@@ -37,7 +37,7 @@ public sealed class DarlingStoreFolderScriptTests
     private static readonly string[] s_functions =
     {
         "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid",
-        "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
+        "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Get-DarlingStoreRepairSteps", "Get-DarlingStoreRepairText", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
         "Get-DarlingNativeText", "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
     };
 
@@ -468,7 +468,7 @@ public sealed class DarlingStoreFolderScriptTests
         foreach (var name in new[]
         {
             "Get-DarlingDataDirectory", "Get-DarlingStoreFolder", "Initialize-DarlingNativeStoreFolder", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid",
-            "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
+            "Get-DarlingStoreContentsProblem", "Get-DarlingItemOwnerProblem", "Get-DarlingStoreRepairSteps", "Get-DarlingStoreRepairText", "Initialize-DarlingStoreFolder", "Get-DarlingServiceSids",
             "Get-DarlingProductType", "Test-DarlingDomainController", "Initialize-DarlingOperatorGroup",
         })
         {
@@ -503,6 +503,124 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Matches(@"if \(-not \$onDomainController\) \{\s+try \{ \$operatorSid = Initialize-DarlingOperatorGroup \$operatorGroupName \}", upgrade);
         Assert.Contains("elseif ($onDomainController) {\n    Warn \"This machine is a domain controller", upgrade, StringComparison.Ordinal);
     }
+
+    /// <summary>#7267: the upgrade judges the store folder before it stops anything. A hand-made store whose items carry a
+    /// grant to Users is one it takes over in place (the four steps, printed, the owner step stood in for because it needs
+    /// an elevated token), and the plan afterwards is clean. A store owned by an account that is neither the one running
+    /// the script nor an administrator, one with no PG_VERSION, and one behind a link are refused, not taken over.</summary>
+    [Fact]
+    public void TheUpgrade_TakesOverTheStoreThePreviousReleaseRan_AndRefusesTheRest()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell, ACLs and junctions");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe("""
+            $system = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+            $admins = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            $users = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            function New-Store([string]$name, [bool]$existingCluster) {
+                $store = Join-Path $base $name
+                $data = Join-Path $store 'pg'
+                New-Item -ItemType Directory $data | Out-Null
+                if ($existingCluster) { Set-Content -LiteralPath (Join-Path $data 'PG_VERSION') '17' }
+                Set-Content -LiteralPath (Join-Path $data 'postgresql.conf') 'x'
+                Set-Content -LiteralPath (Join-Path $store 'pg.log') 'x'
+                Set-Content -LiteralPath (Join-Path $store 'server.key') 'x'
+                return $store
+            }
+            function Expose([string]$path) {
+                # What a hand-made folder's items carry: Users read, explicit, with inheritance cut.
+                $acl = Get-Acl -LiteralPath $path
+                $acl.SetAccessRuleProtection($true, $true)
+                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($users, 'Read', 'Allow')))
+                Set-Acl -LiteralPath $path -AclObject $acl
+            }
+
+            # A store owned by the running account, which the trusted list leaves out: taken over only for that account or an administrator.
+            $stranger = New-Store 'stranger' $true
+            $trustedWithoutMe = @($system, $admins)
+            $p = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') $trustedWithoutMe @($meSid)
+            'strangerAdopter=' + $p.State
+            $p = Get-DarlingStoreAdoptionPlan $stranger (Join-Path $stranger 'pg') $trustedWithoutMe @()
+            'strangerOther=' + $p.State
+            'strangerOtherReason=' + $p.Reason
+            $fresh = New-Store 'fresh' $false
+            $p = Get-DarlingStoreAdoptionPlan $fresh (Join-Path $fresh 'pg') $trustedWithoutMe @($meSid)
+            'noClusterState=' + $p.State
+            'noClusterReason=' + $p.Reason
+            $linked = New-Store 'linked' $true
+            $elsewhere = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory $elsewhere | Out-Null
+            Remove-Item -LiteralPath (Join-Path $linked 'logs') -Force -ErrorAction SilentlyContinue
+            cmd /c mklink /J (Join-Path $linked 'logs') "$elsewhere" | Out-Null
+            $p = Get-DarlingStoreAdoptionPlan $linked (Join-Path $linked 'pg') @($system, $admins, $meSid) @($meSid)
+            'linkedState=' + $p.State
+            cmd /c rmdir (Join-Path $linked 'logs') | Out-Null
+
+            # A store whose owners are trusted but whose items grant Users: taken over, and clean after the steps.
+            $store = New-Store 'exposed' $true
+            $data = Join-Path $store 'pg'
+            $trusted = @($meSid, $system, $admins)
+            $p = Get-DarlingStoreAdoptionPlan $store $data $trusted @($meSid)
+            'cleanBefore=' + $p.State
+            foreach ($path in @($data, (Join-Path $store 'pg.log'), (Join-Path $store 'server.key'))) { Expose $path }
+            $plan = Get-DarlingStoreAdoptionPlan $store $data $trusted @($meSid)
+            'exposedState=' + $plan.State
+            'exposedItems=' + @($plan.Findings).Count
+            $ran = New-Object System.Collections.Generic.List[string]
+            $seam = {
+                param($arguments)
+                if ($arguments -contains '/setowner') { return 0 }
+                & icacls.exe @($arguments) | Out-Null
+                return $LASTEXITCODE
+            }
+            try {
+                Invoke-DarlingStoreAdoption $store $data $meSid $trusted @($meSid) $plan $seam
+                'adoption=done'
+            }
+            catch { 'adoption=' + $_.Exception.Message }
+            $after = Get-DarlingStoreAdoptionPlan $store $data $trusted @($meSid)
+            'afterState=' + $after.State
+            """));
+
+        Assert.Contains("strangerAdopter=Adopt", answers);
+        Assert.Contains("strangerOther=Refuse", answers);
+        Assert.Contains(answers, line => line.StartsWith("strangerOtherReason=", StringComparison.Ordinal) && line.Contains("not the account running this script", StringComparison.Ordinal));
+        Assert.Contains("noClusterState=Refuse", answers);
+        Assert.Contains(answers, line => line.StartsWith("noClusterReason=", StringComparison.Ordinal) && line.Contains("PG_VERSION", StringComparison.Ordinal));
+        Assert.Contains("linkedState=Refuse", answers);
+        Assert.Contains("cleanBefore=Clean", answers);
+        Assert.Contains("exposedState=Adopt", answers);
+        Assert.Contains("exposedItems=3", answers);
+        Assert.Contains("adoption=done", answers);
+        Assert.Contains("afterState=Clean", answers);
+
+        var steps = answers.Where(line => line.StartsWith("Step ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(4, steps.Count);
+        Assert.Contains("/setowner", steps[0], StringComparison.Ordinal);
+        Assert.Contains("/inheritance:r /grant", steps[2], StringComparison.Ordinal);
+        Assert.EndsWith(@"\*"" /reset /T /C /L", steps[3], StringComparison.Ordinal);
+    }
+
+    private static string UpgradeProbe(string body) => string.Join(
+        "\n",
+        """
+        function Note([string]$message) { Write-Host $message }
+        function Good([string]$message) { Write-Host $message }
+        """,
+        ExtractFunctions(
+            UpgradeScript, "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Get-DarlingStoreRepairSteps",
+            "Get-DarlingStoreRepairText", "Get-DarlingStoreAdoptionPlan", "Invoke-DarlingStoreAdoption"),
+        $$"""
+        $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory $base | Out-Null
+        $meSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        try {
+        """,
+        body,
+        """
+        }
+        finally { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
+        """);
 
     private static string Probe(string body) => string.Join(
         "\n",
@@ -668,6 +786,144 @@ public sealed class DarlingStoreContentsGateTests
         {
             Remove(store);
         }
+    }
+
+    private static string? ProblemWhenTheServiceCannotRestoreAnItem(string store) =>
+        DarlingManagedPostgres.StoreContentsProblem(
+            store, Path.Combine(store, "pg"), Path.Combine(store, "pg.log"), Path.Combine(store, "logs"), (_, _, _) => "Access is denied");
+
+    private static int Icacls(params string[] arguments)
+    {
+        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo)!;
+        _ = process.StandardOutput.ReadToEnd();
+        _ = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode;
+    }
+
+    /// <summary>The commands the refusal prints, run one by one. The owner change needs an elevated token and the test's
+    /// temp tree is already owned by the account the check trusts, so that one command is left out.</summary>
+    private static void RunTheRepairCommandsExceptTheOwnerChange(string store)
+    {
+        var lines = DarlingManagedPostgres.StoreRepairCommands(store).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(4, lines.Length);
+        foreach (var line in lines)
+        {
+            var arguments = Regex.Matches(line, "\"([^\"]*)\"|(\\S+)").Select(match => match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value).Skip(1).ToArray();
+            if (!arguments.Contains("/setowner"))
+            {
+                Assert.Equal(0, Icacls(arguments));
+            }
+        }
+    }
+
+    private static void ExposeToUsers(string store, bool explicitOnTheItems)
+    {
+        if (!explicitOnTheItems)
+        {
+            /* What a folder made by hand under another drive's root gets: Users read, handed down to every item below. */
+            Grant(store, FileSystemRights.Read);
+            return;
+        }
+
+        foreach (var name in new[] { "pg", "logs", "pg.log", "server.key" })
+        {
+            var path = Path.Combine(store, name);
+            var rule = new FileSystemAccessRule(s_users, FileSystemRights.Read, AccessControlType.Allow);
+            if (Directory.Exists(path))
+            {
+                var info = new DirectoryInfo(path);
+                var security = info.GetAccessControl();
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: true);
+                security.AddAccessRule(rule);
+                info.SetAccessControl(security);
+            }
+            else
+            {
+                var info = new FileInfo(path);
+                var security = info.GetAccessControl();
+                security.SetAccessRuleProtection(isProtected: true, preserveInheritance: true);
+                security.AddAccessRule(rule);
+                info.SetAccessControl(security);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #7267: a store folder made by hand puts Users access on every item below it, and the service cannot rewrite an item
+    /// that Administrators own and that grants it nothing, so each start refused one item and the one-item advice cleared
+    /// that one (or, where the access is explicit, none). The four printed commands clear the whole folder in one pass.
+    /// The owner step is left out (it needs an elevated token), so this proves the exposure half. CI's elevated
+    /// darling-upgrade-shapes run covers the owner half.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AStoreWithManyExposedItems_IsNotClearedItemByItem_ButOnePassOfTheRepairCommandsClearsIt(bool explicitOnTheItems)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs and icacls are Windows-only.");
+        var store = NewStore(lockStoreFolder: false);
+        try
+        {
+            ExposeToUsers(store, explicitOnTheItems);
+            Assert.NotNull(ProblemWhenTheServiceCannotRestoreAnItem(store));
+
+            /* The earlier advice: the protected grant on the one item the start named, run again for the next. */
+            var rounds = 0;
+            while (rounds < 8 && ProblemWhenTheServiceCannotRestoreAnItem(store) is { } named)
+            {
+                var item = Regex.Match(named, "^(.+?) (is readable by|can be changed by) ").Groups[1].Value;
+                Assert.NotEmpty(item);
+                Assert.Equal(0, Icacls(item, "/inheritance:r", "/grant", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", DarlingFileSecurity.ServiceAccountDisplayName + ":(OI)(CI)F"));
+                rounds++;
+            }
+
+            if (explicitOnTheItems)
+            {
+                Assert.NotNull(ProblemWhenTheServiceCannotRestoreAnItem(store));
+            }
+            else
+            {
+                Assert.True(rounds >= 3, $"inherited access made the start name a new item {rounds} times");
+            }
+        }
+        finally
+        {
+            Remove(store);
+        }
+
+        var whole = NewStore(lockStoreFolder: false);
+        try
+        {
+            ExposeToUsers(whole, explicitOnTheItems);
+            Assert.NotNull(ProblemWhenTheServiceCannotRestoreAnItem(whole));
+
+            RunTheRepairCommandsExceptTheOwnerChange(whole);
+
+            Assert.Null(ProblemWhenTheServiceCannotRestoreAnItem(whole));
+        }
+        finally
+        {
+            Remove(whole);
+        }
+    }
+
+    [Fact]
+    public void TheRefusalsRepairCommands_AreFourInOrder_AndCoverTheFolderAndEverythingBelowIt()
+    {
+        var lines = DarlingManagedPostgres.StoreRepairCommands(@"D:\Store\").Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        Assert.Equal(4, lines.Length);
+        Assert.StartsWith(@"icacls ""D:\Store"" /setowner ""*S-1-5-32-544"" /T /C /L", lines[0], StringComparison.Ordinal);
+        Assert.Equal(@"icacls ""D:\Store"" /reset /C /L", lines[1]);
+        Assert.StartsWith(@"icacls ""D:\Store"" /inheritance:r /grant ""*S-1-5-18:(OI)(CI)F"" ""*S-1-5-32-544:(OI)(CI)F"" ", lines[2], StringComparison.Ordinal);
+        Assert.Equal(@"icacls ""D:\Store\*"" /reset /T /C /L", lines[3]);
     }
 
     private static bool HasOrdinaryUserAccess(string path)

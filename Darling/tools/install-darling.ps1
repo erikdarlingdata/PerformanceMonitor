@@ -3047,6 +3047,33 @@ function Get-DarlingItemOwnerProblem([string]$path, $trusted) {
     return "$path is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it."
 }
 
+# #7267: the one command sequence that makes a whole store folder acceptable at once. A store folder made by hand carries the
+# maker's owner and explicit or inherited grants on items far below the folder, and the earlier advice (one /setowner, then an
+# /inheritance:r on the single item a start named) cleared one item per attempt. In order: Administrators own the folder and
+# everything in it (/T), the folder itself is cleared of its own and inherited access, the folder is protected and granted to SYSTEM,
+# Administrators and the service account only, and then everything below it is reset so it inherits that protected folder. The
+# principals are SIDs, so no account name has to translate on the machine. $serviceSid is the service account's SID (empty leaves its
+# grant out). Each step is an object with the icacls arguments (Args) and the line to show an operator (Text).
+function Get-DarlingStoreRepairSteps([string]$folder, [string]$serviceSid = '') {
+    $f = $folder.TrimEnd('\')
+    $grants = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F')
+    if ($serviceSid) { $grants += "*${serviceSid}:(OI)(CI)F" }
+    $lists = New-Object System.Collections.Generic.List[object]
+    $lists.Add(@($f, '/setowner', '*S-1-5-32-544', '/T', '/C', '/L'))
+    $lists.Add(@($f, '/reset', '/C', '/L'))
+    $lists.Add(@($f, '/inheritance:r', '/grant') + $grants)
+    $lists.Add(@("$f\*", '/reset', '/T', '/C', '/L'))
+    foreach ($list in $lists) {
+        $shown = @($list | ForEach-Object { if ($_ -match '[\s*()]') { '"' + $_ + '"' } else { "$_" } })
+        [pscustomobject]@{ Args = [string[]]$list; Text = 'icacls ' + ($shown -join ' ') }
+    }
+}
+
+# The steps above as the lines an operator runs from an elevated prompt, one per line.
+function Get-DarlingStoreRepairText([string]$folder, [string]$serviceSid = '') {
+    return ((Get-DarlingStoreRepairSteps $folder $serviceSid | ForEach-Object { '    ' + $_.Text }) -join "`n")
+}
+
 # Creates $folder if it is missing, makes Administrators its owner, and gives it the DACL described above.
 # Throws with the reason when it cannot leave the folder in that state, so the caller stops before the
 # service starts. Nothing about the folder is decided by name: the folder is created with its DACL in the call that
@@ -3132,11 +3159,11 @@ function Initialize-DarlingStoreFolder([string]$folder, [string]$serviceAccount,
         if ($existed -and $trusted -notcontains $owner) {
             try { $ownerName = $owner.Translate([System.Security.Principal.NTAccount]).Value }
             catch { $ownerName = $owner.Value }
-            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you changed the service's Log On account), make Administrators the owner of everything in it first, from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L"
+            throw "$folder already exists and is owned by $ownerName, which is not SYSTEM, Administrators or the service account, so another user may have made it. If you did not create it, delete it and re-run this script: this script does not take over a folder it did not make. If it is your existing store (for example you made the folder yourself, or you changed the service's Log On account), fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)"
         }
         if ($existed) {
             $contents = Get-DarlingStoreContentsProblem $full $dataDirectory $trusted
-            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, give Administrators ownership of, and full control over, everything in it from an elevated prompt, then re-run this script: icacls `"$folder`" /setowner *$($adminsSid.Value) /T /C /L" }
+            if ($contents) { throw "$contents If you did not create $folder, delete it (take ownership first if Windows refuses) and re-run this script. If it is your existing store, fix the whole folder at once from an elevated prompt, then re-run this script:`n$(Get-DarlingStoreRepairText $full $serviceSid.Value)" }
         }
 
         # A folder this script made is owned by whoever created it: Administrators, or the installing user's own account

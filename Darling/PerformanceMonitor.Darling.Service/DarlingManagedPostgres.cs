@@ -5740,10 +5740,33 @@ public sealed class DarlingManagedPostgres
             "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
             "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
             "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
-            $"the same way, or, to keep the folder, from an ELEVATED prompt:   takeown /f \"{storeFolder}\" /a   then   " +
-            $"icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. Either way " +
-            "the service then checks the data directory, pg.log, server.key and the logs folder before it uses them.");
+            "the same way, or, to keep the folder, from an ELEVATED prompt run these four commands in order (they fix the " +
+            $"folder and everything under it at once, #7267):{StoreRepairCommands(storeFolder)}{Environment.NewLine}and start the " +
+            "service again. Either way the service then checks the data directory, pg.log, server.key and the logs folder " +
+            "before it uses them.");
+    }
+
+    /// <summary>
+    /// The one command sequence that makes a whole store folder acceptable to <see cref="StoreContentsProblem"/> at
+    /// once (#7267), one command per line after a line break. A store folder made by hand has its maker as owner and
+    /// explicit or inherited access on items far below the folder (the data directory, its files, pg.log, the keys).
+    /// The service tightens an item it owns or can restore, but it cannot rewrite one that Administrators own and
+    /// that grants it nothing, so the earlier advice (one <c>/setowner</c>, then <c>/inheritance:r</c> on the single
+    /// item a start named) made each start name the next item. The sequence: Administrators own the folder and
+    /// everything in it, the folder itself is cleared of its own and inherited access, the folder is protected and
+    /// granted to SYSTEM, Administrators and the service account, and everything below it is reset to inherit that.
+    /// Principals are SIDs where the service account is not involved, so no account name has to translate.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string StoreRepairCommands(string storeFolder)
+    {
+        var folder = Path.TrimEndingDirectorySeparator(storeFolder);
+        var grants = $"\"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"";
+        var newLine = Environment.NewLine + "    ";
+        return $"{newLine}icacls \"{folder}\" /setowner \"*S-1-5-32-544\" /T /C /L" +
+               $"{newLine}icacls \"{folder}\" /reset /C /L" +
+               $"{newLine}icacls \"{folder}\" /inheritance:r /grant {grants}" +
+               $"{newLine}icacls \"{folder}\\*\" /reset /T /C /L";
     }
 
     /// <summary>
@@ -5933,11 +5956,11 @@ public sealed class DarlingManagedPostgres
             "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
             "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
             "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
-            "this service (the previous Log On account of an earlier install, say), from an ELEVATED prompt run   " +
-            $"icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service again. If it is " +
-            "readable or changeable by other accounts and the service could not restrict it, from an ELEVATED prompt run   " +
-            "icacls \"<the item named above>\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. If it is a " +
+            "this service (the previous Log On account of an earlier install, or the account that made the folder by " +
+            "hand, say), or it is readable or changeable by other accounts and the service could not restrict it, " +
+            "from an ELEVATED prompt run these four commands in order. They fix the whole store folder at once, so " +
+            $"the next start does not name another item under it:{StoreRepairCommands(storeFolder)}{Environment.NewLine}and " +
+            "start the service again. If it is a " +
             "link, or another user may have made it first, do not keep it: stop the service, delete the " +
             $"item named above (deleting {_dataDirectory} destroys the collected history), and run install-darling.ps1 " +
             "again, which creates the store folder with the right owner and ACL before the first start.");

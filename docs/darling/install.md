@@ -750,6 +750,15 @@ dir /q /a "C:\ProgramData" | findstr /C:"PerformanceMonitorDarling"
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544 /T /C /L
 ```
 
+If you made the folder yourself, its items can also carry your account's grants, and one `/setowner` leaves those in place. `upgrade-darling.ps1` runs the four commands below for you, and prints each one, on a store the previous release was running when the account running the script or an administrator owns it. Otherwise fix the whole folder at once from an elevated prompt, in this order (put your own folder path in each command, and `PerformanceMonitor Darling` is the service name):
+
+```
+icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
+icacls "C:\ProgramData\PerformanceMonitorDarling" /reset /C /L
+icacls "C:\ProgramData\PerformanceMonitorDarling" /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "NT SERVICE\PerformanceMonitor Darling:(OI)(CI)F"
+icacls "C:\ProgramData\PerformanceMonitorDarling\*" /reset /T /C /L
+```
+
 - The folder does not exist. Make it.
 
 ```
