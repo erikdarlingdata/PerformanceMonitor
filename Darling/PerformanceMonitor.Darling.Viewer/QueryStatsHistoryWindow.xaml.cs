@@ -8,14 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -211,18 +208,8 @@ public partial class QueryStatsHistoryWindow : Window
                 MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
             }
 
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = string.IsNullOrEmpty(planHash)
-                    ? $"query_plan_{_queryHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-                    : $"query_plan_{_queryHash}_{planHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = "Saved";
+            var saveName = string.IsNullOrEmpty(planHash) ? $"query_plan_{_queryHash}" : $"query_plan_{_queryHash}_{planHash}";
+            if (FileSaveHelper.SavePlanFile(plan, saveName)) btn.Content = "Saved";
             return;
         }
         catch (Exception ex)

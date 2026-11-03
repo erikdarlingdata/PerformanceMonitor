@@ -1362,13 +1362,11 @@ ORDER BY bucket";
     /// server whose collectors have run before has a GAP in this window, while one that has never run
     /// them is not collecting blocking at all. Both are "not an all-clear" and they want different next
     /// moves. LIMIT 1, so it stops at the first row.</para>
-    /// <para>NOT the same question as the neighbouring <c>HasAnyBlockingCaptureAsync</c> in
-    /// <c>LocalDataService.BlockingStats.cs</c>, which asks whether an EVENT was ever captured. That one is
-    /// right for get_blocking_stats, whose verdict is about severity; it is wrong here, because a server
-    /// collected perfectly for months that simply never blocked has no event rows and would be reported as
-    /// never captured — the reassuring-answer failure this read exists to prevent, inverted. Hence
-    /// "collector run", not "capture": the denominator is whether we LOOKED, not whether we found
-    /// something. Darling's twin is <c>DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync</c>.</para>
+    /// <para>This asks whether a collector RAN, not whether an EVENT was ever captured: a server collected perfectly
+    /// for months that simply never blocked has no event rows and would be reported as never captured, the
+    /// reassuring-answer failure this read exists to prevent, inverted. Hence "collector run", not "capture": the
+    /// denominator is whether we LOOKED, not whether we found something. Darling's twin is
+    /// <c>DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync</c>.</para>
     /// </summary>
     public Task<bool> HasAnyBlockingCollectorRunAsync(int serverId) =>
         HasAnyCaptureAsync(serverId, "collector_name IN ('blocked_process_report', 'dmv_blocking_snapshot')");
