@@ -89,4 +89,48 @@ public sealed class CollectorGridScheduleTests : IDisposable
 
         Assert.Equal(expectedDue, due.Contains("wait_stats"));
     }
+
+    /// <summary>
+    /// #7269: the sweep reads its due list some time after the cycle time was taken, and a tab-open or refresh run that
+    /// took its turn in between recorded its own start time in that gap. A run in (cycle time, now] is a run since the
+    /// cycle time and is not due again; a run ahead of the real clock is a wall clock that stepped backwards and is
+    /// due now (#4732); a run at or before the cycle time keeps the interval rule.
+    /// </summary>
+    [Theory]
+    [InlineData(600, true)]
+    [InlineData(121, true)]
+    [InlineData(120, false)]
+    [InlineData(1, false)]
+    [InlineData(0, false)]
+    [InlineData(-59, false)]
+    [InlineData(-60, true)]
+    public void GetDueCollectorsForServer_OneMinuteCollector_IsDueByWhereItsLastRunSitsAgainstTheCycleTimeAndTheClock(
+        int lastRunSecondsFromCycleTime, bool expectedDue)
+    {
+        var manager = new ScheduleManager(_configDir);
+        var atUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var nowUtc = atUtc.AddSeconds(120);
+        manager.MarkCollectorRunForServer("srv1", "wait_stats", atUtc.AddSeconds(lastRunSecondsFromCycleTime));
+
+        var due = manager.GetDueCollectorsForServer("srv1", atUtc, nowUtc).Select(s => s.Name);
+
+        Assert.Equal(expectedDue, due.Contains("wait_stats"));
+    }
+
+    /// <summary>#7269: the same for a daily collector, the case that ran twice: a run since the cycle time is not due again.</summary>
+    [Theory]
+    [InlineData(30, false)]
+    [InlineData(-30, false)]
+    [InlineData(-1440 * 60 - 1, true)]
+    public void GetDueCollectorsForServer_DailyCollector_IsNotDueAgainForARunSinceTheCycleTime(
+        int lastRunSecondsFromCycleTime, bool expectedDue)
+    {
+        var manager = new ScheduleManager(_configDir);
+        var atUtc = new DateTime(2026, 1, 2, 0, 0, 0, DateTimeKind.Utc);
+        manager.MarkCollectorRunForServer("srv1", "index_object_stats", atUtc.AddSeconds(lastRunSecondsFromCycleTime));
+
+        var due = manager.GetDueCollectorsForServer("srv1", atUtc, atUtc.AddSeconds(60)).Select(s => s.Name);
+
+        Assert.Equal(expectedDue, due.Contains("index_object_stats"));
+    }
 }
