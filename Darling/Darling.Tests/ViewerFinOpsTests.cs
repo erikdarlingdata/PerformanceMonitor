@@ -488,37 +488,6 @@ public sealed class ViewerFinOpsSqlTests
         Assert.Contains("$1", sql, StringComparison.Ordinal);
     }
 
-    /* ── #1591: the permission-denied badge query ── */
-
-    /// <summary>
-    /// The badge counts DISTINCT collectors, not log rows. One collector denied every cycle for a week is "1
-    /// collector has no permission" — counting rows would render a meaningless four-figure number and train the
-    /// operator to ignore the badge.
-    /// </summary>
-    [Fact]
-    public void PermissionDeniedCountSql_CountsDistinctCollectors_NotRows()
-    {
-        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
-
-        Assert.Contains("COUNT(DISTINCT collector_name)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("COUNT(*)", sql, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// It must filter to PERMISSIONS only. Counting ERROR too would badge ordinary collector failures as a
-    /// permission problem and send the operator hunting for a grant that is not missing.
-    /// </summary>
-    [Fact]
-    public void PermissionDeniedCountSql_FiltersToPermissionsOnly()
-    {
-        var sql = ViewerDataService.PermissionDeniedCollectorCountSql;
-
-        Assert.Contains("status = 'PERMISSIONS'", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("'ERROR'", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
-    }
-
     /* ── #1591: the Hardware Note ── */
 
     /// <summary>

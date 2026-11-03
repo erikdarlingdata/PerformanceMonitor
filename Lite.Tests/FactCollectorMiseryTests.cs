@@ -421,6 +421,37 @@ VALUES (-9999, $1, $2, $3, $4, 42, 10)";
             "Grouped LCK should preserve individual lock type wait times in metadata");
     }
 
+    /// <summary>
+    /// #7178: the engine's LCK_M_SCH_M wait gets its own SCH_M fact, so the SCH_M scorer ramp, advice card
+    /// and RUNNING_JOBS edge can see it. It used to fold into LCK with the writer/writer lock modes.
+    /// LCK_M_SCH_S (readers queued behind the change) still folds into LCK.
+    /// </summary>
+    [Fact]
+    public async Task LockGrouping_SchemaModification_GetsItsOwnSchMFact_NotLck()
+    {
+        using var seeder = new TestDataSeeder(_duckDb);
+        await seeder.ClearTestDataAsync();
+        await seeder.SeedTestServerAsync();
+
+        var waits = new Dictionary<string, (long waitTimeMs, long waitingTasks, long signalMs)>
+        {
+            ["LCK_M_SCH_M"] = (3_000_000, 200_000, 50_000),
+            ["LCK_M_SCH_S"] = (1_000_000, 100_000, 20_000),
+            ["LCK_M_X"] = (2_000_000, 100_000, 20_000),
+        };
+        await seeder.SeedWaitStatsAsync(waits);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(TestDataSeeder.CreateTestContext());
+
+        var schM = Assert.Single(facts, f => f.Source == "waits" && f.Key == "SCH_M");
+        Assert.Equal(3_000_000, schM.Metadata["wait_time_ms"]);
+        Assert.DoesNotContain(facts, f => f.Key == "LCK_M_SCH_M");
+
+        var lck = Assert.Single(facts, f => f.Source == "waits" && f.Key == "LCK");
+        Assert.Equal(3_000_000, lck.Metadata["wait_time_ms"]); // SCH_S + X, not SCH_M
+        Assert.False(lck.Metadata.ContainsKey("LCK_M_SCH_M_ms"));
+    }
+
     /* ═══════════════════════════════════════════════════════════════════
        CX grouping: single CX wait type should NOT be grouped
        ═══════════════════════════════════════════════════════════════════ */
