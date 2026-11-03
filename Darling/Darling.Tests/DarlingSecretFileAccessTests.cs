@@ -143,7 +143,7 @@ public sealed class DarlingSecretFileAccessTests
     [InlineData("DarlingStoreUpgrade.cs", "var preUpgradeCopy = Path.Combine(parent, PreUpgradeAutoConfFileName);", "File.Copy(sourcePath, preUpgradeCopy", "DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false)")]
     [InlineData("DarlingCliCommands.cs", "private static void CopyToHardenedBackup(", "File.Copy(sourcePath, backupPath", "DarlingFileSecurity.CreateHardenedFile(backupPath, allowInteractiveRead: false)")]
     [InlineData("DarlingCliCommands.cs", "private static async Task WriteExportFileAsync(", "DarlingFileSecurity.HardenFile(", "DarlingFileSecurity.CreateHardenedFile(path, allowInteractiveRead: true)")]
-    [InlineData("DarlingStoreUpgrade.cs", "step = \"initdb-new-cluster\";", "File.WriteAllText(passwordFile", "DarlingManagedPostgres.WriteHardenedText(passwordFile")]
+    [InlineData("DarlingStoreUpgrade.cs", "internal async Task InitializeNewClusterAsync(", "File.WriteAllText(passwordFile", "DarlingManagedPostgres.WriteHardenedText(passwordFile")]
     [InlineData("DarlingStoreUpgrade.cs", "private static string? TrySavePreUpgradeConf(", "File.Copy(sourcePath, preUpgradeCopy", "DarlingFileSecurity.CreateHardenedFile(preUpgradeCopy, allowInteractiveRead: false)")]
     [InlineData("DarlingManagedPostgres.cs", "var generated = StoreTlsCertificates.Create(", "File.WriteAllText(keyPath", "WriteHardenedText(keyPath, generated.ServerKeyPem)")]
     public void SecretFiles_AreCreatedHardened_NotWrittenThenHardened(string file, string anchor, string forbidden, string required)
