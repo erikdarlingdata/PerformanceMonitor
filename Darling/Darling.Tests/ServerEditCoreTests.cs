@@ -224,6 +224,8 @@ public sealed class ServerEditCoreTests : IDisposable
     [InlineData("{\"encrypt_mode\":\"Sometimes\"}")]
     [InlineData("{\"monthly_cost_usd\":-1}")]
     [InlineData("{\"monthly_cost_usd\":\"lots\"}")]
+    [InlineData("{\"monthly_cost_usd\":\"120,50\"}")] // #7197: a thousands separator was accepted, so this stored 12050
+    [InlineData("{\"monthly_cost_usd\":\"$120\"}")]
     [InlineData("{\"expected_modified_at\":\"\"}")]
     public void ABadBody_IsInvalid_BeforeAnyStoreAccess(string json)
     {
