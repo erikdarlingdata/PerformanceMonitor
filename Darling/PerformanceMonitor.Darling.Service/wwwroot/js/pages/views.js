@@ -636,9 +636,13 @@ export async function renderView(main, id, opts) {
      keep drawing into it. */
   const liveGrid = hold ? Array.from(main.children).find((n) => n.className === "panel-grid") : null;
   const gridBox = liveGrid || el("div", { class: "panel-grid" });
+  /* #7257: the panels of a render start their reads two at a time. A new render ends the one before it. */
+  let panelRender = null;
   function buildGrid() {
     if (scopeNote) scopeNote.textContent = panelServerNote(state, panelServer);
-    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i));
+    if (panelRender) panelRender.end();
+    const render = (panelRender = newPanelRender(ourHash));
+    return panels.map((p, i) => panelOrError(panelUnderScope(p, state, panelServer), readSet, sourceSet, currentScope(), undefined, i, render.gate));
   }
   function renderGrid() {
     mount(gridBox, buildGrid());
@@ -658,7 +662,13 @@ export async function renderView(main, id, opts) {
 
   if (liveGrid) {
     showAround(main, pageKey, liveGrid, [head, status, controls, scopeNote].filter(Boolean));
-    cancelViewRefresh = refreshGridInPlace(liveGrid, buildGrid());
+    const staged = buildGrid();
+    const stagedRender = panelRender;
+    const cancelSwap = refreshGridInPlace(liveGrid, staged);
+    cancelViewRefresh = () => {
+      cancelSwap();
+      stagedRender.end();
+    };
   } else {
     showPage(main, pageKey, [head, status, controls, scopeNote, gridBox]);
     renderGrid();
@@ -793,6 +803,8 @@ export async function renderNotebookDoc(main, opts) {
 
   const docBox = el("div", { class: "notebook-doc" });
   const limiter = isAlert ? new InFlightLimiter(3) : null;
+  const ourHash = location.hash;
+  let panelRender = null;
   function renderDoc() {
     if (isAlert) {
       /* Alert-mode cells load top to bottom, at most 3 in flight (#4222's cost rule) — renderCell/renderPanel
@@ -802,7 +814,10 @@ export async function renderNotebookDoc(main, opts) {
       mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, sourceSet, scope, opts, limiter)));
     } else {
       refreshScopeNote();
-      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope())));
+      /* #7257: a saved notebook starts its panel reads two at a time, and a new render (a scope change) ends the one before it. */
+      if (panelRender) panelRender.end();
+      const render = (panelRender = newPanelRender(ourHash));
+      mount(docBox, cells.map((cell) => renderCell(cellUnderScope(cell), readSet, sourceSet, currentScope(), undefined, render.gate)));
     }
   }
 
@@ -987,19 +1002,19 @@ function openLiveButton(onOpenLive) {
 /* One notebook cell -> a document block: a markdown cell renders through renderMarkdown (XSS-safe); a panel cell
    through the shared panelOrError (unknown source/viz -> a clean strip, exactly as in the dashboard grid).
    `onSettled` is optional and only the alert notebook passes it (its in-flight limiter's release): see panelOrError. */
-function renderCell(cell, readSet, sourceSet, scope, onSettled) {
+function renderCell(cell, readSet, sourceSet, scope, onSettled, gate = null) {
   if (!cell || typeof cell !== "object") return null;
   if (cell.type === "markdown") {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, null, gate)]);
   }
   /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
      panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
      Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
   if (cell.type === "read") {
-    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled)]);
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope, onSettled, null, gate)]);
   }
   return null;
 }
@@ -1135,33 +1150,74 @@ function checkRow(label, checked, onToggle) {
    `onSettled` (optional; the alert notebook's in-flight limiter release, #4222) is called exactly once per call: by
    the renderer when its load ends, or right here when the panel cannot start a load and becomes an error card —
    so a bad cell cannot hold a limiter slot. Every other caller omits it. */
-function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null) {
-  const fail = (title, message) => {
+function panelOrError(p, readSet, sourceSet, scope, onSettled, slot = null, gate = null) {
+  const bad = panelProblem(p, readSet, sourceSet);
+  if (bad) {
     if (onSettled) onSettled();
-    return panelErrorCard(title, message);
-  };
+    return panelErrorCard(bad.title, bad.message);
+  }
+  if (p.source != null) {
+    return renderComposedPanelCard(p, scope, onSettled, slot, gate);
+  }
+  return renderPanel(p, onSettled, gate);
+}
+
+/* Why a panel cannot start a read (the catalog check), as {title, message}, or null when it can. A panel with a problem
+   draws an error card and takes no limiter slot, and no Retry button, since running it again cannot fix it (#7257). */
+function panelProblem(p, readSet, sourceSet) {
   if (!p || typeof p !== "object") {
-    return fail("Invalid panel", "This panel is not an object.");
+    return { title: "Invalid panel", message: "This panel is not an object." };
   }
   if (p.path != null) {
-    return fail(p.title, "This panel uses raw 'path' mode, which is not supported.");
+    return { title: p.title, message: "This panel uses raw 'path' mode, which is not supported." };
   }
   if (p.source != null) {
     if (!sourceSet.has(p.source)) {
-      return fail(p.title, "Unknown source '" + p.source + "'. It may have been renamed or removed.");
+      return { title: p.title, message: "Unknown source '" + p.source + "'. It may have been renamed or removed." };
     }
     if (!p.viz) {
-      return fail(p.title, "This composed panel has no chart type.");
+      return { title: p.title, message: "This composed panel has no chart type." };
     }
-    return renderComposedPanelCard(p, scope, onSettled, slot);
+    return null;
   }
   if (!p.read || !readSet.has(p.read)) {
-    return fail(p.title, "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed.");
+    return { title: p.title, message: "Unknown read '" + (p.read || "") + "'. It may have been renamed or removed." };
   }
   if (!p.viz || !VIZ[p.viz]) {
-    return fail(p.title, "Unknown visualization '" + (p.viz || "") + "'.");
+    return { title: p.title, message: "Unknown visualization '" + (p.viz || "") + "'." };
   }
-  return renderPanel(p, onSettled);
+  return null;
+}
+
+/* #7257: the most long reads one saved view starts at once. The service default for reads.maxHeavyReads is 2 and the page
+   cannot read the service's limit, so the two move together. */
+const SAVED_VIEW_READS = 2;
+
+/* One render of a saved dashboard or notebook: its own limiter (the alert notebook's InFlightLimiter) and a way to end it.
+   A render ends when a newer one replaces it (a scope change, an in-place refresh that was cancelled) or the route changes.
+   A panel of an ended render that still waits for a slot never starts its read (#6933), and gives the slot straight back. */
+function newPanelRender(ourHash) {
+  const limiter = new InFlightLimiter(SAVED_VIEW_READS);
+  const render = {
+    ended: false,
+    end() { render.ended = true; },
+    /* `start` runs the panel's read and returns its promise. The slot is held until that settles, busy retry wait included.
+       A retry is the viewer's own click on a panel that drew, so it runs even after a poll's refresh has ended the render. */
+    gate(start, retry = false) {
+      return limiter.acquire().then(async () => {
+        if (!retry && (render.ended || location.hash !== ourHash)) {
+          limiter.release();
+          return;
+        }
+        try {
+          await start();
+        } finally {
+          limiter.release();
+        }
+      });
+    },
+  };
+  return render;
 }
 
 function panelErrorCard(title, message) {
