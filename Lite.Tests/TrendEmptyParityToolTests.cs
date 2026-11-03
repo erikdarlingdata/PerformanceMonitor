@@ -85,6 +85,30 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         AssertPayload(await McpMemoryTools.GetMemoryTrend(service, _serverManager, ServerName, 4));
     }
 
+    /// <summary>#7167: a window that ends before the oldest row the store holds was never read, so the empty answer must not call it
+    /// genuinely quiet. Darling's twin says the same through McpHelpers.QuietUnlessCut.</summary>
+    [Fact]
+    public async Task MemoryAndFileIoTrend_AWindowBeforeTheStoresFirstRow_DoesNotClaimToBeQuiet()
+    {
+        var service = new LocalDataService(_duckDb);
+        await SeedMemoryAsync(DateTime.UtcNow.AddMinutes(-10));
+        await SeedFileIoAsync(DateTime.UtcNow.AddMinutes(-10));
+        var asOf = DateTime.UtcNow.AddHours(-3).ToString("o");
+
+        foreach (var payload in new[]
+        {
+            await McpMemoryTools.GetMemoryTrend(service, _serverManager, ServerName, 1, asOf),
+            await McpIoTools.GetFileIoTrend(service, _serverManager, ServerName, 1, as_of: asOf),
+        })
+        {
+            var root = JsonDocument.Parse(payload).RootElement;
+            Assert.Equal("empty", root.GetProperty("status").GetString());
+            var text = root.GetProperty("message").GetString()!;
+            Assert.DoesNotContain("genuinely quiet", text, StringComparison.Ordinal);
+            Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        }
+    }
+
     [Fact]
     public async Task FileIoTrend_NeverCollected_AndAQuietWindow_AreDifferentAnswers()
     {

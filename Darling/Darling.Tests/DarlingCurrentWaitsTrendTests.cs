@@ -210,7 +210,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 VALUES ($1,$2,$3,$4,$5,100,'SUCCESS',0)",
             CollectionIdGenerator.Next(), ServerId, ServerName, CollectorCatalog.All.First(c => c.TargetTable == table).Name,
-            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-30)));
+            DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-2)));
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

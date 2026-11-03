@@ -73,8 +73,10 @@ public sealed class DarlingTrendEmptyTests
             await SeedFileIoAsync(connection, ct, old);
             await SeedQueryAsync(connection, ct, old);
 
-            AssertQuietWindow(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 1));
-            AssertQuietWindow(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1));
+            /* #7167: memory_stats and file_io_stats land a row every cycle, so a window with none is a window the store never read, and
+               the empty answer says so instead of claiming the window was genuinely quiet. */
+            AssertNothingReadWindow(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 1));
+            AssertNothingReadWindow(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 1));
             AssertQuietWindow(await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, 1));
 
             /* ── inside the window: the trend payload, envelope gone ── */
@@ -160,6 +162,16 @@ public sealed class DarlingTrendEmptyTests
 
     /// <summary>The server collected and this window is simply quiet — the opposite next move, and it must
     /// not share wording with the case above.</summary>
+    private static void AssertNothingReadWindow(string payload)
+    {
+        var root = JsonDocument.Parse(payload).RootElement;
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.True(root.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+        var text = root.GetProperty("message").GetString()!;
+        Assert.Contains("not a report that nothing happened", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("genuinely quiet", text, StringComparison.Ordinal);
+    }
+
     private static void AssertQuietWindow(string payload)
     {
         var root = JsonDocument.Parse(payload).RootElement;

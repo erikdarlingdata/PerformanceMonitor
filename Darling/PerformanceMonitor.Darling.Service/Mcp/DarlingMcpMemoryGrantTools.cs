@@ -353,7 +353,10 @@ public sealed class DarlingMcpMemoryGrantTools
                 windowStart, now, "memory_pressure_events", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints());
+                /* #7167: an offline server's empty window answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, now,
+                    McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints()), cancellationToken);
 
             var payload = new
             {

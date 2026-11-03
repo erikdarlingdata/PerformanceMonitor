@@ -75,17 +75,18 @@ public sealed class McpSessionTools
                 /* A filtered miss is not a collection miss — Darling's twin's words. */
                 if (filter != null || blocking_only || waitFilter != null || tagScope.Active)
                 {
-                    return McpHelpers.Status(
+                    return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status(
                         "empty",
                         $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
                         + (tagScope.Active ? $" (query tag '{tagScope.Requested}')" : "")
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
-                        notice.AsHints());
+                        notice.AsHints()));
                 }
 
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints());
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd,
+                        McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints()));
             }
 
             var truncated = rows.Count > limit;

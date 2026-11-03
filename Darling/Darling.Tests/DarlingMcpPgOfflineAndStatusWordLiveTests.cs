@@ -60,7 +60,7 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
 
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
-            var expectedLead = "Orders PG is offline: the store has had no collection from it since "
+            var expectedLead = "Orders PG is offline: the store has had no successful collection from it since "
                 + lastCollection.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC";
             Assert.StartsWith(expectedLead, message, StringComparison.Ordinal);
             Assert.DoesNotContain(Name, message, StringComparison.Ordinal);
@@ -82,6 +82,32 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             Assert.DoesNotContain("offline", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
             Assert.Contains("get_collection_health", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>
+    /// #7167: a target the service cannot reach still logs a failed run every cycle. Its newest SUCCESS is three days old, so the
+    /// unavailable answer that carries the offline sentence in front (<c>WithLeadAsync</c>) says so even with an ERROR row a minute old.
+    /// </summary>
+    [Fact]
+    public async Task AnUnavailableAnswer_FromATargetWithOnlyAFreshErrorRow_SaysItIsOfflineFirst_AgainstDevPostgres()
+    {
+        const string Name = "pg7167-lead-error-only.example:appdb:pg";
+        await WindowFloorLiveHarness.RunAsync(ConnectionString, ["pg_blocking"], [Name], Tables, async (c, ds, now) =>
+        {
+            var lastSuccess = now.AddDays(-3);
+            await WindowFloorLiveHarness.SeedServerAsync(
+                c, Name, now.AddDays(-40), "pg_blocking", lastSuccess.AddHours(-3), 30, lastSuccess, Tables, TestContext.Current.CancellationToken);
+            await WindowFloorLiveHarness.SeedRunAsync(c, Name, "pg_blocking", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
+
+            var root = WindowFloorLiveHarness.Parse(await DarlingMcpPgBlockingTools.GetPgBlocking(ds, Name, 1));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.StartsWith(
+                Name + " is offline: the store has had no successful collection from it since "
+                + lastSuccess.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
+                root.GetProperty("message").GetString()!,
+                StringComparison.Ordinal);
         });
     }
 
