@@ -449,7 +449,11 @@ public static class DarlingNativeFileNames
 # was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and 3 when the count could not be read
 # (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
 # the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
-# bits as read from the handle, so a caller can tell a folder from a link without opening it again. EnablePrivileges turns on
+# bits as read from the handle, so a caller can tell a folder from a link without opening it again. ResetDacl (#7267) opens and
+# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down (an empty
+# list written with the unprotected flag through the same handle, which is what icacls /reset does), so the owner step and the
+# reset step of the store repair never follow a link or touch a file with more than one name. It returns the same results, and 6
+# when the object is a link (nothing was changed). EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
 # for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
 # not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
@@ -637,6 +641,41 @@ public static class DarlingNativeOwner
             uint error = SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (error != 0) { detail = (int)error; return 4; }
             return 0;
+        }
+    }
+
+    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION
+    // with an empty list (revision 2, size 8, no entries): Windows replaces the object's own entries with the ones its parent passes
+    // down, which is what icacls /reset does. READ_CONTROL is asked for because the inherited list cannot be worked out without it.
+    public static int ResetDacl(string path, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00020000 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            string prefix = root.EndsWith(@"\", StringComparison.Ordinal) ? root : root + @"\";
+            if (!string.Equals(real, root, StringComparison.Ordinal) && !real.StartsWith(prefix, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if ((information.FileAttributes & 0x400) != 0) { return 6; }
+            if (information.NumberOfLinks != 1) { return 1; }
+            IntPtr empty = Marshal.AllocHGlobal(8);
+            try
+            {
+                Marshal.Copy(new byte[] { 2, 0, 8, 0, 0, 0, 0, 0 }, 0, empty, 8);
+                uint error = SetSecurityInfo(handle, 1, 0x00000004u | 0x20000000u, null, IntPtr.Zero, empty, IntPtr.Zero);
+                if (error != 0) { detail = (int)error; return 4; }
+                return 0;
+            }
+            finally { Marshal.FreeHGlobal(empty); }
         }
     }
 }

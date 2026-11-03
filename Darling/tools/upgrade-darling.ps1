@@ -474,7 +474,11 @@ public static class DarlingNativeFileNames
 # was set; 1 when the count is not 1 (detail is the count); 2 when it could not be opened and 3 when the count could not be read
 # (detail is the Win32 error); 4 when the owner could not be set (detail is the error); 5 when the opened object is not inside
 # the root, or no root is open, or its real path could not be read (nothing was changed). attributes is the object's attribute
-# bits as read from the handle, so a caller can tell a folder from a link without opening it again. EnablePrivileges turns on
+# bits as read from the handle, so a caller can tell a folder from a link without opening it again. ResetDacl (#7267) opens and
+# judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down (an empty
+# list written with the unprotected flag through the same handle, which is what icacls /reset does), so the owner step and the
+# reset step of the store repair never follow a link or touch a file with more than one name. It returns the same results, and 6
+# when the object is a link (nothing was changed). EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
 # for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
 # not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
@@ -662,6 +666,41 @@ public static class DarlingNativeOwner
             uint error = SetSecurityInfo(handle, 1, 1, ownerSid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
             if (error != 0) { detail = (int)error; return 4; }
             return 0;
+        }
+    }
+
+    // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION
+    // with an empty list (revision 2, size 8, no entries): Windows replaces the object's own entries with the ones its parent passes
+    // down, which is what icacls /reset does. READ_CONTROL is asked for because the inherited list cannot be worked out without it.
+    public static int ResetDacl(string path, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00020000 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            string prefix = root.EndsWith(@"\", StringComparison.Ordinal) ? root : root + @"\";
+            if (!string.Equals(real, root, StringComparison.Ordinal) && !real.StartsWith(prefix, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if ((information.FileAttributes & 0x400) != 0) { return 6; }
+            if (information.NumberOfLinks != 1) { return 1; }
+            IntPtr empty = Marshal.AllocHGlobal(8);
+            try
+            {
+                Marshal.Copy(new byte[] { 2, 0, 8, 0, 0, 0, 0, 0 }, 0, empty, 8);
+                uint error = SetSecurityInfo(handle, 1, 0x00000004u | 0x20000000u, null, IntPtr.Zero, empty, IntPtr.Zero);
+                if (error != 0) { detail = (int)error; return 4; }
+                return 0;
+            }
+            finally { Marshal.FreeHGlobal(empty); }
         }
     }
 }
@@ -1779,15 +1818,21 @@ function Get-DarlingStoreAdopterSids {
     return @($sids)
 }
 
-# Every junction, symbolic link or other reparse point under $folder, found by a walk that never goes into one. icacls /T follows a
-# link into whatever it points at even with /L, which governs only a link named on the command line (measured: with a junction at
-# data\pg_tblspc\16384, a tree-wide reset of the store's contents with /T /C /L reset the files inside the junction's target), so one link anywhere in
-# the tree sends the elevated owner change and reset to wherever it points (#7267). The walk lists one folder at a time through
-# .NET and checks the attribute before it descends, so it does not depend on how Get-ChildItem -Recurse treats a link in the
-# PowerShell version that runs it. Unreadable is the first folder it could not list ('' when every folder was listed).
+# Every junction, symbolic link or other reparse point under $folder, found by a walk that never goes into one, and every file that has
+# more than one name. icacls /T follows a link into whatever it points at even with /L, which governs only a link named on the command
+# line (measured: with a junction at data\pg_tblspc\16384, a tree-wide reset of the store's contents with /T /C /L reset the files inside
+# the junction's target), so one link anywhere in the tree sends the elevated owner change and reset to wherever it points (#7267). A file
+# with more than one name (a hard link) is not a reparse point, and it has one owner and one access list under every name, some of them
+# outside the store, so a change made through the store's name is made to the other names too (#5677). The walk lists one folder at a time
+# through .NET and checks the attribute before it descends, so it does not depend on how Get-ChildItem -Recurse treats a link in the
+# PowerShell version that runs it. Unreadable is the first folder it could not list ('' when every folder was listed). HardLinks is one
+# 'path (N names)' string per file with more than one name. Uncounted is the first file whose number of names could not be read ('' when
+# every file was counted).
 function Find-DarlingStoreLinks([string]$folder) {
     $links = New-Object System.Collections.Generic.List[string]
+    $hardLinks = New-Object System.Collections.Generic.List[string]
     $unreadable = ''
+    $uncounted = ''
     $pending = New-Object System.Collections.Generic.Stack[string]
     $pending.Push($folder)
     while ($pending.Count -gt 0) {
@@ -1795,12 +1840,15 @@ function Find-DarlingStoreLinks([string]$folder) {
         try {
             foreach ($entry in (New-Object System.IO.DirectoryInfo($dir)).EnumerateFileSystemInfos()) {
                 if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links.Add($entry.FullName); continue }
-                if ($entry.Attributes -band [System.IO.FileAttributes]::Directory) { $pending.Push($entry.FullName) }
+                if ($entry.Attributes -band [System.IO.FileAttributes]::Directory) { $pending.Push($entry.FullName); continue }
+                $names = Get-DarlingFileNameCount $entry.FullName
+                if ($names -lt 0) { if (-not $uncounted) { $uncounted = $entry.FullName } }
+                elseif ($names -gt 1) { $hardLinks.Add("$($entry.FullName) ($names names)") }
             }
         }
         catch { if (-not $unreadable) { $unreadable = "$dir ($($_.Exception.Message))" } }
     }
-    return [pscustomobject]@{ Links = @($links); Unreadable = $unreadable }
+    return [pscustomobject]@{ Links = @($links); HardLinks = @($hardLinks); Unreadable = $unreadable; Uncounted = $uncounted }
 }
 
 # The sentence that reports a write grant: the accounts in $writers could change the store's files, which the service then runs.
@@ -1868,8 +1916,15 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
                 continue
             }
             $paths.Add($child.FullName)
-            # Judged for grants too (#7267): an account with write access to postgresql.conf, to pg_hba.conf or to a subfolder such as
-            # base is the one that could change what the service runs, or plant a link after the walk below and before the elevated reset.
+            # Judged for grants too (#7267): an account with write access to postgresql.conf, to pg_hba.conf or to a subfolder such as base
+            # can change what the service runs. The plan names that account in its report and does not stop it: a plan with writers still
+            # returns Adopt, so those grants are in place while the repair runs, and the same account can plant a link or a hard link below
+            # the folder after the walk further down. The two steps that act on every item (the owner and the reset) judge each item on its
+            # own handle at the moment they change it, so a link or a hard link planted after the walk is not followed there. The two steps
+            # on the folder itself are not covered the same way: writing the folder's access list makes Windows copy the inherited entries
+            # to every name below it, so a hard link planted between the walk and those two steps still receives them. Refusing on writers
+            # would close that, and it would also refuse the Authenticated Users grant a data-volume folder inherits, which is the layout
+            # #7267 reports.
             $judgedForGrants.Add($child.FullName)
         }
     }
@@ -1924,7 +1979,8 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
         }
     }
     # icacls /T follows a link below the folder into what it points at, a trusted owner's relocation link (pg_wal, a tablespace) included,
-    # so one anywhere in the tree stops the takeover and the operator takes the link out first (#7267).
+    # so one anywhere in the tree stops the takeover and the operator takes the link out first (#7267). A file with more than one name
+    # stops it the same way (#5677): its owner and access list are shared by every name, so the takeover would change them outside the store.
     $walk = Find-DarlingStoreLinks $full
     if ($walk.Unreadable) { return (& $plan 'Refuse' "$($walk.Unreadable) cannot be listed by this script, so whether the store holds a junction or link is not known. The commands that fix a store follow a link into what it points at and change that too." $findings $true) }
     if (@($walk.Links).Count -gt 0) {
@@ -1932,13 +1988,85 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
         if (@($walk.Links).Count -gt 3) { $named += " and $(@($walk.Links).Count - 3) more" }
         return (& $plan 'Refuse' "$full holds a junction or symbolic link ($named). The commands that fix a store follow a link into what it points at and change that too, so this script does not run them while a link is there." $findings $true)
     }
+    if ($walk.Uncounted) { return (& $plan 'Refuse' "The number of names of $($walk.Uncounted) cannot be read by this script, so whether it is a hard link is not known. Fixing a store changes a file's owner and permissions under every name it has, outside the store included, so this script does not run while that is not known." $findings $false) }
+    if (@($walk.HardLinks).Count -gt 0) {
+        $named = (@($walk.HardLinks) | Select-Object -First 3) -join ', '
+        if (@($walk.HardLinks).Count -gt 3) { $named += " and $(@($walk.HardLinks).Count - 3) more" }
+        return (& $plan 'Refuse' "$full holds a file with more than one name, a hard link ($named). A file has one owner and one set of permissions under every name, so fixing the store would change them under the names outside it too, and this script does not do that. If you did not make the link, remove this name with del `"<path>`" (fsutil hardlink list `"<path>`" shows every name), then run this script again." $findings $false)
+    }
     return (& $plan 'Adopt' '' $findings $true $writers)
 }
 
-# Runs the four steps on an existing store, printing each one and what it left. $RunIcacls is a seam for a test: it takes the
-# argument array and returns the exit code; null runs icacls.exe. Throws with the reason when a step fails or the store is still
-# refused afterwards, and the caller warns (the service is stopped, and starting it is what the operator came for).
-function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $serviceSid, $trusted, $adopters, $plan, [scriptblock]$RunIcacls = $null) {
+# One pass over a store tree for the two repair steps that act on every item (#7267, #5677). Mode 'Owner' makes the account whose binary
+# SID is $ownerBytes the owner of $folder and of everything in it, mode 'Reset' replaces the access list of everything BELOW $folder with
+# what its parent passes down (the folder's own list is left to the two steps between them). This is the per-object, handle-based form of
+# the two icacls commands that take /T (the owner and the reset), which follow a link into whatever it points at and change the owner and
+# the permissions of a file at every one of its names, outside the store as well. Each object is opened itself (never what it points to) and judged on that
+# handle at the moment it is changed (Initialize-DarlingNativeOwner): a file with more than one name, a link, an object whose real path is
+# outside the folder, or one that cannot be opened or counted is left alone and reported. A link is never entered, and a folder that could
+# not be changed is not walked into. Returns Problems (one string per object that was not changed, empty when every one was) and Changed
+# (how many were).
+function Set-DarlingStoreTreeSecurity([string]$folder, [string]$mode, [byte[]]$ownerBytes) {
+    $problems = New-Object System.Collections.Generic.List[string]
+    $changed = 0
+    $root = [System.IO.Path]::GetFullPath($folder).TrimEnd('\')
+    $privileges = $false
+    try {
+        Initialize-DarlingNativeOwner
+        $privileges = [DarlingNativeOwner]::EnablePrivileges()
+        $rootError = 0
+        if (-not [DarlingNativeOwner]::OpenRoot($root, [ref]$rootError)) { $problems.Add("$root (the folder could not be pinned and its real path read, error $rootError)") }
+        else {
+            $pending = New-Object System.Collections.Generic.Stack[string]
+            $pending.Push($root)
+            $atRoot = $true
+            while ($pending.Count -gt 0) {
+                $path = $pending.Pop()
+                $isRoot = $atRoot
+                $atRoot = $false
+                $detail = 0
+                $attributes = [uint32]0
+                if ($isRoot -and $mode -eq 'Reset') { $result = 0; $attributes = [uint32]0x10 }
+                elseif ($mode -eq 'Owner') { $result = [DarlingNativeOwner]::SetOwner($path, $ownerBytes, [ref]$detail, [ref]$attributes) }
+                else { $result = [DarlingNativeOwner]::ResetDacl($path, [ref]$detail, [ref]$attributes) }
+                if ($result -ne 0) {
+                    $what = if ($mode -eq 'Owner') { 'owner' } else { 'permissions' }
+                    $why = switch ($result) {
+                        1 { "has $detail names (a hard link), and its owner and permissions are the same under every one, so they were not changed" }
+                        2 { "could not be opened, error $detail" }
+                        3 { "its number of names could not be read, error $detail" }
+                        4 { "its $what could not be changed, error $detail" + $(if ($mode -eq 'Owner' -and -not $privileges) { ' (this session could not turn on SeTakeOwnershipPrivilege and SeBackupPrivilege, see whoami /priv)' } else { '' }) }
+                        5 { 'its real path is outside the store folder, so it was not changed' }
+                        6 { 'is a junction or link, so it was not changed' }
+                        default { "gave result $result" }
+                    }
+                    $problems.Add("$path ($why)")
+                    continue
+                }
+                if (-not ($isRoot -and $mode -eq 'Reset')) { $changed++ }
+                if (($attributes -band 0x10) -ne 0 -and ($attributes -band 0x400) -eq 0) {
+                    try { foreach ($kid in [System.IO.Directory]::EnumerateFileSystemEntries($path)) { $pending.Push($kid) } }
+                    catch { $problems.Add("$path (its contents could not be listed: $($_.Exception.Message))") }
+                }
+            }
+        }
+    }
+    catch { $problems.Add("$root ($($_.Exception.Message))") }
+    finally {
+        try { [DarlingNativeOwner]::CloseRoot() } catch { }
+        try { $null = [DarlingNativeOwner]::RestorePrivileges() } catch { }
+    }
+    return [pscustomobject]@{ Problems = @($problems); Changed = $changed }
+}
+
+# Runs the four steps on an existing store, printing each one and what it left. The two steps that act on every item below the folder (the
+# owner and the reset, steps 1 and 4) do not run as icacls /T: they go through Set-DarlingStoreTreeSecurity, one object at a time on its own
+# handle, so a link or a file with more than one name that turns up after the plan's walk is refused and not followed (#5677, #7267). The two
+# steps on the folder itself run icacls on the folder alone. $RunIcacls is a seam for a test: it takes the argument array of those two and
+# returns the exit code; null runs icacls.exe. $ownerSid is who the owner step makes the owner (Administrators when null), which a test sets
+# to the account that runs it. Throws with the reason when a step fails or the store is still refused afterwards, and the caller warns (the
+# service is stopped, and starting it is what the operator came for).
+function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $serviceSid, $trusted, $adopters, $plan, [scriptblock]$RunIcacls = $null, $ownerSid = $null) {
     # icacls writes what it could not change to stderr, which Windows PowerShell 5.1 turns into a terminating error under Stop.
     $ErrorActionPreference = 'Continue'
     Note ''
@@ -1947,10 +2075,28 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
     if (@($plan.Findings).Count -gt 10) { Note "    found: and $(@($plan.Findings).Count - 10) more." }
     $writeText = Get-DarlingStoreWriteGrantText $dataDirectory $plan.Writers
     if ($writeText) { Warn "$writeText The upgrade goes on and starts the service afterwards: if those files are not what you set, stop the service and correct them." }
+    if ($null -eq $ownerSid) { $ownerSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null) }
+    $ownerBytes = New-Object byte[] $ownerSid.BinaryLength
+    $ownerSid.GetBinaryForm($ownerBytes, 0)
+    try { $ownerName = $ownerSid.Translate([System.Security.Principal.NTAccount]).Value } catch { $ownerName = $ownerSid.Value }
     $steps = @(Get-DarlingStoreRepairSteps $folder $serviceSid.Value)
+    if ($steps.Count -ne 4) { throw "the repair has $($steps.Count) steps, not the four this function runs." }
     $number = 0
     foreach ($step in $steps) {
         $number++
+        if ($number -eq 1 -or $number -eq 4) {
+            $mode = if ($number -eq 1) { 'Owner' } else { 'Reset' }
+            $what = if ($number -eq 1) { "make $ownerName the owner of the folder and of everything in it, one file or folder at a time" } else { 'reset the permissions of everything below the folder to what it inherits, one file or folder at a time' }
+            Note "  Step $number of $($steps.Count): $what. A link is not followed and a file with more than one name is refused."
+            $walk = Set-DarlingStoreTreeSecurity $folder $mode $ownerBytes
+            if (@($walk.Problems).Count -gt 0) {
+                $named = (@($walk.Problems) | Select-Object -First 3) -join ', '
+                if (@($walk.Problems).Count -gt 3) { $named += " and $(@($walk.Problems).Count - 3) more" }
+                throw "step $number ($what) did not finish: $named."
+            }
+            Note "    Done: $($walk.Changed) items."
+            continue
+        }
         Note "  Step $number of $($steps.Count): $($step.Text)"
         if ($RunIcacls) { $code = & $RunIcacls $step.Args }
         else {
