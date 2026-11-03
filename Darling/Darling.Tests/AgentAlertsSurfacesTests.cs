@@ -109,8 +109,12 @@ public sealed class ViewerAgentAlertsTextTests
             Alert(8, "Err 823", message: 823, enabled: false, fired: false),
             Alert(9, "Sev 19", severity: 19, fired: null)));
 
-        Assert.Equal(new ViewerAgentAlertRow("Sev 20", "yes", "20", "0", "", "0", "yes", "4", "2026-10-27T13:05:09"), rows[0]);
-        Assert.Equal(new ViewerAgentAlertRow("Err 823", "no", "0", "823", "", "1", "no", "4", "2026-10-27T13:05:09"), rows[1]);
+        /* #7243: the server's own clock is written in the viewer's date and time format, not as an ISO stamp, and the grid sorts on the time. */
+        var fired = new DateTime(2026, 10, 27, 13, 5, 9);
+        var shown = fired.ToString("G", System.Globalization.CultureInfo.CurrentCulture);
+        Assert.NotEqual("2026-10-27T13:05:09", shown);
+        Assert.Equal(new ViewerAgentAlertRow("Sev 20", "yes", "20", "0", "", "0", "yes", "4", shown, fired), rows[0]);
+        Assert.Equal(new ViewerAgentAlertRow("Err 823", "no", "0", "823", "", "1", "no", "4", shown, fired), rows[1]);
         Assert.Equal("—", rows[2].FiredInWindow);
     }
 

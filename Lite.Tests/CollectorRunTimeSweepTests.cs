@@ -150,6 +150,53 @@ public sealed class CollectorRunTimeSweepTests : IDisposable
         }
     }
 
+    /* #7215: the scheduled sweep, the run a newly opened tab starts and the tab's on-load re-collection share one
+       telemetry slot per server, so a server's runs take turns. The test holds the server's turn and starts both
+       entry points; nothing may run until the turn is released. Another server is not held back. */
+    [Fact]
+    public async Task TheSweep_AndTheTabOpenRun_WaitForTheServersTurn_AndOtherServersDoNot()
+    {
+        var (duckDb, servers, server) = await OpenAsync();
+        try
+        {
+            var other = new ServerConnection { ServerName = "sweep-test-other", DisplayName = "sweep-test-other" };
+            /* Not added to the server list, so the sweep does not run it and take its turn. */
+            var scheduler = NewScheduler(server, ("no_such_daily", 1440, null));
+            var service = new RemoteCollectorService(duckDb, servers, scheduler);
+
+            var turn = await service.AcquireServerRunAsync(server);
+            Task sweep;
+            Task tabOpen;
+            try
+            {
+                sweep = Task.Run(() => service.RunDueCollectorsAsync(DateTime.UtcNow, CancellationToken.None));
+                tabOpen = Task.Run(() => service.RunAllCollectorsForServerAsync(server));
+
+                await Task.Delay(500);
+                Assert.False(sweep.IsCompleted);
+                Assert.False(tabOpen.IsCompleted);
+                Assert.Equal(0, await RowsAsync(duckDb, server, "no_such_daily"));
+
+                using var otherTurn = await service.AcquireServerRunAsync(other).WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally
+            {
+                turn.Dispose();
+            }
+
+            await Task.WhenAll(sweep, tabOpen).WaitAsync(TimeSpan.FromSeconds(30));
+
+            /* Both runs finish once the turn is released, and the collector ran. */
+            /* The count can be two (#7269): the sweep's due list is read at a cycle time taken before the turn, and under the #4732 clamp a run
+               stamped after that time is due again. */
+            Assert.True(await RowsAsync(duckDb, server, "no_such_daily") >= 1);
+        }
+        finally
+        {
+            duckDb.Dispose();
+        }
+    }
+
     [Fact]
     public async Task OpeningATab_DoesNotRunADailyCollectorThatRanToday_OrOneWithARunTime_ButRunsTheOnLoadAndTheHourlyOnes()
     {
