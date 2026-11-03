@@ -206,7 +206,7 @@ public sealed class QueryStoreWideReadGuardTests
     {
         var end = Start.AddDays(1);
         var limit = QueryStoreWideReadGuard.LimitFor(false);
-        var fleet = new QueryStoreWideReadGuard.FleetServing(21, 3_900_000);
+        var fleet = new QueryStoreWideReadGuard.FleetServing(21, 3_900_000, true);
 
         /* The stamp weight alone: (3/24 + 21/24 x 0.3) x 25 M = 9.7 M, over the limit. */
         Assert.NotNull(QueryStoreWideReadGuard.Refusal(LargeFleetDay, Start, end, limit, FleetThrough));
@@ -224,12 +224,12 @@ public sealed class QueryStoreWideReadGuardTests
 
         /* 120 M wide rows a day, the newest 3 hours unstamped: a 15 M raw tail counts 7.5 M at the 0.5 tail weight, over 6.8 M before the fleet rows are added. */
         var bigDay = new QueryStoreWideReadGuard.Estimate(120_000_000, 210);
-        var small = new QueryStoreWideReadGuard.FleetServing(21, 1_000_000);
+        var small = new QueryStoreWideReadGuard.FleetServing(21, 1_000_000, true);
         Assert.NotNull(QueryStoreWideReadGuard.Refusal(bigDay, Start, end, limit, FleetThrough, small));
         Assert.True(bigDay.RowsOver(Start, end, FleetThrough, small) >= 7_500_000L);
 
         /* A fleet table that is itself huge is not waved through: 30 M fleet rows weigh 9 M. */
-        var huge = new QueryStoreWideReadGuard.FleetServing(21, 30_000_000);
+        var huge = new QueryStoreWideReadGuard.FleetServing(21, 30_000_000, true);
         Assert.NotNull(QueryStoreWideReadGuard.Refusal(LargeFleetDay, Start, end, limit, FleetThrough, huge));
     }
 
@@ -241,15 +241,15 @@ public sealed class QueryStoreWideReadGuardTests
         /* A panel outside the fleet conditions passes no fleet: the figure is exactly the stamp-weighted one, whatever the overload. */
         Assert.Equal(LargeFleetDay.RowsOver(Start, end, FleetThrough), LargeFleetDay.RowsOver(Start, end, FleetThrough, null));
         Assert.Equal(FleetDay.RowsOver(Start, Start.AddDays(1), StampedThrough), FleetDay.RowsOver(Start, Start.AddDays(1), StampedThrough, null));
-        Assert.Equal(LargeFleetDay.RowsOver(Start, end), LargeFleetDay.RowsOver(Start, end, null, new QueryStoreWideReadGuard.FleetServing(21, 3_900_000)));
+        Assert.Equal(LargeFleetDay.RowsOver(Start, end), LargeFleetDay.RowsOver(Start, end, null, new QueryStoreWideReadGuard.FleetServing(21, 3_900_000, true)));
 
         /* Only 10 of the 21 stamped hours are fleet-served: the other 11 stay at 0.3 x the wide rows. */
-        var partial = new QueryStoreWideReadGuard.FleetServing(10, 1_000_000);
+        var partial = new QueryStoreWideReadGuard.FleetServing(10, 1_000_000, true);
         var expected = (3d / 24d * 0.5d + 11d / 24d * 0.3d) * 25_000_000d + 0.3d * 1_000_000d;
         Assert.InRange(LargeFleetDay.RowsOver(Start, end, FleetThrough, partial), (long)expected - 2, (long)expected + 2);
 
         /* More fleet hours than stamped hours (a partial first hour counted whole) never push the stamp part below zero. */
-        var over = new QueryStoreWideReadGuard.FleetServing(40, 0);
+        var over = new QueryStoreWideReadGuard.FleetServing(40, 0, true);
         Assert.InRange(LargeFleetDay.RowsOver(Start, end, FleetThrough, over), (long)(25_000_000d * 3d / 24d * 0.5d) - 2, (long)(25_000_000d * 3d / 24d * 0.5d) + 2);
     }
 
@@ -258,11 +258,11 @@ public sealed class QueryStoreWideReadGuardTests
     private static readonly QueryStoreWideReadGuard.Estimate LoadTestFleetDay = new(42_720_000, 210);
     private const long FleetRowsFor1_3M = 4_333_333;
 
-    private static long TailPanel(double tailHours, bool fleetRollup, out string? refusal)
+    private static long TailPanel(double tailHours, bool fleetRollup, out string? refusal, bool tailAnalyzed = true)
     {
         var end = Start.AddDays(1);
         var through = end.AddHours(-tailHours);
-        var served = new QueryStoreWideReadGuard.FleetServing((int)Math.Floor(24d - tailHours), FleetRowsFor1_3M);
+        var served = new QueryStoreWideReadGuard.FleetServing((int)Math.Floor(24d - tailHours), FleetRowsFor1_3M, tailAnalyzed);
         QueryStoreWideReadGuard.FleetServing? fleet = fleetRollup ? served : null;
         refusal = QueryStoreWideReadGuard.Refusal(LoadTestFleetDay, Start, end, QueryStoreWideReadGuard.LimitFor(false), through, fleet);
         return LoadTestFleetDay.RowsOver(Start, end, through, fleet);
@@ -274,7 +274,7 @@ public sealed class QueryStoreWideReadGuardTests
         var end = Start.AddDays(1);
 
         /* A fleet that serves nothing and has no rows leaves only the tail and the stamp part, so the two figures differ by the tail weight alone. */
-        var none = new QueryStoreWideReadGuard.FleetServing(0, 0);
+        var none = new QueryStoreWideReadGuard.FleetServing(0, 0, true);
         var stampPart = 25_000_000d * 21d / 24d * 0.3d;
         var tail = 25_000_000d * 3d / 24d;
         Assert.InRange(LargeFleetDay.RowsOver(Start, end, FleetThrough, null), (long)(tail + stampPart) - 2, (long)(tail + stampPart) + 2);
@@ -296,6 +296,20 @@ public sealed class QueryStoreWideReadGuardTests
         var unweighted = TailPanel(6d, false, out var unweightedRefusal);
         Assert.True(unweighted > 6_800_000L);
         Assert.NotNull(unweightedRefusal);
+    }
+
+    [Fact]
+    public void AFleetPanelWith6hTail_IsRefusedWhenTheCurrentPartitionHasNoStatistics_AndAdmittedWhenItDoes()
+    {
+        /* The 0.5 weight is measured with statistics on the current partition. Without them the same arm ran at about four times that
+           weight, so the tail counts at 1.0 and the panel the weight would admit is refused (#7353). */
+        var fresh = TailPanel(6d, true, out var freshRefusal);
+        Assert.Null(freshRefusal);
+
+        var stale = TailPanel(6d, true, out var staleRefusal, tailAnalyzed: false);
+        Assert.NotNull(staleRefusal);
+        Assert.InRange(stale, 11_900_000L, 12_100_000L);   /* 6/24 x 42.72 M raw tail at 1.0 + 0.3 x 4.33 M fleet rows */
+        Assert.True(stale > fresh);
     }
 
     [Fact]

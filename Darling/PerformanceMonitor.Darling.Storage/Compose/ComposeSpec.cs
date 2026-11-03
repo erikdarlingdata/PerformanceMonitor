@@ -105,9 +105,13 @@ public static class ComposeLimits
     /// store the guard refused the fleet 24 hour panel for about 34 minutes of each hour, because the tail counted at the cold rate
     /// (6.53 us per row) while the panel ran in 10 to 13 s. The raw-tail arm was then measured cold on that store (cold boot, after an
     /// ANALYZE of today's partition): 2.91 us per row, 15.8 s for 5.44 M rows, which is 0.45 of the guard's 6.53 us per row, and 0.5
-    /// keeps a margin over it. The weight holds only with the hourly ANALYZE of the current partition that
-    /// <c>QueryStoreIntervalPartitions</c> runs: without it the same arm took 13.4 us per row (about 2.05 of the guard's rate). A panel
-    /// that does not read the fleet rollup keeps the tail at 1.0.
+    /// keeps a margin over it. The guard applies the weight only when the current day partition of the wide table has fresh statistics,
+    /// a last ANALYZE or autoanalyze within <c>QueryStoreIntervalPartitions.FreshStatisticsSeconds</c> (read from the catalogs with
+    /// the fleet table's size, #7353). Without statistics the same arm took 13.4 us per row (about 2.05 of the guard's rate and four
+    /// times this weight), so a partition that was never analyzed (a role that may not ANALYZE, the time before the first background
+    /// pass, a pass that lost a lock or found a vacuum running) counts the tail at 1.0, which is the figure before this weight. The
+    /// hourly ANALYZE that <c>QueryStoreIntervalPartitions</c> runs, and a pass a minute after 00:00 UTC, are what keep them fresh. A
+    /// panel that does not read the fleet rollup keeps the tail at 1.0.
     /// </summary>
     public const double FleetTailRowWeight = 0.5;
 
