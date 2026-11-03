@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpHealthTools
 {
     /// <summary>get_server_summary's description, VERBATIM Lite's (#3541 A10); the cross-SKU census pins them
-    /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
+    /// equal (so the PostgreSQL not_collected answer, #7159, is not named here: Lite has no PostgreSQL targets; the envelope itself says it). Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =
         "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
 
@@ -62,6 +62,10 @@ public sealed class DarlingMcpHealthTools
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_server_summary", cancellationToken);
+        if (postgresGate != null) return postgresGate;
 
         try
         {
@@ -137,6 +141,10 @@ public sealed class DarlingMcpHealthTools
            parse this replaced was the wrong tool in a file that already held as_of's strict allowlist. */
         var dateError = McpHelpers.ParseSummaryDate(summary_date, out var date);
         if (dateError != null) return dateError;
+
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_daily_summary", cancellationToken);
+        if (postgresGate != null) return postgresGate;
 
         try
         {
@@ -258,6 +266,10 @@ public sealed class DarlingMcpHealthTools
            present when the caller sent nothing, which is exactly the pre-anchor behaviour. */
         var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
+
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_daily_summary_range", cancellationToken);
+        if (postgresGate != null) return postgresGate;
 
         try
         {
