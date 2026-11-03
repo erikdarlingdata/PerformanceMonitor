@@ -1137,6 +1137,27 @@ FROM wait_stats
 WHERE server_id = $1";
 
     /// <summary>
+    /// The table that proves a SQL Server target is being collected: the one <see cref="TotalDataSpanSql"/> measures and
+    /// the SQL Server fact collector stamps its coverage witness from.
+    /// </summary>
+    internal const string SqlServerCoverageTable = "wait_stats";
+
+    /// <summary>
+    /// The table that proves a PostgreSQL target is being collected: the one <see cref="PgTargetDataSpanSql"/> measures and
+    /// the PostgreSQL-target fact collector stamps its coverage witness from (#3665).
+    /// </summary>
+    internal const string PgTargetCoverageTable = "pg_database_stats";
+
+    /// <summary>
+    /// The table "was this window collected at all" is asked of, for a server of <paramref name="engineKind"/> (#7194): the one
+    /// engine mapping of <see cref="EngineFor"/> (<see cref="MonitoredEngineKind.IsPostgres"/>), so a read outside the
+    /// analysis pass (get_analysis_findings, get_analysis_facts) probes the same series the pass reads and cannot call a
+    /// quiet PostgreSQL window "not collected" for lacking a SQL Server table.
+    /// </summary>
+    internal static string CoverageTableFor(string? engineKind) =>
+        MonitoredEngineKind.IsPostgres(engineKind) ? PgTargetCoverageTable : SqlServerCoverageTable;
+
+    /// <summary>
     /// The PostgreSQL-target engine set's data-span gate (#3542, D3): the same measurement over
     /// <c>pg_database_stats</c> — the one-minute series every PostgreSQL flavour writes with no extension,
     /// and the same table the pass's coverage witness and baseline gate read, so "how long has this server

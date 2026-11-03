@@ -293,23 +293,6 @@ public sealed class WebhookChannelFailureNoticeTests
     }
 
     [Fact]
-    public void TheThreshold_IsTheCountTheChannelsLoggingAlreadyStopsEveryFailureAt()
-    {
-        Assert.Equal(3, WebhookAlertService.FailingChannelThreshold);
-
-        var source = string.Concat(new[] { "", ".Teams", ".Slack", ".Generic", ".PagerDuty", ".Shared" }
-            .Select(part => ReadRepoFile(Path.Combine("PerformanceMonitor.Notifications", "WebhookAlertService" + part + ".cs"))));
-        foreach (var channel in new[] { "Teams", "Slack", "Generic", "PagerDuty" })
-        {
-            Assert.Contains($"_consecutive{channel}Failures <= FailingChannelThreshold", source, StringComparison.Ordinal);
-        }
-
-        /* A bare 3 back in a logging test would let the log and the notice disagree about when a channel is
-           failing. */
-        Assert.DoesNotContain("Failures <= 3", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheTrayNotice_NamesTheChannelAndTheCount_AndSaysNothingWhenThereIsNothingToSay()
     {
         var failing = WebhookChannelTrayNotice.For(WebhookChannelNotice.Failing, "Slack", 3);

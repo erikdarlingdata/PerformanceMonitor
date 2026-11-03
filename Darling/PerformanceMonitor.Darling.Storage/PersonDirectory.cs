@@ -107,7 +107,7 @@ public sealed record PersonRow(long PersonId, string DisplayName, bool Enabled, 
 /// a write on the three tables, and none is given one. No MCP tool, chat message or agent token reaches it. Each write checks its input,
 /// changes the row and journals its event (<see cref="PersonEvents"/>) in ONE transaction, with the administrator as the actor
 /// (<c>person:&lt;login&gt;</c>) and the surface in the detail. A refusal changes nothing and never throws.
-/// <para>No gate reads a grant yet (child (d1) of #6980 adds that), so nothing here changes what any current path may do.</para>
+/// <para>Only an <c>approve</c> grant is read (#7109): it decides who can approve an agent-proposed action. The other grants change what no path may do yet.</para>
 /// </summary>
 public static class PersonDirectory
 {
