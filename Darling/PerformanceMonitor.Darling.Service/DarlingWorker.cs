@@ -1374,9 +1374,21 @@ public sealed partial class DarlingWorker : BackgroundService
        IAlertStateStore on each server's first post-restart sweep (EnsureWatermarksSeededAsync), but
        nothing does the equivalent here, so a restart resets the watermark to 0 and the very next sweep
        re-fires on a deadlock/blocking count still sitting in the rolling window from before the
-       restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededServerKeys. */
+       restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededSteps. #7295: a key is added
+       only after a load that worked (a row or no row), so a failed load leaves it unseeded and the pass is skipped. */
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockWatermarkSeeded = new(StringComparer.Ordinal);
+    /* #7295: set once the pairs half of the deadlock seed has read the stored list. Until then the replace hook writes nothing. */
+    private readonly ConcurrentDictionary<string, bool> _pgDeadlockPairsSeeded = new(StringComparer.Ordinal);
+    /* #7295: per server, the pairs a seed put back that the agent gate has not been told about yet. The next count tells the gate
+       about those it keeps and forgets the rest (the pairs whose reports left the hour while the service was down). */
+    private readonly ConcurrentDictionary<string, HashSet<string>> _pgDeadlockRestoredForGate = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _pgBlockingWatermarkSeeded = new(StringComparer.Ordinal);
+    /* #7295 round 3: counts the failed state reads of the PostgreSQL seeds above (CPU persistence record, deadlock watermark, blocking
+       watermark) per server and step. The third failed read in a row seeds that step empty, so a state table that stays unreadable
+       while the collected data is readable cannot silence the alert for as long as the failure lasts. The deadlock pairs half is not
+       capped: it never skips a pass, it only holds the saved-pair writes back, and capping it would turn those writes on over a set
+       that never loaded. */
+    private readonly SeedLoadCap _seedLoadCap = new(AlertReadFailureCounter.Shared);
 
     /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)
        has the same restart gap, but no watermark COUNT to seed — it is a plain last-alerted TIME per

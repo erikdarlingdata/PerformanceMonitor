@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -110,6 +112,78 @@ public sealed class BlockingHeldRowLiteTests
             App.AlertBlockingEnabled = beforeBlocking;
             App.AlertBlockingThreshold = beforeCount;
             App.AlertBlockingWaitSecondsThreshold = beforeWait;
+        }
+    }
+
+    [Fact]
+    public async Task AStateTableThatCannotBeRead_SeedsEmptyOnTheThirdSweep_AndTheBlockingEventPages()
+    {
+        /* #7295 round 3: Lite's state store throws on a table it cannot read (here a database no upgrade ever created the watermark
+           table in), and the shared engine skips the blocking check until the read works. A table that stays unreadable must not hold
+           Blocking Detected back for as long as the failure lasts: the first two sweeps skip it, and the third seeds an empty watermark
+           and pages. */
+        var beforeEnabled = App.AlertsEnabled;
+        var beforeBlocking = App.AlertBlockingEnabled;
+        var beforeCount = App.AlertBlockingThreshold;
+        var beforeWait = App.AlertBlockingWaitSecondsThreshold;
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteSeedCap_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            App.AlertsEnabled = true;
+            App.AlertBlockingEnabled = true;
+            App.AlertBlockingThreshold = 3;
+            App.AlertBlockingWaitSecondsThreshold = 60;
+
+            var settings = new AlertWebhookCancelTests.GenericWebhookSettings("http://127.0.0.1:1/");
+            var history = new AlertWebhookCancelTests.CapturingHistoryStore();
+            var webhooks = new WebhookAlertService(
+                settings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>());
+            var emailAlerts = new EmailAlertService(
+                settings, history, webhooks, new AppLoggerAdapter<EmailAlertService>());
+            var toasts = new List<string>();
+            var deliverer = new LiteAlertDeliverer(
+                (title, _, _, _, _) => toasts.Add(title),
+                (metric, server, current, threshold, id, context, numCur, numThr, muted, detail, mode, token) =>
+                    emailAlerts.TrySendAlertEmailAsync(
+                        metric, server, current, threshold, id, context, numCur, numThr, muted, detail,
+                        deliveryMode: mode, cancellationToken: token),
+                _ => null,
+                (metric, server, current, threshold, id, context, numCur, numThr, detail, hold, token) =>
+                    emailAlerts.RecordHeldAlertAsync(
+                        metric, server, current, threshold, id, context, numCur, numThr, detail, hold, token));
+
+            var adapter = DispatchProxy.Create<IAlertReadAdapter, ReadAdapterProxy>();
+            ((ReadAdapterProxy)(object)adapter).Blocking = new List<BlockedProcessAlertRow> { Row(99, 90000) };
+
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            var now = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+            var engine = new AlertEngine(
+                new AppAlertEngineSettings(), adapter, store, deliverer,
+                isAlertMuted: _ => false, utcNow: () => now);
+            var snapshot = new AlertServerSnapshot("1", "SRV-A", true, null, null, false, false, now);
+            var ct = TestContext.Current.CancellationToken;
+
+            for (var sweep = 1; sweep < SeedLoadCap.MaxFailedLoads; sweep++)
+            {
+                await engine.EvaluateServerAsync(snapshot, ct);
+                Assert.DoesNotContain(history.Records, r => r.MetricName == "Blocking Detected");
+                Assert.Empty(toasts);
+            }
+
+            await engine.EvaluateServerAsync(snapshot, ct);
+            Assert.Single(history.Records, r => r.MetricName == "Blocking Detected");
+            Assert.Single(toasts);
+        }
+        finally
+        {
+            App.AlertsEnabled = beforeEnabled;
+            App.AlertBlockingEnabled = beforeBlocking;
+            App.AlertBlockingThreshold = beforeCount;
+            App.AlertBlockingWaitSecondsThreshold = beforeWait;
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
         }
     }
 

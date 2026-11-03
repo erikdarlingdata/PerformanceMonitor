@@ -585,6 +585,8 @@ AND   NOT EXISTS (SELECT 1 FROM v_config_alert_log AS r
     /// from these at startup, before the first alert sweep, so a restart does not
     /// reset the watermark to 0 and re-fire (and re-post a webhook for) events
     /// still lingering in the rolling lookback window.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row. It used
+    /// to answer an empty list for a failure too, so a seed that could not read looked like a store with nothing saved.</para>
     /// </summary>
     public async Task<List<(int ServerId, string MetricName, int Watermark)>> LoadEdgeTriggerWatermarksAsync()
     {
@@ -621,6 +623,7 @@ WHERE watermark_time IS NULL";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}");
+            throw;
         }
         return result;
     }
@@ -822,9 +825,8 @@ AND   metric_name = $2"
     /// — the Lite twin of Darling's V118 table. Returns null when there is no row, which the engine reads as
     /// "no memory" and arms the gate from zero.
     ///
-    /// <para>Null on failure too, deliberately. A load failure cannot resurrect a <c>firing</c> bit it did
-    /// not read, so the worst outcome is the streak rebuilding over the next few samples — a delay, never a
-    /// re-announcement of an incident the user already has open.</para>
+    /// <para>#7295: a read that fails is logged and then thrown, so a caller can tell it from a table with no row. It used to answer
+    /// null for both, and a seed that could not read lost an open incident's <c>firing</c> bit and its streak.</para>
     /// </summary>
     public async Task<(int Breaches, int Clears, bool Firing, DateTime? LastObservedSampleUtc)?>
         LoadAlertPersistenceAsync(int serverId, string metricName)
@@ -867,7 +869,7 @@ AND   metric_name = $2";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load the alert persistence gate ({metricName}): {ex.Message}");
-            return null;
+            throw;
         }
     }
 
@@ -940,6 +942,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     /// toasts for failures still inside the lookback window that the user already saw and dismissed.
     /// The value is the server-local run time of the newest already-alerted failure, returned in its
     /// native basis (NOT coerced to UTC) so it compares directly against <c>FailedJobInfo.RunDateTime</c>.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row.</para>
     /// </summary>
     public async Task<List<(int ServerId, DateTime Watermark)>> LoadFailedJobWatermarksAsync()
     {
@@ -975,6 +978,7 @@ AND   watermark_time IS NOT NULL";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load failed-job watermarks: {ex.Message}");
+            throw;
         }
         return result;
     }
