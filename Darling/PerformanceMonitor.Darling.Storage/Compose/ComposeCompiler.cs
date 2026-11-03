@@ -1651,8 +1651,15 @@ public static class ComposeCompiler
     /// All of these hold: the store has the table (<see cref="ComposeRunContext.QueryStoreFleetReady"/>); no server scope; no server on the
     /// raw route; no filter of any kind (server, database, module, tag, hash); and the only grouping column is <c>query_hash</c> or none,
     /// because the fleet table keeps no server, database or module. The per-hour validity check is in the statement itself
-    /// (<see cref="BuildStampRelation"/>), so it is decided for the hours the read really takes.
+    /// (<see cref="BuildStampRelation"/>), so it is decided for the hours the read really takes. The two-argument overload (#7285) asks
+    /// the same of the runner's context, so the size guard counts the fleet hours only for a panel whose text really reads the table.
     /// </summary>
+    internal static bool ReadsFleetRollup(PanelPlan plan, ComposeRunContext context) =>
+        ReadsFleetRollup(plan, context, context.Servers is { Count: > 0 },
+            context.QueryStoreWideEligible
+            && context.QueryStoreRawServerIds is { Count: > 0 }
+            && string.Equals(plan.Measure.SourceTable, QueryStoreTable, StringComparison.Ordinal));
+
     private static bool ReadsFleetRollup(PanelPlan plan, ComposeRunContext context, bool hasServerScope, bool hasRawServers) =>
         context.QueryStoreFleetReady
         && !hasServerScope
