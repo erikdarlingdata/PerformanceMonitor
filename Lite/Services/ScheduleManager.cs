@@ -267,7 +267,9 @@ public class ScheduleManager
     /// A run recorded after <paramref name="atUtc"/> but not after <paramref name="nowUtc"/> happened since the cycle's
     /// time was taken (a tab-open or refresh run, <see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>,
     /// that took its turn first) and is not due again (#7269). A run at or before <paramref name="atUtc"/> keeps the
-    /// interval rule.</summary>
+    /// interval rule. The sweep passes the time it got the server's turn, so the window is as long as the wait for that
+    /// turn: a wall clock that steps back by less than the wait leaves stamps inside the window, and those read as a
+    /// run since the cycle time, not as a step (the collector then waits out the step plus one interval).</summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc, DateTime nowUtc)
     {
         lock (_lock)
