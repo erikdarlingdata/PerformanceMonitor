@@ -445,16 +445,7 @@ AND NOT EXISTS (
     }
 
     /// <summary>
-    /// Dismisses all visible (non-dismissed) alerts matching the current filter criteria.
-    /// Uses an exclusive write lock to prevent race conditions with archival.
-    /// Updates the live table, then inserts any remaining archived alerts into the sidecar table.
-    /// Logs structured telemetry and verifies dismissal success.
-    /// </summary>
-    public Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
-        => DismissAllVisibleAlertsWindowAsync(DateTime.UtcNow.AddHours(-hoursBack), null, serverId);
-
-    /// <summary>
-    /// <see cref="DismissAllVisibleAlertsAsync"/> over the window <see cref="GetAlertHistoryWindowAsync"/> shows (#5562): the
+    /// Dismisses all visible (non-dismissed) alerts over the window <see cref="GetAlertHistoryWindowAsync"/> shows (#5562): the
     /// alerts from <paramref name="sinceUtc"/> up to but not including <paramref name="untilUtc"/> (<c>null</c> = to now), so a
     /// finished range's Dismiss All touches exactly the rows its grid shows and none raised after its end. The Darling Viewer's
     /// <c>DismissAllVisibleAlertsWindowAsync</c> scopes the same way.
