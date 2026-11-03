@@ -249,6 +249,22 @@ public sealed class QuietWindowBehaviourTests
     }
 
     [Fact]
+    public async Task CreateMuteRule_AnEndAtOrBeforeTheStart_IsRefusedAndNothingIsWritten()
+    {
+        var store = new FakeMuteRuleStore();
+        var start = Now.AddDays(2);
+
+        var equal = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
+            store, "alpha", "High CPU", null, null, null, null, "r", Iso(start), null, null, null, null, Iso(start), nowUtc: Now));
+        var before = Parse(await DarlingMcpAlertTools.CreateMuteRuleOver(
+            store, "alpha", "High CPU", null, null, null, null, "r", Iso(Now.AddDays(1)), null, null, null, null, Iso(start), nowUtc: Now));
+
+        Assert.Equal("invalid", equal["status"]!.GetValue<string>());
+        Assert.Equal("invalid", before["status"]!.GetValue<string>());
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
     public async Task UpdateMuteRule_CanMoveAndClearTheStart_ButNotPastTheEnd()
     {
         var rule = new MuteRule { Id = "r1", ServerName = "alpha", ExpiresAtUtc = Now.AddDays(2), StartsAtUtc = Now.AddDays(1) };
