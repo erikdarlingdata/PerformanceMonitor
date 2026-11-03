@@ -3352,6 +3352,19 @@ public partial class DuckDbInitializer : IDisposable
     private long _archiveViewGeneration;
 
     /// <summary>
+    /// The oldest and newest time column value in a table's Parquet archive, one entry per table and column and
+    /// archive view generation (#7256). The span only changes when the files do, and the files change exactly when
+    /// <see cref="ArchiveViewGeneration"/> goes up, so a read whose window lies outside the span skips the archive
+    /// without opening one of its files. See <c>LocalDataService.ArchiveSpan</c>.
+    /// </summary>
+    internal ArchiveWatermarkCache ArchiveSpans { get; } = new();
+
+    /// <summary>True when the archive view of <paramref name="table"/> removes copies on a natural key. Such a view can
+    /// hide a hot row, so a read of it never swaps the view for the hot table or reasons from the archive's span.</summary>
+    internal static bool ArchiveViewDedups(string table) =>
+        table == "config_alert_log" || ArchiveViewDedupKeys.ContainsKey(table);
+
+    /// <summary>
     /// A counter that goes up by one each time <see cref="CreateArchiveViewsCoreAsync"/> finishes, which
     /// runs after the 512 MB archive-and-reset and after periodic archival. The watermark reads in
     /// <c>RemoteCollectorService</c> cache what the <c>v_{table}</c> archive views return, and a cached
@@ -3690,7 +3703,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     }
 
     /* The read_parquet source argument for one or more globs: a quoted string for one, a list for several. */
-    private static string ParquetSourceSql(List<string> globs) =>
+    internal static string ParquetSourceSql(List<string> globs) =>
         globs.Count == 1
             ? $"'{EscapeSqlPath(globs[0])}'"
             : "[" + string.Join(", ", globs.Select(g => $"'{EscapeSqlPath(g)}'")) + "]";

@@ -88,12 +88,14 @@ public sealed class PvsStatsCollectorDefinitionTests
     }
 
     [Fact]
-    public void NeverRunsPerDatabase()
+    public void RunsPerDatabaseOnAzureSqlDatabaseOnly()
     {
-        /* The database grain comes from the DMV's own rows on box/MI, and from the connection's own
-           database on Azure SQL DB. Enumerating would connect to master for nothing (#1631). */
+        /* #7165: the Azure query is scoped to DB_ID() of the connection, and a logical-server registration
+           connects to master, so one connection read master's version store and no user database's. Azure
+           SQL DB now runs once per database (the #1631 / #5498 fallback). The DMV is instance-wide on box
+           and MI, so those keep their one connection. */
+        Assert.True(PvsStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(PvsStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo()));
-        Assert.False(PvsStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureSqlDb = true }));
         Assert.False(PvsStatsCollector.Instance.RunsPerDatabase(new CollectorTargetInfo { IsAzureManagedInstance = true }));
     }
 

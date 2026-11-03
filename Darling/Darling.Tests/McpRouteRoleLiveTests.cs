@@ -369,6 +369,38 @@ public sealed class McpRouteRoleLiveTests
         });
     }
 
+    /// <summary>#7199: the fallback write holds back a route with an agent setting above Off, and a fallback that is not a route, in its own
+    /// statement, as the enable and delete writes do. A write that changed no row changes nothing; a route with no agent setting, or an Off
+    /// route, is written, and a null fallback clears.</summary>
+    [Fact]
+    public async Task TheFallbackWrite_HoldsBackAnAgentRouteAndAMissingFallbackItself()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            await ExecAsync(owner,
+                "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 0), ('Deadlocks', 1), ('High CPU', NULL);", ct);
+            var role = new NpgsqlConnectionStringBuilder(asMcp.ConnectionString).Username;
+            await ExecAsync(owner, $"GRANT UPDATE (fallback_route_id) ON config.config_notification_routes TO {role}", ct);
+            var store = new PgNotificationRouteStore(asMcp);
+
+            /* An agent route is held back, and a fallback that is not a route is not written. */
+            Assert.Equal(0, await store.SetFallbackAsync(2, 3, ct));
+            Assert.Equal(0, await store.SetFallbackAsync(3, 99, ct));
+            Assert.Equal(0, await store.SetFallbackAsync(99, 3, ct));
+            await using (var none = owner.CreateCommand("SELECT count(*)::int FROM config.config_notification_routes WHERE fallback_route_id IS NOT NULL"))
+            {
+                Assert.Equal(0, (int)(await none.ExecuteScalarAsync(ct))!);
+            }
+
+            /* A route with no agent setting and an Off route are written, and null clears. */
+            Assert.Equal(1, await store.SetFallbackAsync(3, 2, ct));
+            Assert.Equal(1, await store.SetFallbackAsync(1, 3, ct));
+            Assert.Equal(1, await store.SetFallbackAsync(3, null, ct));
+            await using var left = owner.CreateCommand("SELECT fallback_route_id FROM config.config_notification_routes WHERE fallback_route_id IS NOT NULL");
+            Assert.Equal(3, (int)(await left.ExecuteScalarAsync(ct))!);
+        });
+    }
+
     private static async Task<bool> RouteEnabledAsync(NpgsqlDataSource owner, int routeId, CancellationToken ct)
     {
         await using var command = owner.CreateCommand("SELECT enabled FROM config.config_notification_routes WHERE route_id = $1");

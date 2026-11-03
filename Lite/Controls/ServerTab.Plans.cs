@@ -328,7 +328,7 @@ public partial class ServerTab : UserControl
 
     private void CancelPlanButton_Click(object sender, RoutedEventArgs e)
     {
-        _actualPlanCts?.Cancel();
+        _actualPlanRun.Cancel();
     }
 
     private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
@@ -541,8 +541,7 @@ public partial class ServerTab : UserControl
 
             ShowPlanLoading(label);
 
-            _actualPlanCts?.Dispose();
-            _actualPlanCts = new CancellationTokenSource();
+            var actualPlanToken = _actualPlanRun.Begin();
 
             try
             {
@@ -557,8 +556,11 @@ public partial class ServerTab : UserControl
                     isolationLevel,
                     isAzureSqlDb: false,
                     timeoutSeconds: 0,
-                    _actualPlanCts.Token,
+                    actualPlanToken,
                     productName: "SQL Server Performance Monitor Lite"));
+
+                /* #7181: the tab closed while the query ran; there is no tab left to show a result or a message. */
+                if (_actualPlanRun.IsClosed) return;
 
                 if (!string.IsNullOrEmpty(actualPlanXml))
                 {
@@ -573,11 +575,13 @@ public partial class ServerTab : UserControl
             }
             catch (OperationCanceledException)
             {
+                if (_actualPlanRun.IsClosed) return;
                 MessageBox.Show("The query was cancelled or timed out.",
                     "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
+                if (_actualPlanRun.IsClosed) return;
                 MessageBox.Show($"Could not get the actual plan from server {_server.DisplayName}:\n\n{ex.Message}\n\nCheck that the query still runs on that server, then try Get Actual Plan again.",
                     "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }

@@ -817,6 +817,30 @@ public partial class AddServerDialog : Window
         }
     }
 
+    /// <summary>
+    /// Parses the monthly cost box (#7197): blank is 0 (no cost), otherwise a plain decimal number, zero or more,
+    /// in invariant form (the box is filled that way on an edit). No thousands separator is accepted, so "120,50"
+    /// is refused instead of stored as 12050, and "abc", "-5" and "$120" give a message instead of being ignored.
+    /// </summary>
+    internal static (decimal Cost, string? Error) ParseMonthlyCostText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return (0m, null);
+
+        if (!decimal.TryParse(
+                text,
+                System.Globalization.NumberStyles.AllowDecimalPoint | System.Globalization.NumberStyles.AllowLeadingSign
+                    | System.Globalization.NumberStyles.AllowLeadingWhite | System.Globalization.NumberStyles.AllowTrailingWhite,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var cost)
+            || cost < 0)
+        {
+            return (0m, "Monthly cost must be a number, zero or more, written like 120 or 120.50. Leave it blank for no cost.");
+        }
+
+        return (cost, null);
+    }
+
     private async void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         var serverName = ServerNameBox.Text.Trim();
@@ -837,6 +861,14 @@ public partial class AddServerDialog : Window
         if (ReplicaBoxRefusal() is { } replicaRefusal)
         {
             StatusText.Text = replicaRefusal;
+            return;
+        }
+
+        /* #7197: a bad monthly cost is refused here, before any connect or save, instead of being dropped or misread. */
+        var (monthlyCostValue, monthlyCostError) = ParseMonthlyCostText(MonthlyCostBox.Text);
+        if (monthlyCostError is not null)
+        {
+            StatusText.Text = monthlyCostError;
             return;
         }
 
@@ -1036,8 +1068,7 @@ public partial class AddServerDialog : Window
                 AddedServer.QueryStoreReplica = string.IsNullOrWhiteSpace(QueryStoreReplicaBox.Text) ? null : QueryStoreReplicaBox.Text.Trim();
                 AddedServer.ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
                 AddedServer.MultiSubnetFailover = MultiSubnetFailoverCheckBox.IsChecked == true;
-                if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var editCost) && editCost >= 0)
-                    AddedServer.MonthlyCostUsd = editCost;
+                AddedServer.MonthlyCostUsd = monthlyCostValue;
                 AddedServer.AlertDeliveryModeOverride = GetSelectedDeliveryOverride();
 
                 AddedServer.CredentialProfileId = useProfile ? selectedProfile!.Id : null;
@@ -1068,9 +1099,7 @@ public partial class AddServerDialog : Window
             else
             {
                 /* Adding new server */
-                decimal monthlyCost = 0m;
-                if (decimal.TryParse(MonthlyCostBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var newCost) && newCost >= 0)
-                    monthlyCost = newCost;
+                var monthlyCost = monthlyCostValue;
 
                 AddedServer = new ServerConnection
                 {

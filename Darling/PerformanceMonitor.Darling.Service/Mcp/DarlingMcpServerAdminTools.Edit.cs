@@ -1043,8 +1043,14 @@ LIMIT 1";
             return true;
         }
 
+        /* #7197: no AllowThousands. NumberStyles.Number accepts a comma anywhere in the digits, so a decimal-comma
+           "120,50" stored 12050. A string is a plain decimal number: digits, an optional sign and an optional point. */
         return v.TryGetValue<string>(out var text)
-            && decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out value);
+            && decimal.TryParse(
+                text,
+                NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite,
+                CultureInfo.InvariantCulture,
+                out value);
     }
 
     /* ─────────────────────────────── plan (pure) ─────────────────────────────── */

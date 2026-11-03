@@ -82,8 +82,14 @@ public class DailyHealthReportDeliveryTests
         Assert.False(s.IsDue(new DateTime(2026, 3, 8, 6, 59, 0, DateTimeKind.Utc)));
         Assert.True(s.IsDue(new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc)));
 
-        /* The period still ends at a real instant: the same minute an hour later, 03:30 EDT = 07:30Z. */
-        Assert.Equal(new DateTime(2026, 3, 8, 7, 30, 0, DateTimeKind.Utc), s.MostRecentSendAtUtc(new DateTime(2026, 3, 8, 12, 0, 0, DateTimeKind.Utc)));
+        /* The period ends where the gap ends, 03:00 EDT = 07:00Z, the instant it turns due: not an hour past the send time (03:30 EDT),
+           which put the end up to 59 minutes in the future (#7201). get_daily_health_report agrees with it. */
+        var gapEnd = new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(gapEnd, s.MostRecentSendAtUtc(gapEnd));
+        Assert.Equal(gapEnd, s.MostRecentSendAtUtc(new DateTime(2026, 3, 8, 12, 0, 0, DateTimeKind.Utc)));
+        Assert.Equal(gapEnd, DailyHealthReportPeriod.EndUtcFor(new DateOnly(2026, 3, 8), s.SendAt, zone));
+        Assert.Equal(new DateOnly(2026, 3, 8), DailyHealthReportPeriod.LatestEndedDate(gapEnd, s.SendAt, zone));
+        Assert.Equal(new DateTime(2026, 3, 7, 7, 30, 0, DateTimeKind.Utc), s.MostRecentSendAtUtc(gapEnd.AddMinutes(-1)));
     }
 
     [Fact]
@@ -105,6 +111,12 @@ public class DailyHealthReportDeliveryTests
         var sendAt = new TimeOnly(1, 30);
         Assert.Equal(first, DailyHealthReportPeriod.EndUtcFor(new DateOnly(2026, 11, 1), sendAt, zone));
         Assert.Equal(new DateOnly(2026, 11, 1), DailyHealthReportPeriod.LatestEndedDate(first, sendAt, zone));
+
+        /* 06:15Z is 01:15 EST, the repeat's second pass, before the send time on the clock. The period ended at 05:30Z, so the report
+           is still owed: a failed 05:30Z delivery keeps its five-minute retries instead of pausing for thirty minutes (#7201). */
+        var secondPass = second.AddMinutes(-15);
+        Assert.True(s.IsDue(secondPass));
+        Assert.Equal(first, s.MostRecentSendAtUtc(secondPass));
     }
 
     /* ---------------- the scheduled send ---------------- */

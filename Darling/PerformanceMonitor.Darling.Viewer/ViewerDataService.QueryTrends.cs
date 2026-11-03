@@ -431,22 +431,7 @@ public sealed partial class ViewerDataService
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>: a collection the chosen database had no rows in
     /// still counts its seconds, so the rate is the true per-second rate over the bucket.</summary>
     public static readonly string ExecutionCountTrendSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                COALESCE(SUM(delta_execution_count) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) AS total_executions,
-                COUNT(*) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)) AS matched_rows,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+        WITH {DurationTrendRouting.QueryExecutionCollectionsCte()},
         rated AS
         (
             SELECT

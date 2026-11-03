@@ -168,7 +168,9 @@ public sealed partial class QueryStoreSliceRepairService
         await create.ExecuteNonQueryAsync(cancellationToken);
 
         using var insert = connection.CreateCommand();
-        insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES (CURRENT_TIMESTAMP, {rowsRemoved})";
+        /* #7200: bound UTC, not CURRENT_TIMESTAMP (local wall-clock). Nothing reads completed_at, only the row count. */
+        insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES ($1, {rowsRemoved})";
+        insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -310,6 +312,9 @@ SELECT
         await create.ExecuteNonQueryAsync(CancellationToken.None);
 
         using var insert = connection.CreateCommand();
+        /* #7200: deliberately still CURRENT_TIMESTAMP (local). ReadAttemptsAsync orders by attempted_at DESC, and a store with
+           attempts already written in local time would sort a new UTC row (up to 14 hours earlier east of UTC) BEFORE the
+           old ones, so the "last attempt" shape would come from a stale row. No migration, so the column stays one clock. */
         insert.CommandText =
             $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files, unreadable_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles}, {unreadableFiles})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
