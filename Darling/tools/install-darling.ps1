@@ -384,13 +384,17 @@ function Test-DarlingServiceWrittenFileName([string]$name) {
 # PowerShell 5.1 leaves it empty when the file cannot be opened for read (another process holds it with no read
 # sharing, or this account is denied read), so a hard link read as no link at all. Returns -1 when the count cannot be
 # read, and every caller treats that as more than one name: a file whose names cannot be counted is never trusted, made
-# service-owned, granted anything or reset (#5649). Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
+# service-owned, granted anything or reset (#5649). The same class also lists every name a file has (ListNames: FindFirstFileNameW and
+# FindNextFileNameW, each name spelled with its volume), which the hard link refusal in upgrade-darling.ps1 reads (#7267).
+# Kept byte-identical in install-darling.ps1 and upgrade-darling.ps1.
 function Get-DarlingFileNameCount([string]$path) {
     try {
         if (-not ('DarlingNativeFileNames' -as [type])) {
             Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 public static class DarlingNativeFileNames
@@ -429,6 +433,52 @@ public static class DarlingNativeFileNames
             return (int)information.NumberOfLinks;
         }
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(string fileName, uint flags, ref uint length, StringBuilder linkName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextFileNameW(IntPtr find, ref uint length, StringBuilder linkName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindClose(IntPtr find);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetVolumePathNameW(string fileName, StringBuilder volumePathName, uint length);
+
+    // Every name the file has, each one spelled with its volume (the API returns paths relative to the volume), or null when
+    // the names could not be read. The buffer holds the longest path NTFS allows, so ERROR_MORE_DATA does not come up, and the
+    // list ends with ERROR_HANDLE_EOF (38).
+    public static string[] ListNames(string path)
+    {
+        StringBuilder volume = new StringBuilder(1024);
+        if (!GetVolumePathNameW(path, volume, (uint)volume.Capacity)) { return null; }
+        string prefix = volume.ToString().TrimEnd('\\');
+        string extended = path;
+        if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) { extended = path; }
+        else if (path.StartsWith(@"\\", StringComparison.Ordinal)) { extended = @"\\?\UNC\" + path.Substring(2); }
+        else { extended = @"\\?\" + path; }
+        StringBuilder buffer = new StringBuilder(32768);
+        uint length = (uint)buffer.Capacity;
+        IntPtr find = FindFirstFileNameW(extended, 0, ref length, buffer);
+        if (find == new IntPtr(-1)) { return null; }
+        try
+        {
+            List<string> names = new List<string>();
+            while (true)
+            {
+                names.Add(prefix + buffer.ToString());
+                length = (uint)buffer.Capacity;
+                if (!FindNextFileNameW(find, ref length, buffer))
+                {
+                    if (Marshal.GetLastWin32Error() == 38) { break; }
+                    return null;
+                }
+            }
+            return names.ToArray();
+        }
+        finally { FindClose(find); }
+    }
 }
 '@
         }
@@ -453,7 +503,10 @@ public static class DarlingNativeFileNames
 # judges an object the same way and, in place of the owner, replaces its access list with what its parent passes down (an empty
 # list written with the unprotected flag through the same handle, which is what icacls /reset does), so the owner step and the
 # reset step of the store repair never follow a link or touch a file with more than one name. It returns the same results, and 6
-# when the object is a link (nothing was changed). EnablePrivileges turns on
+# when the object is a link (nothing was changed). The list is worked out from the parent's own descriptor and written through the object's own
+# handle with SetKernelObjectSecurity, which does not pass anything down, because SetSecurityInfo writes a folder's inheritable entries to
+# everything below it, the other name of a hard link included, before a walk could refuse that link (#7267). SetFolderDacl does the same
+# for the root folder alone, with the list the caller describes. EnablePrivileges turns on
 # SeTakeOwnershipPrivilege and SeBackupPrivilege (backup semantics let an object that denies Administrators read access open)
 # for this process's token, keeps what AdjustTokenPrivileges reports as their previous state and returns false if either could
 # not be turned on; RestorePrivileges puts back exactly that previous state. Kept byte-identical in install-darling.ps1 and
@@ -492,6 +545,27 @@ public static class DarlingNativeOwner
     private static SafeFileHandle rootHandle;
     private static string rootPath;
     private static TokenPrivilege[] previousStates = new TokenPrivilege[0];
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GenericMapping { public uint Read; public uint Write; public uint Execute; public uint All; }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint requestedInformation, byte[] descriptor, uint length, out uint lengthNeeded);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation, IntPtr descriptor);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool CreatePrivateObjectSecurityEx(IntPtr parent, IntPtr creator, out IntPtr newDescriptor, IntPtr objectType, bool isContainer, uint autoInheritFlags, IntPtr token, ref GenericMapping mapping);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DestroyPrivateObjectSecurity(ref IntPtr descriptor);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, out uint size);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
@@ -644,10 +718,64 @@ public static class DarlingNativeOwner
         }
     }
 
+    // The access list an object gets from its parent, worked out from the parent's own descriptor read through the parent's own handle
+    // (the folder above the object's real path, opened as itself): CreatePrivateObjectSecurityEx with SEF_DACL_AUTO_INHERIT (1) and the
+    // file generic mapping and the process token (TOKEN_QUERY: the call fails with ERROR_NO_TOKEN without one), no explicit entries of
+    // its own, so what comes back is the parent's inheritable entries flagged as inherited.
+    // Returns 0 with the descriptor to free with DestroyPrivateObjectSecurity, or 4 with the Win32 error.
+    private static int InheritedDescriptor(string realPath, bool container, out IntPtr inherited, out int error)
+    {
+        inherited = IntPtr.Zero;
+        error = 0;
+        int cut = realPath.TrimEnd('\\').LastIndexOf('\\');
+        if (cut < 4) { error = 87; return 4; }
+        string parent = realPath.Substring(0, cut);
+        if (parent.IndexOf('\\', 4) < 0) { parent += @"\"; }
+        using (SafeFileHandle handle = CreateFileW(parent, 0x80 | 0x00020000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { error = Marshal.GetLastWin32Error(); return 4; }
+            uint needed;
+            byte[] buffer = new byte[2048];
+            if (!GetKernelObjectSecurity(handle, 7, buffer, (uint)buffer.Length, out needed))
+            {
+                error = Marshal.GetLastWin32Error();
+                if (error != 122) { return 4; }
+                buffer = new byte[needed];
+                if (!GetKernelObjectSecurity(handle, 7, buffer, (uint)buffer.Length, out needed)) { error = Marshal.GetLastWin32Error(); return 4; }
+                error = 0;
+            }
+            GCHandle pinned = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            try
+            {
+                GenericMapping mapping = new GenericMapping();
+                mapping.Read = 0x120089u;
+                mapping.Write = 0x120116u;
+                mapping.Execute = 0x1200A0u;
+                mapping.All = 0x1F01FFu;
+                IntPtr token;
+                if (!OpenProcessToken(GetCurrentProcess(), 0x8, out token)) { error = Marshal.GetLastWin32Error(); return 4; }
+                try
+                {
+                    if (!CreatePrivateObjectSecurityEx(pinned.AddrOfPinnedObject(), IntPtr.Zero, out inherited, IntPtr.Zero, container, 1u, token, ref mapping))
+                    {
+                        error = Marshal.GetLastWin32Error();
+                        return 4;
+                    }
+                    return 0;
+                }
+                finally { CloseHandle(token); }
+            }
+            finally { pinned.Free(); }
+        }
+    }
+
     // READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES; share read, write and delete; OPEN_EXISTING;
-    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION
-    // with an empty list (revision 2, size 8, no entries): Windows replaces the object's own entries with the ones its parent passes
-    // down, which is what icacls /reset does. READ_CONTROL is asked for because the inherited list cannot be worked out without it.
+    // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS. The object's access list is replaced with the one its parent passes
+    // down (InheritedDescriptor), which is what icacls /reset does, and it is written through this handle with SetKernelObjectSecurity
+    // (DACL_SECURITY_INFORMATION). That call changes this object only: SetSecurityInfo propagates a folder's inheritable entries to
+    // everything below it, including the other name of a hard link that sits below it, before any walk could refuse that link (#7267).
+    // Whatever is below a folder is reset by the walk, one judged object at a time. READ_CONTROL is asked for because the object's
+    // handle is also the one the parent is worked out from.
     public static int ResetDacl(string path, out int detail, out uint attributes)
     {
         detail = 0;
@@ -667,15 +795,49 @@ public static class DarlingNativeOwner
             detail = (int)information.NumberOfLinks;
             if ((information.FileAttributes & 0x400) != 0) { return 6; }
             if (information.NumberOfLinks != 1) { return 1; }
-            IntPtr empty = Marshal.AllocHGlobal(8);
+            IntPtr inherited;
+            int error;
+            if (InheritedDescriptor(real, (information.FileAttributes & 0x10) != 0, out inherited, out error) != 0) { detail = error; return 4; }
             try
             {
-                Marshal.Copy(new byte[] { 2, 0, 8, 0, 0, 0, 0, 0 }, 0, empty, 8);
-                uint error = SetSecurityInfo(handle, 1, 0x00000004u | 0x20000000u, null, IntPtr.Zero, empty, IntPtr.Zero);
-                if (error != 0) { detail = (int)error; return 4; }
+                if (!SetKernelObjectSecurity(handle, 0x00000004u, inherited)) { detail = Marshal.GetLastWin32Error(); return 4; }
                 return 0;
             }
-            finally { Marshal.FreeHGlobal(empty); }
+            finally { DestroyPrivateObjectSecurity(ref inherited); }
+        }
+    }
+
+    // Replaces the access list of the ROOT folder (the path must be the open root's own real path) with the one the SDDL text describes,
+    // written through the folder's own handle with SetKernelObjectSecurity, so nothing is passed down to what is below it. The text
+    // carries the protected flag (D:P...), which is what keeps the folder from inheriting. It returns the same results as ResetDacl:
+    // 0 changed, 2 not opened, 3 count unreadable, 4 not changed (detail is the error), 5 not the root or no root open, 6 a link.
+    public static int SetFolderDacl(string path, string sddl, out int detail, out uint attributes)
+    {
+        detail = 0;
+        attributes = 0;
+        using (SafeFileHandle handle = CreateFileW(ExtendedPath(path), 0x80 | 0x00040000, 7, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid) { detail = Marshal.GetLastWin32Error(); return 2; }
+            int pathError;
+            string real = RealPath(handle, out pathError);
+            string root = rootPath;
+            if (real == null || root == null) { detail = pathError; return 5; }
+            if (!string.Equals(real, root, StringComparison.Ordinal)) { return 5; }
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information)) { detail = Marshal.GetLastWin32Error(); return 3; }
+            attributes = information.FileAttributes;
+            detail = (int)information.NumberOfLinks;
+            if ((information.FileAttributes & 0x400) != 0) { return 6; }
+            if ((information.FileAttributes & 0x10) == 0) { return 5; }
+            IntPtr descriptor;
+            uint size;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out descriptor, out size)) { detail = Marshal.GetLastWin32Error(); return 4; }
+            try
+            {
+                if (!SetKernelObjectSecurity(handle, 0x00000004u, descriptor)) { detail = Marshal.GetLastWin32Error(); return 4; }
+                return 0;
+            }
+            finally { LocalFree(descriptor); }
         }
     }
 }

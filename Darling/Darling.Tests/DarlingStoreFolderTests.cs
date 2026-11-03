@@ -561,13 +561,8 @@ public sealed class DarlingStoreFolderScriptTests
             'exposedState=' + $plan.State
             'exposedItems=' + @($plan.Findings).Count
             $ran = New-Object System.Collections.Generic.List[string]
-            $seam = {
-                param($arguments)
-                & icacls.exe @($arguments) | Out-Null
-                return $LASTEXITCODE
-            }
             try {
-                Invoke-DarlingStoreAdoption $store $data $meSid $trusted @($meSid) $plan $seam $meSid
+                Invoke-DarlingStoreAdoption $store $data $meSid $trusted @($meSid) $plan $null $meSid
                 'adoption=done'
             }
             catch { 'adoption=' + $_.Exception.Message }
@@ -591,7 +586,8 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Equal(4, steps.Count);
         Assert.Contains("the owner of the folder and of everything in it, one file or folder at a time", steps[0], StringComparison.Ordinal);
         Assert.DoesNotContain("/T", steps[0], StringComparison.Ordinal);
-        Assert.Contains("/inheritance:r /grant", steps[2], StringComparison.Ordinal);
+        Assert.Contains("protect the folder and grant SYSTEM, Administrators and the service account full control", steps[2], StringComparison.Ordinal);
+        Assert.Contains("Nothing is passed down to what is below it.", steps[2], StringComparison.Ordinal);
         Assert.Contains("reset the permissions of everything below the folder to what it inherits, one file or folder at a time", steps[3], StringComparison.Ordinal);
         Assert.DoesNotContain("/T", steps[3], StringComparison.Ordinal);
     }
@@ -744,21 +740,40 @@ public sealed class DarlingStoreFolderScriptTests
             $before3 = (Get-Acl -LiteralPath $o3).Sddl
             cmd /c mklink /H (Join-Path $d2 'planted.dat') $o3 | Out-Null
             $ran = New-Object System.Collections.Generic.List[string]
-            $seam2 = { param($arguments) $ran.Add(($arguments -join ' ')); return 0 }
+            $seam2 = { param($number) $ran.Add("$number") }
             try { Invoke-DarlingStoreAdoption $s2 $d2 $meSid $trusted @($meSid) $plan2 $seam2 $meSid; 'afterPlan=done' } catch { 'afterPlan=' + (Get-Plain $_.Exception.Message) }
-            'afterPlanIcaclsRan=' + $ran.Count
+            'afterPlanStepsFinished=' + $ran.Count
             'afterPlanOutsideUnchanged=' + ((Get-Acl -LiteralPath $o3).Sddl -eq $before3)
 
-            # Planted between step 3 and step 4 (the stand-in for icacls plants it): the reset step refuses it.
+            # Planted between step 3 and step 4: the reset step refuses it.
             $s3 = New-Store 'between' $true
             $d3 = Join-Path $s3 'pg'
             Expose $d3 'Read'
             $plan3 = Get-DarlingStoreAdoptionPlan $s3 $d3 $trusted @($meSid)
             $o4 = New-Outside 'four.txt'
             $before4 = (Get-Acl -LiteralPath $o4).Sddl
-            $seam3 = { param($arguments) if ($arguments -contains '/inheritance:r') { cmd /c mklink /H (Join-Path $d3 'planted.dat') $o4 | Out-Null }; return 0 }
+            $seam3 = { param($number) if ($number -eq 3) { cmd /c mklink /H (Join-Path $d3 'planted.dat') $o4 | Out-Null } }
             try { Invoke-DarlingStoreAdoption $s3 $d3 $meSid $trusted @($meSid) $plan3 $seam3 $meSid; 'between=done' } catch { 'between=' + (Get-Plain $_.Exception.Message) }
             'betweenOutsideUnchanged=' + ((Get-Acl -LiteralPath $o4).Sddl -eq $before4)
+
+            # The same, with an outside file whose list is NOT protected: it inherits from its own folder, which is the list a
+            # folder reset above the planted link would have written an entry into (#7267: SetSecurityInfo passes a folder's
+            # inheritable entries to every name below it). The store folder gets an entry with inheritance after the plan, so
+            # resetting the data directory to what it inherits would hand that entry to the planted link's other name.
+            $s4 = New-Store 'between-inheriting' $true
+            $d4 = Join-Path $s4 'pg'
+            Expose $d4 'Read'
+            $plan4 = Get-DarlingStoreAdoptionPlan $s4 $d4 $trusted @($meSid)
+            $o5 = Join-Path $elsewhere 'five.txt'
+            Set-Content -LiteralPath $o5 'x'
+            $before5 = (Get-Acl -LiteralPath $o5).Sddl
+            $marker = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-547')
+            $acl4 = Get-Acl -LiteralPath $s4
+            $acl4.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($marker, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            Set-Acl -LiteralPath $s4 -AclObject $acl4
+            $seam4 = { param($number) if ($number -eq 3) { cmd /c mklink /H (Join-Path $d4 'planted.dat') $o5 | Out-Null } }
+            try { Invoke-DarlingStoreAdoption $s4 $d4 $meSid $trusted @($meSid) $plan4 $seam4 $meSid; 'inheriting=done' } catch { 'inheriting=' + (Get-Plain $_.Exception.Message) }
+            'inheritingOutsideUnchanged=' + ((Get-Acl -LiteralPath $o5).Sddl -eq $before5)
             """));
 
         Assert.Contains("planState=Refuse", answers);
@@ -771,10 +786,87 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("quietState=Clean", answers);
         Assert.Contains("afterPlanState=Adopt", answers);
         Assert.Contains(answers, line => line.StartsWith("afterPlan=", StringComparison.Ordinal) && line.Contains("step 1", StringComparison.Ordinal) && line.Contains("planted.dat", StringComparison.Ordinal) && line.Contains("2 names", StringComparison.Ordinal));
-        Assert.Contains("afterPlanIcaclsRan=0", answers);
+        Assert.Contains("afterPlanStepsFinished=0", answers);
         Assert.Contains("afterPlanOutsideUnchanged=True", answers);
         Assert.Contains(answers, line => line.StartsWith("between=", StringComparison.Ordinal) && line.Contains("step 4", StringComparison.Ordinal) && line.Contains("planted.dat", StringComparison.Ordinal) && line.Contains("2 names", StringComparison.Ordinal));
         Assert.Contains("betweenOutsideUnchanged=True", answers);
+        Assert.Contains(answers, line => line.StartsWith("inheriting=", StringComparison.Ordinal) && line.Contains("step 4", StringComparison.Ordinal) && line.Contains("planted.dat", StringComparison.Ordinal));
+        Assert.Contains("inheritingOutsideUnchanged=True", answers);
+    }
+
+    /// <summary>#7267: the names of a hard link are the store's own paths, and the data directory is the live cluster, so the refusal
+    /// never tells the operator to remove a name inside it. When the service's major store upgrade linked the files (pg_upgrade --link)
+    /// and could not delete the old folder, every relation file has one name in the data directory and one in the retained
+    /// pg-old-17 folder beside it: the refusal names that folder, says it is what is left of that upgrade, and offers rmdir of it and
+    /// of nothing under the data directory. A file whose other name is outside the store gets that outside name named, and the
+    /// in-store name is never offered for removal. Both refusals stay a refusal with no four commands.</summary>
+    [Fact]
+    public void TheUpgrade_NeverTellsTheOperatorToRemoveANameInsideTheDataDirectory_WhenAFileHasMoreThanOneName()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell, ACLs and hard links");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Get-Plain([string]$text) { return ($text -replace '\r|\n', ' ') }
+            function Test-RemovesUnder([string]$text, [string]$folder) {
+                # A del or rmdir whose quoted path is the folder or something below it (pg-old-17 is not below pg).
+                return [regex]::IsMatch($text, '(?i)\b(del|rmdir)\b[^"]*"' + [regex]::Escape($folder) + '(\\[^"]*)?"')
+            }
+
+            # A retained folder beside the data directory, every file in it a second name of a file in the data directory.
+            $s = New-Store 'retained' $true
+            $data = Join-Path $s 'pg'
+            $old = Join-Path $s 'pg-old-17'
+            New-Item -ItemType Directory $old | Out-Null
+            Expose $data 'Read'
+            Set-Content -LiteralPath (Join-Path $old 'rel.dat') 'x'
+            cmd /c mklink /H (Join-Path $data 'rel.dat') (Join-Path $old 'rel.dat') | Out-Null
+            $dataCanon = Get-DarlingCanonicalPath $data
+            $oldCanon = Get-DarlingCanonicalPath $old
+            $p = Get-DarlingStoreAdoptionPlan $s $data $trusted @($meSid)
+            $r = Get-Plain $p.Reason
+            'retainedState=' + $p.State
+            'retainedByHand=' + $p.FixByHand
+            'retainedNamesOldFolder=' + $r.Contains($oldCanon)
+            'retainedRmdirOld=' + $r.Contains('rmdir /s /q "' + $oldCanon + '"')
+            'retainedSaysUpgrade=' + ($r.Contains('major store upgrade') -and $r.Contains('not a rollback copy'))
+            'retainedRemovesInData=' + (Test-RemovesUnder $r $dataCanon)
+            'retainedSaysNotInData=' + $r.Contains('Do not remove any name inside the data directory')
+
+            # A name outside the store: it is named, and the in-store name inside the data directory is not offered for removal.
+            $elsewhere = Join-Path $base 'elsewhere'
+            New-Item -ItemType Directory $elsewhere | Out-Null
+            $outside = Join-Path $elsewhere 'outside.dat'
+            Set-Content -LiteralPath $outside 'x'
+            $s2 = New-Store 'outside' $true
+            $data2 = Join-Path $s2 'pg'
+            Expose $data2 'Read'
+            $inStore = Join-Path $data2 'rel.dat'
+            cmd /c mklink /H $inStore $outside | Out-Null
+            $p2 = Get-DarlingStoreAdoptionPlan $s2 $data2 $trusted @($meSid)
+            $r2 = Get-Plain $p2.Reason
+            'outsideState=' + $p2.State
+            'outsideByHand=' + $p2.FixByHand
+            'outsideNamesOutside=' + $r2.Contains((Get-DarlingCanonicalPath $outside))
+            'outsideRemovesInStoreName=' + (Test-RemovesUnder $r2 (Get-DarlingCanonicalPath $inStore))
+            'outsideRemovesInData=' + (Test-RemovesUnder $r2 (Get-DarlingCanonicalPath $data2))
+            'outsideNoRmdir=' + (-not $r2.Contains('rmdir'))
+            'outsideSaysNotInData=' + $r2.Contains('Do not remove any name inside the data directory')
+            """));
+
+        Assert.Contains("retainedState=Refuse", answers);
+        Assert.Contains("retainedByHand=False", answers);
+        Assert.Contains("retainedNamesOldFolder=True", answers);
+        Assert.Contains("retainedRmdirOld=True", answers);
+        Assert.Contains("retainedSaysUpgrade=True", answers);
+        Assert.Contains("retainedRemovesInData=False", answers);
+        Assert.Contains("retainedSaysNotInData=True", answers);
+        Assert.Contains("outsideState=Refuse", answers);
+        Assert.Contains("outsideByHand=False", answers);
+        Assert.Contains("outsideNamesOutside=True", answers);
+        Assert.Contains("outsideRemovesInStoreName=False", answers);
+        Assert.Contains("outsideRemovesInData=False", answers);
+        Assert.Contains("outsideNoRmdir=True", answers);
+        Assert.Contains("outsideSaysNotInData=True", answers);
     }
 
     /// <summary>#7267: the reset step changes one object at a time on its own handle. A plain file inside the folder goes back to
@@ -1158,7 +1250,7 @@ public sealed class DarlingStoreFolderScriptTests
         """,
         ExtractFunctions(
             UpgradeScript, "Get-DarlingCanonicalPath", "Get-DarlingItemOwnerSid", "Get-DarlingLinkOwnerSid", "Initialize-DarlingNativeStoreFolder", "Initialize-DarlingNativeOwner", "Get-DarlingFileNameCount", "Get-DarlingStoreRepairSteps",
-            "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Set-DarlingStoreTreeSecurity", "Invoke-DarlingStoreAdoption",
+            "Get-DarlingStoreRepairText", "Find-DarlingStoreLinks", "Get-DarlingFileNames", "Get-DarlingStoreHardLinkAdvice", "Get-DarlingStoreFolderSddl", "Get-DarlingStoreWriteGrantText", "Get-DarlingStoreAdoptionPlan", "Set-DarlingStoreTreeSecurity", "Invoke-DarlingStoreAdoption",
             "Get-DarlingStoreStoppedText", "Get-DarlingNothingChangedText", "Get-DarlingStoreRefusalText", "Write-DarlingStoreCheckResult", "Repair-DarlingStoreAfterStop"),
         $$"""
         $base = Join-Path $env:TEMP ('darling-adopt-' + [guid]::NewGuid().ToString('N'))
