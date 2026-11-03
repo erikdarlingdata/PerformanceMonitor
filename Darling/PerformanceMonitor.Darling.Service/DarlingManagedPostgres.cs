@@ -2649,7 +2649,9 @@ public sealed class DarlingManagedPostgres
     /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
     /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
     /// store the value is in force from the following start; every store already on the managed file has the line
-    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
+    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
+    /// key became managed may hold the operator's own <c>random_page_cost</c> above the include, where the include would override it:
+    /// <see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/> finds such a line and the render leaves the key out.
     ///
     /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
     /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
@@ -2708,6 +2710,8 @@ public sealed class DarlingManagedPostgres
     /// managed file has the lines written before <c>pg_ctl start</c> (the file is re-rendered each start), and a store still on the legacy
     /// blocks gets them when that conf migrates (<see cref="ManagedConfFile.ManagedOnlyKeys"/>).
     /// Only <c>max_worker_processes</c> needs a restart: both parallel settings are <c>user</c>-context and apply on a reload.
+    /// An operator's own line for either key above the include stays in force: <see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/>
+    /// finds it and the render leaves the key out (#7365), as it does for <see cref="RandomPageCostSetting"/>.
     /// </summary>
     internal static string BuildParallelQueryConfAppend(int processorCount)
     {
@@ -4565,6 +4569,20 @@ public sealed class DarlingManagedPostgres
         var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
         var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
 
+        /* #7365: the operator lines above the include that a key managed only by this file would override. */
+        IReadOnlyDictionary<string, ManagedConfFile.OperatorPinnedLine>? operatorPinned = null;
+        try
+        {
+            if (File.Exists(confPath))
+            {
+                operatorPinned = ManagedConfFile.FindOperatorLinesAboveInclude(File.ReadAllText(confPath));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not read {Path} for operator lines above the include ({Message}).", confPath, ex.Message);
+        }
+
         return new ManagedConfFile.RenderInputs(
             ManagedConfFile.CurrentFormulaVersion,
             "Windows",
@@ -4577,7 +4595,8 @@ public sealed class DarlingManagedPostgres
             totalBytes,
             diskAuthoritative,
             _config.Port,
-            effectivePreload);
+            effectivePreload,
+            OperatorPinned: operatorPinned);
     }
 
     /// <summary>
@@ -4609,6 +4628,17 @@ public sealed class DarlingManagedPostgres
     {
         var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
         var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
+
+        /* #7365: once per start, for each key this file leaves out because postgresql.conf assigns it above the include. */
+        if (inputs.OperatorPinned is { } operatorPinned)
+        {
+            foreach (var (key, pinned) in operatorPinned)
+            {
+                _logger.LogInformation(
+                    "{Key} = {Value} on line {Line} of postgresql.conf, above the include of {ManagedFile}, stays in force: the managed file leaves the key out rather than override it. Remove or comment out that line to let the managed value apply.",
+                    key, pinned.Value, pinned.Line, ManagedConfFile.FileName);
+            }
+        }
 
         string? existingText = null;
         try
