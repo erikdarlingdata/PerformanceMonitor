@@ -202,7 +202,7 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
             Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
         }
 
-        Assert.Contains("status empty: no row for that day.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+        Assert.Contains("status unavailable: nothing collected that day.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
         Assert.Contains("data_state purged, zeros are absences, no verdict;", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
         Assert.Contains("past_horizon if a signal table still holds the day (band NoData, non-zero counts real).", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
         Assert.Contains("the band stands on real zeros, no_run_record too; only its collection-error share has no denominator.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
