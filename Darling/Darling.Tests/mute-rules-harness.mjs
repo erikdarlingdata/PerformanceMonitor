@@ -18,9 +18,10 @@ const context = vm.createContext({
   console, URLSearchParams, window: windowStub,
   fetch: async () => ({ status: nextResponse.status, text: async () => nextResponse.text }),
   reportSessionExpired: () => { expiredCalls++; },
+  browserZoneOrBlank: () => Intl.DateTimeFormat().resolvedOptions().timeZone || "", /* util.js, same body */
   storeHeaders: (h) => h, /* util.js: adds X-Darling-Store behind a front door (#6840); a store is not behind one */
 });
-vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, actionOf, scheduleOf, scheduleCell, valuesOf, browserZone, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
+vm.runInContext(source + "\nglobalThis.__p = { TEXT_FIELDS, actionOf, scheduleOf, scheduleCell, valuesOf, formToCreateBody, buildPatch, isEmptyCreate, interpretWrite, EMPTY_CREATE_WARNING, send, closeForm, parsePrefill, openForm: (f) => { form = { errors: {}, ...f }; }, setLast: (v) => { lastPrefillQuery = v; }, getLast: () => lastPrefillQuery };", context);
 const ctx2 = vm.createContext({});
 vm.runInContext(ctxSource + "\nglobalThis.__c = { mutePrefillParams, parseDetailContext };", ctx2);
 const c = ctx2.__c;

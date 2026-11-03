@@ -452,9 +452,9 @@ public sealed partial class DarlingCollectorRunner
     /// <summary>
     /// The hit-or-miss split of <see cref="FetchDeferredQueryStatsPlansAsync"/>, pulled out so the cap is testable
     /// without a target (#7156). A row with a cached digest takes it (and the cached size) and is not a miss; a row
-    /// with no usable plan handle is skipped; the first <see cref="QueryStatsCollector.MaxPlansPerRun"/> remaining
-    /// rows, in input (rank) order, are the misses the caller fetches. A miss past the cap is neither fetched nor
-    /// cached: it ships without a plan and is fetched on a later run once it ranks.
+    /// with no usable plan handle is skipped; of the rest, <see cref="ChooseDeferredQueryStatsMisses"/> picks the at most
+    /// <see cref="QueryStatsCollector.MaxPlansPerRun"/> misses the caller fetches, in input order (#7337). A miss not
+    /// chosen is neither fetched nor cached: it ships without a plan and is fetched on a later run once it ranks.
     /// </summary>
     internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> PartitionDeferredQueryStatsPlans(
         int serverId,
@@ -462,7 +462,7 @@ public sealed partial class DarlingCollectorRunner
         PlanDigestCache<QueryStatsPlanKey> cache,
         DateTime now)
     {
-        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        var candidates = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
         foreach (var row in rows)
         {
             if (QueryStatsPlanKey.TryCreate(serverId, row) is not { } key)
@@ -477,16 +477,51 @@ public sealed partial class DarlingCollectorRunner
                 row.KnownPlanDigest = hit.Digest;
                 row.QueryPlanXmlBytes = hit.Bytes;
             }
-            else if (misses.Count < QueryStatsCollector.MaxPlansPerRun)
+            else
             {
-                /* #7156: the main query returns every statement that ran in the window, in rank order, and the plan work
-                   stays bounded at the old 200: a miss past the cap ships without a plan, is not cached, and is fetched
-                   on a later run once it ranks (or once the rows above it go idle). */
-                misses.Add((key, row));
+                candidates.Add((key, row));
             }
         }
 
-        return misses;
+        return ChooseDeferredQueryStatsMisses(candidates);
+    }
+
+    /// <summary>
+    /// #7337: picks the plans one deferred run fetches from the misses, at most
+    /// <see cref="QueryStatsCollector.MaxPlansPerRun"/> in total, split the way the inline apply splits its slots. The
+    /// newest <see cref="QueryStatsCollector.PlansByRecency"/> misses by <c>last_execution_time</c> keep a plan that just
+    /// recompiled or regressed; the heaviest <see cref="QueryStatsCollector.PlansByWeight"/> of the REMAINING misses by
+    /// <c>total_elapsed_time</c> keep a heavy statement that runs now and then, which the recency half alone starved on a
+    /// server where hundreds of new ad hoc statements arrive every run. A miss in both lists is one pick. Ties keep input
+    /// order; the result is in input order.
+    /// </summary>
+    internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> ChooseDeferredQueryStatsMisses(
+        IReadOnlyList<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> candidates)
+    {
+        if (candidates.Count <= QueryStatsCollector.MaxPlansPerRun)
+        {
+            return candidates.ToList();
+        }
+
+        var chosen = new HashSet<int>();
+        foreach (var i in Enumerable.Range(0, candidates.Count)
+                     .OrderByDescending(i => candidates[i].Row.LastExecutionTime ?? DateTime.MinValue)
+                     .ThenByDescending(i => candidates[i].Row.TotalElapsedTime)
+                     .Take(QueryStatsCollector.PlansByRecency))
+        {
+            chosen.Add(i);
+        }
+
+        foreach (var i in Enumerable.Range(0, candidates.Count)
+                     .Where(i => !chosen.Contains(i))
+                     .OrderByDescending(i => candidates[i].Row.TotalElapsedTime)
+                     .ThenByDescending(i => candidates[i].Row.LastExecutionTime ?? DateTime.MinValue)
+                     .Take(QueryStatsCollector.PlansByWeight))
+        {
+            chosen.Add(i);
+        }
+
+        return Enumerable.Range(0, candidates.Count).Where(chosen.Contains).Select(i => candidates[i]).ToList();
     }
 
     /// <summary>

@@ -193,15 +193,12 @@ public static class FactAdvice
         if (tsql is not null)
             advice = advice with { RemediationTsql = tsql };
 
-        // B3 Phase 3 (§6) + Clear-cached-plan (§5): when the finding offers a DESTRUCTIVE
-        // remediation, append the two-sided RiskDisclosure so every read-only surface
-        // (email / webhook / MCP) SHOWS the operator the same risks they'd see in-app —
-        // they simply cannot click Apply off-app (no consent gate there; consent is
-        // enforced only by the dialog). A finding carries exactly one root fact key, so at
-        // most ONE of these parallel builders returns non-null: a DB_CONFIG finding may
-        // offer RCSI; a CPU finding (CPU_SQL_PERCENT / CPU_SPIKE) may offer CLEAR_PLAN.
-        var destructiveAction = FactRemediation.BuildRcsiAction(finding)
-                                ?? FactRemediation.BuildClearPlanAction(finding);
+        // B3 Phase 3 (§6): when the finding offers a DESTRUCTIVE remediation, append the
+        // two-sided RiskDisclosure so every read-only surface (email / webhook / MCP) SHOWS the
+        // operator the same risks they'd see in-app — they simply cannot click Apply off-app
+        // (no consent gate there; consent is enforced only by the dialog). A DB_CONFIG finding
+        // may offer RCSI.
+        var destructiveAction = FactRemediation.BuildRcsiAction(finding);
         if (destructiveAction is not null)
         {
             var risks = FactRiskDisclosure.GetForAction(destructiveAction, finding);

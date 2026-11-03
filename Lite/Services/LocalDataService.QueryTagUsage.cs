@@ -77,6 +77,13 @@ public partial class LocalDataService
     {
         var ids = string.Join(",", serverIds.Select(i => i.ToString(CultureInfo.InvariantCulture)));
         var tags = await GetQueryTagsAsync();
+
+        /* #7256: a window that starts after the newest archived row of a source reads that source's hot table alone. The spans are
+           read before the connection opens (no database lock is held while they run). An archive-and-reset that lands after them
+           bumps the generation, and the two reads below then run again against the views. */
+        var generation = _duckDb.ArchiveViewGeneration;
+        var planCacheHot = ArchiveHoldsNothingFrom(await GetArchiveSpanAsync("query_stats", "collection_time", CancellationToken.None), startUtc);
+        var queryStoreHot = ArchiveHoldsNothingFrom(await GetArchiveSpanAsync("query_store_stats", "collection_time", CancellationToken.None), startUtc);
         using var connection = await OpenConnectionAsync();
 
         var map = new Dictionary<(int Server, string Kind, string Key), int>();
@@ -137,17 +144,23 @@ public partial class LocalDataService
                 : Lookup(server, "object", new QueryTagObject(r.IsDBNull(1) ? null : r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), name).Qualified);
         }
 
-        sections[QueryTagRollupSection.PlanCache.Name] = await Additive(QueryTagRollupSection.PlanCache, $@"
+        Task<List<QueryTagRollupFact>> ReadPlanCacheAsync(bool hot) => Additive(QueryTagRollupSection.PlanCache, SwapArchiveView($@"
 SELECT server_id, query_hash,
        CAST(COALESCE(SUM(delta_worker_time), 0) AS DOUBLE), CAST(COALESCE(SUM(delta_elapsed_time), 0) AS DOUBLE),
        CAST(COALESCE(SUM(delta_logical_reads), 0) AS DOUBLE), CAST(COALESCE(SUM(delta_logical_writes), 0) AS DOUBLE),
        CAST(COALESCE(SUM(delta_execution_count), 0) AS DOUBLE)
 FROM v_query_stats
 WHERE server_id IN ({ids}) AND collection_time >= $1 AND collection_time <= $2
-GROUP BY server_id, query_hash", 1, HashTag);
+GROUP BY server_id, query_hash", "query_stats", hot ? "query_stats" : "v_query_stats"), 1, HashTag);
+
+        sections[QueryTagRollupSection.PlanCache.Name] = await ReadPlanCacheAsync(planCacheHot);
+        if (planCacheHot && _duckDb.ArchiveViewGeneration != generation)
+        {
+            sections[QueryTagRollupSection.PlanCache.Name] = await ReadPlanCacheAsync(false);
+        }
 
         /* The latest snapshot of each interval, as the existing Query Store reads dedupe (#1907). */
-        sections[QueryTagRollupSection.QueryStore.Name] = await Additive(QueryTagRollupSection.QueryStore, $@"
+        Task<List<QueryTagRollupFact>> ReadQueryStoreAsync(bool hot) => Additive(QueryTagRollupSection.QueryStore, SwapArchiveView($@"
 WITH deduped AS (
     SELECT server_id, query_hash, execution_count, avg_cpu_time_us, avg_duration_us, avg_logical_io_reads, avg_logical_io_writes,
            max_query_max_used_memory,
@@ -166,7 +179,13 @@ SELECT server_id, query_hash,
        CAST(COALESCE(MAX(max_query_max_used_memory), 0) AS DOUBLE)
 FROM deduped
 WHERE rn = 1
-GROUP BY server_id, query_hash", 1, HashTag);
+GROUP BY server_id, query_hash", "query_store_stats", hot ? "query_store_stats" : "v_query_store_stats"), 1, HashTag);
+
+        sections[QueryTagRollupSection.QueryStore.Name] = await ReadQueryStoreAsync(queryStoreHot);
+        if (queryStoreHot && _duckDb.ArchiveViewGeneration != generation)
+        {
+            sections[QueryTagRollupSection.QueryStore.Name] = await ReadQueryStoreAsync(false);
+        }
 
         sections[QueryTagRollupSection.Procedures.Name] = await Additive(QueryTagRollupSection.Procedures, $@"
 SELECT server_id, database_name, schema_name, object_name,
