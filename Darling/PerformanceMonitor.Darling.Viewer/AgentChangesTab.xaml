@@ -23,7 +23,7 @@
         </StackPanel>
         <DataGrid Grid.Row="2" x:Name="ChangesGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" SelectionMode="Single" AutomationProperties.Name="Agent changes">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="130" SortMemberPath="CalledAtUtc"/>
+                <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="190" SortMemberPath="CalledAtUtc"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
                 <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="80"/>
                 <DataGridTextColumn Header="Tool" Binding="{Binding Tool}" Width="140"/>
@@ -39,7 +39,7 @@
         </StackPanel>
         <DataGrid Grid.Row="4" x:Name="RefusalsGrid" Style="{DynamicResource DarkGrid}" IsReadOnly="True" AutomationProperties.Name="Refused agent changes">
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Refused at" Binding="{Binding WhenDisplay}" Width="130" SortMemberPath="AtUtc"/>
+                <DataGridTextColumn Header="Refused at" Binding="{Binding WhenDisplay}" Width="190" SortMemberPath="AtUtc"/>
                 <DataGridTextColumn Header="Server" Binding="{Binding Server}" Width="90"/>
                 <DataGridTextColumn Header="Tool" Binding="{Binding Tool}" Width="160"/>
                 <DataGridTextColumn Header="Agent" Binding="{Binding Agent}" Width="140"/>

@@ -167,7 +167,7 @@
                               IsReadOnly="True" SelectionMode="Single"
                               SelectionChanged="FeedbackReportsGrid_SelectionChanged">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="120" SortMemberPath="ReportedAtUtc"/>
+                            <DataGridTextColumn Header="Reported" Binding="{Binding ReportedDisplay}" Width="190" SortMemberPath="ReportedAtUtc"/>
                             <DataGridTextColumn Header="Server" Binding="{Binding Row.ServerName}" Width="*"/>
                             <DataGridTextColumn Header="Family" Binding="{Binding Row.Family}" Width="100"/>
                             <DataGridTextColumn Header="Verdict" Binding="{Binding Row.ReportVerdict}" Width="90"/>
@@ -189,7 +189,7 @@
                             <TextBlock Grid.Row="2" Text="Feedback so far (newest first)" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,6,0,0"/>
                             <DataGrid Grid.Row="3" x:Name="FeedbackGivenGrid" Style="{StaticResource DarkGrid}" IsReadOnly="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="120" SortMemberPath="CreatedAtUtc"/>
+                                    <DataGridTextColumn Header="When" Binding="{Binding WhenDisplay}" Width="190" SortMemberPath="CreatedAtUtc"/>
                                     <DataGridTextColumn Header="By" Binding="{Binding Row.Author}" Width="100"/>
                                     <DataGridTextColumn Header="Report was" Binding="{Binding Row.Verdict}" Width="70"/>
                                     <DataGridTextColumn Header="Should be" Binding="{Binding CorrectedDisplay}" Width="95"/>

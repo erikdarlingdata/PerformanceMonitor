@@ -48,9 +48,9 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*"/>
                             <DataGridTextColumn Header="State" Binding="{Binding StateDisplay}" Width="70"/>
-                            <DataGridTextColumn Header="Identities" Binding="{Binding IdentitiesDisplay}" Width="70"/>
-                            <DataGridTextColumn Header="Grants" Binding="{Binding GrantsDisplay}" Width="60"/>
-                            <DataGridTextColumn Header="Changed" Binding="{Binding UpdatedDisplay}" Width="120" SortMemberPath="UpdatedAtUtc"/>
+                            <DataGridTextColumn Header="Identities" Binding="{Binding IdentitiesDisplay}" Width="70" SortMemberPath="IdentityCount"/>
+                            <DataGridTextColumn Header="Grants" Binding="{Binding GrantsDisplay}" Width="60" SortMemberPath="GrantCount"/>
+                            <DataGridTextColumn Header="Changed" Binding="{Binding UpdatedDisplay}" Width="190" SortMemberPath="UpdatedAtUtc"/>
                         </DataGrid.Columns>
                     </DataGrid>
                     <TextBlock x:Name="EmptyMessage" Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -78,7 +78,7 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Kind" Binding="{Binding KindDisplay}" Width="100"/>
                         <DataGridTextColumn Header="Id" Binding="{Binding ExternalId}" Width="*"/>
-                        <DataGridTextColumn Header="Added" Binding="{Binding AddedDisplay}" Width="190"/>
+                        <DataGridTextColumn Header="Added" Binding="{Binding AddedDisplay}" Width="270" SortMemberPath="CreatedAtUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
                 <StackPanel x:Name="IdentityButtons" Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,12">
