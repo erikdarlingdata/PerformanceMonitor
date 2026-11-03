@@ -16,22 +16,26 @@ namespace PerformanceMonitor.Darling.Service;
 /// <param name="TablesOverLine">Regular tables with over 1,000,000 live rows whose changes since the last ANALYZE are over
 /// three times the table's autoanalyze threshold.</param>
 /// <param name="WorstTable"><c>schema.name</c> of the table with the highest changes-to-threshold ratio, or null when none is over.</param>
-/// <param name="WorstRatio">That table's changes since its last ANALYZE divided by its threshold (1.0 is the point autovacuum starts).</param>
+/// <param name="WorstRatio">That table's changes since its last ANALYZE divided by its threshold (1.0 is the point autovacuum starts),
+/// or null when the worst table's threshold works out to 0 so there is no ratio. Tables with a ratio sort ahead of those without.</param>
 /// <param name="WorkersInUse">Autovacuum workers running now. Visible to every role: <c>backend_type</c> is not a privileged column.</param>
 /// <param name="MaxWorkers"><c>autovacuum_max_workers</c>.</param>
 /// <param name="LongestWorkerSeconds">How long the oldest running worker's current table has been in progress, or null when the role cannot see
 /// <c>query_start</c> (no <c>pg_read_all_stats</c>) or no worker is running.</param>
 /// <param name="LongestWorkerTable"><c>schema.name</c> of that worker's table, or null when the role cannot see other backends' query text.</param>
 /// <param name="ServerVersionNum"><c>server_version_num</c>, which decides whether raising <c>autovacuum_max_workers</c> takes a reload.</param>
+/// <param name="AutovacuumOn"><c>current_setting('autovacuum')</c>. When it is off nothing analyzes the tables, and the advice is to turn it on,
+/// not to raise the cost limit or the workers.</param>
 internal sealed record StoreAutovacuumReading(
     int TablesOverLine,
     string? WorstTable,
-    double WorstRatio,
+    double? WorstRatio,
     int WorkersInUse,
     int MaxWorkers,
     double? LongestWorkerSeconds,
     string? LongestWorkerTable,
-    int ServerVersionNum)
+    int ServerVersionNum,
+    bool AutovacuumOn = true)
 {
     /// <summary>True when at least one big table is over the line.</summary>
     public bool IsBehind => TablesOverLine > 0;
@@ -52,7 +56,9 @@ internal static class StoreAutovacuumReader
     /* One statement, no per-table loop. relkind 'r' only: TimescaleDB chunks are regular tables and count, a partitioned
        parent (relkind 'p') is never analyzed by autovacuum and the service analyzes it itself, so it never counts.
        The threshold and scale factor come from the table's own reloptions when set, else from the server's settings -
-       never a hard-coded 50 and 0.1. reltuples is -1 on a table never analyzed (PostgreSQL 14 and later), hence greatest(.., 0).
+       never a hard-coded 50 and 0.1. A table whose reloptions turn autovacuum_enabled off (false, off, no, 0 or any other spelling the
+       boolean input function accepts, as PgAutovacuumStatsCollector reads it) is left out: autovacuum is told to skip it, so raising the cost limit or the workers cannot help.
+       reltuples is -1 on a table never analyzed (PostgreSQL 14 and later), hence greatest(.., 0).
        pg_stat_activity: backend_type is readable by every role, query_start and query only by a superuser or a member of
        pg_read_all_stats. Without that, query_start is NULL and query reads '<insufficient privilege>', so the age and the
        table are left out and the count still stands. Both come from the oldest worker by query_start. */
@@ -73,6 +79,8 @@ big AS (
     JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
     CROSS JOIN cfg
     WHERE c.relkind = 'r' AND s.n_live_tup > @bigRows
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_options_to_table(c.reloptions) AS o
+                      WHERE o.option_name = 'autovacuum_enabled' AND NOT o.option_value::boolean)
 ),
 behind AS (
     SELECT nspname, relname, changes / NULLIF(analyze_threshold, 0) AS ratio
@@ -80,7 +88,7 @@ behind AS (
     WHERE changes > @multiple * analyze_threshold
 ),
 worst AS (
-    SELECT nspname, relname, ratio FROM behind ORDER BY ratio DESC, nspname, relname LIMIT 1
+    SELECT nspname, relname, ratio FROM behind ORDER BY ratio DESC NULLS LAST, nspname, relname LIMIT 1
 ),
 workers AS (
     SELECT count(*) AS in_use FROM pg_catalog.pg_stat_activity WHERE backend_type = 'autovacuum worker'
@@ -99,7 +107,8 @@ SELECT (SELECT count(*) FROM behind)::int,
        current_setting('autovacuum_max_workers')::int,
        (SELECT age_seconds FROM longest),
        (SELECT query FROM longest),
-       current_setting('server_version_num')::int";
+       current_setting('server_version_num')::int,
+       current_setting('autovacuum') = 'on'";
 
     /// <summary>Reads the store. Throws on a failed read, so the caller can leave every piece of alert state alone.</summary>
     internal static async Task<StoreAutovacuumReading> ReadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -118,12 +127,13 @@ SELECT (SELECT count(*) FROM behind)::int,
         return new StoreAutovacuumReading(
             TablesOverLine: reader.GetInt32(0),
             WorstTable: reader.IsDBNull(1) ? null : reader.GetString(1),
-            WorstRatio: reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+            WorstRatio: reader.IsDBNull(2) ? null : reader.GetDouble(2),
             WorkersInUse: reader.GetInt32(3),
             MaxWorkers: reader.GetInt32(4),
             LongestWorkerSeconds: reader.IsDBNull(5) ? null : reader.GetDouble(5),
             LongestWorkerTable: ParseWorkerTable(reader.IsDBNull(6) ? null : reader.GetString(6)),
-            ServerVersionNum: reader.GetInt32(7));
+            ServerVersionNum: reader.GetInt32(7),
+            AutovacuumOn: reader.GetBoolean(8));
     }
 
     /* An autovacuum worker's query text reads "autovacuum: VACUUM ANALYZE public.t", "autovacuum: ANALYZE public.t" or

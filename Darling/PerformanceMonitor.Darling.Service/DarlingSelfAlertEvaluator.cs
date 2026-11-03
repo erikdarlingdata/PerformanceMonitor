@@ -6071,6 +6071,25 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, bool> _activeAutovacuumBehind = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAutovacuumBehindAlert = new();
 
+    /// <summary>What the last Store Autovacuum Behind alert reported: the count of tables over the line and the worst ratio (0 when the
+    /// worst table had no ratio). The worsening gate compares the next reading with it.</summary>
+    internal readonly record struct AutovacuumBehindMarker(int Tables, double Ratio);
+
+    private readonly ConcurrentDictionary<string, AutovacuumBehindMarker> _lastAlertedAutovacuumBehind = new();
+
+    /// <summary>The ratio must rise to this multiple of the last reported ratio to count as worse. The read runs hourly and the cooldown
+    /// is minutes, so without a gate a standing condition would page every hour for days (the #2101 problem on Store Disk Pressure).
+    /// A table is first reported at 3 times its threshold or more, so 1.5 times steps it 3, 4.5, 6.75 and on: a clear step up, where a
+    /// table creeping a few percent an hour stays quiet. A larger count of tables over the line is worse at any ratio.</summary>
+    internal const double AutovacuumWorseningFactor = 1.5;
+
+    /// <summary>True when <paramref name="reading"/> is worse than what the last alert reported: more tables over the line, or a worst
+    /// ratio of <see cref="AutovacuumWorseningFactor"/> times the last one. True when nothing has been reported yet.</summary>
+    internal static bool AutovacuumBehindWorsened(StoreAutovacuumReading reading, AutovacuumBehindMarker? last) =>
+        last is not { } prior
+        || reading.TablesOverLine > prior.Tables
+        || (reading.WorstRatio is double ratio && ratio >= prior.Ratio * AutovacuumWorseningFactor);
+
     /// <summary>
     /// The entry point the worker's hourly autovacuum check calls. Skips the read when the master alerts switch is off, reads the
     /// store once (<see cref="StoreAutovacuumReader"/>), and hands the reading to <see cref="ApplyAutovacuumBehindAsync"/> in the
@@ -6117,7 +6136,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Edge-applies the fleet-level Store Autovacuum Behind condition (#7368) from one hourly reading. A reading with a table over the
     /// line counts as one read toward <see cref="AutovacuumBehindReadsToFire"/>. The alert fires on the second such read in a row and
-    /// re-fires only after the shared cooldown while the condition stands. The first read that finds no table over the line clears
+    /// re-fires while the condition stands only when it is worse than what the last alert reported (see
+    /// <see cref="AutovacuumBehindWorsened"/>) and the shared cooldown has run out. The first read that finds no table over the line clears
     /// the count and, when the alert had fired, writes ONE "Store Autovacuum Behind Resolved" row. A null reading is a read that
     /// failed: nothing changes. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and a
     /// controllable clock.
@@ -6134,6 +6154,7 @@ internal sealed class DarlingSelfAlertEvaluator
         if (!reading.IsBehind)
         {
             _autovacuumBehindReads.TryRemove(AutovacuumKey, out _);
+            _lastAlertedAutovacuumBehind.TryRemove(AutovacuumKey, out _);
             if (_activeAutovacuumBehind.TryRemove(AutovacuumKey, out var was) && was)
             {
                 await RecordResolutionAsync(new AlertResolution(
@@ -6152,12 +6173,16 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         _activeAutovacuumBehind[AutovacuumKey] = true;
-        if (!CooldownElapsed(_lastAutovacuumBehindAlert, AutovacuumKey, now))
+        AutovacuumBehindMarker? lastReported =
+            _lastAlertedAutovacuumBehind.TryGetValue(AutovacuumKey, out var marker) ? marker : null;
+        if (!AutovacuumBehindWorsened(reading, lastReported)
+            || !CooldownElapsed(_lastAutovacuumBehindAlert, AutovacuumKey, now))
         {
             return;
         }
 
         _lastAutovacuumBehindAlert[AutovacuumKey] = now;
+        _lastAlertedAutovacuumBehind[AutovacuumKey] = new AutovacuumBehindMarker(reading.TablesOverLine, reading.WorstRatio ?? 0);
         var shortMessage = BuildAutovacuumShortMessage(reading);
         var delivery = await FireAsync(
             StoreKey(AutovacuumKey), _storeLabel, AutovacuumBehindMetric,
@@ -6169,15 +6194,26 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: reading.TablesOverLine,
             numericThresholdValue: 0,
             cancellationToken);
-        AfterSelfFire(AutovacuumBehindMetric, _lastAutovacuumBehindAlert, AutovacuumKey, now, SharedCooldown, delivery);
+        if (AfterSelfFire(AutovacuumBehindMetric, _lastAutovacuumBehindAlert, AutovacuumKey, now, SharedCooldown, delivery))
+        {
+            /* #4795, as on disk pressure: the marker moved before the send. Put it back so the retry still counts as worse. */
+            RestoreMarker(_lastAlertedAutovacuumBehind, AutovacuumKey, lastReported);
+        }
     }
 
     private static string FormatAutovacuumRatio(double ratio) =>
         ratio.ToString("0.#", CultureInfo.InvariantCulture);
 
+    /// <summary>"23.7 times its threshold", or "its analyze threshold is 0" for a worst table whose threshold works out to 0, which
+    /// has no ratio to quote.</summary>
+    private static string DescribeAutovacuumWorst(StoreAutovacuumReading reading, string thresholdWord) =>
+        reading.WorstRatio is double ratio
+            ? $"at {FormatAutovacuumRatio(ratio)} times its {thresholdWord}"
+            : $"whose {thresholdWord} is 0";
+
     internal static string BuildAutovacuumShortMessage(StoreAutovacuumReading reading) =>
         string.Create(CultureInfo.InvariantCulture,
-            $"autovacuum is behind on {reading.TablesOverLine} big {(reading.TablesOverLine == 1 ? "table" : "tables")}, worst {reading.WorstTable} at {FormatAutovacuumRatio(reading.WorstRatio)} times its analyze threshold");
+            $"autovacuum is {(reading.AutovacuumOn ? "behind" : "off and behind")} on {reading.TablesOverLine} big {(reading.TablesOverLine == 1 ? "table" : "tables")}, worst {reading.WorstTable} {DescribeAutovacuumWorst(reading, "analyze threshold")}");
 
     /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
     internal static string BuildAutovacuumDetail(StoreAutovacuumReading reading, bool managedStore)
@@ -6186,7 +6222,12 @@ internal sealed class DarlingSelfAlertEvaluator
         text.Append(CultureInfo.InvariantCulture,
             $"{reading.TablesOverLine} {(reading.TablesOverLine == 1 ? "table" : "tables")} with over 1,000,000 live rows {(reading.TablesOverLine == 1 ? "is" : "are")} past 3 times the autoanalyze threshold on two hourly reads in a row. ");
         text.Append(CultureInfo.InvariantCulture,
-            $"The worst is {reading.WorstTable} at {FormatAutovacuumRatio(reading.WorstRatio)} times its threshold (autovacuum starts at 1 time). ");
+            $"The worst is {reading.WorstTable} {DescribeAutovacuumWorst(reading, "threshold")} (autovacuum starts at 1 time). ");
+        if (!reading.AutovacuumOn)
+        {
+            text.Append("Autovacuum is off on the store, so nothing is analyzing these tables. ");
+        }
+
         text.Append(CultureInfo.InvariantCulture,
             $"{reading.WorkersInUse} of {reading.MaxWorkers} autovacuum workers are running. ");
         if (reading.LongestWorkerSeconds is double age && reading.LongestWorkerTable is { } workerTable)
@@ -6209,6 +6250,15 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         text.Append("Tables without fresh statistics make the planner misjudge row counts, and a bad estimate shows up as a slow query or a sort that spills. ");
+        if (!reading.AutovacuumOn)
+        {
+            text.Append("Turn autovacuum back on: set autovacuum = on, which takes a reload. Raising the worker count does nothing while it is off. ");
+            text.Append(managedStore
+                ? "On the managed store, set it with ALTER SYSTEM or add a line below the include line in postgresql.conf. The service does not manage this setting, so there is nothing for it in darling.json, and darling-managed.conf is rewritten on every start."
+                : "Change it on the store's PostgreSQL.");
+            return text.ToString();
+        }
+
         text.Append("Raise autovacuum_vacuum_cost_limit and autovacuum_max_workers. ");
         text.Append(reading.ServerVersionNum >= 180000
             ? "On PostgreSQL 18 both take a reload, and autovacuum_max_workers can go up to autovacuum_worker_slots without a restart. "

@@ -96,7 +96,7 @@ public sealed class StoreAutovacuumBehindTests
     }
 
     [Fact]
-    public async Task AStandingCondition_ReFiresOnlyAfterTheCooldown()
+    public async Task AStandingCondition_ReFiresOnlyAfterTheCooldown_AndOnlyWhenItWorsens()
     {
         var h = new DarlingSelfAlertTests.Harness();
         var e = h.Build();
@@ -105,12 +105,111 @@ public sealed class StoreAutovacuumBehindTests
         await e.ApplyAutovacuumBehindAsync(Behind(), true, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
+        /* Worse, but inside the cooldown: nothing. */
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 4), true, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The read runs hourly, so the next one is an hour on. */
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 4), true, Ct);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AStandingConditionThatDoesNotWorsen_SendsNothingOnTheNextHourlyReads()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
+        await e.ApplyAutovacuumBehindAsync(Behind(), true, Ct);
+        h.Now = h.Now.AddHours(1);
         await e.ApplyAutovacuumBehindAsync(Behind(), true, Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        h.Now = h.Now.AddMinutes(h.Settings.CooldownMinutes + 1);
+        /* A day of hourly reads at the same count, and a ratio that creeps up under the step (23.7 to 35): nothing more is sent. */
+        for (var hour = 0; hour < 24; hour++)
+        {
+            h.Now = h.Now.AddHours(1);
+            await e.ApplyAutovacuumBehindAsync(Behind(ratio: 23.7 + hour * 0.45), true, Ct);
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData(4, 23.7, true)]    // one more table over the line
+    [InlineData(3, 35.6, true)]    // the worst ratio at 1.5 times the reported one (35.55)
+    [InlineData(3, 35.0, false)]   // just under the step
+    [InlineData(2, 23.7, false)]   // fewer tables
+    public async Task AStandingCondition_ReFiresWhenTheCountOrTheWorstRatioStepsUp(int tables, double ratio, bool reFires)
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
         await e.ApplyAutovacuumBehindAsync(Behind(), true, Ct);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        await e.ApplyAutovacuumBehindAsync(Behind(), true, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: tables, ratio: ratio), true, Ct);
+
+        Assert.Equal(reFires ? 2 : 1, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task AfterTheResolve_ANewEntryFiresAgainOnTheSecondRead_EvenAtALowerLevel()
+    {
+        var h = new DarlingSelfAlertTests.Harness();
+        var e = h.Build();
+
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 6, ratio: 90), true, Ct);
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 6, ratio: 90), true, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyAutovacuumBehindAsync(Caught(), true, Ct);
+
+        h.Now = h.Now.AddHours(1);
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 1, ratio: 4), true, Ct);
+        h.Now = h.Now.AddHours(1);
+        var before = h.Deliverer.Outcomes.Count;
+        await e.ApplyAutovacuumBehindAsync(Behind(tables: 1, ratio: 4), true, Ct);
+
+        Assert.Equal(before + 1, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public void AWorstTableWithNoRatio_IsNamedByItsThresholdOfZero_NeverAtZeroTimes()
+    {
+        var reading = Behind(ratio: 0) with { WorstRatio = null };
+
+        var detail = DarlingSelfAlertEvaluator.BuildAutovacuumDetail(reading, true);
+        var shortMessage = DarlingSelfAlertEvaluator.BuildAutovacuumShortMessage(reading);
+
+        Assert.Contains("public.big_hourly whose threshold is 0", detail, StringComparison.Ordinal);
+        Assert.Contains("worst public.big_hourly whose analyze threshold is 0", shortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 times", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 times", shortMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WhenAutovacuumIsOff_TheTextSaysSoAndAdvisesTurningItOn_NotRaisingWorkers()
+    {
+        var off = Behind() with { AutovacuumOn = false };
+
+        var managed = DarlingSelfAlertEvaluator.BuildAutovacuumDetail(off, true);
+        var byo = DarlingSelfAlertEvaluator.BuildAutovacuumDetail(off, false);
+        var shortMessage = DarlingSelfAlertEvaluator.BuildAutovacuumShortMessage(off);
+
+        Assert.Contains("Autovacuum is off on the store", managed, StringComparison.Ordinal);
+        Assert.Contains("set autovacuum = on", managed, StringComparison.Ordinal);
+        Assert.Contains("ALTER SYSTEM", managed, StringComparison.Ordinal);
+        Assert.DoesNotContain("Raise autovacuum_vacuum_cost_limit", managed, StringComparison.Ordinal);
+        Assert.Contains("Change it on the store's PostgreSQL.", byo, StringComparison.Ordinal);
+        Assert.Contains("autovacuum is off and behind", shortMessage, StringComparison.Ordinal);
+        Assert.Contains("Raise autovacuum_vacuum_cost_limit",
+            DarlingSelfAlertEvaluator.BuildAutovacuumDetail(Behind(), true), StringComparison.Ordinal);
+        Assert.DoesNotContain(';', managed + byo + shortMessage);
     }
 
     [Fact]
@@ -250,32 +349,57 @@ public sealed class StoreAutovacuumReadLiveTests
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
 
-            /* big_t: over 1M rows, autovacuum off, and its OWN small scale factor, so a modest number of changes passes 3x of
+            /* The tables that must be reported fall behind for real: autovacuum is on and they are over their own threshold. A table
+               autovacuum is not told to skip cannot be held back by a reloption, and the cluster's settings are not this test's to
+               change, so a second session holds SHARE UPDATE EXCLUSIVE on them (after the manual ANALYZE, before the changes). That is
+               the lock autovacuum's ANALYZE needs, and it skips a table it cannot lock, so n_mod_since_analyze stays put. */
+
+            /* big_t: over 1M rows and its OWN small scale factor, so a modest number of changes passes 3x of
                a threshold of 100 + 0.0001 * reltuples (about 220). The server's default threshold (50 + 0.1 * reltuples, about
                110,000) would put the same changes far under the line, so a read that used the settings would not report it. */
             await ExecAsync(connection,
-                "CREATE TABLE big_t (id int, v int) WITH (autovacuum_enabled = false, autovacuum_analyze_threshold = 100, autovacuum_analyze_scale_factor = 0.0001)", ct);
+                "CREATE TABLE big_t (id int, v int) WITH (autovacuum_analyze_threshold = 100, autovacuum_analyze_scale_factor = 0.0001)", ct);
+            /* zero_t: a threshold of 0 (no ratio, it is NULL), so any change is past the line. It must not become the worst table. */
+            await ExecAsync(connection,
+                "CREATE TABLE zero_t (id int, v int) WITH (autovacuum_analyze_threshold = 0, autovacuum_analyze_scale_factor = 0)", ct);
             /* default_t: the same size and the same changes, no reloptions: the server settings give a threshold near 110,000. */
-            await ExecAsync(connection, "CREATE TABLE default_t (id int, v int) WITH (autovacuum_enabled = false)", ct);
+            await ExecAsync(connection, "CREATE TABLE default_t (id int, v int)", ct);
             /* small_t: far past 3x of its own threshold, but under 1M rows. */
             await ExecAsync(connection,
-                "CREATE TABLE small_t (id int, v int) WITH (autovacuum_enabled = false, autovacuum_analyze_threshold = 10, autovacuum_analyze_scale_factor = 0.0001)", ct);
+                "CREATE TABLE small_t (id int, v int) WITH (autovacuum_analyze_threshold = 10, autovacuum_analyze_scale_factor = 0.0001)", ct);
             /* A partitioned parent over 1M rows with changes: autovacuum never analyzes it, and it must never be reported. */
             await ExecAsync(connection, "CREATE TABLE part_parent (id int, v int) PARTITION BY RANGE (id)", ct);
-            await ExecAsync(connection, "CREATE TABLE part_child PARTITION OF part_parent FOR VALUES FROM (0) TO (2000000) WITH (autovacuum_enabled = false)", ct);
+            await ExecAsync(connection, "CREATE TABLE part_child PARTITION OF part_parent FOR VALUES FROM (0) TO (2000000)", ct);
+            /* off_false_t and off_off_t: autovacuum is told to skip them, with more changes and the same small threshold as big_t, so
+               they would be the worst table if they counted. They must never be reported: no alert advice can make autovacuum look. */
+            await ExecAsync(connection,
+                "CREATE TABLE off_false_t (id int, v int) WITH (autovacuum_enabled = false, autovacuum_analyze_threshold = 100, autovacuum_analyze_scale_factor = 0.0001)", ct);
+            await ExecAsync(connection,
+                "CREATE TABLE off_off_t (id int, v int) WITH (autovacuum_enabled = off, autovacuum_analyze_threshold = 100, autovacuum_analyze_scale_factor = 0.0001)", ct);
 
-            foreach (var table in new[] { "big_t", "default_t", "part_parent" })
+            foreach (var table in new[] { "big_t", "zero_t", "default_t", "part_parent", "off_false_t", "off_off_t" })
             {
                 await ExecAsync(connection, $"INSERT INTO {table} SELECT g, 0 FROM generate_series(1, 1100000) AS g", ct);
             }
 
             await ExecAsync(connection, "INSERT INTO small_t SELECT g, 0 FROM generate_series(1, 100000) AS g", ct);
-            await ExecAsync(connection, "ANALYZE big_t; ANALYZE default_t; ANALYZE small_t; ANALYZE part_parent", ct);
+            await ExecAsync(connection,
+                "ANALYZE big_t; ANALYZE zero_t; ANALYZE default_t; ANALYZE small_t; ANALYZE part_parent; ANALYZE off_false_t; ANALYZE off_off_t", ct);
 
-            /* Changes after the ANALYZE: 11,000 on each (1% of the rows). */
-            foreach (var table in new[] { "big_t", "default_t", "small_t", "part_parent" })
+            await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+            await holder.OpenAsync(ct);
+            await ExecAsync(holder,
+                "BEGIN; LOCK TABLE big_t, zero_t, default_t, small_t, part_child, off_false_t, off_off_t IN SHARE UPDATE EXCLUSIVE MODE", ct);
+
+            /* Changes after the ANALYZE: 11,000 on each (1% of the rows), 33,000 on the two autovacuum-off tables. */
+            foreach (var table in new[] { "big_t", "zero_t", "default_t", "small_t", "part_parent" })
             {
                 await ExecAsync(connection, $"UPDATE {table} SET v = 1 WHERE id <= 11000", ct);
+            }
+
+            foreach (var table in new[] { "off_false_t", "off_off_t" })
+            {
+                await ExecAsync(connection, $"UPDATE {table} SET v = 1 WHERE id <= 33000", ct);
             }
 
             /* The counters reach the shared stats on a transaction end after a flush; force it so this read sees them. */
@@ -289,16 +413,20 @@ public sealed class StoreAutovacuumReadLiveTests
             await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
             var reading = await StoreAutovacuumReader.ReadAsync(source, ct);
 
-            Assert.Equal(1, reading.TablesOverLine);
+            /* big_t and zero_t count. The two autovacuum-off tables, default_t, small_t and the partitioned parent never do. */
+            Assert.Equal(2, reading.TablesOverLine);
+            /* zero_t has no ratio (NULL) and big_t does: the table with a ratio is the worst, never the NULL one. */
             Assert.Equal("public.big_t", reading.WorstTable);
             var threshold = 100 + 0.0001 * reltuples;
-            Assert.Equal(changes / threshold, reading.WorstRatio, 3);
+            Assert.NotNull(reading.WorstRatio);
+            Assert.Equal(changes / threshold, reading.WorstRatio.Value, 3);
             Assert.True(reading.WorstRatio > 3);
-            Assert.Equal(0, reading.WorkersInUse);
+            var autovacuumOn = await ScalarAsync(connection, "SELECT (current_setting('autovacuum') = 'on')::int", ct);
+            Assert.Equal(autovacuumOn == 1, reading.AutovacuumOn);
             Assert.True(reading.MaxWorkers >= 1);
             Assert.True(reading.ServerVersionNum >= 140000);
-            Assert.Null(reading.LongestWorkerSeconds);
-            Assert.Null(reading.LongestWorkerTable);
+
+            await ExecAsync(holder, "ROLLBACK", ct);
 
             bodySucceeded = true;
         }
