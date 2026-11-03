@@ -1058,7 +1058,7 @@ public sealed partial class DarlingWorker
                windowed on occurred_at, not collection_time — see that reader's doc comment for why
                collection_time would put a report in the wrong window and move it every cycle. */
             var rows = await DarlingPgDeadlockReader.GetDeadlocksAsync(
-                _postgres, runtime.ServerId, windowStart, now, limit: 50, cancellationToken);
+                _postgres, runtime.ServerId, windowStart, now, limit: PgDeadlockReadLimit, cancellationToken);
             readClock.Restart();
             var count = rows.Count;
 
@@ -1228,6 +1228,10 @@ public sealed partial class DarlingWorker
     /// its pair (#7082). Below it a known pair is held.</summary>
     internal const int PgDeadlockPageReports = 5;
 
+    /// <summary>How many distinct reports one sweep's read of the hour returns, newest first (#7188). A read that returns
+    /// this many may have left older reports of the hour out.</summary>
+    internal const int PgDeadlockReadLimit = 50;
+
     /// <summary>
     /// The page-or-hold rule for a PostgreSQL deadlock fire (#7082): page at <see cref="PgDeadlockPageReports"/> or more
     /// distinct reports in the hour, or when a statement pair is new (not in the 30-day store) and not yet announced, or
@@ -1346,9 +1350,16 @@ public sealed partial class DarlingWorker
             /* #7188: a pair whose reports have all left the hour's rows can no longer be announced by a page that
                carries them. Left in the set, it would turn a later held known-pair fire into a page with nothing new
                to show. A store failure above added nothing, and this sweep's fresh pairs are in the rows, so only
-               stale pairs are dropped. */
-            var current = byReport.Values.Select(key => key.Value).ToHashSet(StringComparer.Ordinal);
-            unannounced.RemoveWhere(pair => !current.Contains(pair));
+               stale pairs are dropped. The rows are the newest PgDeadlockReadLimit reports of the hour, so they are
+               the whole hour only while fewer than that came back. A full read may have left older reports of the
+               hour out, and a pair missing from it can still be inside the hour: the sweep then drops nothing (such a
+               sweep pages on its report count anyway, and the page clears the set). */
+            if (rows.Count < PgDeadlockReadLimit)
+            {
+                var current = byReport.Values.Select(key => key.Value).ToHashSet(StringComparer.Ordinal);
+                unannounced.RemoveWhere(pair => !current.Contains(pair));
+            }
+
             newKeys = unannounced.ToArray();
         }
 
