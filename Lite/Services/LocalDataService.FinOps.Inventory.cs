@@ -15,6 +15,45 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>#7174: the Database Sizes rows for <paramref name="databaseNames"/> (null or empty = every database), each with its
+    /// <see cref="DatabaseSizeRow.MonthlyCostShare"/> as its share of the SERVER's allocated size times the monthly cost. The grid is
+    /// narrowed by the saved database filter but the budget is the whole server's, so the total comes from the unfiltered snapshot:
+    /// dividing by the filtered total made one picked database cost 100% of the server. A file with no allocated size takes no share.
+    /// No cost (0 or less) leaves every share 0. The snapshot is resolved ONCE and both reads use it, so a size collection that
+    /// lands between the two reads cannot make a share come from two different snapshots. <paramref name="betweenReads"/> is a test
+    /// seam that runs after the rows are read and before the server total is.</summary>
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestWithCostShareAsync(
+        int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, Func<Task>? betweenReads = null)
+    {
+        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        if (snapshotTime is null) return new List<DatabaseSizeRow>();
+
+        var rows = await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames);
+        if (betweenReads is not null) await betweenReads();
+        if (monthlyCostUsd <= 0m || rows.Count == 0) return rows;
+
+        var serverRows = databaseNames is { Count: > 0 }
+            ? await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, null)
+            : rows;
+        var totalMb = DatabaseSizeRow.AllocatedTotalMb(serverRows);
+        if (totalMb > 0m)
+        {
+            foreach (var d in rows)
+                d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * monthlyCostUsd;
+        }
+        return rows;
+    }
+
+    private async Task<DateTime?> GetLatestDatabaseSizeSnapshotAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        var value = await command.ExecuteScalarAsync();
+        return value is DateTime stamp ? stamp : null;
+    }
+
     /// <summary>
     /// Gets the latest database size snapshot per server per file (cross-server).
     /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
@@ -23,9 +62,17 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
+        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        return snapshotTime is null
+            ? new List<DatabaseSizeRow>()
+            : await GetDatabaseSizeAtAsync(serverId, snapshotTime.Value, databaseNames);
+    }
+
+    private async Task<List<DatabaseSizeRow>> GetDatabaseSizeAtAsync(int serverId, DateTime snapshotTime, IReadOnlyList<string>? databaseNames)
+    {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
         command.CommandText = $@"
 SELECT
     database_name,
@@ -44,14 +91,11 @@ SELECT
     file_id
 FROM v_database_size_stats
 WHERE server_id = $1
-AND   collection_time = (
-    SELECT MAX(collection_time)
-    FROM v_database_size_stats
-    WHERE server_id = $1
-){dbClause}
+AND   collection_time = $2{dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = snapshotTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
