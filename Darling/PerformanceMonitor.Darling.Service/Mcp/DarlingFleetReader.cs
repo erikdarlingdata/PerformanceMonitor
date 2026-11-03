@@ -171,8 +171,19 @@ ORDER BY sort_order, lower(name)";
     /// servers, and no longer a function of how many days are retained. The rows are identical: the registry
     /// is where the cards come from, and <see cref="SqlServerCollectedTargetSql"/> skips only servers that
     /// never write this table.</para>
+    ///
+    /// <para><b>The probe is bounded on <c>collection_time</c>, and only on it</b> (#7196). $1 is now (naive UTC)
+    /// and $2 the freshness floor in minutes (<c>DarlingPgCpuUtilizationReader.Freshness</c>, the bound
+    /// <see cref="FleetPgCpuSql"/> uses). The cutoff is now minus the larger of that floor and twice the server's own
+    /// <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a collector scheduled every 30
+    /// minutes is not read as stopped between samples. Freshness of the card is per SERVER (any collector), not per metric, so a server whose
+    /// <c>cpu_utilization</c> collector was switched off or keeps failing stayed Online and kept showing and
+    /// banding its last CPU from days ago as current. A server with no row inside the bound falls out of this
+    /// read, so its card reads <see cref="FleetCpuSource.NotCollected"/> and bands Unknown. The bound is on
+    /// <c>collection_time</c> because that is the store's own clock; <c>sample_time</c> stays unbounded, since it
+    /// is the monitored server's local wall clock.</para>
     /// </summary>
-    public const string FleetCpuSql = $@"
+    public static readonly string FleetCpuSql = $@"
 SELECT
     s.server_id,
     latest.sqlserver_cpu_utilization,
@@ -185,6 +196,7 @@ CROSS JOIN LATERAL
         other_process_cpu_utilization
     FROM v_cpu_utilization_stats
     WHERE server_id = s.server_id
+    AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("s.server_id", "$1", "$2")}
     ORDER BY collection_time DESC, sample_time DESC
     LIMIT 1
 ) AS latest
@@ -922,7 +934,7 @@ GROUP BY server_id, collector_name";
 
         var servers = await ReadServersAsync(postgres, cancellationToken);
 
-        var cpu = await ReadCpuAsync(postgres, cancellationToken);
+        var cpu = await ReadCpuAsync(postgres, now, cancellationToken);
         var pgCpu = await ReadPgCpuAsync(postgres, now, cancellationToken);
         var memory = await ReadMemoryAsync(postgres, cancellationToken);
         var memoryPressure = await ReadMemoryPressureAsync(postgres, cancellationToken);
@@ -1858,11 +1870,15 @@ AND   {SqlServerCollectedTargetSql}";
         return map;
     }
 
-    private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, CpuRow>();
         await using var command = postgres.CreateCommand(FleetCpuSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        /* Naive UTC at the bind, as ReadPgCpuAsync does (#7196). The cutoff is now minus the larger of the
+           freshness floor and twice the server's own cpu_utilization interval, worked out in the statement. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(CpuReadingFreshnessSql.FloorMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

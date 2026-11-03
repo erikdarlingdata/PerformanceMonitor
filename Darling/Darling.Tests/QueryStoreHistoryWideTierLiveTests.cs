@@ -117,6 +117,12 @@ public sealed class QueryStoreHistoryWideTierLiveTests
         Assert.Equal(22, points[0].GetProperty("execution_count").GetInt64());
         Assert.Equal(first.AddMinutes(40).ToString("yyyy-MM-dd'T'HH:mm", System.Globalization.CultureInfo.InvariantCulture), points[0].GetProperty("collection_time").GetString()![..16]);
 
+        /* #7167: the fixture's collection log ends days ago, so a read now would find a server with no recent SUCCESS run and answer
+           unavailable (offline) instead of the true negative asserted below. A collecting server has a run minutes old. */
+        await QueryStoreIntervalWideBelowFloorLiveTests.ExecAsync(rig.Connection, @"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT COALESCE(MAX(log_id), 0) + 1, @server_id, 'qsiw-below-floor', 'wait_stats', now() - interval '2 minutes', 12, 'SUCCESS', 0 FROM collect.collection_log;", null, ct);
+
         /* An empty answer over the same window still says what the window reached. */
         using var empty = JsonDocument.Parse(await DarlingMcpQueryStoreHistoryTools.GetQueryStoreQueryHistory(
             rig.Postgres, Db, 9999, ServerName, hours_back: 168, cancellationToken: ct));

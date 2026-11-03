@@ -286,11 +286,13 @@ public sealed class FileIoDatabaseFilterLiveTests
             Assert.Contains("database 'NoSuchDb'", one.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal("NoSuchDb", one.GetProperty("database_name").GetString());
 
-            /* The unfiltered quiet-window sentence is unchanged: a window with no rows at all. */
+            /* #7167: an unfiltered window 30 days back is one the store never read, so it does not claim to be quiet (the
+               filtered answers above are about names, and keep their sentences). */
             var quiet = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(
                 postgres, ServerName, 1, end.AddDays(-30).ToString("o"), null, DatabaseFilter.All, TrendBudget.Chart, ct)).RootElement;
             Assert.Equal("empty", quiet.GetProperty("status").GetString());
-            Assert.Contains("genuinely quiet", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Contains("not a report that nothing happened", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", quiet.GetProperty("message").GetString(), StringComparison.Ordinal);
             Assert.Equal(JsonValueKind.Null, quiet.GetProperty("database_name").ValueKind);
 
             /* A server with no file I/O row ever: the never-collected answer is about the server, filtered or not, and carries

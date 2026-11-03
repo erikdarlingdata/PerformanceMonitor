@@ -64,12 +64,17 @@ internal static class DarlingHealthReader
     /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.
     /// Same shape and same reasoning as <c>DarlingWorker.LatestCpuSql</c>: ordered on the hypertable's
     /// <c>collection_time</c> partition column so ordered ChunkAppend stops at the newest chunk, with
-    /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
-    /// the monitored server's local wall clock.</summary>
-    public const string ServerSummaryCpuSql = @"
+    /// <c>sample_time</c> as the within-batch tiebreak, and no predicate on <c>sample_time</c>, because it is
+    /// the monitored server's local wall clock. $2 now (naive UTC), $3 the freshness floor in minutes: the read
+    /// is cut off on <c>collection_time</c> at now minus the larger of the floor and twice this server's
+    /// <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a collector that stopped days ago
+    /// answers with no CPU figure, as the fleet card does (#7196). The answer still carries the reading's own
+    /// <c>collection_time</c> when there is one.</summary>
+    public static readonly string ServerSummaryCpuSql = $@"
 SELECT sqlserver_cpu_utilization, collection_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("$1", "$2", "$3")}
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -161,6 +166,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(CpuReadingFreshnessSql.FloorMinutes);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {

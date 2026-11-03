@@ -90,9 +90,10 @@ public sealed class DarlingMcpClientTimeoutTools
             if (kind == ClientTimeoutsKind.Quiet)
             {
                 var quietNotice = await NoticeAsync(emptyAnswer: true);
-                return DarlingMcpWindowNotice.FinishEmpty(
+                return await DarlingMcpWindowNotice.FinishEmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
                     McpHelpers.Status("empty", ClientTimeoutsRead.EmptyMessage(resolved.DisplayName, reading!, hours_back), quietNotice.AsHints()),
-                    quietNotice);
+                    quietNotice, cancellationToken);
             }
 
             var notice = await NoticeAsync(emptyAnswer: false);

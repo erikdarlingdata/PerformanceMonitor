@@ -138,7 +138,8 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                         scopeName, hints);
                 }
 
-                return McpHelpers.WithDatabase(
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.WithDatabase(
                            await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken)
                            ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken)
                            ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_store", cancellationToken),
@@ -147,7 +148,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
                            "empty",
                            $"No Query Store rows for {resolved.DisplayName} in the {hours_back}-hour window searched"
                            + (truncated ? ", and the store does not hold the whole window (see effective_start)." : ". Query Store may be off for the target databases, or nothing ran."),
-                           scopeName, hints);
+                           scopeName, hints), cancellationToken);
             }
 
             var queries = page.Select(r =>

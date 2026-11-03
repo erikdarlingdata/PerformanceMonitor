@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -39,7 +40,7 @@ public static class DarlingPgCpuUtilizationReader
     /// the #2473 kind: the High CPU alert would be evaluating a reading the card had already dropped, or
     /// the reverse. One constant, two consumers.</para>
     /// </summary>
-    public static readonly TimeSpan Freshness = TimeSpan.FromMinutes(15);
+    public static readonly TimeSpan Freshness = TimeSpan.FromMinutes(CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes);
 
     internal const string LatestCpuSql = """
         SELECT cpu_percent, sample_time, acu_utilization_percent, serverless_capacity_acu, max_configured_acu

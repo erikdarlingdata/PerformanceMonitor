@@ -158,12 +158,16 @@ public sealed partial class DarlingMcpAlertTools
                 /* An empty default page over a window that DOES hold dismissed rows is not "no alerts": it is
                    "every alert here was acknowledged", and the one-sentence quiet-window answer would send
                    the caller off widening a window whose contents they were never shown. */
-                return DarlingMcpWindowNotice.FinishEmpty(dismissedExcludedCount > 0
+                var emptyPage = DarlingMcpWindowNotice.FinishEmpty(dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
                         $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.",
                         notice.AsHints())
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.", notice.AsHints()), notice);
+                /* #7167: a server-scoped read of an offline server is missing data, not a clean history. The fleet-wide read has no one server to judge. */
+                return serverId is { } scopedServer
+                    ? await DarlingServerOfflineNote.EmptyAsync(postgres, scopedServer, scope, windowEnd, emptyPage, cancellationToken)
+                    : emptyPage;
             }
 
             /* #6334: the known-pattern entries, loaded ONCE for the page and matched in memory (no query per row). */

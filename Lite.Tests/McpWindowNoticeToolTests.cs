@@ -630,6 +630,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("query_snapshots", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpSessionTools.GetActiveQueries(Service(), _serverManager, ServerName, hours_back: 1));
 
@@ -668,6 +671,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddDays(-10), now.AddDays(-9), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is waiting_tasks' alone
+           and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 168));
 
@@ -738,6 +744,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         await _duckDb.InitializeFromTemplateAsync();
         var now = DateTime.UtcNow;
         await SeedLogRunsAsync("waiting_tasks", now.AddMinutes(-35), now.AddMinutes(-35), everyMinutes: 30);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedLogRunsAsync("wait_stats", now.AddMinutes(-1), now.AddMinutes(-1), everyMinutes: 1);
 
         var root = Root(await McpWaitTools.GetWaitingTasks(Service(), _serverManager, ServerName, hours_back: 1));
 

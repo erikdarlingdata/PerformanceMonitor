@@ -81,12 +81,12 @@ public sealed class McpLongQueryTools
                    means the store holds no long-query row for this server in the window, and only then does the answer send the reader to
                    the opt-in switch; with rows for other databases the collector is on. */
                 var collectorMayBeOff = (database == null && !tagScope.Active) || emptyNotice.EffectiveStart is null;
-                return McpHelpers.StatusForDatabase("empty",
+                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
                         + (tagScope.Active ? $" for query tag '{tagScope.Requested}'" : "")
                         + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
                     database, /* #5244 review L2: the echo rides on an empty answer too */
-                    emptyNotice.AsHints());
+                    emptyNotice.AsHints()));
             }
 
             var truncated = rows.Count > limit;
