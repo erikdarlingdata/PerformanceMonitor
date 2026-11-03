@@ -25,7 +25,7 @@
  * el()/textContent.
  */
 
-import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText } from "../util.js";
+import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The editable text scope/pattern fields, in form order, with their labels. `reason` and the expiry follow. */
@@ -97,15 +97,6 @@ function fieldValue(values, key) {
   if (key === EXPIRY || key === STARTS) return localInputToIso(raw) || null;
   if (key === SERVER_ID) return /^-?\d+$/.test(raw) && Number(raw) !== 0 ? Number(raw) : null;
   return raw === "" ? null : raw;
-}
-
-/** The browser's own IANA time zone, the default for a new schedule. "" when the browser does not say. */
-export function browserZone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    return "";
-  }
 }
 
 /** A day name from the form or the read to its three-letter lower-case key ("Monday" and "mon" both give "mon"). */
@@ -375,7 +366,7 @@ function valuesOf(r) {
   v[RECUR_DAYS] = Array.isArray(r.recur_days) ? r.recur_days.map((d) => DAY_NAMES.find((n) => dayKey(n) === dayKey(d))).filter(Boolean) : [];
   v[RECUR_START] = r.recur_start_time || "";
   v[RECUR_END] = r.recur_end_time || "";
-  v[RECUR_ZONE] = r.recur_time_zone || browserZone();
+  v[RECUR_ZONE] = r.recur_time_zone || browserZoneOrBlank();
   v[ACTION] = actionOf(r.action);
   return v;
 }
@@ -402,7 +393,7 @@ async function remove(r) {
 function openForm(f) {
   form = { errors: {}, banner: null, exists: null, confirmEmpty: false, ...f };
   /* A new rule's schedule zone starts as the browser's; it rides along only when times are filled in (see scheduleOf). */
-  if (form.values[RECUR_ZONE] == null) form.values[RECUR_ZONE] = browserZone();
+  if (form.values[RECUR_ZONE] == null) form.values[RECUR_ZONE] = browserZoneOrBlank();
   drawForm();
 }
 

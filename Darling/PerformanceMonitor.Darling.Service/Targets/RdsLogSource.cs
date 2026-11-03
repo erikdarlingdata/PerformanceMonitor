@@ -313,8 +313,8 @@ public sealed class RdsLogSource
         var key = moved ? resume.NextKey : resume.Key;
         var marker = moved ? StartOfFileMarker : resume.Marker;
 
-        var instance = InstanceKey(key);
-        var file = ResumeFileName(key);
+        var instance = RdsCsvlogCarryBook.InstanceKey(key);
+        var file = RdsCsvlogCarryBook.ResumeFileName(key);
 
         return string.IsNullOrEmpty(instance) || string.IsNullOrEmpty(file) || string.IsNullOrEmpty(marker)
             ? null
@@ -348,8 +348,8 @@ public sealed class RdsLogSource
            csv key survives it. The csv route then finds that old key, finishes that file if RDS still lists
            it, and moves on to the newest csv file from its first line; events the stderr route already stored
            for the same window can be stored again, and the identity hashes keep them from duplicating. */
-        var instanceId = InstanceKey(key);
-        var isCsv = IsCsvFileName(ResumeFileName(key));
+        var instanceId = RdsCsvlogCarryBook.InstanceKey(key);
+        var isCsv = IsCsvFileName(RdsCsvlogCarryBook.ResumeFileName(key));
 
         if (instanceId is null)
         {
@@ -386,32 +386,6 @@ public sealed class RdsLogSource
     /// <see cref="CommitResume"/>'s own marker-pruning check (#4053 review round 2, item 3).</summary>
     private static bool IsCsvFileName(string? fileName)
         => !string.IsNullOrEmpty(fileName) && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>The instance half of a marker key ("instance|file"), or null when the key itself is
-    /// null/empty — <see cref="CommitResume"/>'s own copy of the same split
-    /// <see cref="RdsLogEventIngestor"/> keeps privately for its carry key.</summary>
-    private static string? InstanceKey(string? resumeKey)
-    {
-        if (string.IsNullOrEmpty(resumeKey))
-        {
-            return null;
-        }
-
-        var separator = resumeKey.IndexOf('|');
-        return separator < 0 ? resumeKey : resumeKey[..separator];
-    }
-
-    /// <summary>The file half of a marker key, or null when the key itself is null/empty.</summary>
-    private static string? ResumeFileName(string? resumeKey)
-    {
-        if (string.IsNullOrEmpty(resumeKey))
-        {
-            return null;
-        }
-
-        var separator = resumeKey.IndexOf('|');
-        return separator < 0 ? null : resumeKey[(separator + 1)..];
-    }
 
     /// <summary>
     /// The newest PostgreSQL log file's unread portion, or null when this target is not RDS at all.

@@ -811,9 +811,11 @@ public sealed class CollectorEngineCapabilitySweepDimensionTests
                 if (FactByGetterName.TryGetValue(callee.Name, out var fact))
                 {
                     facts.Add(fact.Name);
+                    continue;
                 }
 
-                continue;
+                /* A helper method on the target (MeetsMinimumVersion, #7222) reads facts for the gate that calls it:
+                   follow it, or a gate written through the helper reads nothing and the sweep goes unchecked. */
             }
 
             /* Follow only into code this repo ships. Walking the framework would never terminate usefully,
