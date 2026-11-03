@@ -646,16 +646,40 @@ WHERE calls > 0";
                — makes the whole row unknowable, (0, 0), same as an ordinary single-family reset already
                reports. NEVER compared against context.CollectionTime — the collector host's own clock —
                which is the whole point of carrying target_now beside stats_since in the same read. */
+            var gapSeconds = previousTargetNow.HasValue
+                ? (int)(targetNow - previousTargetNow.Value).TotalSeconds
+                : 0;
+
+            var creditedInGap = statsSince.HasValue && previousTargetNow.HasValue
+                && statsSince.Value > previousTargetNow.Value
+                && gapSeconds > 0;
+
+            /* #7189: a key with no usable baseline (a first sighting, or a collector-clock gap re-baseline)
+               comes back from the three calls above as (0, 0), the right answer when nothing says when the
+               counters began. stats_since says exactly that, though: strictly after the previous pass's
+               target_now means the entry was created inside the gap, so its whole accrual belongs to the
+               gap and the baseline was 0 rather than the current value. Credit it the way the restart
+               branch does, with one added bound the Add path of the delta calculator also applies: a gap
+               past the max-gap policy is not credited, because an outage would otherwise land an hour of
+               work in one interval. A row with no stats_since (PostgreSQL below 17), one whose stats_since
+               is at or before the previous pass, and the first pass after a service restart (no
+               previousTargetNow) keep the unknowable (0, 0). A pg_stat_statements_reset or a dealloc
+               forgets the baselines, so entries re-created in the gap take this same path. */
+            if (!rowReset.AnyReset
+                && callsIntervalSeconds == 0 && timeIntervalSeconds == 0 && rowsIntervalSeconds == 0
+                && creditedInGap
+                && gapSeconds <= CollectorDeltaCalculator.DefaultMaxGapSeconds)
+            {
+                deltaCalls = calls;
+                deltaTotalTime = (long)totalExecTimeMs;
+                deltaRows = rowsReturned;
+                callsIntervalSeconds = gapSeconds;
+                timeIntervalSeconds = gapSeconds;
+                rowsIntervalSeconds = gapSeconds;
+            }
+
             if (rowReset.AnyReset)
             {
-                var gapSeconds = previousTargetNow.HasValue
-                    ? (int)(targetNow - previousTargetNow.Value).TotalSeconds
-                    : 0;
-
-                var creditedInGap = statsSince.HasValue && previousTargetNow.HasValue
-                    && statsSince.Value > previousTargetNow.Value
-                    && gapSeconds > 0;
-
                 if (creditedInGap)
                 {
                     deltaCalls = calls;

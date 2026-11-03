@@ -203,6 +203,116 @@ public sealed class PgStatementStatsRowCoherentResetTests
         Assert.Equal(60, ordinary.SampleIntervalSeconds);
     }
 
+    /// <summary>
+    /// #7189: a key first seen on the second pass whose stats_since is inside the gap since the previous
+    /// pass's target_now began counting inside that gap, so its whole value is the first delta over the
+    /// target-clock gap, not (0, 0).
+    /// </summary>
+    [Fact]
+    public async Task NewKey_StatsSinceInsideGap_CreditsCurrentValuesAsFirstDelta()
+    {
+        var deltas = new CollectorDeltaCalculator();
+
+        await RunReadAsync(deltas, T0,
+            Row(1, 1, 1, true, calls: 100, totalExecTimeMs: 5000, rowsReturned: 100,
+                statsReset: null, statsSince: null, targetNow: T0));
+
+        var rows = await RunReadAsync(deltas, T0.AddSeconds(60),
+            Row(2, 1, 1, true, calls: 7, totalExecTimeMs: 321, rowsReturned: 9,
+                statsReset: null, statsSince: T0.AddSeconds(20), targetNow: T0.AddSeconds(60)));
+
+        var created = Assert.Single(rows);
+        Assert.Equal(7, created.DeltaCalls);
+        Assert.Equal(321, created.DeltaTotalExecTimeMs);
+        Assert.Equal(9, created.DeltaRows);
+        Assert.Equal(60, created.SampleIntervalSeconds);
+    }
+
+    /// <summary>
+    /// #7189: a new key to this collector whose stats_since is at or before the previous pass's target_now
+    /// is an older entry we are only now seeing, so its counters were accruing before the gap and the first
+    /// sighting stays (0, 0).
+    /// </summary>
+    [Fact]
+    public async Task NewKey_StatsSinceBeforePreviousTargetNow_ReportsZeroZero()
+    {
+        var deltas = new CollectorDeltaCalculator();
+
+        await RunReadAsync(deltas, T0,
+            Row(1, 1, 1, true, calls: 100, totalExecTimeMs: 5000, rowsReturned: 100,
+                statsReset: null, statsSince: null, targetNow: T0));
+
+        var rows = await RunReadAsync(deltas, T0.AddSeconds(60),
+            Row(2, 1, 1, true, calls: 7, totalExecTimeMs: 321, rowsReturned: 9,
+                statsReset: null, statsSince: T0, targetNow: T0.AddSeconds(60)));
+
+        var old = Assert.Single(rows);
+        Assert.Equal(0, old.DeltaCalls);
+        Assert.Equal(0, old.DeltaTotalExecTimeMs);
+        Assert.Equal(0, old.DeltaRows);
+        Assert.Equal(0, old.SampleIntervalSeconds);
+    }
+
+    /// <summary>#7189: a new key with no stats_since (PostgreSQL below 17) stays (0, 0).</summary>
+    [Fact]
+    public async Task NewKey_StatsSinceAbsent_ReportsZeroZero()
+    {
+        var deltas = new CollectorDeltaCalculator();
+
+        await RunReadAsync(deltas, T0,
+            Row(1, 1, 1, true, calls: 100, totalExecTimeMs: 5000, rowsReturned: 100,
+                statsReset: null, statsSince: null, targetNow: T0));
+
+        var rows = await RunReadAsync(deltas, T0.AddSeconds(60),
+            Row(2, 1, 1, true, calls: 7, totalExecTimeMs: 321, rowsReturned: 9,
+                statsReset: null, statsSince: null, targetNow: T0.AddSeconds(60)));
+
+        var unknown = Assert.Single(rows);
+        Assert.Equal(0, unknown.DeltaCalls);
+        Assert.Equal(0, unknown.SampleIntervalSeconds);
+    }
+
+    /// <summary>
+    /// #7189: the first pass after a service restart has no previous target_now, so even a stats_since
+    /// that looks recent cannot be placed in a gap and stays (0, 0).
+    /// </summary>
+    [Fact]
+    public async Task NewKey_FirstPassEver_ReportsZeroZero()
+    {
+        var deltas = new CollectorDeltaCalculator();
+
+        var rows = await RunReadAsync(deltas, T0,
+            Row(2, 1, 1, true, calls: 7, totalExecTimeMs: 321, rowsReturned: 9,
+                statsReset: null, statsSince: T0.AddSeconds(-5), targetNow: T0));
+
+        var first = Assert.Single(rows);
+        Assert.Equal(0, first.DeltaCalls);
+        Assert.Equal(0, first.SampleIntervalSeconds);
+    }
+
+    /// <summary>
+    /// #7189: a gap longer than the max-gap policy is not credited, so an outage does not land an hour of
+    /// accrual in one interval.
+    /// </summary>
+    [Fact]
+    public async Task NewKey_GapPastMaxGap_ReportsZeroZero()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        var late = T0.AddSeconds(CollectorDeltaCalculator.DefaultMaxGapSeconds + 600);
+
+        await RunReadAsync(deltas, T0,
+            Row(1, 1, 1, true, calls: 100, totalExecTimeMs: 5000, rowsReturned: 100,
+                statsReset: null, statsSince: null, targetNow: T0));
+
+        var rows = await RunReadAsync(deltas, late,
+            Row(2, 1, 1, true, calls: 7, totalExecTimeMs: 321, rowsReturned: 9,
+                statsReset: null, statsSince: T0.AddSeconds(20), targetNow: late));
+
+        var tooLong = Assert.Single(rows);
+        Assert.Equal(0, tooLong.DeltaCalls);
+        Assert.Equal(0, tooLong.SampleIntervalSeconds);
+    }
+
     /// <summary>A minimal multi-call <see cref="DbDataReader"/> over one boxed row, ordinal access only.</summary>
     private sealed class FakeReader : DbDataReader
     {

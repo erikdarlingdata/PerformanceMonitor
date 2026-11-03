@@ -232,9 +232,12 @@ public static class DarlingPgTrendReader
     /// event that actually dominates this server rather than a name somebody guessed. Null when nothing was
     /// sampled.
     ///
-    /// <para>Ranked on the DIFFERENCE across the window, not on the newest cumulative value — the profile is
-    /// cumulative, so ranking it raw would return whichever event has been accumulating longest since the
-    /// server started, which is a fact about uptime rather than about now.</para>
+    /// <para>Ranked on the sum of the per-interval DIFFERENCES across the window, not on the newest cumulative
+    /// value — the profile is cumulative, so ranking it raw would return whichever event has been accumulating
+    /// longest since the server started, which is a fact about uptime rather than about now. A target restart
+    /// inside the window zeroes the counters, so the differences are summed with the reset rule
+    /// <see cref="WaitTrendSql"/> uses (#7205); a MAX minus MIN would span the restart and return the
+    /// pre-restart lifetime.</para>
     ///
     /// <para><b><c>event_type = 'CPU'</c> is excluded from the CHOICE, and only from the choice.</b> That
     /// class means the backend was NOT waiting, and on any healthy server it dominates the profile by a wide
@@ -244,26 +247,38 @@ public static class DarlingPgTrendReader
     /// automatic answer to "what is this server waiting on".</para>
     /// </summary>
     public const string DominantWaitEventSql = """
-        WITH bounds AS (
+        WITH per_snapshot AS (
+            SELECT event, collection_time, SUM(sample_count) AS sample_count
+            FROM pg_wait_sampling
+            WHERE server_id = $1
+            AND   event IS NOT NULL
+            AND   coalesce(event_type, '') <> 'CPU'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY event, collection_time
+        ),
+        differenced AS (
             SELECT
                 event,
-                MIN(sample_count) AS lo,
-                MAX(sample_count) AS hi
-            FROM (
-                SELECT event, collection_time, SUM(sample_count) AS sample_count
-                FROM pg_wait_sampling
-                WHERE server_id = $1
-                AND   event IS NOT NULL
-                AND   coalesce(event_type, '') <> 'CPU'
-                AND   collection_time >= $2
-                AND   collection_time <= $3
-                GROUP BY event, collection_time
-            ) AS per_snapshot
-            GROUP BY event
+                sample_count,
+                LAG(sample_count) OVER (PARTITION BY event ORDER BY collection_time) AS prev_samples
+            FROM per_snapshot
         )
         SELECT event
-        FROM bounds
-        ORDER BY (hi - lo) DESC, event
+        FROM differenced
+        GROUP BY event
+        /* Summed per-interval deltas, with WaitTrendSql's reset rule (#7205): the counters restart at zero when
+           the target restarts, and across the restart the new value is taken whole. MAX - MIN across a window
+           holding a restart is the pre-restart lifetime total, which ranks whichever event ran longest before
+           it. The first snapshot of each event has nothing to difference against, so it adds 0 rather than
+           being filtered out: an event seen once in the window stays a candidate (every sum is 0 and the event
+           name decides, as before), so a window with a single snapshot still answers "needs two snapshots"
+           rather than "nothing was sampled". */
+        ORDER BY SUM(CASE
+                         WHEN prev_samples IS NULL THEN 0
+                         WHEN sample_count < prev_samples THEN sample_count
+                         ELSE sample_count - prev_samples
+                     END) DESC, event
         LIMIT 1
         """;
 

@@ -52,7 +52,7 @@ The list can be empty. A new install starts with `"servers": []`, and you add th
 | `password` | *(none)* | A literal (dev only, warned on every use) or an `env:NAME` / `file:/path` reference (#1804) — references are the supported non-Windows shape and are not warned |
 | `readOnlyIntent` | `false` | Route to a readable AG secondary (`ApplicationIntent=ReadOnly`) |
 | `queryStoreReplica` | *(none)* | SQL Server only: a readable AG secondary (`host` or `host,port`) or a listener name that Darling reads Query Store from, instead of the server itself, so the primary carries none of that read. Empty (the default) reads the primary and changes nothing. Azure SQL Database never reads a replica. The replica host gets the same login and password as the server, so the replica must accept them. Changing it counts as a change of how the server is reached, so the web dashboard, the MCP `edit_server` tool and the desktop viewer ask for the password again. Collection health shows the newest Query Store run's `read_source` (for example `replica 12, primary 2`) beside the collector, only when a run has one |
-| `trustServerCertificate` | `false` | |
+| `trustServerCertificate` | `false` | `true` skips the check of the SQL Server's certificate: the connection is still encrypted, but any certificate is accepted. The compose sample sets it to `true` so a first run reaches a server with a self-signed certificate. Keep verification on (`false`) for production targets |
 | `encryptMode` | `"Mandatory"` | `Mandatory` / `Strict` / `Optional`; unknown values fail closed to `Mandatory` |
 | `multiSubnetFailover` | `false` | |
 | `excludedDatabases` | `[]` | Databases excluded from collection |

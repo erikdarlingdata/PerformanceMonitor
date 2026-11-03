@@ -15,6 +15,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -103,7 +104,7 @@ public partial class FinOpsTab
 
     private void FinOpsIndexLockingGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
+        if (DataGridRowHit.IsOnRow(e.OriginalSource) && FinOpsIndexLockingDataGrid.SelectedItem is IndexLockingRow row)
             ShowFinOpsLockingDetail(row);
     }
 

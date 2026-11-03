@@ -196,6 +196,63 @@ public sealed class QueryStoreWideReadGuardTests
         Assert.InRange(allStamped, (long)(unweighted * 0.3d) - 1, (long)(unweighted * 0.3d) + 2);
     }
 
+    /* #7285: a fleet-wide 24 hour panel on a large fleet. The wide rows of the servers in scope are many, and the stamp-weighted figure
+       alone is over the one-scan limit. The fleet table serves 21 of the 24 hours from a few million rows. */
+    private static readonly QueryStoreWideReadGuard.Estimate LargeFleetDay = new(25_000_000, 210);
+    private static readonly DateTime FleetThrough = Start.AddHours(21);
+
+    [Fact]
+    public void AFleetPanelOnALargeFleet_CountsTheFleetHoursFromTheFleetTable_AndPasses_WhereTheStampWeightRefusesIt()
+    {
+        var end = Start.AddDays(1);
+        var limit = QueryStoreWideReadGuard.LimitFor(false);
+        var fleet = new QueryStoreWideReadGuard.FleetServing(21, 3_900_000);
+
+        /* The stamp weight alone: (3/24 + 21/24 x 0.3) x 25 M = 9.7 M, over the limit. */
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(LargeFleetDay, Start, end, limit, FleetThrough));
+
+        /* The fleet table's own size: 3/24 x 25 M of raw tail + 0.3 x 3.9 M fleet rows = 4.3 M, under it. */
+        Assert.InRange(LargeFleetDay.RowsOver(Start, end, FleetThrough, fleet), 4_200_000L, 4_400_000L);
+        Assert.Null(QueryStoreWideReadGuard.Refusal(LargeFleetDay, Start, end, limit, FleetThrough, fleet));
+    }
+
+    [Fact]
+    public void AFleetPanelWhoseRawTailAloneIsOverTheLimit_IsStillRefused_AndSoIsAFleetTableThatIsTooBig()
+    {
+        var end = Start.AddDays(1);
+        var limit = QueryStoreWideReadGuard.LimitFor(false);
+
+        /* 80 M wide rows a day, the newest 3 hours unstamped: 10 M raw tail, over 6.8 M before the fleet rows are added. */
+        var bigDay = new QueryStoreWideReadGuard.Estimate(80_000_000, 210);
+        var small = new QueryStoreWideReadGuard.FleetServing(21, 1_000_000);
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(bigDay, Start, end, limit, FleetThrough, small));
+        Assert.True(bigDay.RowsOver(Start, end, FleetThrough, small) >= 10_000_000L);
+
+        /* A fleet table that is itself huge is not waved through: 30 M fleet rows weigh 9 M. */
+        var huge = new QueryStoreWideReadGuard.FleetServing(21, 30_000_000);
+        Assert.NotNull(QueryStoreWideReadGuard.Refusal(LargeFleetDay, Start, end, limit, FleetThrough, huge));
+    }
+
+    [Fact]
+    public void ThePartOfTheStampedRangeTheFleetTableDoesNotServe_StaysAtTheStampWeight_AndNoFleetIsTodaysFigure()
+    {
+        var end = Start.AddDays(1);
+
+        /* A panel outside the fleet conditions passes no fleet: the figure is exactly the stamp-weighted one, whatever the overload. */
+        Assert.Equal(LargeFleetDay.RowsOver(Start, end, FleetThrough), LargeFleetDay.RowsOver(Start, end, FleetThrough, null));
+        Assert.Equal(FleetDay.RowsOver(Start, Start.AddDays(1), StampedThrough), FleetDay.RowsOver(Start, Start.AddDays(1), StampedThrough, null));
+        Assert.Equal(LargeFleetDay.RowsOver(Start, end), LargeFleetDay.RowsOver(Start, end, null, new QueryStoreWideReadGuard.FleetServing(21, 3_900_000)));
+
+        /* Only 10 of the 21 stamped hours are fleet-served: the other 11 stay at 0.3 x the wide rows. */
+        var partial = new QueryStoreWideReadGuard.FleetServing(10, 1_000_000);
+        var expected = (3d / 24d + 11d / 24d * 0.3d) * 25_000_000d + 0.3d * 1_000_000d;
+        Assert.InRange(LargeFleetDay.RowsOver(Start, end, FleetThrough, partial), (long)expected - 2, (long)expected + 2);
+
+        /* More fleet hours than stamped hours (a partial first hour counted whole) never push the stamp part below zero. */
+        var over = new QueryStoreWideReadGuard.FleetServing(40, 0);
+        Assert.Equal((long)Math.Ceiling(25_000_000d * 3d / 24d), LargeFleetDay.RowsOver(Start, end, FleetThrough, over));
+    }
+
     [Fact]
     public void AWeightedRefusal_NeverCallsTheFigureRows_AndNamesTheServersTheWindowAndWhatToChange()
     {

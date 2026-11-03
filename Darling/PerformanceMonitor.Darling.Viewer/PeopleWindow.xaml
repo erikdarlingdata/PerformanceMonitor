@@ -28,7 +28,7 @@
 
         <TextBlock Grid.Row="0" Text="People" FontSize="18" FontWeight="Bold" HorizontalAlignment="Left" Margin="0,0,0,4"/>
         <TextBlock Grid.Row="1" TextWrapping="Wrap" HorizontalAlignment="Left" Margin="0,0,0,12" Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Text="Name each person who works with the agents, map the identities they sign in with (a web sign-in key, a Slack account), and give them grants. Nothing reads a grant yet, so this changes what no one can do today. Only the store owner writes these lists: each change goes through the service and is journaled."/>
+                   Text="Name each person who works with the agents, map the identities they sign in with (a web sign-in key, a Slack account), and give them grants. An approve grant lets that person approve the actions an agent proposes, only for the kinds and the scope it names. The other grants are not read yet. Only the store owner writes these lists: each change goes through the service and is journaled."/>
 
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
@@ -48,9 +48,9 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*"/>
                             <DataGridTextColumn Header="State" Binding="{Binding StateDisplay}" Width="70"/>
-                            <DataGridTextColumn Header="Identities" Binding="{Binding IdentitiesDisplay}" Width="70"/>
-                            <DataGridTextColumn Header="Grants" Binding="{Binding GrantsDisplay}" Width="60"/>
-                            <DataGridTextColumn Header="Changed" Binding="{Binding UpdatedDisplay}" Width="120" SortMemberPath="UpdatedAtUtc"/>
+                            <DataGridTextColumn Header="Identities" Binding="{Binding IdentitiesDisplay}" Width="70" SortMemberPath="IdentityCount"/>
+                            <DataGridTextColumn Header="Grants" Binding="{Binding GrantsDisplay}" Width="60" SortMemberPath="GrantCount"/>
+                            <DataGridTextColumn Header="Changed" Binding="{Binding UpdatedDisplay}" Width="190" SortMemberPath="UpdatedAtUtc"/>
                         </DataGrid.Columns>
                     </DataGrid>
                     <TextBlock x:Name="EmptyMessage" Foreground="{DynamicResource ForegroundMutedBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -78,7 +78,7 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Kind" Binding="{Binding KindDisplay}" Width="100"/>
                         <DataGridTextColumn Header="Id" Binding="{Binding ExternalId}" Width="*"/>
-                        <DataGridTextColumn Header="Added" Binding="{Binding AddedDisplay}" Width="190"/>
+                        <DataGridTextColumn Header="Added" Binding="{Binding AddedDisplay}" Width="270" SortMemberPath="CreatedAtUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
                 <StackPanel x:Name="IdentityButtons" Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,12">

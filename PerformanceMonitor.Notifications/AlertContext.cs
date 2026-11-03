@@ -569,11 +569,8 @@ public record RemediationActionDto(
     List<ForcePlanTargetDto> Targets,
     List<DbConfigTargetDto>? DbConfigTargets = null,
     RcsiInactionFiguresDto? RcsiFigures = null,
-    List<ClearPlanTargetDto>? ClearPlanTargets = null,
-    ClearPlanFiguresDto? ClearPlanFigures = null,
     List<FileGrowthTargetDto>? FileGrowthTargets = null,
     List<RcsiTargetDto>? RcsiTargets = null,
-    List<ServerConfigTargetDto>? ServerConfigTargets = null,
     List<MissingIndexTargetDto>? MissingIndexTargets = null);
 
 /// <summary>
@@ -587,35 +584,6 @@ public record RemediationActionDto(
 public record RcsiTargetDto(
     string Database,
     RcsiInactionFiguresDto Figures);
-
-/// <summary>
-/// JSON mirror of <see cref="ClearPlanTarget"/> (clear-cached-plan, PR-B). The
-/// <c>QueryHash</c> is the only execution input; the remaining members are display/
-/// disclosure only. The trailing optional <c>ClearPlanTargets</c> member on
-/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/
-/// non-CLEAR_PLAN contextJson without it deserializes to null.
-/// </summary>
-public record ClearPlanTargetDto(
-    string Database,
-    string QueryHash,
-    double CurrentCpuPerExecMs,
-    double BaselineCpuPerExecMs,
-    double AnomalyRatio,
-    string? LatestPlanHandle);
-
-/// <summary>
-/// JSON mirror of <see cref="ClearPlanFigures"/> (clear-cached-plan, PR-B). Carried on
-/// the persisted CLEAR_PLAN action so the informed-consent dialog shows the REAL anomaly
-/// figures (incl. the window CPU%, LOW-1) at apply time, when the UI apply call site has
-/// no finding. Trailing optional → backward-compatible.
-/// </summary>
-public record ClearPlanFiguresDto(
-    double CurrentCpuPerExecMs,
-    double BaselineCpuPerExecMs,
-    double AnomalyRatio,
-    int CpuPercent,
-    bool PlanRegressionCoFired,
-    bool ParameterSensitivityCoFired);
 
 /// <summary>
 /// JSON mirror of <see cref="RcsiInactionFigures"/> (B3 Phase 3). Carried on the
@@ -685,19 +653,6 @@ public record FileGrowthTargetDto(
     double CurrentSizeMb,
     int CurrentGrowthPercent,
     int RecommendedGrowthMb);
-
-/// <summary>
-/// JSON mirror of <see cref="ServerConfigTarget"/> (WS3 server-level config). <see cref="Setting"/>
-/// is persisted as the enum's int value. The trailing optional <c>ServerConfigTargets</c> member on
-/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/non-
-/// SERVER_CONFIG contextJson without it deserializes to null. Carried so the Recommendations reader
-/// can fan the server-config cards on read (the drill-down is ephemeral); MAXDOP/CTFP drive Apply,
-/// the two memory targets are copy-paste only.
-/// </summary>
-public record ServerConfigTargetDto(
-    int Setting,
-    long CurrentValue,
-    long RecommendedValue);
 
 /// <summary>
 /// JSON mirror of <see cref="MissingIndexTarget"/> (WS4 missing-index advisory). The trailing
@@ -1199,7 +1154,7 @@ public static class AlertContextSerializer
     /// finding row (recommendations rebuild D2). Reuses the SAME private
     /// <see cref="ToDto(RemediationAction?)"/> projection the alert-context write already
     /// uses, so a finding's persisted action round-trips byte-identically to one carried
-    /// in an alert's ContextJson (incl. RcsiInactionFigures / ClearPlanFigures / all
+    /// in an alert's ContextJson (incl. RcsiInactionFigures / all
     /// target lists). Returns null when the action is null.
     /// </summary>
     public static string? SerializeAction(RemediationAction? action)
@@ -1361,23 +1316,6 @@ public static class AlertContextSerializer
             ? new RcsiInactionFiguresDto(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
             : null;
 
-        // Clear-cached-plan (PR-B): persist the targets + carried figures so the affordance
-        // survives the contextJson round-trip and the dialog shows the REAL numbers at apply.
-        List<ClearPlanTargetDto>? clearPlanTargets = null;
-        if (action.ClearPlanTargets is not null)
-        {
-            clearPlanTargets = new List<ClearPlanTargetDto>(action.ClearPlanTargets.Count);
-            foreach (var t in action.ClearPlanTargets)
-                clearPlanTargets.Add(new ClearPlanTargetDto(
-                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
-                    t.AnomalyRatio, t.LatestPlanHandle));
-        }
-
-        var clearPlanFigures = action.ClearPlanFigures is { } cf
-            ? new ClearPlanFiguresDto(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
-                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
-            : null;
-
         // WS3 (percent-autogrowth advisory): persist the file targets so the Recommendations
         // reader can render the copy-paste MODIFY FILE statements on read (the drill-down is
         // ephemeral). Null for every other fact key -> backward-compatible.
@@ -1404,17 +1342,6 @@ public static class AlertContextSerializer
                     new RcsiInactionFiguresDto(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
         }
 
-        // WS3 (server-level config): persist the targets so the Recommendations reader can fan the
-        // server-config cards on read (the drill-down is ephemeral) AND the ServerConfigHandler can
-        // re-derive the MAXDOP/CTFP target at apply. Null for every other fact key -> backward-compatible.
-        List<ServerConfigTargetDto>? serverConfigTargets = null;
-        if (action.ServerConfigTargets is not null)
-        {
-            serverConfigTargets = new List<ServerConfigTargetDto>(action.ServerConfigTargets.Count);
-            foreach (var t in action.ServerConfigTargets)
-                serverConfigTargets.Add(new ServerConfigTargetDto((int)t.Setting, t.CurrentValue, t.RecommendedValue));
-        }
-
         // WS4 (missing-index advisory): persist the suggested CREATE statements so the Recommendations
         // reader can render them as copy-paste on read (the drill-down is ephemeral). Copy-paste only —
         // no handler, never Apply. Null for every other fact key -> backward-compatible.
@@ -1427,8 +1354,7 @@ public static class AlertContextSerializer
         }
 
         return new RemediationActionDto(action.FactKey, action.Action, targets, dbConfigTargets,
-            rcsiFigures, clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets,
-            serverConfigTargets, missingIndexTargets);
+            rcsiFigures, fileGrowthTargets, rcsiTargets, missingIndexTargets);
     }
 
     private static RemediationAction? FromDto(RemediationActionDto? dto)
@@ -1478,25 +1404,6 @@ public static class AlertContextSerializer
             ? new RcsiInactionFigures(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
             : null;
 
-        // Clear-cached-plan (PR-B): rebuild the targets + carried figures from the DTO and
-        // PASS them to the ctor (the trailing ClearPlan* members default to null, so a short
-        // call would silently drop a CLEAR_PLAN action's targets on the round-trip). Legacy
-        // JSON without the fields deserializes to null → backward-compatible.
-        List<ClearPlanTarget>? clearPlanTargets = null;
-        if (dto.ClearPlanTargets is not null)
-        {
-            clearPlanTargets = new List<ClearPlanTarget>(dto.ClearPlanTargets.Count);
-            foreach (var t in dto.ClearPlanTargets)
-                clearPlanTargets.Add(new ClearPlanTarget(
-                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
-                    t.AnomalyRatio, t.LatestPlanHandle));
-        }
-
-        var clearPlanFigures = dto.ClearPlanFigures is { } cf
-            ? new ClearPlanFigures(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
-                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
-            : null;
-
         // WS3: rebuild the percent-autogrowth file targets from the DTO and PASS them to the
         // ctor (the trailing FileGrowthTargets member defaults to null, so a short call would
         // silently drop them on the round-trip). Legacy JSON without the field -> null.
@@ -1523,19 +1430,6 @@ public static class AlertContextSerializer
                     new RcsiInactionFigures(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
         }
 
-        // WS3: rebuild the server-config targets from the DTO and PASS them to the ctor (the trailing
-        // ServerConfigTargets member defaults to null, so a short call would silently drop them on the
-        // round-trip — the reader would then fan no server-config cards and the handler could not
-        // re-derive the MAXDOP/CTFP target). Legacy JSON without the field deserializes to null →
-        // backward-compatible.
-        List<ServerConfigTarget>? serverConfigTargets = null;
-        if (dto.ServerConfigTargets is not null)
-        {
-            serverConfigTargets = new List<ServerConfigTarget>(dto.ServerConfigTargets.Count);
-            foreach (var t in dto.ServerConfigTargets)
-                serverConfigTargets.Add(new ServerConfigTarget((ServerConfigSetting)t.Setting, t.CurrentValue, t.RecommendedValue));
-        }
-
         // WS4: rebuild the missing-index targets from the DTO and PASS them to the ctor (the trailing
         // MissingIndexTargets member defaults to null, so a short call would silently drop them on the
         // round-trip — the reader would then render no missing-index copy-paste). Legacy JSON without
@@ -1549,7 +1443,6 @@ public static class AlertContextSerializer
         }
 
         return new RemediationAction(dto.FactKey, dto.Action, targets, dbConfigTargets, rcsiFigures,
-            clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets, serverConfigTargets,
-            missingIndexTargets);
+            fileGrowthTargets, rcsiTargets, missingIndexTargets);
     }
 }

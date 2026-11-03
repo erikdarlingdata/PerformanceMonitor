@@ -78,7 +78,7 @@ public partial class AgentChangesTab : UserControl
             return;
         try
         {
-            var rows = await _dataService.ReadProposalsAsync(null, _login);
+            var rows = await _dataService.ReadProposalsAsync(_login);
             if (rows is null)
                 Status?.Invoke("The service has not listed the proposals yet. Reload the tab to read them again.");
             else

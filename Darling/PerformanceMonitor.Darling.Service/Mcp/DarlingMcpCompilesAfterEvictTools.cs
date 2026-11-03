@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -36,6 +37,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpCompilesAfterEvictTools
 {
     internal const string ToolName = "get_compiles_after_evict";
+    /// <summary>
+    /// #7315: what the query_stats collector keeps, in words, for the messages built at run time. The number is read from
+    /// <see cref="QueryStatsCollector.MaxCandidateRows"/> so the text cannot drift from the collector. The tool description attribute needs a
+    /// constant and an int is not one in a string, so it uses <see cref="CollectorReadsNoNumber"/>.
+    /// </summary>
+    private static readonly string CollectorReads = QueryStatsCollector.MaxCandidateRows.ToString(CultureInfo.InvariantCulture) + " " + CollectorReadsNoNumber;
+
+    /// <summary>#7315: the same words without the number, for the description attribute.</summary>
+    internal const string CollectorReadsNoNumber = "most recently run statements of the last ten minutes that the collector reads";
     internal const string NotAnEviction = "not_an_eviction";
     internal const string NotCollectedYet = "not_collected_yet";
     internal const string OldPlanStillSeen = "old_plan_still_seen";
@@ -54,7 +64,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '"
     [McpServerTool(Name = "get_compiles_after_evict"), Description(
         "Reads what happened after an evict_cached_plan: for each statement Darling collected for that handle, whether it compiled again and whether the new plan has the same shape. Reads the store only; changes nothing. <<GUIDE>> " +
         "Call it with the journal_id evict_cached_plan returned, after the next query_stats collection (about a minute), and again later: a statement that has not run yet is not_collected_yet. " +
-        "Per statement: not_collected_yet (no row after the eviction; the collector keeps only the costliest statements, so a cheap one may never appear), old_plan_still_seen (rows after the eviction, none with a later creation_time), or recompiled with same_plan_shape (query_plan_hash equal), the new plan_handle and creation_time, executions since, and per-execution CPU, duration and reads beside the before image's. " +
+        "Per statement: not_collected_yet (no row after the eviction; either it has not run since then, or it is outside the " + CollectorReadsNoNumber + "), old_plan_still_seen (rows after the eviction, none with a later creation_time), or recompiled with same_plan_shape (query_plan_hash equal), the new plan_handle and creation_time, executions since, and per-execution CPU, duration and reads beside the before image's. " +
         "A compile is a later creation_time, not a new plan_handle: the same batch can compile again under the same handle. Reads up to 7 days after the eviction. An id that is not a done eviction is refused (not_an_eviction).")]
     public static Task<string> GetCompilesAfterEvict(
         NpgsqlDataSource postgres,
@@ -122,7 +132,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '"
                 statement_count = statements.Count,
                 statements,
                 note = "A compile is a later creation_time than the before image's, not a new plan_handle. Both creation times are on the monitored server's own clock. "
-                       + "The collector keeps only the costliest statements, so a cheap statement may never appear. A recompiled entry's totals all come from after the eviction.",
+                       + "A statement with no row has not run since the eviction, or is outside the " + CollectorReads + ". A recompiled entry's totals all come from after the eviction.",
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -162,7 +172,7 @@ WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '"
             {
                 identity,
                 state = NotCollectedYet,
-                message = "No row for this statement has been collected since the eviction. The collector takes only the costliest statements, so a cheap statement may never appear. Call again after the next query_stats collection.",
+                message = "No row for this statement has been collected since the eviction. Either it has not run since then, or it is outside the " + CollectorReads + ". Call again after the next query_stats collection.",
                 before = beforeNode,
             };
         }

@@ -3513,6 +3513,70 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
+    /// <summary>#7223: the five stored-credential builders share one body. Each role keeps its own login, application name and pool bound:
+    /// the web admin pool is the only one smaller than the default, and the owner string leaves the application name unset.</summary>
+    [Fact]
+    public void StoredCredential_EveryRoleBuilder_KeepsItsRoleApplicationNameAndPoolBound()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "DPAPI requires Windows.");
+
+        var root = Directory.CreateTempSubdirectory("darling-rolecred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var config = new PostgresConfig { Managed = true, Port = 5993, DataDirectory = dataDirectory };
+            var password = DarlingManagedPostgres.GeneratePassword();
+            var protectedPassword = DarlingSecrets.Protect(password);
+
+            var cases = new (Func<string, string> PathFor, Func<PostgresConfig, string?> Build, string Role, string? ApplicationName, int MaxPoolSize)[]
+            {
+                (DarlingManagedPostgres.CredentialPathFor, DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential,
+                    DarlingManagedPostgres.UserName, null, DarlingManagedPostgres.DefaultMaxPoolSize),
+                (DarlingManagedPostgres.McpCredentialPathFor, DarlingManagedPostgres.TryBuildMcpConnectionStringFromStoredCredential,
+                    DarlingManagedPostgres.McpRoleName, DarlingManagedPostgres.McpApplicationName, DarlingManagedPostgres.DefaultMaxPoolSize),
+                (DarlingManagedPostgres.ViewerCredentialPathFor, DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential,
+                    DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebApplicationName, DarlingManagedPostgres.DefaultMaxPoolSize),
+                (DarlingManagedPostgres.WebCredentialPathFor, DarlingManagedPostgres.TryBuildWebConnectionStringFromStoredCredential,
+                    DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.WebApplicationName, DarlingManagedPostgres.DefaultMaxPoolSize),
+                (DarlingManagedPostgres.AdminCredentialPathFor, DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential,
+                    DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.WebAdminApplicationName, DarlingManagedPostgres.WebAdminMaxPoolSize),
+            };
+
+            /* No credential file yet for any role: null, and writing one role's file does not stand in for another's. */
+            foreach (var c in cases)
+            {
+                Assert.Null(c.Build(config));
+                File.WriteAllText(c.PathFor(dataDirectory), protectedPassword);
+            }
+
+            foreach (var c in cases)
+            {
+                var derived = c.Build(config);
+                Assert.NotNull(derived);
+                var parsed = new NpgsqlConnectionStringBuilder(derived);
+                Assert.Equal(c.Role, parsed.Username);
+                Assert.Equal(password, parsed.Password);
+                Assert.Equal(5993, parsed.Port);
+                Assert.Equal(c.MaxPoolSize, parsed.MaxPoolSize);
+                if (c.ApplicationName is null)
+                {
+                    Assert.True(string.IsNullOrEmpty(parsed.ApplicationName), $"{c.Role}: the owner string must leave ApplicationName unset");
+                }
+                else
+                {
+                    Assert.Equal(c.ApplicationName, parsed.ApplicationName);
+                }
+            }
+
+            /* The web admin pool is the one deliberately small pool. */
+            Assert.Equal(4, new NpgsqlConnectionStringBuilder(DarlingManagedPostgres.TryBuildWebAdminConnectionStringFromStoredCredential(config)).MaxPoolSize);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void CertificateSanCoversIp_TrueForItsIpSan_FalseForOthers()
     {

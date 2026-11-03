@@ -118,7 +118,7 @@ public sealed class AgentChangeViewRow
     /// <summary>The call time, the sort key of the When column.</summary>
     public DateTime CalledAtUtc => Row.CalledAtUtc;
 
-    public string WhenDisplay => Row.CalledAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.CalledAtUtc, "yyyy-MM-dd HH:mm");
 
     public string Server => Row.ServerLabel;
 
@@ -180,7 +180,7 @@ public sealed class AgentRefusalViewRow
     /// <summary>The refusal time, the sort key of the Refused at column.</summary>
     public DateTime AtUtc => Row.AtUtc;
 
-    public string WhenDisplay => Row.AtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.AtUtc, "yyyy-MM-dd HH:mm");
 
     public string Server => Row.ServerLabel;
 

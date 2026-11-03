@@ -81,6 +81,27 @@ public sealed class ActionProposalStoreLiveTests
     internal static ActionProposalDraft Draft(Guid request, string tool, JsonObject target) =>
         new(request, 1, "agent-a", tool, 7, target, new JsonObject { ["statement"] = "EXEC x;" }, "the plan regressed");
 
+    /* #7225: the store has no own-transaction overloads of these two (the press calls the caller's-transaction ones), so a test opens the
+       connection and transaction itself and commits, as the press does. */
+    internal static async Task<bool> ApproveAsync(NpgsqlDataSource source, InvestigationRequestStore store, Guid proposalId, string person, CancellationToken ct)
+    {
+        await using var connection = await source.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var changed = await store.ApproveProposalAsync(connection, transaction, proposalId, person, null, ct);
+        await transaction.CommitAsync(ct);
+        return changed;
+    }
+
+    internal static async Task<bool> FinishAsync(NpgsqlDataSource source, InvestigationRequestStore store, Guid proposalId, string state, string actor,
+        JsonObject? outcome, CancellationToken ct)
+    {
+        await using var connection = await source.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var changed = await store.FinishProposalAsync(connection, transaction, proposalId, state, actor, outcome, ct);
+        await transaction.CommitAsync(ct);
+        return changed;
+    }
+
     private static JsonObject Force(int planId) => new() { ["database"] = "Sales", ["query_id"] = 9, ["plan_id"] = planId };
 
     private static async Task WithStoreAsync(Func<NpgsqlConnection, ScratchPostgres, CancellationToken, Task> body)
@@ -146,25 +167,26 @@ public sealed class ActionProposalStoreLiveTests
         await WithStoreAsync(async (connection, scratch, ct) =>
         {
             await AddRequestAsync(connection, s_request, "claimed", ct);
-            var store = new InvestigationRequestStore(NpgsqlDataSource.Create(scratch.ConnectionString), 30);
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var store = new InvestigationRequestStore(source, 30);
             var id = (await store.CreateProposalAsync(Draft(s_request, "force_query_store_plan", Force(5)), ct)).ProposalId;
             var facts = new JsonObject { ["statement"] = "EXEC x;" };
 
             /* No first press yet, so no confirming press. */
-            Assert.False(await store.ApproveProposalAsync(id, "person:ann", null, ct));
-            Assert.False(await store.FinishProposalAsync(id, ProposalStates.Run, "service", null, ct));
+            Assert.False(await ApproveAsync(source, store, id, "person:ann", ct));
+            Assert.False(await FinishAsync(source, store, id, ProposalStates.Run, "service", null, ct));
             Assert.True(await store.RecordFirstPressAsync(id, "person:ann", facts, new JsonObject { ["surface"] = "web" }, ct));
-            Assert.False(await store.ApproveProposalAsync(id, "person:bob", null, ct));
-            Assert.True(await store.ApproveProposalAsync(id, "person:ann", null, ct));
+            Assert.False(await ApproveAsync(source, store, id, "person:bob", ct));
+            Assert.True(await ApproveAsync(source, store, id, "person:ann", ct));
 
             /* A double press, a late first press and a supersede find no pending row. */
-            Assert.False(await store.ApproveProposalAsync(id, "person:ann", null, ct));
+            Assert.False(await ApproveAsync(source, store, id, "person:ann", ct));
             Assert.False(await store.RecordFirstPressAsync(id, "person:bob", facts, null, ct));
             Assert.False(await store.SupersedeProposalAsync(id, "person:ann", new JsonObject { ["changed"] = "statement" }, ct));
 
-            Assert.True(await store.FinishProposalAsync(id, ProposalStates.Run, "agent-a", new JsonObject { ["called_id"] = 41 }, ct));
-            Assert.False(await store.FinishProposalAsync(id, ProposalStates.Failed, "agent-a", null, ct));
-            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.FinishProposalAsync(id, ProposalStates.Expired, "service", null, ct));
+            Assert.True(await FinishAsync(source, store, id, ProposalStates.Run, "agent-a", new JsonObject { ["called_id"] = 41 }, ct));
+            Assert.False(await FinishAsync(source, store, id, ProposalStates.Failed, "agent-a", null, ct));
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => FinishAsync(source, store, id, ProposalStates.Expired, "service", null, ct));
 
             var row = (await store.GetProposalAsync(id, ct))!;
             Assert.Equal(ProposalStates.Run, row.State);
@@ -198,7 +220,8 @@ public sealed class ActionProposalStoreLiveTests
             await ExecAsync(connection, $"INSERT INTO config.investigation_journal (request_id, event, actor) VALUES ('{s_resolved}', 'resolved', 'service')", ct);
 
             var clock = DateTime.UtcNow;
-            var store = new InvestigationRequestStore(NpgsqlDataSource.Create(scratch.ConnectionString), 30, () => clock);
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var store = new InvestigationRequestStore(source, 30, () => clock);
             var kill = new JsonObject { ["session_id"] = 87 };
             var onClosed = (await store.CreateProposalAsync(Draft(s_closed, "force_query_store_plan", Force(5)), ct)).ProposalId;
             var resolvedKill = (await store.CreateProposalAsync(Draft(s_resolved, "kill_session", kill), ct)).ProposalId;
@@ -206,7 +229,7 @@ public sealed class ActionProposalStoreLiveTests
             var live = (await store.CreateProposalAsync(Draft(s_request, "kill_session", kill), ct)).ProposalId;
             var approved = (await store.CreateProposalAsync(Draft(s_request, "force_query_store_plan", Force(5)), ct)).ProposalId;
             Assert.True(await store.RecordFirstPressAsync(approved, "person:ann", new JsonObject(), null, ct));
-            Assert.True(await store.ApproveProposalAsync(approved, "person:ann", null, ct));
+            Assert.True(await ApproveAsync(source, store, approved, "person:ann", ct));
 
             var first = await store.SweepAsync(ct);
             Assert.Equal(2, first.Proposals);
@@ -343,7 +366,7 @@ public sealed class ActionProposalGrantLiveTests
 
             /* The store on the login's own data source is refused too, and changes nothing. */
             await using var source = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = password, Pooling = false }.ConnectionString);
-            var refused = await Assert.ThrowsAsync<PostgresException>(() => new InvestigationRequestStore(source, 30).ApproveProposalAsync(id, "person:eve", null, ct));
+            var refused = await Assert.ThrowsAsync<PostgresException>(() => ActionProposalStoreLiveTests.ApproveAsync(source, new InvestigationRequestStore(source, 30), id, "person:eve", ct));
             Assert.Equal("42501", refused.SqlState);
         }
 

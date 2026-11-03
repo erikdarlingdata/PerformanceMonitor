@@ -39,7 +39,7 @@ const COLUMNS = [
   { key: "reads_share_pct", label: "Reads %", format: "num1" },
   { key: "total_writes", label: "Writes", format: "int" },
   { key: "writes_share_pct", label: "Writes %", format: "num1" },
-  { key: "total_memory_mb", label: "Memory MB", format: "num1" },
+  { key: "peak_memory_mb", label: "Peak grant MB", format: "num1" },
   { key: "memory_share_pct", label: "Memory %", format: "num1" },
   { key: "executions_share_pct", label: "Executions %", format: "num1" },
   { key: "has_plan", label: "Plan", format: "bool" },

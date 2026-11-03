@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
@@ -95,6 +96,15 @@ public sealed class WebPeopleBehaviourTests
         Assert.False(r.GetProperty("addPersonPresent").GetBoolean());
         Assert.Empty(r.GetProperty("otherButtons").EnumerateArray());
         Assert.Equal(0, r.GetProperty("strips").GetInt32());
+    }
+
+    [Fact]
+    public void TheAdminNotice_SaysAnApproveGrantDecidesWhoApproves_NotThatGrantsDoNothing()
+    {
+        var notice = Run("notice").GetProperty("notice").GetString()!;
+
+        Assert.DoesNotContain("Nothing reads a grant", notice, StringComparison.Ordinal);
+        Assert.Contains("An approve grant lets that person approve", notice, StringComparison.Ordinal);
     }
 
     [Fact]

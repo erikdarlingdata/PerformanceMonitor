@@ -186,7 +186,14 @@ public partial class ManageServersWindow : Window
 
     private void EditButton_Click(object sender, RoutedEventArgs e) => EditSelected();
 
-    private void ServersGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditSelected();
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void ServersGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditSelected();
+        }
+    }
 
     private async void EditSelected()
     {
@@ -337,7 +344,7 @@ public partial class ManageServersWindow : Window
 /// <summary>
 /// One Manage-Servers grid row — a display projection of a <see cref="MonitoredServerRow"/> from the store.
 /// The bound property names match the grid's columns (<c>DisplayNameWithIntent</c> / <c>ServerNameDisplay</c>
-/// / <c>AuthenticationDisplay</c> / <c>StatusDisplay</c> / <c>MonthlyCostUsd</c> / <c>CreatedDate</c>), so the
+/// / <c>AuthenticationDisplay</c> / <c>StatusDisplay</c> / <c>MonthlyCostUsd</c> / <c>CreatedDisplay</c>), so the
 /// XAML is unchanged from the former <c>ViewerServerEntry</c> binding; the underlying <see cref="Row"/> drives
 /// the Edit / Delete / Enable / Excluded-Databases actions.
 /// </summary>
@@ -364,8 +371,16 @@ public sealed class ManagedServerListItem
 
     public decimal MonthlyCostUsd => Row.MonthlyCostUsd;
 
-    /// <summary>The store's creation time (local, for the grid's "Added" column); falls back to now for a row read without it.</summary>
-    public DateTime CreatedDate => (Row.CreatedAt ?? DateTime.UtcNow).ToLocalTime();
+    /// <summary>The store's creation time (naive UTC), the sort key of the "Added" column; falls back to now for a row read without it.</summary>
+    public DateTime CreatedAtUtc => Row.CreatedAt ?? DateTime.UtcNow;
+
+    /// <summary>The "Added" cell (#7343): the registration time on this row's own clock, exactly as <see cref="LastCollectedDisplay"/>
+    /// renders its time, so one row never mixes zones. Server mode shows this server's hour, UTC mode UTC, Local mode this
+    /// machine's wall time. None of them carries a label.</summary>
+    public string CreatedDisplay =>
+        ViewerTimeHelper.FormatForDisplay(
+            CreatedAtUtc, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock),
+            "yyyy-MM-dd HH:mm");
 
     /// <summary>The store's naive-UTC newest collection time for this server (MAX(collection_time) across all
     /// collectors), set once before binding; null when the Darling service has not collected this server yet.</summary>
