@@ -367,7 +367,12 @@ public class ServerPropertyRow
     public long? PhysicalMemoryMb { get => HostHardware ? null : _physicalMemoryMb; set => _physicalMemoryMb = value ?? 0L; }
     public int? SocketCount { get => HostHardware ? null : _socketCount; set => _socketCount = value; }
     public int? CoresPerSocket { get => HostHardware ? null : _coresPerSocket; set => _coresPerSocket = value; }
+    /// <summary>The server's start time on the SERVER's own clock, shown as-is. Never subtract it from the client's clock (#7176).</summary>
     public DateTime? SqlServerStartTime { get; set; }
+
+    /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured as two tick counts
+    /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
+    public DateTime? SqlServerStartUtc { get; set; }
     public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }
     public bool? IsClustered { get; set; }
@@ -392,14 +397,14 @@ public class ServerPropertyRow
 
     /// <summary>The uptime in seconds, the sort key of the Uptime column (#6086): <see cref="UptimeDisplay"/> is text, which sorts
     /// "10d" before "2d". Null when the start time is unknown.</summary>
-    public double? UptimeSeconds => SqlServerStartTime is { } start ? (DateTime.Now - start).TotalSeconds : null;
+    public double? UptimeSeconds => SqlServerStartUtc is { } start ? Math.Max(0d, (DateTime.UtcNow - start).TotalSeconds) : null;
 
     public string UptimeDisplay
     {
         get
         {
-            if (SqlServerStartTime == null) return "";
-            var uptime = DateTime.Now - SqlServerStartTime.Value;
+            if (UptimeSeconds is not { } seconds) return "";
+            var uptime = TimeSpan.FromSeconds(seconds);
             return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
         }
     }

@@ -92,6 +92,12 @@ let pageSeq = 0;
 /** The last press answer on the page, by proposal id, so it stays in view after the page reads the proposal again. */
 const lastPress = new Map();
 
+/** The proposals with a press in flight, and the newest draw of each. A press outlives one draw: the 60 second poll or the Refresh button
+    draws the page again while the write is still out, and that new draw must show the buttons disabled too (#7207). The reply then draws
+    the newest page, not the one the press started on (whose isCurrent has gone false). */
+const pressing = new Set();
+const newestDraw = new Map();
+
 /** The page: the list, or one proposal. */
 export function renderProposals(main, proposalId) {
   const mine = ++pageSeq;
@@ -132,7 +138,9 @@ export async function buildList(body, isCurrent = () => true) {
 export function pressResultNodes(result) {
   if (!result) return [];
   const answer = result.body || {};
-  const message = answer.message || result.message || "The press did not answer.";
+  /* A press refused before it reached the press logic (not signed in as a person, the owner connection not yet up, a bad request) answers
+     { error } from the route, not { message } (#7207). */
+  const message = answer.message || answer.error || result.message || "The press did not answer.";
   const nodes = [];
   if (answer.status === "first_pressed" || answer.status === "run") nodes.push(noticeStrip(message));
   else nodes.push(errorStrip(message));
@@ -145,6 +153,7 @@ export function pressResultNodes(result) {
 
 /** One proposal, with the presses for a session that can press. */
 export async function buildProposal(body, id, isCurrent = () => true) {
+  newestDraw.set(id, () => buildProposal(body, id, isCurrent));
   const res = await apiGet("/api/proposals/" + encodeURIComponent(id));
   if (!isCurrent()) return;
   if (res.kind !== "data") return mount(body, errorStrip(res.message || "The proposal could not be read."));
@@ -178,13 +187,25 @@ export async function buildProposal(body, id, isCurrent = () => true) {
   } else if (p.state === "pending") {
     if (data.press_note) nodes.push(noticeStrip(data.press_note));
     else if (data.person_name) nodes.push(noticeStrip("You press as " + data.person_name + "."));
+    /* #7207: both buttons stay disabled from the click until the reply arrives, so a double click sends one press, not two, and a draw
+       that lands in between (the poll, Refresh) draws them disabled too. The reply draws the page again, which replaces the buttons. */
+    const buttons = [];
     const press = (verb) => async () => {
-      const result = await apiWrite("POST", "/api/proposals/" + encodeURIComponent(p.proposal_id) + "/" + verb, {});
+      if (pressing.has(p.proposal_id)) return;
+      pressing.add(p.proposal_id);
+      for (const b of buttons) b.disabled = true;
+      let result;
+      try {
+        result = await apiWrite("POST", "/api/proposals/" + encodeURIComponent(p.proposal_id) + "/" + verb, {});
+      } finally {
+        pressing.delete(p.proposal_id);
+      }
       lastPress.set(p.proposal_id, result);
-      return buildProposal(body, id, isCurrent);
+      return newestDraw.get(id)();
     };
-    const buttons = [el("button", { class: "btn", type: "button", "data-action": "first-press", text: p.first_press_by ? "Read the facts again" : "First press: read the facts", onClick: press("first-press") })];
+    buttons.push(el("button", { class: "btn", type: "button", "data-action": "first-press", text: p.first_press_by ? "Read the facts again" : "First press: read the facts", onClick: press("first-press") }));
     if (p.first_press_by) buttons.push(el("button", { class: "btn", type: "button", "data-action": "confirm", text: "Confirm and run", onClick: press("confirm") }));
+    if (pressing.has(p.proposal_id)) for (const b of buttons) b.disabled = true;
     nodes.push(el("div", { class: "row-actions proposal-actions" }, buttons));
   }
   return mount(body, nodes);

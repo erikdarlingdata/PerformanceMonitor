@@ -405,19 +405,10 @@ public partial class FinOpsTab
 
     private async Task LoadFinOpsDatabaseSizesAsync()
     {
-        var data = await _dataService.GetDatabaseSizeLatestAsync(_server.ServerId, SelectedDatabaseFilter);
-
-        /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). */
-        if (_server.MonthlyCostUsd > 0 && data.Count > 0)
-        {
-            /* A row with no allocated size (the Hyperscale log file, in the log service) takes no share. */
-            var totalMb = DatabaseSizeRow.AllocatedTotalMb(data);
-            if (totalMb > 0)
-            {
-                foreach (var d in data)
-                    d.MonthlyCostShare = FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, _server.MonthlyCostUsd);
-            }
-        }
+        /* Proportional cost share by size (mirrors Lite's LoadDatabaseSizesAsync). The share is of the whole server's allocated size,
+           so a database filter narrows the rows without shrinking the total (#7174). A row with no allocated size (the Hyperscale
+           log file, in the log service) takes no share. */
+        var data = await _dataService.GetDatabaseSizeLatestWithCostShareAsync(_server.ServerId, SelectedDatabaseFilter, _server.MonthlyCostUsd);
 
         _finopsDbSizesFilterMgr!.UpdateData(data);
         FinOpsNoDbSizesMessage.Visibility = data.Count == 0 ? Visibility.Visible : Visibility.Collapsed;

@@ -2265,6 +2265,9 @@ public sealed class CreateMuteRuleCoreTests
     private static JsonNode Payload(string json) =>
         JsonNode.Parse(json)!["mute_rule"] ?? throw new InvalidOperationException($"no mute_rule in {json}");
 
+    /* A fixed future instant, whole seconds so it round-trips through the wire spelling unchanged. */
+    private static readonly DateTime FutureExpiry = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(30), DateTimeKind.Utc);
+
     [Fact]
     public async Task AFullBody_CreatesAnEnabledRule_AndReportsTheStoredRow()
     {
@@ -2279,9 +2282,9 @@ public sealed class CreateMuteRuleCoreTests
               "wait_type_pattern": "LCK",
               "job_name_pattern": "nightly",
               "reason": "  known load window  ",
-              "expires_at_utc": "2026-12-01T00:00:00Z"
+              "expires_at_utc": "{FUTURE}"
             }
-            """);
+            """.Replace("{FUTURE}", FutureExpiry.ToString("o", System.Globalization.CultureInfo.InvariantCulture)));
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
 
@@ -2293,7 +2296,7 @@ public sealed class CreateMuteRuleCoreTests
         Assert.Equal("pm-server-1", stored.ServerName);
         Assert.Equal("known load window", stored.Reason);
         Assert.Equal("nightly", stored.JobNamePattern);
-        Assert.Equal(new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc), stored.ExpiresAtUtc);
+        Assert.Equal(FutureExpiry, stored.ExpiresAtUtc);
 
         /* The #3306 clock starts NOW — the store's value, which is also what the payload reports. */
         Assert.True((DateTime.UtcNow - stored.CreatedAtUtc).Duration() < TimeSpan.FromMinutes(1));
@@ -2343,11 +2346,72 @@ public sealed class CreateMuteRuleCoreTests
         /* create_mute_rule's parameter spelling, honored here through the SAME parser normalization. */
         var store = new FakeMuteRuleStore();
 
-        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"expires_at\":\"2026-06-01T00:00:00Z\"}");
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"expires_at\":\"{FutureExpiry:o}\"}}");
 
         Assert.Equal("created", DarlingMcpTestData.StatusOf(result));
-        Assert.Equal(new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc),
-            store.Row((string)Payload(result)["id"]!)!.ExpiresAtUtc);
+        Assert.Equal(FutureExpiry, store.Row((string)Payload(result)["id"]!)!.ExpiresAtUtc);
+    }
+
+    /* #7198: a rule born already expired mutes nothing, so a create must refuse it instead of answering "created". */
+    [Theory]
+    [InlineData("expires_at")]
+    [InlineData("expires_at_utc")]
+    public async Task APastExpiry_IsRefused_AndStoresNothing(string key)
+    {
+        var store = new FakeMuteRuleStore();
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"{key}\":\"{past}\"}}");
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("already in the past", result, StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task TheMcpCreate_RefusesAPastExpiry_AndStoresNothing()
+    {
+        var store = new FakeMuteRuleStore();
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var result = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "stale clock", past);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(result));
+        Assert.Contains("already in the past", result, StringComparison.Ordinal);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task TheMcpCreate_RefusesAnExpiryExactlyAtNow_ButAcceptsOneSecondLater()
+    {
+        /* The boundary: an expiry equal to the create's clock mutes nothing, so it is refused (<=, not <). */
+        var store = new FakeMuteRuleStore();
+        var now = new DateTime(2030, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var atNow = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(atNow));
+        Assert.Equal(0, store.Count);
+
+        var later = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.AddSeconds(1).ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(later));
+    }
+
+    [Fact]
+    public async Task AnUpdate_MayStillSetAPastExpiry_ToEndARule()
+    {
+        var store = new FakeMuteRuleStore();
+        var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store, $"{{\"expires_at\":\"{FutureExpiry:o}\"}}");
+        var id = (string)Payload(created)["id"]!;
+        var past = DateTime.UtcNow.AddMinutes(-5).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+
+        var updated = await DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, $"{{\"expires_at_utc\":\"{past}\"}}");
+
+        Assert.Equal("updated", DarlingMcpTestData.StatusOf(updated));
+        Assert.True(store.Row(id)!.ExpiresAtUtc < DateTime.UtcNow);
     }
 
     [Fact]
@@ -2846,8 +2910,9 @@ public sealed class WebMuteRuleEndpointFlowTests
         var store = new FakeMuteRuleStore();
 
         /* POST /api/mute-rules */
+        var future = DateTime.UtcNow.AddDays(30).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
         var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
-            "{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"2026-12-01T00:00:00Z\"}");
+            $"{{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"{future}\"}}");
         Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
         var id = (string)JsonNode.Parse(created)!["mute_rule"]!["id"]!;
         var born = store.Row(id)!.CreatedAtUtc;

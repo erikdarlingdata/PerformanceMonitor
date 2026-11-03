@@ -1709,14 +1709,14 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Case-insensitive substring the alert's wait type must contain. Omit for any wait type.")] string? wait_type_pattern = null,
         [Description("Case-insensitive substring the alert's job name must contain. Omit for any job.")] string? job_name_pattern = null,
         [Description("Optional human-readable reason, shown in the mute-rule list.")] string? reason = null,
-        [Description("Optional ISO-8601 UTC expiry (e.g. 2026-08-01T00:00:00Z); after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
+        [Description("Optional ISO-8601 UTC expiry (e.g. 2027-08-01T00:00:00Z), which must be in the future; after this the rule no longer mutes. Omit for a permanent rule.")] string? expires_at = null,
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
         [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
         [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
         [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
-        [Description("Optional ISO-8601 UTC start (e.g. 2026-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null,
+        [Description("Optional ISO-8601 UTC start (e.g. 2027-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null,
         [Description("Optional repeat schedule (#7040): the days of the week the rule applies on, as day names (Mon..Sun or Monday..Sunday, any case). Omit for every day. Needs recur_start and recur_end.")] string[]? recur_days = null,
         [Description("Optional daily start time of the repeating window, 24-hour HH:mm in recur_time_zone (e.g. 22:00). Set with recur_end. A window may cross midnight (22:00 to 02:00).")] string? recur_start = null,
         [Description("Optional daily end time of the repeating window, 24-hour HH:mm in recur_time_zone (exclusive). Set with recur_start; it must differ from recur_start.")] string? recur_end = null,
@@ -1819,7 +1819,7 @@ public sealed partial class DarlingMcpAlertTools
                 if (!DateTime.TryParse(expires_at, CultureInfo.InvariantCulture,
                         DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed))
                 {
-                    return Outcome("invalid", $"expires_at '{expires_at}' is not a valid ISO-8601 timestamp (e.g. 2026-08-01T00:00:00Z).");
+                    return Outcome("invalid", $"expires_at '{expires_at}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T00:00:00Z).");
                 }
 
                 expiresAtUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
@@ -1831,7 +1831,7 @@ public sealed partial class DarlingMcpAlertTools
                 if (!DateTime.TryParse(starts_at, CultureInfo.InvariantCulture,
                         DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsedStart))
                 {
-                    return Outcome("invalid", $"starts_at '{starts_at}' is not a valid ISO-8601 timestamp (e.g. 2026-08-01T00:00:00Z).");
+                    return Outcome("invalid", $"starts_at '{starts_at}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T00:00:00Z).");
                 }
 
                 startsAtUtc = DateTime.SpecifyKind(parsedStart, DateTimeKind.Utc);
@@ -1840,6 +1840,11 @@ public sealed partial class DarlingMcpAlertTools
             if (startsAtUtc.HasValue && expiresAtUtc.HasValue && expiresAtUtc.Value <= startsAtUtc.Value)
             {
                 return Outcome("invalid", $"expires_at ({expiresAtUtc.Value:o}) must be after starts_at ({startsAtUtc.Value:o}). Nothing was written.");
+            }
+
+            if (PastExpiryRefusal(expiresAtUtc, now, "expires_at") is { } pastExpiry)
+            {
+                return Outcome("invalid", pastExpiry);
             }
 
             /* #7040: the repeat schedule, held to the one check every write path runs (MuteRule.TryNormalizeRecurrence). */
@@ -2010,6 +2015,12 @@ public sealed partial class DarlingMcpAlertTools
             if (WindowRefusal(rule) is { } coreWindowProblem)
             {
                 return Outcome("invalid", coreWindowProblem);
+            }
+
+            /* #7198: the web create holds a new rule to the create tool's rule, so an expiry already past is refused here too. */
+            if (PastExpiryRefusal(rule.ExpiresAtUtc, rule.CreatedAtUtc, "expires_at_utc") is { } corePastExpiry)
+            {
+                return Outcome("invalid", corePastExpiry);
             }
 
             if (!rule.TryNormalizeRecurrence(out var coreRecurrenceProblem))
@@ -2293,7 +2304,7 @@ public sealed partial class DarlingMcpAlertTools
         "changes the enabled flag cannot express: narrowing or correcting a pattern, rewording a reason, adding " +
         "an expires_at_utc to a rule that should stop being permanent, or clearing one so it stays. A PARTIAL " +
         "update: pass ONLY the fields to change as JSON in the SAME shape get_mute_rules returns (e.g. " +
-        "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2026-08-01T00:00:00Z\"}); a field you do NOT " +
+        "{\"reason\":\"root cause found\",\"expires_at_utc\":\"2027-08-01T00:00:00Z\"}); a field you do NOT " +
         "send is left exactly as stored, and an EXPLICIT JSON null clears a field — the same clearing the " +
         "Viewer's edit dialog performs by blanking it — so {\"expires_at_utc\":null} makes a rule permanent and " +
         "{\"job_name_pattern\":null} stops constraining that dimension (external_source clears the same way: null " +
@@ -2737,7 +2748,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             else
             {
-                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2026-08-01T00:00:00Z), or null for a permanent rule.";
+                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2027-08-01T00:00:00Z), or null for a permanent rule.";
             }
         }
 
@@ -2758,7 +2769,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             else
             {
-                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2026-08-01T00:00:00Z), or null for a rule that applies from now.";
+                error = $"'{spelling}' must be an ISO-8601 UTC timestamp (e.g. 2027-08-01T00:00:00Z), or null for a rule that applies from now.";
             }
         }
 
@@ -2907,6 +2918,14 @@ public sealed partial class DarlingMcpAlertTools
 
         return (changes, error);
     }
+
+    /// <summary>The refusal for a NEW rule whose expiry is not after <paramref name="nowUtc"/> (#7198), or null. Such a rule is born
+    /// expired and mutes nothing, yet a create would answer "created" and the caller (an agent with a stale clock, say) would believe
+    /// the alerts were silenced. Create only: an update may set a past expiry to end a rule on purpose, so it does not run this.</summary>
+    internal static string? PastExpiryRefusal(DateTime? expiresAtUtc, DateTime nowUtc, string field) =>
+        expiresAtUtc is { } e && e <= nowUtc
+            ? $"'{field}' ({e.ToString("o", CultureInfo.InvariantCulture)}) is already in the past, so the rule would be born expired and mute nothing. Send a future instant, or omit it for a permanent rule. Nothing was written."
+            : null;
 
     /// <summary>The refusal for a rule whose end is not after its start (#6231), or null. A window that ends before it starts would
     /// never apply and would read as if it did, so every write that can set either bound runs this on the rule it is about to

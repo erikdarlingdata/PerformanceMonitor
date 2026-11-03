@@ -41,12 +41,14 @@ const proposal = {
   first_press_by: null, first_press_at_utc: null, first_press_facts: null, decided_by: null, outcome: null,
 };
 let pressAnswer = { status: 200, body: { status: "first_pressed", code: null, message: "These are the facts now.", facts: { pid: 87 }, changed: [] } };
+let pressGate = null; /* when set, a POST waits on this promise before it answers (the press in flight) */
 const posts = [];
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   const reply = (status, body) => ({ status, ok: status < 400, text: async () => JSON.stringify(body), headers: { get: () => "application/json" } });
   if (init && init.method === "POST") {
     posts.push({ path: u, body: JSON.parse(init.body) });
+    if (pressGate) await pressGate;
     if (u.endsWith("/first-press") && pressAnswer.body.status === "first_pressed") {
       proposal.first_press_by = "person:5"; proposal.first_press_name = "Ann";
       proposal.first_press_at_utc = "2026-11-01T10:05:00Z";
@@ -104,6 +106,58 @@ try {
       await click(button("first-press"));
       out.strips = strips();
       out.changed = role("changed") ? role("changed").textContent : null;
+    },
+    /* A press the route itself refuses answers { error }, not { message } (#7207): the page shows that sentence. */
+    async routeRefused() {
+      pressAnswer = { status: 403, body: { error: "Your sign-in is no longer mapped to an enabled person, so you cannot press this." } };
+      await draw(ID);
+      await click(button("first-press"));
+      out.strips = strips();
+    },
+    /* A double click while the first press is in flight (#7207): both buttons are disabled, only one POST goes out, and the buttons come
+       back (drawn again) when the reply lands. */
+    async doubleClick() {
+      proposal.first_press_by = "person:5"; proposal.first_press_name = "Ann";
+      proposal.first_press_at_utc = "2026-11-01T10:05:00Z";
+      pressAnswer = { status: 200, body: { status: "run", code: null, message: "The action ran.", facts: { pid: 87 }, changed: [] } };
+      let release;
+      pressGate = new Promise((r) => { release = r; });
+      await draw(ID);
+      const confirm = button("confirm");
+      const first = (async () => { for (const fn of confirm.listeners.click) await fn({}); })();
+      await settle();
+      out.disabledInFlight = buttons().map((b) => b.disabled);
+      const other = button("first-press"); /* a disabled button is not clicked; fired without awaiting so old code cannot hang here */
+      const third = other.disabled ? null : (async () => { for (const fn of other.listeners.click) await fn({}); })();
+      const second = (async () => { for (const fn of confirm.listeners.click) await fn({}); })(); /* a second event on the same button */
+      await settle();
+      out.postsInFlight = posts.length;
+      release();
+      await first; await second; await third; await settle();
+      out.postsAfter = posts.length;
+      out.disabledAfter = buttons().map((b) => b.disabled);
+      out.strips = strips().map((x) => x.text);
+    },
+    /* A redraw while a press is in flight (#7207): the 60 second poll or Refresh draws the page again. The new buttons are disabled too, no
+       second press goes out, and once the write settles the page shows the answer with the buttons enabled again. */
+    async redrawDuringPress() {
+      proposal.first_press_by = "person:5"; proposal.first_press_name = "Ann";
+      proposal.first_press_at_utc = "2026-11-01T10:05:00Z";
+      pressAnswer = { status: 200, body: { status: "first_pressed", code: null, message: "These are the facts now.", facts: { pid: 87 }, changed: [] } };
+      let release;
+      pressGate = new Promise((r) => { release = r; });
+      await draw(ID);
+      const first = (async () => { for (const fn of button("first-press").listeners.click) await fn({}); })();
+      await settle();
+      await draw(ID); /* the poll: a new page, new buttons */
+      out.disabledAfterRedraw = buttons().map((b) => b.disabled);
+      await click(button("confirm")); /* a click on a disabled button does nothing */
+      out.postsInFlight = posts.length;
+      release();
+      await first; await settle();
+      out.postsAfter = posts.length;
+      out.disabledAfter = buttons().map((b) => b.disabled);
+      out.strips = strips().map((x) => x.text);
     },
     /* An administrator path: the note that says why a two-person route needs a mapped person shows before any press. */
     async administrator() {
