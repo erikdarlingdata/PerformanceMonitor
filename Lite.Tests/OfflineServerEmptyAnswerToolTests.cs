@@ -95,7 +95,7 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
 
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith(ServerName + " is offline: it has had no successful collection since ", message, StringComparison.Ordinal);
+        Assert.StartsWith(ServerName + " is offline: the store has had no successful collection from it since ", message, StringComparison.Ordinal);
         Assert.DoesNotContain("genuinely", message, StringComparison.Ordinal);
         /* Darling's offline answer is the bare status and message, with no window keys (DarlingServerOfflineNote.OfflineInsteadOfEmpty). */
         Assert.Equal(new[] { "message", "status" }, root.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));

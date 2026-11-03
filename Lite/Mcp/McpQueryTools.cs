@@ -1760,7 +1760,7 @@ public sealed class McpQueryTools
 
         return McpHelpers.Status(
             "unavailable",
-            $"{OfflineSubject(dataService, serverId)} is offline: it has had no successful collection since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
             + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
     }
 
@@ -1770,11 +1770,6 @@ public sealed class McpQueryTools
     private static string OfflineSubject(LocalDataService dataService, int serverId) =>
         dataService.ServerDisplayNameLookup?.Invoke(serverId) is { Length: > 0 } name ? name : "This server";
 
-    /// <summary>
-    /// True for the answer <see cref="OfflineInsteadOfEmptyAsync"/> builds. It carries no window hints, as Darling's <c>OfflineInsteadOfEmpty</c>
-    /// answer carries none: the window notice speaks for a window the store may not reach back to, and an offline answer says why nothing
-    /// is there already.
-    /// </summary>
     /// <summary>An answer's <c>status</c> word and <c>message</c>, read with one parse (null when the answer is not a status envelope).</summary>
     private readonly record struct AnswerStatus(string? Word, string? Message)
     {
