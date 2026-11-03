@@ -2670,7 +2670,7 @@ public sealed class PgLogEventsRungTests
         Assert.Contains("return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";", viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
-    /// <summary>The managed RAM rule gives 128 / 139 on an 8 GB host at the current hypertable count, and the runbook and README carry the log-events rows; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
+    /// <summary>The managed RAM rule gives 128 / 147 on an 8 GB host at the current hypertable count, and the runbook and README carry the log-events rows; the CI cluster workflows keep their own (smaller) floor, held by CiClusterWorkerSizingTests.</summary>
     [Fact]
     public void TheWorkerExample_AndTheLogEventsRows_Hold()
     {
@@ -2682,7 +2682,7 @@ public sealed class PgLogEventsRungTests
         var workers = example.MaxBackgroundWorkers;
         var processes = example.MaxWorkerProcesses;
         Assert.Equal(128, workers);
-        Assert.Equal(139, processes);
+        Assert.Equal(147, processes);
 
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
         Assert.Contains("| `get_pg_log_events` |", runbook, StringComparison.Ordinal);
