@@ -930,6 +930,35 @@ public sealed partial class DarlingCollectorRunner
     private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), long[]> _textFetchCarryover = new();
 
     /// <summary>
+    /// #7187: how many fetch attempts in a row threw for an id, for the ids a carryover holds. An attempt is a pass
+    /// whose target read of the chunk holding the id threw; a store-write throw counts against no id. A completed pass
+    /// that issued the id resets its count to zero, and a pass that did not issue it (cut by the time budget, or past
+    /// the attempt cap) neither ends nor extends the run. Kept beside the carryover (same key, same in-memory life) rather than inside it, because the
+    /// carryover is a sorted <c>long[]</c> that the retry reads in id order: the count is what lets a throw carry an
+    /// id forward without a poison id staying at the head of that order for good. Only ids with a count above zero
+    /// have an entry, and a pass that completes prunes it to the ids still owed.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), Dictionary<long, int>> _planFetchThrowAttempts = new();
+
+    /// <summary>Text twin of <see cref="_planFetchThrowAttempts"/>, keyed by query_id.</summary>
+    private readonly ConcurrentDictionary<(int ServerId, string Database, string Collector), Dictionary<long, int>> _textFetchThrowAttempts = new();
+
+    /// <summary>
+    /// #7187: the throws an id survives in the carryover before it is dropped. Five matches how far the #2776 backoff
+    /// narrows the width (to a sixteenth), so a pass that threw only because it was too wide has narrowed to a width
+    /// that fits before any id is given up on.
+    /// </summary>
+    internal const int MaxFetchThrowAttempts = 5;
+
+    /// <summary>The ids a database's plan fetch still owes the store. For tests.</summary>
+    internal long[] PlanFetchCarryoverForTests(int serverId, string database, string collector) =>
+        _planFetchCarryover.TryGetValue(FetchStateKey(serverId, database, collector), out var ids) ? ids : [];
+
+    /// <summary>The query ids a database's text fetch still owes the store. For tests.</summary>
+    internal long[] TextFetchCarryoverForTests(int serverId, string database, string collector) =>
+        _textFetchCarryover.TryGetValue(FetchStateKey(serverId, database, collector), out var ids) ? ids : [];
+
+    /// <summary>
     /// Memoizes <see cref="QueryStoreFetchProbe.TouchAndProbePlansAsync"/>'s verdict so a plan id
     /// already confirmed resolved-and-current recently skips the store round trip entirely (#3189,
     /// #3216 — see <see cref="QueryStoreProbeCache"/> for the measurement and why this differs from

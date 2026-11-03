@@ -84,6 +84,8 @@ public partial class LocalDataService
         ReadPhaseTimer? timer, CancellationToken cancellationToken,
         [CallerMemberName] string? holderMember = null, [CallerFilePath] string? holderFile = null)
     {
+        /* #7256: a read that passes no timer still reports its lock wait and open to the TimeQuery line it runs under. */
+        timer ??= Helpers.QueryExecutionContext.CurrentPhases;
         IDisposable readLock;
         using (timer?.Measure(ReadPhaseTimer.LockWait))
         {
