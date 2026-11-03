@@ -838,7 +838,9 @@ public sealed class DarlingStoreFolderScriptTests
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($meSid, 'ListDirectory', 'Deny')))
             Set-Acl -LiteralPath $lockedDir -AclObject $acl
             $deniedFolder = Find-DarlingStoreLinks $t
-            'deniedUnreadable=' + $deniedFolder.Unreadable.StartsWith($lockedDir)
+            # The walk reports the folder's full path, which spells out an 8.3 short name in the runner's temp path, so compare against the full form.
+            'deniedUnreadable=' + $deniedFolder.Unreadable.StartsWith([System.IO.Path]::GetFullPath($lockedDir), [System.StringComparison]::OrdinalIgnoreCase)
+            'deniedUnreadableText=' + $deniedFolder.Unreadable
             $acl = Get-Acl -LiteralPath $lockedDir
             foreach ($rule in @($acl.Access | Where-Object { $_.AccessControlType -eq 'Deny' })) { [void]$acl.RemoveAccessRule($rule) }
             Set-Acl -LiteralPath $lockedDir -AclObject $acl
@@ -1451,6 +1453,61 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.EndsWith("Then run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service.", account, StringComparison.Ordinal);
 
         Assert.Contains("fine=no-fail", answers);
+    }
+
+    /// <summary>#7267: a post-stop plan of Refuse ends the upgrade with the stopped-text Fail and never reaches the lock. The
+    /// pre-stop judgement can be skipped (its catch only warns) or the store can change after it, and the lock's own gate checks
+    /// owners and top-level links only, so a store the plan refuses would otherwise be locked, printed as Good and started. The text
+    /// is the stopped text with the plan's reason: it never says "has not stopped or copied anything" (false after the stop), and the
+    /// four commands appear only when the plan says they are the way forward.</summary>
+    [Fact]
+    public void ThePostStopPlanOfRefuse_FailsTheUpgrade_AndNeverLocksTheStore()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "Windows PowerShell and ACLs");
+
+        var answers = RunWindowsPowerShell(UpgradeProbe(StoreProbeHelpers + """
+            function Fail([string]$message) { throw ('FAILCALLED:' + $message) }
+            function Get-DarlingDataDirectory([string]$path) { return 'C:\store\pg' }
+            function Get-DarlingStoreTrustedSids([string]$account, [string]$name) { return @($meSid, $system, $admins) }
+            function Get-DarlingStoreAdopterSids { return @($meSid) }
+            function Invoke-DarlingStoreAdoption { 'adoption-was-called' }
+            function Initialize-DarlingStoreFolder { 'initialize-was-called' }
+            $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+            function Run-Case([string]$label, [bool]$byHand) {
+                $script:probeByHand = $byHand
+                try { Repair-DarlingStoreAfterStop 'C:\store' 'darling.json' $me $null 'PerfSvc'; "$label=no-fail" }
+                catch { "$label=" + ($_.Exception.Message -replace "`n", ' | ') }
+            }
+            function Get-DarlingStoreAdoptionPlan {
+                [pscustomobject]@{ State = 'Refuse'; Reason = 'C:\store\pg\base\1 is a hard link to a file outside the store.'; Findings = @(); FixByHand = $script:probeByHand; Writers = @() }
+            }
+
+            Run-Case 'advice' $false
+            Run-Case 'commands' $true
+            """));
+
+        Assert.DoesNotContain("initialize-was-called", answers);
+        Assert.DoesNotContain("adoption-was-called", answers);
+        Assert.DoesNotContain(answers, line => line.EndsWith("=no-fail", StringComparison.Ordinal));
+
+        foreach (var label in new[] { "advice", "commands" })
+        {
+            var failure = Assert.Single(answers, line => line.StartsWith(label + "=", StringComparison.Ordinal));
+            Assert.Contains("FAILCALLED:", failure, StringComparison.Ordinal);
+            Assert.Contains("cannot be upgraded in place: C:\\store\\pg\\base\\1 is a hard link to a file outside the store.", failure, StringComparison.Ordinal);
+            Assert.Contains("'PerfSvc' is STOPPED", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("has not stopped or copied", failure, StringComparison.Ordinal);
+            Assert.DoesNotContain("Start-Service", failure, StringComparison.Ordinal);
+            Assert.EndsWith("Then run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service.", failure, StringComparison.Ordinal);
+        }
+
+        var advice = Assert.Single(answers, line => line.StartsWith("advice=", StringComparison.Ordinal));
+        Assert.DoesNotContain("icacls ", advice, StringComparison.Ordinal);
+        Assert.DoesNotContain("/setowner", advice, StringComparison.Ordinal);
+
+        var commands = Assert.Single(answers, line => line.StartsWith("commands=", StringComparison.Ordinal));
+        Assert.Contains("dir /s /a:l", commands, StringComparison.Ordinal);
+        Assert.Contains("/setowner", commands, StringComparison.Ordinal);
     }
 
     private static string UpgradeProbe(string body) => string.Join(

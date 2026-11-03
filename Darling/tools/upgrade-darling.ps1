@@ -2415,8 +2415,11 @@ function Invoke-DarlingStoreAdoption([string]$folder, [string]$dataDirectory, $s
 # the upgrade ends here with the service STOPPED, the four commands, and a re-run of this script as the step after them. $what says
 # what failed.
 # An empty $serviceSid leaves the commands out, because the service account's own grant cannot be named without it.
-function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName) {
-    if ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
+# $withCommands false leaves them out too, for a store whose reason says not to run them (a hard link outside the store, a link
+# someone else made): $what then carries the advice and this text only adds the re-run step.
+function Get-DarlingStoreStoppedText([string]$folder, [string]$what, [string]$serviceSid, [string]$serviceName, [bool]$withCommands = $true) {
+    if (-not $withCommands) { $fix = "Follow the advice above, because the four fix commands are not the way forward for this store." }
+    elseif ($serviceSid) { $fix = "Fix the folder by hand from an elevated prompt:`n$(Get-DarlingStoreRepairText $folder $serviceSid)" }
     else { $fix = "Fix the service's Log On account so Windows can resolve it." }
     return "$what The new build IS in place and '$serviceName' is STOPPED. It stays stopped: the service refuses a store it cannot trust, so starting it now would only show that refusal. $fix`nThen run upgrade-darling.ps1 again with the same arguments: it judges the store again, finishes the upgrade and starts the service."
 }
@@ -2464,6 +2467,10 @@ function Get-DarlingStoreRefusalText([string]$folder, $plan, [string]$serviceSid
 # The store folder step after the copy, with the service stopped: a store the previous release was running is fixed in place, then
 # the folder is locked the way install-darling.ps1 locks it. Either step failing ends the upgrade with Fail and the service left
 # stopped (#7267): the service would refuse the store, and "Service is Running." with no database is the symptom reported there.
+# So does a post-stop plan of Refuse: the pre-stop judgement may have been skipped (its catch only warns) or the store may have changed
+# since, and the lock's own gate checks owners and top-level links only, so it must not be left to catch what the plan found.
+# A plan of Leave goes on to the lock, as it does before the stop: the store has no PG_VERSION, so no cluster is at risk, the lock
+# leaves the items' explicit grants where they are, and the service's own start check stays the gate.
 function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath, [string]$logonAccount, $operatorSid, [string]$serviceName) {
     try { $serviceSid = (New-Object System.Security.Principal.NTAccount($logonAccount)).Translate([System.Security.Principal.SecurityIdentifier]) }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be secured because the service account '$logonAccount' could not be resolved ($($_.Exception.Message))." '' $serviceName) }
@@ -2477,6 +2484,9 @@ function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath,
         if ($adoptPlan.State -eq 'Adopt') { Invoke-DarlingStoreAdoption $storeFolder $dataDirectory $serviceSid $adoptTrusted $adoptors $adoptPlan $null $null $operatorSid }
     }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
+    if ($adoptPlan -and $adoptPlan.State -eq 'Refuse') {
+        Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' cannot be upgraded in place: $($adoptPlan.Reason)" $serviceSid.Value $serviceName ([bool]$adoptPlan.FixByHand))
+    }
     # A drive root is not locked (the plan says why and how to move the store), and the upgrade goes on.
     if ($adoptPlan -and $adoptPlan.State -eq 'DriveRoot') {
         Warn "The store folder '$storeFolder' is a drive root, so this script does not lock it. The service is stopped now and the script goes on to start it, and the service locks its store folder itself at every start, which changes the permissions of the whole drive (#7363). To move the store instead, stop the service, move the data directory and the files beside it (pg.log, server.key, server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own, point postgres.dataDirectory in darling.json at the moved data directory, and run this script again."
