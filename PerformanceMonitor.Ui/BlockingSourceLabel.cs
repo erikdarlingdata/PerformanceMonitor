@@ -20,7 +20,7 @@ internal static class BlockingSourceLabel
     internal const string DmvSnapshot = "DMV snapshot";
 
     /// <summary>
-    /// <paramref name="baseLabel"/> with the answering arm appended in parentheses, for example <c>Blocking Incidents (DMV snapshot)</c>.
+    /// <paramref name="baseLabel"/> with the answering arm appended in parentheses, for example <c>Block Duration (ms) (DMV snapshot)</c>.
     /// The reads answer from ONE arm, so the first recognized tag names the chart. No rows, or rows carrying no recognized tag (the
     /// deadlock reads leave it null), return <paramref name="baseLabel"/> unchanged: nothing answered, so nothing is named.
     /// </summary>
