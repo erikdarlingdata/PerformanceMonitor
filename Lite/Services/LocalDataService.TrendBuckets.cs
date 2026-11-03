@@ -365,12 +365,18 @@ ORDER BY 1";
         string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
         IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row of the relation reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync(relation.Substring(2), "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string windowRelation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        command.CommandText = BucketedDurationTrendSql(relation, dbClause);
+        command.CommandText = BucketedDurationTrendSql(windowRelation, dbClause);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -399,6 +405,7 @@ ORDER BY 1";
         }
 
         return items;
+        }
     }
 
     /// <summary>

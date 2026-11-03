@@ -127,9 +127,16 @@ ORDER BY p.rk";
     public async Task<List<DatabaseCpuRow>> GetCpuByDatabaseAsync(int serverId, DateTime startUtc, DateTime endUtc, int limit)
     {
         using var _q = TimeQuery("GetCpuByDatabaseAsync", "v_query_stats per database CPU (MCP)");
+
+        /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", startUtc, ReadAsync, CancellationToken.None);
+
+        async Task<List<DatabaseCpuRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = CpuByDatabaseSql;
+        command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -151,6 +158,7 @@ ORDER BY p.rk";
         }
 
         return rows;
+        }
     }
 
     /* ───────────────────────── get_load_by_caller ───────────────────────── */
@@ -274,9 +282,16 @@ ORDER BY p.rk, t.hr";
     public async Task<List<CallerGroup>> GetLoadByCallerAsync(int serverId, DateTime startUtc, DateTime endUtc, int groups, int statements)
     {
         using var _q = TimeQuery("GetLoadByCallerAsync", "v_query_snapshots grouped by caller (MCP)");
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startUtc, ReadAsync, CancellationToken.None);
+
+        async Task<List<CallerGroup>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = LoadByCallerSql;
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -306,6 +321,7 @@ ORDER BY p.rk, t.hr";
         }
 
         return result;
+        }
     }
 
     /* ───────────────────────── get_query_pileups ───────────────────────── */
@@ -359,9 +375,16 @@ ORDER BY p.sessions DESC NULLS LAST, p.collection_time DESC NULLS LAST, p.query_
     public async Task<List<Pileup>> GetQueryPileupsAsync(int serverId, DateTime startUtc, DateTime endUtc, int minSessions, int limit)
     {
         using var _q = TimeQuery("GetQueryPileupsAsync", "v_query_snapshots same-statement pile-ups (MCP)");
+
+        /* #7256: a window that starts after the newest archived row of query_snapshots reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_snapshots", "collection_time", startUtc, ReadAsync, CancellationToken.None);
+
+        async Task<List<Pileup>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = PileupsSql;
+        command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -386,6 +409,7 @@ ORDER BY p.sessions DESC NULLS LAST, p.collection_time DESC NULLS LAST, p.query_
         }
 
         return piles;
+        }
     }
 
     /// <summary>One blocked/blocking pair of a DMV blocking snapshot.</summary>
