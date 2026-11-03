@@ -348,8 +348,22 @@ public sealed class AlertEngineTests
         public List<(string Key, string Metric, int Watermark)> SavedEdge { get; } = new();
         public List<(string Key, DateTime Watermark)> SavedFailedJob { get; } = new();
 
-        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName) =>
-            Task.FromResult(EdgeWatermarks.TryGetValue((serverKey, metricName), out var w) ? (int?)w : null);
+        /* #7295: how many of the next edge-watermark loads throw, as a store that cannot be read does. Every load counts. */
+        public int FailEdgeLoads { get; set; }
+
+        public int EdgeLoadAttempts { get; private set; }
+
+        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName)
+        {
+            EdgeLoadAttempts++;
+            if (FailEdgeLoads > 0)
+            {
+                FailEdgeLoads--;
+                throw new InvalidOperationException("edge watermark store read failed");
+            }
+
+            return Task.FromResult(EdgeWatermarks.TryGetValue((serverKey, metricName), out var w) ? (int?)w : null);
+        }
 
         /* #7085: a metric name whose edge-watermark save throws, to pin that a failed save does not cost the page. */
         public string? ThrowOnSaveEdgeMetric { get; set; }
@@ -2650,6 +2664,75 @@ public sealed class AlertEngineTests
         h.Adapter.Deadlocks.Add(DeadlockRow());
         await h.Build().EvaluateServerAsync(Harness.Snapshot());
         Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Deadlock_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        /* #7295: the saved watermark (1) covers the report in the window. A store that cannot be read used to look like a store with
+           no row: the key was marked seeded at 0 and the report was paged again. The failed read now leaves the key unseeded and
+           the deadlock check is skipped for that sweep, so nothing is paged and nothing is saved. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)] = 1;
+        h.StateStore.FailEdgeLoads = 1;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        /* The store works again. The next sweep reads the saved watermark and the report it covers stays quiet, once the cooldown is out too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+    }
+
+    [Fact]
+    public async Task Blocking_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)] = 1;
+        h.StateStore.FailEdgeLoads = 1;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        h.Adapter.Blocking.Add(BlockingRow(77));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
+    }
+
+    [Fact]
+    public async Task AFailedWatermarkRead_IsReadAgainOnEverySweep_AndTheTwoSkippedChecksFetchNothing()
+    {
+        /* #7295: a store that stays unreadable is asked again on every sweep, and blocking and deadlocks read nothing and page
+           nothing meanwhile. The two loads of one seed count as one attempt, because the first one throws. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.FailEdgeLoads = 100;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(2, h.StateStore.EdgeLoadAttempts);
+        Assert.Equal(0, h.Adapter.BlockingFetches + h.Adapter.DeadlockFetches);
     }
 
     [Fact]

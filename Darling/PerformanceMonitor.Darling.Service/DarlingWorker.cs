@@ -1374,7 +1374,8 @@ public sealed partial class DarlingWorker : BackgroundService
        IAlertStateStore on each server's first post-restart sweep (EnsureWatermarksSeededAsync), but
        nothing does the equivalent here, so a restart resets the watermark to 0 and the very next sweep
        re-fires on a deadlock/blocking count still sitting in the rolling window from before the
-       restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededServerKeys. */
+       restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededServerKeys. #7295: a key is added
+       only after a load that worked (a row or no row), so a failed load leaves it unseeded and the pass is skipped. */
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockWatermarkSeeded = new(StringComparer.Ordinal);
     /* #7295: set once the pairs half of the deadlock seed has read the stored list. Until then the replace hook writes nothing. */
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockPairsSeeded = new(StringComparer.Ordinal);

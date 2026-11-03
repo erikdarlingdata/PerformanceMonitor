@@ -585,6 +585,8 @@ AND   NOT EXISTS (SELECT 1 FROM v_config_alert_log AS r
     /// from these at startup, before the first alert sweep, so a restart does not
     /// reset the watermark to 0 and re-fire (and re-post a webhook for) events
     /// still lingering in the rolling lookback window.
+    /// <para>#7295: a read that fails is logged and then thrown. An empty list means the table was read and holds no row. It used
+    /// to answer an empty list for a failure too, so a seed that could not read looked like a store with nothing saved.</para>
     /// </summary>
     public async Task<List<(int ServerId, string MetricName, int Watermark)>> LoadEdgeTriggerWatermarksAsync()
     {
@@ -621,6 +623,7 @@ WHERE watermark_time IS NULL";
         catch (Exception ex)
         {
             AppLogger.Error("Alerts", $"Could not load edge-trigger watermarks: {ex.Message}");
+            throw;
         }
         return result;
     }

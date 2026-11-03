@@ -1041,11 +1041,14 @@ public sealed partial class DarlingWorker
                name #2711 deliberately chose means no new column or row shape is needed, only a read
                before trusting an in-memory zero. Once per key, mirroring AlertEngine's
                EnsureWatermarksSeededAsync/_seededServerKeys. */
-            var firstSeed = _pgDeadlockWatermarkSeeded.TryAdd(key, true);
-            /* #7295: the pairs half of the seed is done only when the read returned a list. A failed read is tried again on the
-               next sweep, and until it succeeds the replace hook writes nothing (below), so the stored pairs a restart should
-               have found are not overwritten by a set that never loaded them. */
-            if (firstSeed || !_pgDeadlockPairsSeeded.ContainsKey(key))
+            /* #7295: the watermark half of the seed is done only when its load worked, a row or no row. A load that fails throws
+               into the catch below: this pass counts and pages nothing from a watermark of 0 that a page may already have been
+               carried past, and the next pass loads it again. Nothing in memory has moved by then, so the load is still the first one.
+               The pairs half is done only when the read returned a list. A failed read is tried again on the next sweep, and until
+               it succeeds the replace hook writes nothing (below), so the stored pairs a restart should have found are not
+               overwritten by a set that never loaded them. */
+            var watermarkSeeded = _pgDeadlockWatermarkSeeded.ContainsKey(key);
+            if (!watermarkSeeded || !_pgDeadlockPairsSeeded.ContainsKey(key))
             {
                 var seeded = await SeedPgDeadlockStateAsync(
                     stateStore, key, metricName,
@@ -1058,8 +1061,9 @@ public sealed partial class DarlingWorker
                             restored.UnionWith(waiting);
                         }
                     },
-                    retry: !firstSeed);
+                    loadWatermark: !watermarkSeeded);
                 readClock.Restart();
+                _pgDeadlockWatermarkSeeded.TryAdd(key, true);
                 if (seeded.PairsRead)
                 {
                     _pgDeadlockPairsSeeded.TryAdd(key, true);
@@ -1334,7 +1338,7 @@ public sealed partial class DarlingWorker
             store, counted, unannounced, noteNewForAgentGate, logger, serverKey, serverId, rows, now,
             persistUnannounced: null, cancellationToken);
 
-    /// <summary>What the seed found: the saved count watermark (null leaves the one in memory as it is), and whether the pairs read worked.</summary>
+    /// <summary>What the seed found: the saved count watermark (null leaves the one in memory as it is, because no row is saved or because it was not asked for), and whether the pairs read worked.</summary>
     internal readonly record struct PgDeadlockSeed(int? Watermark, bool PairsRead);
 
     /// <summary>
@@ -1354,14 +1358,18 @@ public sealed partial class DarlingWorker
     /// When a retry finds pairs in memory that the stored set lacks (counted while the read was failing), the whole set is
     /// written back once.
     /// <para><c>PairsRead</c> is false when the pairs read failed, so the caller tries again on the next sweep with
-    /// <paramref name="retry"/> set. A retry answers no watermark: the first read already took the saved watermark's turn,
-    /// and the count has moved since.</para>
+    /// <paramref name="loadWatermark"/> false. That call answers no watermark: the first call already took the saved watermark's
+    /// turn, and the count has moved since.</para>
+    /// <para>A watermark load that fails throws (#7295), before anything is restored, and the caller does not count that sweep. It
+    /// calls again with <paramref name="loadWatermark"/> still true, so the saved watermark is loaded as it would be after a clean
+    /// restart. Answering null for a failed load would have taken the retry for an empty store, and the pass would have run from a
+    /// watermark of 0.</para>
     /// </summary>
     internal static async Task<PgDeadlockSeed> SeedPgDeadlockStateAsync(
         PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
-        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool retry = false)
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool loadWatermark = true)
     {
-        var watermark = retry ? null : await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+        var watermark = loadWatermark ? await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName) : null;
         var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
         if (waiting is null)
         {
@@ -1672,12 +1680,14 @@ public sealed partial class DarlingWorker
         var readClock = Stopwatch.StartNew();
         try
         {
-            /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. */
-            if (_pgBlockingWatermarkSeeded.TryAdd(key, true))
+            /* #2716: same restart-survival seed as EvaluatePgDeadlocksAsync — see its comment. #7295: the server is marked
+               seeded only after a load that worked, a row or no row. A load that fails throws into the catch below, so this pass
+               pages nothing from a watermark of 0 that a page may already have been carried past, and the next pass loads again. */
+            if (!_pgBlockingWatermarkSeeded.ContainsKey(key))
             {
                 var seeded = await stateStore.LoadEdgeTriggerWatermarkAsync(key, metricName);
                 readClock.Restart();
-                if (seeded.HasValue)
+                if (_pgBlockingWatermarkSeeded.TryAdd(key, true) && seeded.HasValue)
                 {
                     _lastAlertedPgBlockingCount[key] = seeded.Value;
                 }

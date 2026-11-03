@@ -42,6 +42,10 @@ public interface IAlertStateStore
     /// already-alerted rolling-window count) for one server/metric, or <c>null</c> when none has
     /// been persisted. The engine seeds its in-memory watermark from this at startup so lingering
     /// blocked-process reports / deadlocks don't re-alert on the first sweep.
+    /// <para>#7295: <c>null</c> means "the store was read and holds no row", nothing else. A store that could not be
+    /// read THROWS, so a caller can tell an empty store from a failed read: it leaves its server unseeded and reads
+    /// again on its next pass, instead of running from a watermark of 0 that a page may already have been carried past.
+    /// Only cancellation is not a failed read.</para>
     /// </summary>
     Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName);
 

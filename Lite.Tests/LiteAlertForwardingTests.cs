@@ -1441,4 +1441,24 @@ public partial class LiteAlertForwardingTests : IDisposable
             try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
         }
     }
+
+    [Fact]
+    public async Task StateStore_AWatermarkTableThatCannotBeRead_Throws_NotNull()
+    {
+        /* #7295: null means "read, and no row". A database with no watermark table cannot be read, and the engine must be able to
+           tell that from an empty store, or it marks the server seeded at 0 and pages again what a page already carried. */
+        var tempDir = Path.Combine(Path.GetTempPath(), "LiteFwdTests_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            using var duckDb = new DuckDbInitializer(Path.Combine(tempDir, "uninitialized.duckdb"));
+            IAlertStateStore store = new LiteAlertStateStore(new DuckDbAlertHistoryStore(duckDb));
+
+            await Assert.ThrowsAnyAsync<Exception>(() => store.LoadEdgeTriggerWatermarkAsync("101", AlertEngine.BlockingWatermarkMetric));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
 }

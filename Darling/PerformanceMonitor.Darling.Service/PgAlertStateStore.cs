@@ -43,33 +43,31 @@ public sealed class PgAlertStateStore : IAlertStateStore
         _logger = logger;
     }
 
+    /// <summary>
+    /// The saved count watermark, or null when the store was read and has no row (#7295). A store that cannot be read throws,
+    /// and the caller logs it: null for both meant a failed read was taken for an empty store, the server was marked seeded,
+    /// and counts a page had already carried were paged again once the cooldown ran out. Unlike the pairs read next to it,
+    /// which answers null for a failure, nothing here may be read as "no saved watermark" by mistake.
+    /// </summary>
     public async Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName)
     {
-        try
-        {
-            await using var connection = await _postgres.OpenConnectionAsync();
-            using var command = new NpgsqlCommand(@"
+        await using var connection = await _postgres.OpenConnectionAsync();
+        using var command = new NpgsqlCommand(@"
 SELECT watermark
 FROM config_edge_trigger_watermarks
 WHERE server_id = $1
 AND   metric_name = $2
 AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
-            command.Parameters.AddWithValue(ParseServerKey(serverKey));
-            command.Parameters.AddWithValue(metricName);
+        command.Parameters.AddWithValue(ParseServerKey(serverKey));
+        command.Parameters.AddWithValue(metricName);
 
-            var result = await command.ExecuteScalarAsync();
-            if (result == null || result == DBNull.Value)
-            {
-                return null;
-            }
-
-            return Convert.ToInt32(result, CultureInfo.InvariantCulture);
-        }
-        catch (Exception ex)
+        var result = await command.ExecuteScalarAsync();
+        if (result == null || result == DBNull.Value)
         {
-            _logger?.LogError("Could not load edge-trigger watermark ({Metric}): {Message}", metricName, ex.Message);
             return null;
         }
+
+        return Convert.ToInt32(result, CultureInfo.InvariantCulture);
     }
 
     public async Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark)

@@ -125,6 +125,10 @@ public sealed class AlertEngine
        Lite's bulk SeedEdgeTriggerWatermarksAsync (MainWindow.xaml.cs:1563). */
     private readonly ConcurrentDictionary<string, bool> _seededServerKeys = new();
 
+    /* #7295: the blocking and deadlock count watermarks are seeded apart from the rest, and a failed read leaves the key unseeded
+       so the next sweep reads again. The rest of the seed marks its key whether or not it read. */
+    private readonly ConcurrentDictionary<string, bool> _countWatermarksSeeded = new();
+
     /* Cooldown timestamps — Lite's MainWindow.xaml.cs:56-63,90 dictionaries, keyed serverKey.
        In-memory only, exactly like Lite (the restart protection is the persisted watermarks plus
        the deliverer's own email/webhook cooldown seeds, not these). */
@@ -701,10 +705,14 @@ public sealed class AlertEngine
     /// (MainWindow.xaml.cs:1563-1594): loads the persisted blocking/deadlock count watermarks and
     /// the failed-job time watermark before this server's first sweep, so a host restart doesn't
     /// re-fire (and re-post webhooks for) events still lingering in the rolling window. Seeded
-    /// once per key; a seed failure logs and proceeds unseeded, exactly like Lite.
+    /// once per key. A failure of the failed-job and persistence reads logs and proceeds unseeded, exactly like Lite. The blocking
+    /// and deadlock count watermarks are the exception (#7295): they are seeded by <see cref="EnsureCountWatermarksSeededAsync"/>,
+    /// which does not give up on a failed read.
     /// </summary>
     private async Task EnsureWatermarksSeededAsync(string key, CancellationToken ct)
     {
+        await EnsureCountWatermarksSeededAsync(key, ct);
+
         if (_seededServerKeys.ContainsKey(key))
         {
             return;
@@ -713,20 +721,6 @@ public sealed class AlertEngine
         var readClock = Stopwatch.StartNew();
         try
         {
-            var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
-            readClock.Restart();
-            if (blocking.HasValue)
-            {
-                _lastAlertedBlockingCount[key] = blocking.Value;
-            }
-
-            var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
-            readClock.Restart();
-            if (deadlock.HasValue)
-            {
-                _lastAlertedDeadlockCount[key] = deadlock.Value;
-            }
-
             var failedJob = await _stateStore.LoadFailedJobWatermarkAsync(key);
             if (failedJob.HasValue)
             {
@@ -760,7 +754,23 @@ public sealed class AlertEngine
                     _cpuRestoredOpen[key] = true;
 
                     readClock.Restart();
-                    var openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
+                    int? openedMinutes = null;
+                    try
+                    {
+                        openedMinutes = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, CpuIncidentOpenedMetric);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        /* #7295: the load throws on a failed read now; a missing opened time was always survivable (the incident then
+                           reads as opened at its first sweep here), and it must not cost the tempdb and blocking-wait seeds below. */
+                        _logger?.LogError("Could not read when the CPU incident for {ServerKey} opened after {ElapsedMs} ms: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+                        _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
+                    }
+
                     if (openedMinutes is > 0)
                     {
                         _cpuIncidentOpenedUtc[key] = DateTime.UnixEpoch.AddMinutes(openedMinutes.Value);
@@ -807,6 +817,49 @@ public sealed class AlertEngine
         }
 
         _seededServerKeys[key] = true;
+    }
+
+    /// <summary>
+    /// #7295: loads the saved blocking and deadlock count watermarks, both before either is applied, and marks the key seeded
+    /// only when both reads worked (a row or no row). A store that cannot be read throws, and an empty store answers null; the two
+    /// used to look the same, so the key was marked seeded with a watermark of 0 and counts a page had carried were paged again once
+    /// the cooldown ran out. A failed read is logged and counted, leaves the key unseeded, and the sweep skips this server's blocking
+    /// and deadlock checks (<see cref="CheckBlockingAsync"/>, <see cref="CheckDeadlocksAsync"/>) until a later sweep reads them.
+    /// Nothing else is held back: the other checks do not depend on these two values. Only cancellation propagates.
+    /// </summary>
+    private async Task EnsureCountWatermarksSeededAsync(string key, CancellationToken ct)
+    {
+        if (_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
+        }
+
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var blocking = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric);
+            var deadlock = await _stateStore.LoadEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric);
+            if (blocking.HasValue)
+            {
+                _lastAlertedBlockingCount[key] = blocking.Value;
+            }
+
+            if (deadlock.HasValue)
+            {
+                _lastAlertedDeadlockCount[key] = deadlock.Value;
+            }
+
+            _countWatermarksSeeded[key] = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Failed to seed the blocking and deadlock count watermarks for {ServerKey} after {ElapsedMs} ms; those two checks are skipped and the read is tried again on the next sweep: {Message}", key, readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(key, "edge-trigger watermark seed", readClock.ElapsedMilliseconds);
+        }
     }
 
     /// <summary>
@@ -1704,6 +1757,12 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
+        /* #7295: without the saved count watermark the gate would run from 0 and page counts a page already carried. Read again next sweep. */
+        if (!_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
+        }
+
         List<BlockedProcessAlertRow>? blockingRows = null;
         int effectiveBlockingCount = 0;
         long worstBlockingWaitMs = 0;
@@ -2219,6 +2278,12 @@ public sealed class AlertEngine
         string key, string serverName, int? serverId, string fingerprintServer, DateTime now, TimeSpan alertCooldown, bool suppressed,
         IReadOnlyList<string> excludedDatabases, CancellationToken ct)
     {
+        /* #7295: same skip as CheckBlockingAsync. */
+        if (!_countWatermarksSeeded.ContainsKey(key))
+        {
+            return;
+        }
+
         List<DeadlockAlertRow>? deadlockRows = null;
         int deadlockThreshold = Threshold(AlertThresholdKey.DeadlockCountThreshold, key);
         int effectiveDeadlockCount = 0;
