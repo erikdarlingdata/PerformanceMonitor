@@ -160,17 +160,30 @@ SELECT c.journal_id, c.event_time, c.request_id, c.server_id, c.actor, c.reason,
 FROM config.investigation_journal AS c
 LEFT JOIN collect.servers AS sv ON sv.server_id = c.server_id
 LEFT JOIN LATERAL (
-    SELECT x.event, x.detail FROM config.investigation_journal AS x
-    WHERE x.request_id = c.request_id
-      AND x.event IN ('action_done', 'action_failed')
-      AND x.detail->>'called_id' = c.journal_id::text
-    ORDER BY x.journal_id DESC LIMIT 1) AS r ON true
+    SELECT y.event, y.detail FROM (
+        SELECT x.journal_id, x.event, x.detail FROM config.investigation_journal AS x
+        WHERE c.request_id IS NOT NULL AND x.request_id = c.request_id
+          AND x.event IN ('action_done', 'action_failed')
+          AND x.detail->>'called_id' = c.journal_id::text
+        UNION ALL
+        /* #7185: a change with no request (a writes-arm tool's, or a person's unknown undo) keeps its result rows with no request too. */
+        SELECT x.journal_id, x.event, x.detail FROM config.investigation_journal AS x
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
+          AND x.event IN ('action_done', 'action_failed')
+          AND x.detail->>'called_id' = c.journal_id::text) AS y
+    ORDER BY y.journal_id DESC LIMIT 1) AS r ON true
 LEFT JOIN LATERAL (
-    SELECT x.event_time, x.actor FROM config.investigation_journal AS x
-    WHERE x.request_id = c.request_id
-      AND x.event = 'action_undone'
-      AND x.detail->>'called_id' = c.journal_id::text
-    ORDER BY x.journal_id DESC LIMIT 1) AS u ON true
+    SELECT y.event_time, y.actor FROM (
+        SELECT x.journal_id, x.event_time, x.actor FROM config.investigation_journal AS x
+        WHERE c.request_id IS NOT NULL AND x.request_id = c.request_id
+          AND x.event = 'action_undone'
+          AND x.detail->>'called_id' = c.journal_id::text
+        UNION ALL
+        SELECT x.journal_id, x.event_time, x.actor FROM config.investigation_journal AS x
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
+          AND x.event = 'action_undone'
+          AND x.detail->>'called_id' = c.journal_id::text) AS y
+    ORDER BY y.journal_id DESC LIMIT 1) AS u ON true
 WHERE c.event = 'action_called' AND c.event_time >= $1 AND ($3::bigint IS NULL OR c.journal_id = $3)
   AND ($4::uuid IS NULL OR c.request_id = $4)
 ORDER BY c.event_time DESC, c.journal_id DESC

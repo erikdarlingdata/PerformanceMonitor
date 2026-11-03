@@ -237,8 +237,10 @@ public sealed class McpZeroIsAMeasurementTests
            which takes the view), so the three trends are two statements in this file, and each divides its
            bucket's work by its rated seconds, NULL for an unrated collection. */
         var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
-        Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
-        Assert.Equal(2, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
+        /* #7161: the query grain rates over its gap to the previous collection, no longer the MAX of the stored intervals: the one
+           shared fragment (QueryCollectionsSql) keeps a restart's stored 0 unrated and uses the stored interval only for the store's first collection. */
+        Assert.Single(Regex.Matches(liteQueryStats, @"WHEN stored_interval = 0 THEN NULL"));
+        Assert.Single(Regex.Matches(liteQueryStats, @"ELSE NULLIF\(stored_interval, 0\)"));
         Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds").Count);
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteQueryStats);
         /* The wrong spelling, in its SQL shape (a COALESCE whose fallback is the LAG derivation): it would fall
@@ -251,8 +253,7 @@ public sealed class McpZeroIsAMeasurementTests
         /* #3897: the bucketed duration pair shares ONE read over both relations, and it takes the same
            three-state interval — never the LAG-only shape, never the COALESCE that fabricates a restart's. */
         var liteBuckets = ReadRepoFile("Lite", "Services", "LocalDataService.TrendBuckets.cs");
-        Assert.Single(Regex.Matches(liteBuckets, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL"));
-        Assert.Single(Regex.Matches(liteBuckets, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)"));
+        /* #7161: the query duration pair reads QueryCollectionsSql now; the MAX that remains in this file is the wait/perfmon grain's. */
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteBuckets);
         Assert.DoesNotMatch(new Regex(@"COALESCE\(NULLIF\(sample_interval_seconds, 0\),\s*(CAST\()?extract"), liteBuckets);
 
