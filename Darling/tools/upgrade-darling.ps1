@@ -1823,7 +1823,7 @@ function Get-DarlingStoreAdoptionPlan([string]$folder, [string]$dataDirectory, $
     # drive's. The service starts on a data directory directly below a drive root (it has no refusal for it) and the previous upgrade
     # warned and went on, so this is a warning and the upgrade continues, not a refusal (#7267).
     if ([string]::IsNullOrEmpty([System.IO.Path]::GetDirectoryName($full))) {
-        return (& $plan 'DriveRoot' "The store folder '$folder' is a drive root, so this script does not lock it: that would change the permissions of the whole drive. The folder is not locked, and the upgrade goes on and starts the service. To have the store locked, stop the service, move the data directory and the files beside it (pg.log, server.key, server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own such as '$full\PerformanceMonitor', point postgres.dataDirectory in darling.json at the moved data directory, and run this script again." @() $false)
+        return (& $plan 'DriveRoot' "The store folder '$folder' is a drive root, so this script does not lock it: that would change the permissions of the whole drive. The service still locks its store folder itself at every start, so on this layout starting it changes the permissions of the whole drive (#7363). The script does not pause here and goes on to start the service. To see this report without stopping the service or changing anything, run the script with -Check, move the store first as described next, then run it again. To move the store, stop the service, move the data directory and the files beside it (pg.log, server.key, server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own such as '$full\PerformanceMonitor', point postgres.dataDirectory in darling.json at the moved data directory, and run this script again." @() $false)
     }
     if (-not (Test-Path -LiteralPath $full)) { return (& $plan 'Clean' '' @() $false) }
     try { $root = Get-Item -LiteralPath $full -Force -ErrorAction Stop }
@@ -2034,7 +2034,10 @@ function Repair-DarlingStoreAfterStop([string]$storeFolder, [string]$configPath,
     }
     catch { Fail (Get-DarlingStoreStoppedText $storeFolder "The store folder '$storeFolder' could not be fixed in place: $($_.Exception.Message)" $serviceSid.Value $serviceName) }
     # A drive root is not locked (the plan says why and how to move the store), and the upgrade goes on.
-    if ($adoptPlan -and $adoptPlan.State -eq 'DriveRoot') { Warn $adoptPlan.Reason; return }
+    if ($adoptPlan -and $adoptPlan.State -eq 'DriveRoot') {
+        Warn "The store folder '$storeFolder' is a drive root, so this script does not lock it. The service is stopped now and the script goes on to start it, and the service locks its store folder itself at every start, which changes the permissions of the whole drive (#7363). To move the store instead, stop the service, move the data directory and the files beside it (pg.log, server.key, server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own, point postgres.dataDirectory in darling.json at the moved data directory, and run this script again."
+        return
+    }
     try {
         Initialize-DarlingStoreFolder $storeFolder $logonAccount $operatorSid $dataDirectory $serviceName
         Good "Store folder '$storeFolder' is owned by Administrators and locked to SYSTEM, Administrators and the service account; the operator group can only traverse it."

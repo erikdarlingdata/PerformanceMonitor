@@ -727,7 +727,8 @@ public sealed class DarlingStoreFolderScriptTests
         Assert.Contains("rootState=DriveRoot", answers);
         var reason = Assert.Single(answers, line => line.StartsWith("rootReason=", StringComparison.Ordinal));
         Assert.Contains("is a drive root", reason, StringComparison.Ordinal);
-        Assert.Contains("The folder is not locked, and the upgrade goes on and starts the service.", reason, StringComparison.Ordinal);
+        Assert.Contains("changes the permissions of the whole drive (#7363)", reason, StringComparison.Ordinal);
+        Assert.Contains("-Check", reason, StringComparison.Ordinal);
         Assert.Contains("point postgres.dataDirectory in darling.json at the moved data directory", reason, StringComparison.Ordinal);
         Assert.DoesNotContain("icacls ", reason, StringComparison.Ordinal);
         Assert.Contains("rootByHand=False", answers);
@@ -738,6 +739,7 @@ public sealed class DarlingStoreFolderScriptTests
 
         Assert.Contains("after=no-fail", answers);
         Assert.Contains(Between(answers, "after-start", "after-end"), line => line.StartsWith("WARNING: ", StringComparison.Ordinal) && line.Contains("is a drive root", StringComparison.Ordinal));
+        Assert.Contains(Between(answers, "after-start", "after-end"), line => line.Contains("(#7363)", StringComparison.Ordinal) && !line.Contains("-Check", StringComparison.Ordinal));
         Assert.DoesNotContain("initialize-was-called", answers);
         Assert.DoesNotContain("adoption-was-called", answers);
         Assert.Contains("rootAclUntouched=True", answers);
