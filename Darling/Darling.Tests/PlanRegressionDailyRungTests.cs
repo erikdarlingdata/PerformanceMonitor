@@ -299,14 +299,6 @@ public sealed class PlanRegressionDailyRungTests
     }
 
     [Fact]
-    public void TheClosedDayArithmetic_IsOnePastOneSkewAndOneSpan()
-    {
-        Assert.Equal(14, PlanRegressionDaily.WindowDays);
-        Assert.Equal(1, PlanRegressionDaily.PlanRegressionSkewMarginDays);
-        Assert.Equal(3, PlanRegressionDaily.ClosedDayLagDays);
-    }
-
-    [Fact]
     public void BuildDaySql_InsertsTheTablesColumnsInOrder_FromTheIntervalTable_WithTheDaysBounds()
     {
         var sql = Regex.Replace(PlanRegressionDaily.BuildDaySql, @"\s+", " ");

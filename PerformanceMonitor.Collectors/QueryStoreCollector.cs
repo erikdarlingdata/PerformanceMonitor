@@ -415,7 +415,7 @@ END;
     /// version-gated columns are selected; this gate decides whether the collector runs at all.)
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target.SqlMajorVersion == 0 || target.SqlMajorVersion >= 13 || target.IsAzureSqlDb || target.IsAzureManagedInstance;
+        target.MeetsMinimumVersion(13, unknownIsNewest: true);
 
     /// <summary>Incremental: only intervals with newer last_execution_time are fetched per cycle.</summary>
     public override string? WatermarkColumn => "last_execution_time";
