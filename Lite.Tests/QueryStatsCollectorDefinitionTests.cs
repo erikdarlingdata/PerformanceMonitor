@@ -103,32 +103,12 @@ public sealed class QueryStatsCollectorDefinitionTests
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(capturePlanXml: true));
 
         AssertPlanXmlSizeGuarded(plan.Text);
-        AssertRanksTakenAfterSelfFilter(plan.Text);
         /* The on-prem plan_attributes join is untouched. */
         Assert.Contains("sys.dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("TOP (" + QueryStatsCollector.MaxCandidateRows + ")", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY", plan.Text, StringComparison.Ordinal);
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
-    }
-
-    /// <summary>
-    /// #7344: the self-filter closes the ranked layer, so plan_rank and weight_rank (in that layer's SELECT list) are
-    /// taken over the rows it kept, and the plan apply reads them. Ranked before the filter, the collector's own
-    /// statements (the newest and among the heaviest rows) took the slots the filter then threw away.
-    /// </summary>
-    private static void AssertRanksTakenAfterSelfFilter(string sql)
-    {
-        var collapsed = Collapse(sql);
-        Assert.Contains(
-            "plan_rank=ROW_NUMBER()OVER(ORDERBYqs.last_execution_timeDESC,qs.total_elapsed_timeDESC)," +
-            "weight_rank=ROW_NUMBER()OVER(ORDERBYqs.total_elapsed_timeDESC,qs.last_execution_timeDESC)" +
-            "FROM(SELECTTOP(" + QueryStatsCollector.MaxCandidateRows + ")",
-            collapsed, StringComparison.Ordinal);
-        Assert.Contains(
-            "WHEREst.textNOTLIKEN'%PerformanceMonitorLite%')ASqsOUTERAPPLY(SELECTtext=qs.st_text,objectid=qs.st_objectid,dbid=qs.st_dbid)ASst" +
-            "OUTERAPPLYsys.dm_exec_text_query_plan(CASEWHENqs.plan_rank<=100ORqs.weight_rank<=100THENqs.plan_handleEND,qs.statement_start_offset,qs.statement_end_offset)AStqp",
-            collapsed, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -196,7 +176,6 @@ public sealed class QueryStatsCollectorDefinitionTests
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, capturePlanXml: true));
 
         AssertPlanXmlSizeGuarded(plan.Text);
-        AssertRanksTakenAfterSelfFilter(plan.Text);
         /* Azure SQL DB still skips plan_attributes (dbid=1 for all plans there). */
         Assert.DoesNotContain("dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);

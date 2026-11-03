@@ -432,6 +432,9 @@ WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'";
        #7337: recency alone starved a heavy statement that runs now and then (a report): with more than 200 other
        statements between its runs it was never in the newest 200, so every row stored for it had no plan. weight_rank
        is the heaviest by total_elapsed_time, and the apply hands the handle to a row within either half.
+       weight_rank is therefore taken over the MaxCandidateRows newest rows the self-filter kept, not over every row in the
+       window before the TOP (as #7337 first had it): a weight slot can no longer go to a row the TOP dropped, and a heavy
+       statement outside the MaxCandidateRows newest gets no weight slot that run.
        The text is carried out of this layer as st_text / st_objectid / st_dbid so it is applied once, not twice. */
     private static readonly string RankOpenFragment = @"(
     SELECT
