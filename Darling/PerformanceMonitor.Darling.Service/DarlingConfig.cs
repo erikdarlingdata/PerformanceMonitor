@@ -3274,7 +3274,7 @@ public sealed class PeerStoreConfig
 /// </summary>
 public sealed class ReadsConfig
 {
-    /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
+    /// <summary>How many long reads run at once (default 4, #7357). 0 turns the limit off.</summary>
     [JsonPropertyName("maxHeavyReads")]
     public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
 }

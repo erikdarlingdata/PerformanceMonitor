@@ -207,7 +207,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                             $"No Query Store rows, no query_store fan-out run and no query_store_health capture for this server in the {hours_back}-hour window. "
                             + "The query_store collector runs every 5 minutes and query_store_health hourly on SQL Server 2016+; a server with none of the three either predates Query Store, has it OFF everywhere, or has not completed a cycle yet. "
                             + "The plan-churn arm reads the raw tier, which a store with the rollups armed drops at 4 days — try a shorter window before concluding nothing ran.", databaseFilter.Describe(), noRows.AsHints());
-                return McpHelpers.WithDatabasesLeftOut(DarlingMcpWindowNotice.FinishEmpty(emptyAnswer, noRows), leftOut)!;
+                return McpHelpers.WithDatabasesLeftOut(await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, emptyAnswer, noRows, cancellationToken), leftOut)!;
             }
 
             /* #2364 / #3653 item 17: what the raw tier actually held, beside what was asked for. The

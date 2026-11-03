@@ -58,8 +58,8 @@ public sealed partial class DarlingMcpFinOpsTools
 
             /* #7010: the window-floor notice of session_stats (the not_collected answer above stays bare). */
             var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["session_stats"], "session_stats", true, ct);
-            return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("empty",
-                $"No session statistics were collected for this server in the last {hoursBack} hours, so there is no per-application connection data to show.", noRows.AsHints()), noRows);
+            return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, McpHelpers.Status("empty",
+                $"No session statistics were collected for this server in the last {hoursBack} hours, so there is no per-application connection data to show.", noRows.AsHints()), noRows, ct);
         }
 
         var ordered = OrderApplicationRows(rows);

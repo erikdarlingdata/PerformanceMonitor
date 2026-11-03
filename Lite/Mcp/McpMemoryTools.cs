@@ -127,7 +127,7 @@ public sealed class McpMemoryTools
                 return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyMemoryStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.MemoryStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "memory_stats", $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
                         $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does."),
@@ -223,10 +223,10 @@ public sealed class McpMemoryTools
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_pressure_events", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", "No memory pressure events found in the requested time range.",
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.MemoryPressureEvents, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            windowEnd.AddHours(-hours_back), windowEnd, "memory_pressure_events", emptyAnswer: true)).AsHints());
+                            windowEnd.AddHours(-hours_back), windowEnd, "memory_pressure_events", emptyAnswer: true)).AsHints()));
             }
 
             /* #4966: where this server's memory_pressure_events data starts for the window. The list is windowed on sample_time,

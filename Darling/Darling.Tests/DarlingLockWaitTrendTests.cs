@@ -98,6 +98,16 @@ public sealed class DarlingLockWaitTrendTests
             */
             await SeedWaitAsync(connection, ct, MinutesAgo(30), "CXPACKET", 999_999);
 
+            /* #7167: the only wait row is 30 minutes old, so a 4-hour read reaches back past anything the store holds. The all-clear needs the
+               store to cover the window, and a cut window says nothing was read instead. */
+            var cut = JsonDocument.Parse(await DarlingMcpBlockingTools.GetLockWaitTrend(dataSource, ServerName, 4));
+            Assert.Equal("empty", cut.RootElement.GetProperty("status").GetString());
+            Assert.True(cut.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+            Assert.DoesNotContain("genuinely quiet", cut.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /* A server monitored since before the window starts is covered, and the same empty read is a true all-clear. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(MinutesAgo(2 * 24 * 60)));
+
             var noLocks = await DarlingMcpBlockingTools.GetLockWaitTrend(dataSource, ServerName, 4);
             var noLocksDoc = JsonDocument.Parse(noLocks);
             Assert.Equal("empty", noLocksDoc.RootElement.GetProperty("status").GetString());

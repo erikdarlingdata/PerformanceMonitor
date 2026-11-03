@@ -341,6 +341,16 @@ internal static class DarlingMcpWindowNotice
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    /// <summary>
+    /// #7167: <see cref="FinishEmpty"/>, then <see cref="DarlingServerOfflineNote.EmptyAsync"/>: an empty answer for a server with no recent SUCCESS
+    /// collector run (Lite's rule, see <see cref="DarlingServerOfflineNote"/>) comes back as <c>unavailable</c> with the offline sentence first, because nothing was arriving to read.
+    /// <paramref name="windowEndUtc"/> is the read's anchor (its <c>as_of</c>, or now), so a window inside collected history stays <c>empty</c>.
+    /// </summary>
+    internal static async Task<string> FinishEmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string json, McpWindowNotice notice,
+        CancellationToken cancellationToken) =>
+        await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, displayName, windowEndUtc, FinishEmpty(json, notice), cancellationToken);
+
     /// <summary>A test's stand-in for the coverage probe, per async flow (null: the store is asked).</summary>
     private static readonly AsyncLocal<Func<Task<DateTime?>>?> s_testOnlyProbe = new();
 

@@ -482,6 +482,8 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var (eventType, _, _) = SourceOf(tool);
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -522,6 +524,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -869,6 +874,8 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         await SeedEventAsync(tool, Anchor.AddDays(-20));
         await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor.AddHours(-4), everyMinutes: 30);
         await SeedTruncatedRunAsync(Anchor.AddHours(-3));
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
 
@@ -959,6 +966,16 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, $5, 0, $6)",
         {
             Assert.Contains("NOT an all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>One successful run of a collector the system_health reads do not use (#7167: it keeps the server collected, so an empty window stays empty).</summary>
+    private async Task SeedOtherCollectorRunAsync(DateTime atUtc)
+    {
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1, $2, $3, 'wait_stats', $4, 12, 'SUCCESS', 0)",
+            _nextId, _serverId, ServerName, Naive(atUtc));
+        _nextId += 100_000;
     }
 
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)
