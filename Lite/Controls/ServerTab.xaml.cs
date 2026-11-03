@@ -334,7 +334,7 @@ public partial class ServerTab : UserControl
         _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
         _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: GetPickerZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
         _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
         _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);

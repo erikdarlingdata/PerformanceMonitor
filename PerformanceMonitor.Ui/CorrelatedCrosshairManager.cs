@@ -101,6 +101,16 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _lanes.Add(lane);
     }
 
+    /// <summary>
+    /// Changes the unit printed after a lane's value, for a lane whose unit depends on the data drawn (#7219: the blocking lane
+    /// counts blocked-process reports, or DMV snapshot rows when the window holds no reports).
+    /// </summary>
+    public void SetLaneUnit(ScottPlot.WPF.WpfPlot chart, string unit)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane != null) lane.Unit = unit;
+    }
+
     private void OnLaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => ForceReanchor();
     private void OnLaneUnloaded(object sender, RoutedEventArgs e) => ForceReanchor();
     private void OnLaneLoaded(object sender, RoutedEventArgs e) => ForceReanchor();

@@ -98,12 +98,24 @@ if (scenario === "crosshair") {
   out.at38Text = readoutTexts(drawn.node);
   /* minute 12.2 sits on the blocking bucket; the deadlock series (empty) has no sample */
   out.at12 = { blocking: pick(at(12.2), "blocking") };
+  out.at12Text = readoutTexts(drawn.node);
   /* minute 30: the file I/O bucket of both files, weighted 900:100 -> (2*900 + 12*100)/1000 = 3 ms */
   out.at30 = { io: pick(at(30), "io") };
   /* a pointer move over the plot drives the same lookup */
   drawn.node.listeners.pointermove[0]({ clientX: xAt(30) });
   out.pointerText = readoutTexts(drawn.node);
   out.hoverLines = find(drawn.node, (n) => n.attrs.class === "hover-line").length;
+} else if (scenario === "snapshot") {
+  /* #7219: a window with no blocked-process reports is counted from DMV snapshot rows; the read's `source` key says so, and the strip
+     must not call those rows reports. */
+  const snap = { ...reads, blocking: data({ source: "DMV snapshot", trend: [{ time: iso(12), count: 3 }] }) };
+  const built = strips.buildStrips(snap);
+  out.series = built.find((s) => s.key === "blocking").series.map((s) => s.label);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  drawn.crosshairAt(T0 + 12.2 * MIN);
+  out.at12Text = readoutTexts(drawn.node);
+  out.reportsSeries = strips.buildStrips({ ...reads, blocking: data({ source: "blocked-process-report", trend: [{ time: iso(12), count: 3 }] }) })
+    .find((s) => s.key === "blocking").series.map((s) => s.label);
 } else if (scenario === "zoom") {
   const built = strips.buildStrips(reads);
   let zoomed = null;

@@ -86,8 +86,9 @@ INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name
     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
 SELECT s, t, {1}, 'SRV', 65536, 10000, 50000, 40000, 30000 FROM slots ORDER BY t;
 
-INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition)
-SELECT s, t, {1}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3 FROM slots ORDER BY t;
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
+    utc_offset_minutes)
+SELECT s, t, {1}, 'SRV', 'Edition', '15.0.2000.5', 'RTM', 3, -240 FROM slots ORDER BY t;
 
 INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, last_execution_time,
     delta_execution_count, delta_worker_time, delta_elapsed_time, query_text, sql_handle, sample_interval_seconds)
@@ -99,9 +100,42 @@ INSERT INTO database_size_stats (collection_id, collection_time, server_id, serv
 SELECT s * 40 + d, t, {1}, 'SRV', 'Db' || d, d + 5, 1, 'ROWS', 'Db' || d || '_data', 'D:\Db' || d || '.mdf', 1000 + d, 400 + d
 FROM slots, range(40) b(d) ORDER BY t;
 
+INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+    is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb, current_aborted_transaction_count)
+SELECT s * 40 + d, t, {1}, 'SRV', 'Db' || d, d + 5, true, 100 + d, 1000 + d, d % 3
+FROM slots, range(40) b(d) ORDER BY t;
+
+INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+    version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+SELECT s, t, {1}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7 FROM slots ORDER BY t;
+
+/* #7216: the other snapshot tables whose newest-snapshot reads had no time bound. */
+INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds,
+    avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+SELECT t, {1}, 'SRV', 'Job', 'job-1', true, t, 3600, 900, 1200, 42, true, 400.0 FROM slots ORDER BY t;
+
+INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value,
+    delta_cntr_value, sample_interval_seconds)
+SELECT s * 10 + c, t, {1}, 'SRV', 'SQLServer:SQL Statistics', 'Counter_' || c, '', 100, 10, 1800 FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+SELECT s * 10 + c, t, {1}, 'SRV', 'CLERK_' || c, 100 + c FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count)
+SELECT s * 10 + c, t, {1}, 'SRV', 'App' || c, 5, 1, 3, 1 FROM slots, range(10) b(c) ORDER BY t;
+
+INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, recommendation_name, recommendation_state, score)
+SELECT s * 10 + c, t, {1}, 'SRV', 'Db' || c, 'PR_' || c, 'Active', 50 FROM slots, range(10) b(c) ORDER BY t;
+
 INSERT INTO procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle, sample_interval_seconds)
 SELECT s * {2} + d, t, {1}, 'SRV', 'Db' || d, 'dbo', 'usp_' || d, '0xH' || d, 1800
 FROM slots, range({2}) b(d) ORDER BY t;
+
+/* #7216: the Index Usage grid and its match count take the newest index_object_stats snapshot. */
+INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, schema_name, object_id,
+    table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
+SELECT s * 10 + c, t, {1}, 'SRV', 'Db' || c, c + 5, 'dbo', 1000 + c, 'Tbl' || c, 2, 'IX_' || c, 'NONCLUSTERED', 10 + c, 10 + c, 1000, 5, 1, 1, 3
+FROM slots, range(10) b(c) ORDER BY t;
 ";
 
     /// <summary>
@@ -226,6 +260,35 @@ FROM slots, range({2}) b(d) ORDER BY t;
         (InventoryRead, d => d.GetServerMetricsAsync()),
         /* #7014: the per-server idle-coverage check (the Optimization tab's Idle Databases grid and the recommendation row). */
         ("query stats idle coverage", d => d.HasQueryStatsCoverageAsync(ServerId)),
+        /* #7216: the PVS alert read, the FinOps PVS chart (its top-5 lookup) and grid, and the tempdb alert read all take a server's newest row. */
+        ("PVS pressure alert read", d => d.GetPvsPressureAsync(ServerId)),
+        ("PVS trend", d => d.GetPvsTrendAsync(ServerId, DateTime.UtcNow.AddHours(-24))),
+        ("PVS grid", d => d.GetPvsStatsLatestAsync(ServerId)),
+        ("tempdb alert read", d => d.GetLatestTempDbSpaceAsync(ServerId)),
+        /* #7216: the reads that take a server's newest snapshot of a table, by the same unbounded pattern. */
+        ("volume free space alert read", d => d.GetVolumeFreeSpaceAsync(ServerId)),
+        ("running jobs", d => d.ReadRunningJobsAsync(ServerId)),
+        ("running jobs snapshot time", d => d.GetLatestRunningJobsSnapshotTimeAsync(ServerId)),
+        ("anomalous jobs alert read", d => d.GetAnomalousJobsAsync(ServerId, 2)),
+        /* #7216: the "newest server_properties row that carries an offset" reads (the anomalous jobs read above joins the same one). */
+        ("server UTC offset", d => d.GetServerUtcOffsetMinutesAsync(ServerId)),
+        ("server clock", d => d.GetServerClockAsync(ServerId)),
+        ("tempdb card", d => d.GetTempdbSummaryAsync(ServerId)),
+        ("database size latest (FinOps)", d => d.GetDatabaseSizeLatestAsync(ServerId)),
+        ("database size summary", d => d.GetDatabaseSizeSummaryAsync(ServerId)),
+        ("idle databases", d => d.GetIdleDatabasesAsync(ServerId)),
+        ("database size stats (server info)", d => d.GetLatestDatabaseSizeStatsAsync(ServerId)),
+        ("session stats", d => d.GetLatestSessionStatsAsync(ServerId)),
+        ("file I/O latest", d => d.GetLatestFileIoStatsAsync(ServerId)),
+        ("perfmon latest", d => d.GetLatestPerfmonStatsAsync(ServerId)),
+        ("memory clerks", d => d.GetLatestMemoryClerksAsync(ServerId)),
+        ("automatic tuning latest", d => d.GetLatestAutomaticTuningAsync(ServerId)),
+        /* #7216: the index usage grid, its match count, and the newest memory, server properties and engine edition lookups. */
+        ("index usage", d => d.GetIndexUsageAsync(ServerId)),
+        ("index usage match count", d => d.GetIndexUsageMatchCountAsync(ServerId)),
+        ("latest memory stats", d => d.GetLatestMemoryStatsAsync(ServerId)),
+        ("latest server properties", d => d.GetLatestServerPropertiesAsync(ServerId)),
+        ("SQL engine edition", d => d.GetSqlEngineEditionAsync(ServerId)),
     ];
 
     private async Task<(List<string> Failures, List<string> Report)> CheckReadsAsync(LocalDataService oneDay, LocalDataService eightDays)
@@ -359,6 +422,196 @@ VALUES (1, TIMESTAMP '{now}' - INTERVAL 1 HOUR, {ServerId}, 'SRV', TIMESTAMP '{n
         Assert.Equal(65536, row.PhysicalMemoryMb);
         Assert.Equal(40000, row.TotalMemoryMb);
         Assert.Equal(16, row.CpuCount);
+    }
+
+    /// <summary>
+    /// The PVS and tempdb newest-row reads (#7216) read the hot tables first. A server that stopped being collected has every row in Parquet,
+    /// and each read must still answer from the archive with that server's last values. Built with the real archive pass.
+    /// </summary>
+    [Fact]
+    public async Task NewestRowReads_ServerWhoseRowsAreAllArchived_StillShowItsLastValues()
+    {
+        var dir = Path.Combine(_tempDir, "pvsfallback");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            /* Two snapshots, 10 and 11 days old: the newer one (PVS 300 MB, tempdb 20 MB reserved) is what the reads must return. */
+            cmd.CommandText = $@"
+INSERT INTO pvs_stats (collection_id, collection_time, server_id, server_name, database_name, database_id,
+    is_accelerated_database_recovery_on, persistent_version_store_size_mb, database_data_size_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, true, 100, 1000),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, true, 300, 1000);
+INSERT INTO tempdb_stats (collection_id, collection_time, server_id, server_name, user_object_reserved_mb, internal_object_reserved_mb,
+    version_store_reserved_mb, total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 1, 1, 1, 10, 10, 1, 55, 1),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 10, 5, 5, 20, 10, 3, 55, 7);
+/* #7216: the other newest-snapshot reads; the 10 day old snapshot carries the 2s, the 11 day old one the 1s. */
+INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id, file_type_desc,
+    file_name, physical_name, total_size_mb, used_size_mb, volume_mount_point, volume_total_mb, volume_free_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 1000, 400, 'D:', 1000, 100),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 2000, 400, 'D:', 1000, 200);
+INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+    delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 'DbA_data', 'ROWS', 'D:\DbA.mdf', 100, 1, 1, 1, 1, 1, 1, 1800),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 'DbA_data', 'ROWS', 'D:\DbA.mdf', 100, 2, 1, 1, 1, 1, 1, 1800);
+INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value,
+    delta_cntr_value, sample_interval_seconds)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'SQLServer:SQL Statistics', 'Counter', '', 1, 1, 1800),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'SQLServer:SQL Statistics', 'Counter', '', 2, 2, 1800);
+INSERT INTO memory_clerks (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'CLERK', 1),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'CLERK', 2);
+INSERT INTO session_stats (collection_id, collection_time, server_id, server_name, program_name, connection_count, running_count, sleeping_count, dormant_count)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'App', 1, 0, 0, 0),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'App', 2, 0, 0, 0);
+INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_actual_state, recommendation_name, recommendation_state, score)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 'OLD', 'PR_1', 'Active', 50),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 'NEW', 'PR_1', 'Active', 50);
+INSERT INTO running_jobs (collection_time, server_id, server_name, job_name, job_id, job_enabled, start_time, current_duration_seconds,
+    avg_duration_seconds, p95_duration_seconds, successful_run_count, is_running_long, percent_of_average)
+VALUES (TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 11 DAY, 3600, 900, 1200, 42, true, 400.0),
+       (TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewJob', 'job-1', true, TIMESTAMP '{now}' - INTERVAL 10 DAY, 3600, 900, 1200, 42, true, 400.0);
+INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, schema_name, object_id,
+    table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, user_seeks, user_scans, user_lookups, user_updates)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'DbA', 5, 'dbo', 1000, 'Tbl', 2, 'IX_Old', 'NONCLUSTERED', 10, 10, 1000, 5, 1, 1, 3),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'DbA', 5, 'dbo', 1000, 'Tbl', 2, 'IX_New', 'NONCLUSTERED', 10, 10, 1000, 5, 1, 1, 3);
+INSERT INTO memory_stats (collection_id, collection_time, server_id, server_name, total_physical_memory_mb, available_physical_memory_mb,
+    target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 1111, 30000),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 65536, 10000, 50000, 2222, 30000);
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count,
+    utc_offset_minutes)
+VALUES (1, TIMESTAMP '{now}' - INTERVAL 11 DAY, {ServerId}, 'SRV', 'OldEdition', '15.0.2000.5', 'RTM', 3, 4, -300),
+       (2, TIMESTAMP '{now}' - INTERVAL 10 DAY, {ServerId}, 'SRV', 'NewEdition', '15.0.2000.5', 'RTM', 5, 16, -240);";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT (SELECT COUNT(*) FROM pvs_stats) + (SELECT COUNT(*) FROM tempdb_stats) + (SELECT COUNT(*) FROM database_size_stats)"
+                + " + (SELECT COUNT(*) FROM file_io_stats) + (SELECT COUNT(*) FROM perfmon_stats) + (SELECT COUNT(*) FROM memory_clerks)"
+                + " + (SELECT COUNT(*) FROM session_stats) + (SELECT COUNT(*) FROM plan_correction) + (SELECT COUNT(*) FROM running_jobs)"
+                + " + (SELECT COUNT(*) FROM index_object_stats) + (SELECT COUNT(*) FROM memory_stats) + (SELECT COUNT(*) FROM server_properties)";
+            Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
+        }
+
+        var data = new LocalDataService(initializer);
+
+        var pressure = await data.GetPvsPressureAsync(ServerId);
+        Assert.Equal(300, Assert.Single(pressure).PvsSizeMb);
+
+        var grid = await data.GetPvsStatsLatestAsync(ServerId);
+        Assert.Equal(300m, Assert.Single(grid).PvsSizeMb);
+
+        var trend = await data.GetPvsTrendAsync(ServerId, DateTime.UtcNow.AddDays(-30));
+        Assert.Equal(2, trend.Count);
+
+        var tempDb = await data.GetLatestTempDbSpaceAsync(ServerId);
+        Assert.NotNull(tempDb);
+        Assert.Equal(20, tempDb.TotalReservedMb);
+
+        /* #7216 */
+        var tempDbCard = await data.GetTempdbSummaryAsync(ServerId);
+        Assert.Equal(20m, tempDbCard.Single(r => r.Metric == "Total Reserved").CurrentMb);
+
+        var volumes = await data.GetVolumeFreeSpaceAsync(ServerId);
+        Assert.Equal(200, Assert.Single(volumes).FreeMb);
+
+        Assert.Equal(2000m, Assert.Single(await data.GetDatabaseSizeLatestAsync(ServerId)).TotalSizeMb);
+        Assert.Equal(2000m, Assert.Single(await data.GetDatabaseSizeSummaryAsync(ServerId)).TotalMb);
+        Assert.Equal(2000, Assert.Single(await data.GetLatestDatabaseSizeStatsAsync(ServerId)).TotalSizeMb);
+        Assert.Equal(2, Assert.Single(await data.GetLatestFileIoStatsAsync(ServerId)).DeltaReads);
+        Assert.Equal(2, Assert.Single(await data.GetLatestPerfmonStatsAsync(ServerId)).Value);
+        Assert.Equal(2, Assert.Single(await data.GetLatestMemoryClerksAsync(ServerId)).MemoryMb);
+        Assert.Equal(2, Assert.Single(await data.GetLatestSessionStatsAsync(ServerId)).ConnectionCount);
+        Assert.Equal("NEW", Assert.Single(await data.GetLatestAutomaticTuningAsync(ServerId)).ActualState);
+
+        var jobsSnapshot = await data.GetLatestRunningJobsSnapshotTimeAsync(ServerId);
+        Assert.NotNull(jobsSnapshot);
+        Assert.InRange(DateTime.UtcNow - jobsSnapshot.Value, TimeSpan.FromDays(9.9), TimeSpan.FromDays(10.1));
+        var anomalous = Assert.Single(await data.GetAnomalousJobsAsync(ServerId, 2));
+        Assert.Equal("NewJob", anomalous.JobName);
+        /* #7216: the svr join found the archived offset (the newest one, -240; the older row carries -300). */
+        Assert.Equal(-240, anomalous.UtcOffsetMinutes);
+
+        Assert.Equal("IX_New", Assert.Single(await data.GetIndexUsageAsync(ServerId)).IndexName);
+        Assert.Equal(1L, await data.GetIndexUsageMatchCountAsync(ServerId));
+        Assert.Equal(2222, (await data.GetLatestMemoryStatsAsync(ServerId))!.TotalServerMemoryMb);
+        var properties = await data.GetLatestServerPropertiesAsync(ServerId);
+        Assert.NotNull(properties);
+        Assert.Equal("NewEdition", properties.Edition);
+        Assert.Equal(5, await data.GetSqlEngineEditionAsync(ServerId));
+
+        /* #7216: the offset reads probe the hot table for a non-NULL offset and fall back to the view; every row is archived, so the view answers. */
+        Assert.Equal(-240, await data.GetServerUtcOffsetMinutesAsync(ServerId));
+        var clock = await data.GetServerClockAsync(ServerId);
+        Assert.NotNull(clock);
+        Assert.Equal(-240, clock.OffsetMinutesAt(DateTime.UtcNow));
+    }
+
+    /// <summary>
+    /// One probe decides the database size relation for a refresh (#7216). A server whose rows are all archived starts being collected
+    /// again between the snapshot lookup and the read at that snapshot: the snapshot came from the archive view, so the read must stay on the
+    /// view and return the archived rows, not re-probe, find the new hot row and look for the archived timestamp in the hot table.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseSizeRead_HotRowLandsAfterTheSnapshotLookup_StillReadsTheArchivedSnapshot()
+    {
+        var dir = Path.Combine(_tempDir, "sizeonce");
+        var archiveDir = Path.Combine(dir, "archive");
+        Directory.CreateDirectory(archiveDir);
+        var dbPath = Path.Combine(dir, "test.duckdb");
+        var initializer = new DuckDbInitializer(dbPath);
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+
+        const string sizeRow = @"INSERT INTO database_size_stats (collection_id, collection_time, server_id, server_name, database_name, database_id, file_id,
+    file_type_desc, file_name, physical_name, total_size_mb, used_size_mb)
+VALUES ({0}, {1}, {2}, 'SRV', 'DbA', 5, 1, 'ROWS', 'DbA_data', 'D:\DbA.mdf', 2000, 400);";
+        var now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = string.Format(sizeRow, 1, $"TIMESTAMP '{now}' - INTERVAL 10 DAY", ServerId);
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var archive = new ArchiveService(initializer, archiveDir);
+        archive.TimestampForTests = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        await archive.ArchiveOldDataAsync(hotDataHours: HotDays * 24);
+
+        var data = new LocalDataService(initializer);
+        var snapshot = await data.GetLatestDatabaseSizeSnapshotAsync(ServerId);
+        Assert.NotNull(snapshot);
+
+        using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = string.Format(sizeRow, 2, $"TIMESTAMP '{now}'", ServerId);
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var rows = await data.GetDatabaseSizeAtAsync(ServerId, snapshot.Value, null);
+
+        Assert.Equal("DbA", Assert.Single(rows).DatabaseName);
     }
 
     /// <summary>
