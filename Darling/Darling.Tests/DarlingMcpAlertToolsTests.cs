@@ -2382,6 +2382,25 @@ public sealed class CreateMuteRuleCoreTests
     }
 
     [Fact]
+    public async Task TheMcpCreate_RefusesAnExpiryExactlyAtNow_ButAcceptsOneSecondLater()
+    {
+        /* The boundary: an expiry equal to the create's clock mutes nothing, so it is refused (<=, not <). */
+        var store = new FakeMuteRuleStore();
+        var now = new DateTime(2030, 6, 1, 12, 0, 0, DateTimeKind.Utc);
+
+        var atNow = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(atNow));
+        Assert.Equal(0, store.Count);
+
+        var later = await DarlingMcpAlertTools.CreateMuteRuleOver(store, "pm-server-1", "High CPU", null, null, null, null, "edge",
+            now.AddSeconds(1).ToString("o", System.Globalization.CultureInfo.InvariantCulture), nowUtc: now);
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(later));
+    }
+
+    [Fact]
     public async Task AnUpdate_MayStillSetAPastExpiry_ToEndARule()
     {
         var store = new FakeMuteRuleStore();
@@ -2891,8 +2910,9 @@ public sealed class WebMuteRuleEndpointFlowTests
         var store = new FakeMuteRuleStore();
 
         /* POST /api/mute-rules */
+        var future = DateTime.UtcNow.AddDays(30).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
         var created = await DarlingMcpAlertTools.CreateMuteRuleCore(store,
-            "{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"2026-12-01T00:00:00Z\"}");
+            $"{{\"metric_name\":\"High CPU\",\"reason\":\"initial\",\"expires_at_utc\":\"{future}\"}}");
         Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
         var id = (string)JsonNode.Parse(created)!["mute_rule"]!["id"]!;
         var born = store.Row(id)!.CreatedAtUtc;
