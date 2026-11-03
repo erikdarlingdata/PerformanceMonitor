@@ -213,10 +213,6 @@ export function browserZoneOrBlank() {
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
 }
-/** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
-export function metricNote(text) {
-  return el("div", { class: "mp-metric-note", text: plainText(text) });
-}
 
 /**
  * What one point of a bucketed trend covers, from the read's own `bucket_minutes` / `bucket` fields: "covers 1 hour",
