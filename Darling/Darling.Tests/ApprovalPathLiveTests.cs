@@ -369,7 +369,7 @@ public sealed partial class ApprovalPathLiveTests(PostgresKillLiveTests.ScramTls
             var approver = await c.PersonAsync("Approver A");
             Assert.Equal("first_pressed", (await c.Press().FirstPressAsync(proposalId, approver, c.Ct)).Status);
 
-            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, c.Ct);
+            var approval = await c.Requests.ApproveProposalForRunAsync(proposalId, approver, c.Hooks, null, c.Ct);
             Assert.Null(approval.Refusal);
             var failing = new ApprovedActionHooks
             {
