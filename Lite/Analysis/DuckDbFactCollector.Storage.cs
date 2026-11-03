@@ -362,13 +362,22 @@ WITH latest AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   volume_total_mb > 0
+),
+tightest AS (
+    /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
+       volume with the fewest MB. Ties on percent break on the mount point. */
+    SELECT volume_mount_point, volume_free_mb
+    FROM latest WHERE rn = 1
+    ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
+    LIMIT 1
 )
 SELECT
     MIN(volume_free_mb * 1.0 / volume_total_mb) AS min_free_pct,
-    MIN(volume_free_mb) AS min_free_mb,
+    (SELECT volume_free_mb FROM tightest) AS min_free_mb,
     COUNT(DISTINCT volume_mount_point) AS volume_count,
     SUM(volume_total_mb) AS total_volume_mb,
-    SUM(volume_free_mb) AS total_free_mb
+    SUM(volume_free_mb) AS total_free_mb,
+    (SELECT volume_mount_point FROM tightest) AS tightest_mount_point
 FROM latest WHERE rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -384,6 +393,7 @@ FROM latest WHERE rn = 1";
             var volumeCount = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalVolumeMb = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
             var totalFreeMb = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            var tightestMount = reader.IsDBNull(5) ? null : reader.GetString(5);
 
             if (volumeCount == 0) return;
 
@@ -393,6 +403,7 @@ FROM latest WHERE rn = 1";
                 Key = "DISK_SPACE",
                 Value = minFreePct,
                 ServerId = context.ServerId,
+                ObjectName = string.IsNullOrWhiteSpace(tightestMount) ? null : tightestMount,
                 Metadata = new Dictionary<string, double>
                 {
                     ["min_free_pct"] = minFreePct,

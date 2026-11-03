@@ -39,7 +39,7 @@ public partial class ViewerServerTab
     /// <summary>#6878: the Blocking Trends chart's left-axis title. It is drawn rotated along a plot only about 80 px long at 1366x768, so it stays short enough that
     /// <see cref="PerformanceMonitor.Ui.ChartAxisTitle.Fit"/> keeps all of it. The answering collector (blocked-process-report or DMV snapshot) is named in the legend entry instead,
     /// where there is a whole line of width for it.</summary>
-    internal const string BlockingTrendAxisTitle = "Blocking events";
+    internal const string BlockingTrendAxisTitle = PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort;
 
     private ChartHoverHelper? _lockWaitTrendHover;
     private ChartHoverHelper? _blockingTrendHover;
@@ -88,7 +88,7 @@ public partial class ViewerServerTab
         CurrentWaitsBlockedChart.Refresh();
 
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: ViewerTimeHelper.CurrentDisplayZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _blockingDurationHover = new ChartHoverHelper(BlockingDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
         _blockingTotalDurationHover = new ChartHoverHelper(BlockingTotalDurationChart, "ms", displayZone: ViewerTimeHelper.CurrentDisplayZone);
@@ -615,7 +615,7 @@ public partial class ViewerServerTab
             var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
                 new[] { 0.0, 0.0 });
-            zeroLine.LegendText = "Blocking Incidents";
+            zeroLine.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
             BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
@@ -655,15 +655,18 @@ public partial class ViewerServerTab
         expandedCounts.Add(0);
 
         var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
-        plot.LegendText = PerformanceMonitor.Ui.BlockingSourceLabel.For("Blocking Incidents", data.Select(d => d.Source));
+        /* #7219: the read counts blocked-process reports, or DMV snapshot rows when the window holds no reports; name the arm that answered. */
+        var sources = data.Select(d => d.Source).ToList();
+        plot.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.LegendFor(sources);
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
         plot.MarkerSize = 0; /* No markers, just lines */
-        _blockingTrendHover?.Add(plot, "Blocking Incidents");
+        if (_blockingTrendHover != null) _blockingTrendHover.Unit = PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(sources);
+        _blockingTrendHover?.Add(plot, PerformanceMonitor.Ui.BlockingTrendLabels.HoverNameFor(sources));
 
         BlockingTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingTrendChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
-        BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
+        BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(sources));
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();

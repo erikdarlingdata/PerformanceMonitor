@@ -26,7 +26,12 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-row lookups below have no time bound, so through the v_ view they read every archived row of
+           pvs_stats. The hot table holds the newest row of any server that is still being collected, so the view is read
+           only for a server with no hot row (collection stopped and archival moved every row out), which still shows the
+           last values it had (the same shape as #7000's memory and properties reads). */
+        var pvsRelation = await HotTableHasServerAsync(connection, "pvs_stats", serverId) ? "pvs_stats" : "v_pvs_stats";
+        command.CommandText = $@"
 SELECT
     database_name,
     persistent_version_store_size_mb,
@@ -37,11 +42,11 @@ SELECT
     aborted_version_cleaner_start_time,
     aborted_version_cleaner_end_time,
     collection_time
-FROM v_pvs_stats
+FROM {pvsRelation}
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_pvs_stats
+    FROM {pvsRelation}
     WHERE server_id = $1
 )
 AND   is_accelerated_database_recovery_on
@@ -89,14 +94,20 @@ ORDER BY
         using var command = connection.CreateCommand();
         /* $1 server, $2 since, so the optional database list starts at $3. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
+        /* #7216: the newest-row lookup below has no time bound, so through the v_ view it read every archived row of
+           pvs_stats. The hot table holds the newest row of any server that is still being collected, so the view is read
+           only for a server with no hot row (collection stopped and archival moved every row out), which still shows the
+           last values it had (the same shape as #7000's memory and properties reads). */
+        var pvsRelation = await HotTableHasServerAsync(connection, "pvs_stats", serverId) ? "pvs_stats" : "v_pvs_stats";
+        /* The chart's own points stay on the view: they are bounded by the window ($2), so the archive is pruned. */
         command.CommandText = $@"
 WITH top_dbs AS (
     SELECT database_name
-    FROM v_pvs_stats
+    FROM {pvsRelation}
     WHERE server_id = $1
     AND   collection_time = (
         SELECT MAX(collection_time)
-        FROM v_pvs_stats
+        FROM {pvsRelation}
         WHERE server_id = $1
     ){dbClause}
     ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
@@ -140,8 +151,8 @@ ORDER BY p.database_name, p.collection_time";
     }
 
     /// <summary>
-    /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the archive view
-    /// so a window that has aged into parquet still resolves, and pins to the newest collection_time the
+    /// Latest ADR persistent version store snapshot, one row per database (#1951). Reads the hot table, and the archive view
+    /// only for a server with no hot row (#7216), so a window that has aged into parquet still resolves, and pins to the newest collection_time the
     /// way the sibling database-size read does — this grid answers "what is my version store doing right
     /// now", not "how did it get here".
     /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
@@ -152,6 +163,11 @@ ORDER BY p.database_name, p.collection_time";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        /* #7216: the newest-row lookups below have no time bound, so through the v_ view they read every archived row of
+           pvs_stats. The hot table holds the newest row of any server that is still being collected, so the view is read
+           only for a server with no hot row (collection stopped and archival moved every row out), which still shows the
+           last values it had (the same shape as #7000's memory and properties reads). */
+        var pvsRelation = await HotTableHasServerAsync(connection, "pvs_stats", serverId) ? "pvs_stats" : "v_pvs_stats";
         command.CommandText = $@"
 SELECT
     database_name,
@@ -170,11 +186,11 @@ SELECT
     pvs_off_row_page_skipped_min_useful_xts,
     pvs_off_row_page_skipped_oldest_aborted_xdesid,
     collection_time
-FROM v_pvs_stats
+FROM {pvsRelation}
 WHERE server_id = $1
 AND   collection_time = (
     SELECT MAX(collection_time)
-    FROM v_pvs_stats
+    FROM {pvsRelation}
     WHERE server_id = $1
 ){dbClause}
 ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
