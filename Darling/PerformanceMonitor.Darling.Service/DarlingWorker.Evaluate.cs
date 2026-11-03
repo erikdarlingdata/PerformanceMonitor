@@ -1041,16 +1041,26 @@ public sealed partial class DarlingWorker
                name #2711 deliberately chose means no new column or row shape is needed, only a read
                before trusting an in-memory zero. Once per key, mirroring AlertEngine's
                EnsureWatermarksSeededAsync/_seededServerKeys. */
-            if (_pgDeadlockWatermarkSeeded.TryAdd(key, true))
+            var firstSeed = _pgDeadlockWatermarkSeeded.TryAdd(key, true);
+            /* #7295: the pairs half of the seed is done only when the read returned a list. A failed read is tried again on the
+               next sweep, and until it succeeds the replace hook writes nothing (below), so the stored pairs a restart should
+               have found are not overwritten by a set that never loaded them. */
+            if (firstSeed || !_pgDeadlockPairsSeeded.ContainsKey(key))
             {
                 var seeded = await SeedPgDeadlockStateAsync(
                     stateStore, key, metricName,
                     _pgDeadlockUnannouncedNew.GetOrAdd(key, _ => new HashSet<string>(StringComparer.Ordinal)),
-                    waiting => _deadlockRollup?.NoteNewSignatures(key, waiting));
+                    waiting => _deadlockRollup?.NoteNewSignatures(key, waiting),
+                    retry: !firstSeed);
                 readClock.Restart();
-                if (seeded.HasValue)
+                if (seeded.PairsRead)
                 {
-                    _lastAlertedPgDeadlockCount[key] = seeded.Value;
+                    _pgDeadlockPairsSeeded.TryAdd(key, true);
+                }
+
+                if (seeded.Watermark.HasValue)
+                {
+                    _lastAlertedPgDeadlockCount[key] = seeded.Watermark.Value;
                 }
             }
 
@@ -1276,7 +1286,9 @@ public sealed partial class DarlingWorker
             _pgDeadlockUnannouncedNew.GetOrAdd(serverKey, _ => new HashSet<string>(StringComparer.Ordinal)),
             fresh => _deadlockRollup?.NoteNewSignatures(serverKey, fresh),
             _logger, serverKey, serverId, rows, now,
-            (waiting, _) => new PgAlertStateStore(_postgres!, _logger).ReplaceUnannouncedPairsAsync(serverKey, waiting),
+            (waiting, _) => _pgDeadlockPairsSeeded.ContainsKey(serverKey)
+                ? new PgAlertStateStore(_postgres!, _logger).ReplaceUnannouncedPairsAsync(serverKey, waiting)
+                : Task.CompletedTask,
             cancellationToken);
 
     /// <summary>
@@ -1294,6 +1306,9 @@ public sealed partial class DarlingWorker
             store, counted, unannounced, noteNewForAgentGate, logger, serverKey, serverId, rows, now,
             persistUnannounced: null, cancellationToken);
 
+    /// <summary>What the seed found: the watermark to run the gate from (null leaves it as it is), and whether the pairs read worked.</summary>
+    internal readonly record struct PgDeadlockSeed(int? Watermark, bool PairsRead);
+
     /// <summary>
     /// Loads what a restart must not lose, once per server (#2716, #7295): the saved count watermark, and the pairs that were
     /// new and not yet announced by a page, which are put back into <paramref name="unannounced"/>. The signature store
@@ -1303,16 +1318,19 @@ public sealed partial class DarlingWorker
     /// The restored pairs are also handed to <paramref name="noteNewForAgentGate"/>: the agent gate reads new pairs from
     /// memory that a restart emptied, and the next count finds them known, so without it the rescued page would open no
     /// investigation request.
+    /// <para><c>PairsRead</c> is false when the pairs read failed, so the caller tries again on the next sweep with
+    /// <paramref name="retry"/> set. A retry answers a watermark only when it restored a pair (the 0 above): the first read
+    /// already took the saved watermark's turn, and the count has moved since.</para>
     /// </summary>
-    internal static async Task<int?> SeedPgDeadlockStateAsync(
+    internal static async Task<PgDeadlockSeed> SeedPgDeadlockStateAsync(
         PgAlertStateStore stateStore, string serverKey, string metricName, HashSet<string> unannounced,
-        Action<IReadOnlyCollection<string>>? noteNewForAgentGate)
+        Action<IReadOnlyCollection<string>>? noteNewForAgentGate, bool retry = false)
     {
-        var watermark = await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
+        var watermark = retry ? null : await stateStore.LoadEdgeTriggerWatermarkAsync(serverKey, metricName);
         var waiting = await stateStore.LoadUnannouncedPairsAsync(serverKey);
         if (waiting is not { Count: > 0 })
         {
-            return watermark;
+            return new PgDeadlockSeed(watermark, waiting is not null);
         }
 
         lock (unannounced)
@@ -1321,7 +1339,7 @@ public sealed partial class DarlingWorker
         }
 
         noteNewForAgentGate?.Invoke(waiting);
-        return 0;
+        return new PgDeadlockSeed(0, true);
     }
 
     /// <summary>

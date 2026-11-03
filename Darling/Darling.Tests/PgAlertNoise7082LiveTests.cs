@@ -166,8 +166,8 @@ public sealed class PgAlertNoise7082LiveTests
             /* Second life: nothing is in memory. The seed puts the waiting pair back and lets the gate fire again at the same
                count, and the count pages on it although the store already knows the pair. */
             var unannouncedAfter = new HashSet<string>(StringComparer.Ordinal);
-            var watermark = await DarlingWorker.SeedPgDeadlockStateAsync(
-                state, Server, Metric, unannouncedAfter, fresh => h.Rollup.NoteNewSignatures(Server, fresh));
+            var watermark = (await DarlingWorker.SeedPgDeadlockStateAsync(
+                state, Server, Metric, unannouncedAfter, fresh => h.Rollup.NoteNewSignatures(Server, fresh))).Watermark;
             Assert.Equal(0, watermark);
             var after = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedAfter);
             Assert.Equal(new[] { pair }, after.NewKeys.ToArray());
@@ -184,7 +184,7 @@ public sealed class PgAlertNoise7082LiveTests
 
             /* Third life: the same pair is known and announced, so it is held and never pages again. */
             var unannouncedThird = new HashSet<string>(StringComparer.Ordinal);
-            Assert.Equal(1, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedThird, null));
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, unannouncedThird, null)).Watermark);
             var third = await Count(new Dictionary<string, DateTime>(StringComparer.Ordinal), unannouncedThird);
             Assert.Empty(third.NewKeys);
             Assert.False(DarlingWorker.PgDeadlockPagesNow(1, third.NewKeys.Count, third.StoreOk));
@@ -226,7 +226,7 @@ public sealed class PgAlertNoise7082LiveTests
             Assert.Empty((await state.LoadUnannouncedPairsAsync(Server))!);
             await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
             var restored = new HashSet<string>(StringComparer.Ordinal);
-            Assert.Equal(1, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restored, null));
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restored, null)).Watermark);
             Assert.Empty(restored);
         });
     }
@@ -266,7 +266,7 @@ public sealed class PgAlertNoise7082LiveTests
 
             /* A full read drops nothing, in memory or in the saved set: a restart still finds the pair waiting. */
             var restoredFull = new HashSet<string>(StringComparer.Ordinal);
-            Assert.Equal(0, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredFull, null));
+            Assert.Equal(0, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredFull, null)).Watermark);
             Assert.Equal(new[] { newPair }, restoredFull.ToArray());
 
             /* A short read is the whole hour: the pair's report is not in it, so the pair is dropped. */
@@ -277,7 +277,7 @@ public sealed class PgAlertNoise7082LiveTests
             /* The drop left the saved set too: a restart restores nothing. */
             var restoredShort = new HashSet<string>(StringComparer.Ordinal);
             await state.SaveEdgeTriggerWatermarkAsync(Server, Metric, 1);
-            Assert.Equal(1, await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredShort, null));
+            Assert.Equal(1, (await DarlingWorker.SeedPgDeadlockStateAsync(state, Server, Metric, restoredShort, null)).Watermark);
             Assert.Empty(restoredShort);
         });
     }

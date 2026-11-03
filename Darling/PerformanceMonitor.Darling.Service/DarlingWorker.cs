@@ -1376,6 +1376,8 @@ public sealed partial class DarlingWorker : BackgroundService
        re-fires on a deadlock/blocking count still sitting in the rolling window from before the
        restart. Seeded once per (server, metric) key, mirroring AlertEngine's _seededServerKeys. */
     private readonly ConcurrentDictionary<string, bool> _pgDeadlockWatermarkSeeded = new(StringComparer.Ordinal);
+    /* #7295: set once the pairs half of the deadlock seed has read the stored list. Until then the replace hook writes nothing. */
+    private readonly ConcurrentDictionary<string, bool> _pgDeadlockPairsSeeded = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _pgBlockingWatermarkSeeded = new(StringComparer.Ordinal);
 
     /* #2716: the three Tier 0 predictors' cooldown (_lastPostgresAlert, keyed per server|metric|subject)
