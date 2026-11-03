@@ -54,4 +54,16 @@ public sealed class FinOpsInventoryUptimeTests
         Assert.Null(row.UptimeSeconds);
         Assert.Equal("", row.UptimeDisplay);
     }
+
+    [Fact]
+    public void A_start_before_a_daylight_saving_change_is_exactly_as_far_back_as_the_tick_count()
+    {
+        /* 20 days and 6 hours of server ticks, across a fall-back change: the server's wall clock reads 20d 7h apart, the ticks say 20d 6h. */
+        var utcNow = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+        var uptimeSeconds = (20 * 24 + 6) * 3600d;
+
+        var start = LocalDataService.StartUtcFromUptimeSeconds(uptimeSeconds, utcNow);
+
+        Assert.Equal(utcNow.AddHours(-(20 * 24 + 6)), start);
+    }
 }

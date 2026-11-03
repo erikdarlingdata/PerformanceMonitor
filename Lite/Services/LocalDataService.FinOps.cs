@@ -370,8 +370,8 @@ public class ServerPropertyRow
     /// <summary>The server's start time on the SERVER's own clock, shown as-is. Never subtract it from the client's clock (#7176).</summary>
     public DateTime? SqlServerStartTime { get; set; }
 
-    /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured against its own clock
-    /// (<c>DATEDIFF(SECOND, sqlserver_start_time, SYSDATETIME())</c>), so the client's zone never enters it (#7176). Null when unknown.</summary>
+    /// <summary>The start instant in UTC, worked out at read time from the uptime the server itself measured as two tick counts
+    /// (<c>(ms_ticks - sqlserver_start_time_ms_ticks) / 1000</c>), so neither the client's zone nor a daylight saving change enters it (#7176). Null when unknown.</summary>
     public DateTime? SqlServerStartUtc { get; set; }
     public DateTime? LastUpdated { get; set; }
     public bool? IsHadrEnabled { get; set; }

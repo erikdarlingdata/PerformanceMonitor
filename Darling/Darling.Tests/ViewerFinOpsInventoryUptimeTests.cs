@@ -67,4 +67,20 @@ public sealed class ViewerFinOpsInventoryUptimeTests
         Assert.Null(row.UptimeSeconds);
         Assert.Equal("", row.UptimeDisplay);
     }
+
+    [Fact]
+    public void A_start_before_a_daylight_saving_change_gives_the_true_elapsed_time()
+    {
+        /* US Eastern: started 15 Oct at 12:00 on the server's wall clock (EDT, UTC-4). The service last loaded after the fall-back
+           change on 1 Nov, so the stored offset is EST (-300). Read on 10 Nov at 12:00 UTC, the true uptime is 25 days 20 hours. */
+        var utcNow = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+        var start = new DateTime(2026, 10, 15, 12, 0, 0, DateTimeKind.Unspecified);
+        var truth = (25 * 24 + 20) * 3600d;
+
+        var withZone = new ServerPropertyRow { SqlServerStartTime = start, UtcOffsetMinutes = -300, TimeZoneId = "Eastern Standard Time" };
+        var offsetOnly = new ServerPropertyRow { SqlServerStartTime = start, UtcOffsetMinutes = -300 };
+
+        Assert.Equal(truth, withZone.UptimeSecondsAt(utcNow));
+        Assert.Equal(truth - 3600d, offsetOnly.UptimeSecondsAt(utcNow));
+    }
 }
