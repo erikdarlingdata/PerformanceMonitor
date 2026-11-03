@@ -324,8 +324,14 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// #7337: the slots are split, not spent on recency alone (which left a heavy statement that runs now and then with
     /// no plan for good): <see cref="PlansByRecency"/> go to the newest statements by <c>last_execution_time</c>, so a
     /// plan that just recompiled or regressed still gets one, and <see cref="PlansByWeight"/> go to the heaviest by
-    /// <c>total_elapsed_time</c>. The inline apply hands each a plan handle and the rest NULL; the deferred fetch picks
-    /// its misses the same way.
+    /// <c>total_elapsed_time</c>. The inline apply hands each a plan handle and the rest NULL. The split is the inline
+    /// apply's only: the inline query has no counter baselines, so it can rank only by recency and lifetime weight. The
+    /// deferred fetch takes the first <see cref="MaxPlansPerRun"/> misses in the order <c>SkipIdleAndRank</c> returns,
+    /// the in-interval elapsed rank, which already covers a regressed plan and a heavy statement on the run it executes.
+    /// #7344: the inline ranks are taken over the self-filtered survivors of the candidate TOP, so a slot never goes to
+    /// one of the collector's own statements. Those are the newest rows at collection time and, for the heavy
+    /// collectors, among the heaviest by lifetime total; ranked before the filter they took 99 of 100 slots in both
+    /// halves on a test server and the filter then dropped them, so user statements inside the cap shipped no plan.
     /// </summary>
     public const int MaxPlansPerRun = 200;
 
@@ -336,8 +342,8 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// #7337: the plan slots given to the heaviest statements by <c>total_elapsed_time</c>. The weight is the lifetime
     /// total and the inline apply keeps no digest cache, so inline mode does not rotate this half: each run renders the
     /// same lifetime-heaviest statements again, and a statement that runs now and then gets a slot only while its
-    /// lifetime total is in the top <see cref="PlansByWeight"/>. The deferred fetch caches a fetched plan and moves on
-    /// to the next heaviest miss.
+    /// lifetime total is in the top <see cref="PlansByWeight"/>. The deferred fetch has no weight half: it ranks by the in-interval
+    /// delta, and it caches a fetched plan so the next run spends its slots on the next miss.
     /// </summary>
     public const int PlansByWeight = MaxPlansPerRun - PlansByRecency;
 
@@ -353,17 +359,17 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
        store until it out-weighed a plan that had been cached for a week; recency keeps everything that ran in
        the window, and ReadAsync drops the rows whose counters did not move since the last run. The text apply
        still runs only against the derived table's rows and the plan render only against the MaxPlansPerRun of
-       them that PLAN_RANK picks (#7337: half newest, half heaviest). The same shape as ProcedureStatsCollector's #5449 candidate query. */
+       them that the ranked layer picks (#7337: half newest, half heaviest). The same shape as ProcedureStatsCollector's #5449 candidate query. */
     private static readonly string StandardQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
     database_name = qs.database_name," + SelectColumnsText + @"/*PLAN_SELECT*/
 FROM
-(
+/*RANK_OPEN*/(
     SELECT TOP (" + MaxCandidateRows + @")
         database_name = d.name,
-        qs.*/*PLAN_RANK*/
+        qs.*
     FROM sys.dm_exec_query_stats AS qs
     CROSS APPLY
     (
@@ -380,9 +386,7 @@ FROM
     ORDER BY
         qs.last_execution_time DESC,
         qs.total_elapsed_time DESC
-) AS qs
-OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
-WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
+) AS qs/*TEXT_APPLY*/
 ORDER BY
     qs.last_execution_time DESC,
     qs.total_elapsed_time DESC
@@ -396,33 +400,52 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SELECT /* PerformanceMonitorLite */
     database_name = DB_NAME()," + SelectColumnsText + @"/*PLAN_SELECT*/
 FROM
-(
+/*RANK_OPEN*/(
     SELECT TOP (" + MaxCandidateRows + @")
-        qs.*/*PLAN_RANK*/
+        qs.*
     FROM sys.dm_exec_query_stats AS qs
     WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
     ORDER BY
         qs.last_execution_time DESC,
         qs.total_elapsed_time DESC
-) AS qs
-OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st/*PLAN_APPLY*/
-WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
+) AS qs/*TEXT_APPLY*/
 ORDER BY
     qs.last_execution_time DESC,
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
-    /* #7156: spliced into the derived table only when the main query renders plans inline. plan_rank is taken over the
-       same ordering as the derived table's TOP, so 1..PlansByRecency are the newest statements: a plan that just
-       recompiled or regressed keeps its plan.
+    /* The text apply and the collector's own-statement self-filter, as the no-plan form (Lite, and Darling with the
+       plan fetch deferred) has always spelled them. Spliced at the TEXT_APPLY marker so that form's SQL is byte-identical;
+       QueryStatsSqlGoldenTests pins its hash. */
+    private const string PlainTextApplyFragment = @"
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'";
+
+    /* #7156: the inline plan form wraps the cheap TOP derived table in a ranked layer. Spliced at the RANK_OPEN marker; the
+       matching close is InlineTextApplyFragment, which carries the text apply, the self-filter and the plan apply.
+       #7344: plan_rank is taken over the SAME ordering as the derived table's TOP, so 1..PlansByRecency are the newest
+       statements: a plan that just recompiled or regressed keeps its plan. But the ranks are taken over the rows the
+       self-filter KEPT, not over every row the TOP kept. The collector's own statements (every collector query carries
+       the PerformanceMonitorLite marker) are the newest rows at collection time and, for the heavy collectors, among
+       the heaviest by lifetime total, so ranking before the filter handed them 99 of 100 slots in both halves on a test
+       server and the outer filter then threw them away, leaving the user's statements past the cap with no plan.
        #7337: recency alone starved a heavy statement that runs now and then (a report): with more than 200 other
        statements between its runs it was never in the newest 200, so every row stored for it had no plan. weight_rank
-       is the heaviest by total_elapsed_time, and the apply hands the handle to a row within either half. Both
-       numbers are taken over every row the WHERE keeps, before the TOP trims it to MaxCandidateRows, so when more
-       than MaxCandidateRows statements ran in the window, a heavy one the TOP dropped still holds a weight slot. */
-    private static readonly string PlanRankFragment = @",
+       is the heaviest by total_elapsed_time, and the apply hands the handle to a row within either half.
+       weight_rank is therefore taken over the MaxCandidateRows newest rows the self-filter kept, not over every row in the
+       window before the TOP (as #7337 first had it): a weight slot can no longer go to a row the TOP dropped, and a heavy
+       statement outside the MaxCandidateRows newest gets no weight slot that run.
+       The text is carried out of this layer as st_text / st_objectid / st_dbid so it is applied once, not twice. */
+    private static readonly string RankOpenFragment = @"(
+    SELECT
+        qs.*,
+        st_text = st.text,
+        st_objectid = st.objectid,
+        st_dbid = st.dbid,
         plan_rank = ROW_NUMBER() OVER (ORDER BY qs.last_execution_time DESC, qs.total_elapsed_time DESC),
-        weight_rank = ROW_NUMBER() OVER (ORDER BY qs.total_elapsed_time DESC, qs.last_execution_time DESC)";
+        weight_rank = ROW_NUMBER() OVER (ORDER BY qs.total_elapsed_time DESC, qs.last_execution_time DESC)
+    FROM
+";
 
     /* Execution-plan capture — spliced into both variants only when the host sets CapturePlanXml
        (Darling); when off the placeholders erase to nothing, so Lite's SQL is byte-identical to the
@@ -449,11 +472,25 @@ OPTION(RECOMPILE);";
     query_plan_xml_bytes = DATALENGTH(tqp.query_plan)";
 
     /* #7156: the handle is NULL for a row outside both halves, and sys.dm_exec_text_query_plan returns no row for a NULL
-       handle (the way sp_WhoIsActive applies it to idle sessions). The row set is fixed by the derived table, so the
+       handle (the way sp_WhoIsActive applies it to idle sessions). The row set is fixed by the ranked layer, so the
        cap holds whatever order the optimizer runs the apply in.
        #7337: a row gets the handle when it is within the newest PlansByRecency (plan_rank) or the heaviest
-       PlansByWeight (weight_rank). A statement in both takes one slot, so a run can render fewer than MaxPlansPerRun. */
-    private static readonly string PlanApplyFragment = @"
+       PlansByWeight (weight_rank). A statement in both takes one slot, so a run can render fewer than MaxPlansPerRun.
+       #7344: the ranks were taken over the self-filtered survivors of the TOP (RankOpenFragment), so every slot goes to
+       a row that is stored. This is the inline form of the text apply: the first lines close the ranked layer's FROM
+       with the dm_exec_sql_text apply and the self-filter, the one-row apply hands the layer's text columns back to the
+       outer SELECT under the st alias it already reads, and the plan apply runs against the ranked rows. */
+    private static readonly string InlineTextApplyFragment = @"
+OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+    WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
+) AS qs
+OUTER APPLY
+(
+    SELECT
+        text = qs.st_text,
+        objectid = qs.st_objectid,
+        dbid = qs.st_dbid
+) AS st
 OUTER APPLY
     sys.dm_exec_text_query_plan
     (
@@ -464,7 +501,7 @@ OUTER APPLY
 
     /// <summary>
     /// One statement plan the host wants rendered by <see cref="BuildPlanFetchQuery"/>: the same
-    /// <c>plan_handle</c> and statement offsets <see cref="PlanApplyFragment"/> hands to
+    /// <c>plan_handle</c> and statement offsets <see cref="InlineTextApplyFragment"/> hands to
     /// <c>sys.dm_exec_text_query_plan</c>.
     /// </summary>
     public readonly record struct PlanFetchKey(byte[] PlanHandle, int StartOffset, int EndOffset);
@@ -649,25 +686,25 @@ OPTION(RECOMPILE);";
     {
         var inlinePlan = InlinePlanCapture(context);
         var planSelect = inlinePlan ? PlanSelectFragment : "";
-        var planApply = inlinePlan ? PlanApplyFragment : "";
-        var planRank = inlinePlan ? PlanRankFragment : "";
+        var textApply = inlinePlan ? InlineTextApplyFragment : PlainTextApplyFragment;
+        var rankOpen = inlinePlan ? RankOpenFragment : "";
 
         if (context.Target.IsAzureSqlDb)
         {
             return new CollectorQuery(
                 AzureSqlDbQueryText
-                    .Replace("/*PLAN_RANK*/", planRank, StringComparison.Ordinal)
+                    .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                     .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
-                    .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal));
+                    .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal));
         }
 
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
         return new CollectorQuery(
             StandardQueryText
                 .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal)
-                .Replace("/*PLAN_RANK*/", planRank, StringComparison.Ordinal)
+                .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                 .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
-                .Replace("/*PLAN_APPLY*/", planApply, StringComparison.Ordinal),
+                .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal),
             exclusionParameters);
     }
 
@@ -1056,7 +1093,7 @@ OPTION(RECOMPILE);";
 
     /// <summary>
     /// #3392: this row is a backlog candidate when its plan measured over the cap and both cache handles are
-    /// present. The offsets handed back are the SAME ones <see cref="PlanApplyFragment"/> passes, so the
+    /// present. The offsets handed back are the SAME ones <see cref="InlineTextApplyFragment"/> passes, so the
     /// deferred fetch re-issues the identical statement-grain call rather than a plausible-looking variant of
     /// it — a plan_handle with the wrong offsets is a different statement's plan, which is the exact
     /// cross-contamination the delta key's own comment records.
