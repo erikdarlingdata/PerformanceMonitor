@@ -181,7 +181,9 @@ public partial class MainWindow : Window
                 investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys,
                 /* #6596: an alert whose story is recurring at this hour opens no request; the skip is journaled. */
                 recurringSkipped: duckInvestigationStore.RecordRecurringSkipAsync),
-            (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
+            /* #7217: the alert path can run on the dispatcher, and this read takes the store read lock, which waits without limit
+               while an archival holds the write lock. Task.Run keeps that wait off the UI thread. */
+            (requestId, token) => Task.Run(() => investigationStore.ReadRequestAsync(requestId, token), token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
@@ -1462,6 +1464,10 @@ public partial class MainWindow : Window
                    RunCollectorAsync: that method also runs inside the registered sweeps, and a nested
                    registration there would wait out the reset's drain timeout. */
                 using var collectionScope = await CollectionResetGate.BeginCollectionAsync();
+
+                /* #7215: this server's turn, so these runs and a scheduled sweep or tab-open run on the same server never share its
+                   telemetry slot. */
+                using var serverTurn = await _collectorService.AcquireServerRunAsync(server);
 
                 var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)

@@ -60,7 +60,7 @@
                     </DataTrigger>
                     <DataTrigger Binding="{Binding IsArchived}" Value="True">
                         <Setter Property="Foreground" Value="#FF888888"/>
-                        <Setter Property="ToolTip" Value="This alert has been archived and cannot be dismissed."/>
+                        <Setter Property="ToolTip" Value="This alert has been archived. Dismissing it hides it from this view."/>
                     </DataTrigger>
                 </Style.Triggers>
             </Style>

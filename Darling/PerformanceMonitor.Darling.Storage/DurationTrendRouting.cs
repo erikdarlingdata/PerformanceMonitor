@@ -376,34 +376,59 @@ public static class DurationTrendRouting
     /// columns are projected, so the payload-resolving <c>v_*</c> view is not needed). $1 server_id, $2/$3 window
     /// (naive UTC).</para>
     /// </summary>
-    private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter)
+    private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter, bool includeElapsed = true)
     {
         const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
-        var sums = withDatabaseFilter
-            ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n"
-              + $"        COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
-              + $"        COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
-            : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
-              + "        SUM(delta_execution_count) AS total_executions,";
+        var maxGap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        var elapsedSum = !includeElapsed ? ""
+            : withDatabaseFilter
+                ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
+                : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n                ";
+        var executionSum = withDatabaseFilter
+            ? $"COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"                COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
+            : "SUM(delta_execution_count) AS total_executions,";
+        var elapsedOut = includeElapsed ? "total_elapsed_ms, " : "";
+        var matchedOut = withDatabaseFilter ? ", matched_rows" : "";
 
+        // #7161: the collection's seconds are its gap to the previous collection (the shape ProcedureCollectionsCte settled on in
+        // #5449), not MAX(sample_interval_seconds): that is the longest interval of ANY query in the collection, and a query that
+        // returns every 15 or 30 minutes stretched a 60 s collection to 900 s, cutting the rate about 15-fold. The table is read from
+        // maxGap before $2 so the first in-window collection has its previous one; the rows before $2 are dropped after the LAG.
         return $"""
         raw AS
         (
             SELECT
-                collection_time,
-                {sums}
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                collection_time, {elapsedOut}total_executions{matchedOut},
+                -- Three states: every row stored 0 (a restart) is unrated whatever the gap; a previous collection within the collector's
+                -- own gap policy gives the seconds; the store's first collection has no previous one and keeps its stored interval.
+                CASE WHEN stored_interval = 0 THEN NULL
+                     WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {maxGap} THEN gap_seconds END
+                     ELSE NULLIF(stored_interval, 0)
                 END AS interval_seconds
-            FROM {rawTable}
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
+            FROM
+            (
+                SELECT
+                    collection_time,
+                    {elapsedSum}{executionSum}
+                    MAX(sample_interval_seconds) AS stored_interval,
+                    extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds
+                FROM {rawTable}
+                WHERE server_id = $1
+                AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                AND   collection_time <= $3
+                GROUP BY collection_time
+            ) AS g
+            WHERE collection_time >= $2
         )
         """;
     }
+
+    /// <summary>
+    /// #7161: the query grain's per-collection <c>raw</c> CTE without the elapsed sum, for the execution-count chart the viewer
+    /// builds ($4 database filter, always on). Same interval rule as <see cref="RawCollectionsCte"/>.
+    /// </summary>
+    public static string QueryExecutionCollectionsCte() => RawCollectionsCte("query_stats", withDatabaseFilter: true, includeElapsed: false);
 
     /// <summary>
     /// #5449: the per-collection CTE the bucketed raw statement reads for <c>procedure_stats</c>, in place of

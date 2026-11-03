@@ -398,8 +398,7 @@ public partial class AlertsHistoryTab : UserControl
     private void AlertsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var selected = AlertsDataGrid.SelectedItems.OfType<AlertHistoryRow>().ToList();
-        var liveCount = selected.Count(a => !a.IsArchived);
-        DismissSelectedButton.IsEnabled = liveCount > 0 && !_dismissInFlight;
+        DismissSelectedButton.IsEnabled = selected.Count > 0 && !_dismissInFlight;
     }
 
     /* #5650: a dismiss can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync) while
@@ -423,7 +422,14 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private async void DismissSelected_Click(object sender, RoutedEventArgs e)
+    private async void DismissSelected_Click(object sender, RoutedEventArgs e) => await DismissSelectedAsync();
+
+    /// <summary>The confirmation prompt Dismiss All asks. A property so a test answers it without a modal box.</summary>
+    internal Func<string, string, MessageBoxButton, MessageBoxImage, MessageBoxResult> ConfirmPrompt { get; set; } = MessageBox.Show;
+
+    /// <summary>Dismiss Selected, archived rows included (#7160): the keyed write puts an archived key in the dismissed_archive_alerts
+    /// sidecar, and the view then hides it, the way the window write has always hidden archived rows for Dismiss All.</summary>
+    internal async System.Threading.Tasks.Task DismissSelectedAsync()
     {
         if (_dataService == null || _dismissInFlight) return;
 
@@ -433,44 +439,20 @@ public partial class AlertsHistoryTab : UserControl
 
         if (selected.Count == 0) return;
 
-        var liveAlerts = selected.Where(a => !a.IsArchived).ToList();
-        var archivedCount = selected.Count - liveAlerts.Count;
-
-        if (liveAlerts.Count == 0)
-        {
-            MessageBox.Show(
-                "The selected alert(s) have been archived and cannot be dismissed.",
-                "Cannot Dismiss",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
-
-        if (archivedCount > 0)
-        {
-            var confirmResult = MessageBox.Show(
-                $"{archivedCount} of {selected.Count} selected alert(s) have been archived and cannot be dismissed.\n\n" +
-                $"Dismiss the remaining {liveAlerts.Count} alert(s)?",
-                "Partial Dismiss",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-            if (confirmResult != MessageBoxResult.Yes) return;
-        }
-
         SetDismissInFlight(true);
         try
         {
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(liveAlerts));
-            if (affected < liveAlerts.Count && App.LogAlertDismissals)
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(selected));
+            if (affected < selected.Count && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {liveAlerts.Count} live alert(s) were updated");
+                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {selected.Count} alert(s) were updated");
             }
             await LoadAlertsAsync();
 
             /* Clear the matching server tab badge(s) for the servers whose alerts were dismissed,
                matching Dismiss All's behavior (issue #1092). Selected rows can span servers when
                the filter is "all", so acknowledge each distinct server rather than the filter. */
-            foreach (var dismissedServerId in liveAlerts.Select(a => a.ServerId).Distinct())
+            foreach (var dismissedServerId in selected.Select(a => a.ServerId).Distinct())
                 AlertsDismissed?.Invoke(dismissedServerId);
         }
         catch (TimeoutException ex)
@@ -496,32 +478,29 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private async void DismissAll_Click(object sender, RoutedEventArgs e)
+    /// <summary>Whether Dismiss All must dismiss the rows on screen by key (a column filter is set or the last read hit the
+    /// cap) rather than the whole window (#7160).</summary>
+    internal bool DismissAllUsesShownRows()
+        => AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
+    private async void DismissAll_Click(object sender, RoutedEventArgs e) => await DismissAllAsync();
+
+    internal async System.Threading.Tasks.Task DismissAllAsync()
     {
         if (_dataService == null || _dismissInFlight) return;
 
         var allAlerts = (AlertsDataGrid.ItemsSource as IEnumerable<AlertHistoryRow>)?.ToList();
         if (allAlerts == null || allAlerts.Count == 0) return;
 
-        var liveCount = allAlerts.Count(a => !a.IsArchived);
-        var archivedCount = allAlerts.Count - liveCount;
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = DismissAllUsesShownRows();
 
-        if (liveCount == 0)
-        {
-            MessageBox.Show(
-                "All visible alerts have been archived and cannot be dismissed.",
-                "Cannot Dismiss",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
+        /* Archived rows are dismissed too (#7160): both paths hide them (the window write and the keyed write each put them in the
+           dismissed_archive_alerts sidecar), so the count asked about is the count dismissed. */
+        var message = $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
 
-        var message = $"Dismiss {liveCount} alert(s)?";
-        if (archivedCount > 0)
-            message += $"\n\n{archivedCount} archived alert(s) will remain visible.";
-        message += "\n\nDismissed alerts are hidden from this view but remain in the database.";
-
-        var result = MessageBox.Show(
+        var result = ConfirmPrompt(
             message,
             "Dismiss All Alerts",
             MessageBoxButton.YesNo,
@@ -535,15 +514,26 @@ public partial class AlertsHistoryTab : UserControl
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
-            if (affected < liveCount && App.LogAlertDismissals)
+            var shownRows = dismissShownRows ? allAlerts : null;
+            var affected = await System.Threading.Tasks.Task.Run(() => shownRows != null
+                ? _dataService.DismissAlertsAsync(shownRows, "DismissAllShown")
+                : _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
+            if (affected < allAlerts.Count && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
+                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {allAlerts.Count} alert(s) were updated");
             }
             await LoadAlertsAsync();
 
             /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
-            AlertsDismissed?.Invoke(serverId);
+            if (shownRows != null)
+            {
+                foreach (var dismissedServerId in shownRows.Select(a => a.ServerId).Distinct())
+                    AlertsDismissed?.Invoke(dismissedServerId);
+            }
+            else
+            {
+                AlertsDismissed?.Invoke(serverId);
+            }
         }
         catch (TimeoutException ex)
         {
@@ -609,11 +599,14 @@ public partial class AlertsHistoryTab : UserControl
     private async void ShowDetail(AlertHistoryRow item)
     {
         IReadOnlyList<string>? attached = null;
-        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        if (_dataService is { } dataService && OpenEngineAlerts.IsAttachable(item.MetricName))
         {
             try
             {
-                attached = await data.GetAttachedFindingsAsync(item);
+                /* The read takes the DuckDB read lock before its first await and DuckDB.NET's async methods complete
+                   synchronously, so awaited straight from this handler it would wait on archival or compaction and then
+                   run the query on the dispatcher. Task.Run keeps both off the UI thread (#7180). */
+                attached = await System.Threading.Tasks.Task.Run(() => dataService.GetAttachedFindingsAsync(item));
             }
             catch (Exception ex)
             {

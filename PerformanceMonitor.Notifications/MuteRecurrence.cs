@@ -200,6 +200,24 @@ public static class MuteRecurrence
         return (IncludesDay(days, today) && t >= s) || (IncludesDay(days, yesterday) && t < e);
     }
 
+    /// <summary>The longest daily window that still counts as a real bound for the stale mute check (#7183): a schedule open
+    /// for this long or more on every day of the week leaves almost nothing unmuted, so it is a mute with no expiry in practice.
+    /// A schedule that closes for at least an hour a day, or skips at least one day, is bounded.</summary>
+    public static readonly TimeSpan NearFullDayWindow = TimeSpan.FromHours(23);
+
+    /// <summary>Whether the schedule is open for <see cref="NearFullDayWindow"/> or longer on every day of the week, so the
+    /// rule is not bounded by its schedule in any useful way. False for no schedule, a schedule that skips a day, and any
+    /// window shorter than that. A window that crosses midnight is measured across it (00:01-00:00 is 23h59m).</summary>
+    public static bool CoversNearlyEveryHour(int? days, TimeOnly? start, TimeOnly? end)
+    {
+        if (!start.HasValue || !end.HasValue) return false;
+        if (days is { } m && m != AllDaysMask) return false;
+        var s = start.Value;
+        var e = end.Value;
+        var length = s < e ? e - s : TimeSpan.FromHours(24) - (s - e);
+        return length >= NearFullDayWindow;
+    }
+
     /// <summary>The UTC instant the next window starts after <paramref name="nowUtc"/>, or null when the schedule has none (no
     /// times, an unknown zone). The caller applies the rule's own start and expiry.</summary>
     public static DateTime? NextWindowStartUtc(int? days, TimeOnly? start, TimeOnly? end, string? zone, DateTime nowUtc)

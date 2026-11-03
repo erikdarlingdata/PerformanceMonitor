@@ -5080,6 +5080,9 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /// <summary>The most overdue databases one Backup, Log Backup or CHECKDB Overdue alert names; the rest are counted ("and N more").</summary>
+    internal const int OverdueDetailDatabases = 10;
+
     private async Task ApplyOverdueMetricAsync(
         int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
         string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
@@ -5087,7 +5090,9 @@ internal sealed class DarlingSelfAlertEvaluator
         var key = Key(serverId);
         var stateKey = StateRetryKey(metric, key);
         var now = _utcNow();
-        var items = overdue.Where(o => o.Kind == kind).ToList();
+        /* #7202: the oldest first, a database never backed up or checked (no age) before any dated one, so the names the alert
+           carries are the worst ones. OrderBy is stable, so equal ages keep the read's order. */
+        var items = overdue.Where(o => o.Kind == kind).OrderBy(o => o.Age.HasValue).ThenByDescending(o => o.Age).ToList();
         if (items.Count > 0)
         {
             _activeDatabaseProtection[stateKey] = true;
@@ -5096,7 +5101,12 @@ internal sealed class DarlingSelfAlertEvaluator
             if (decision is ConnectionAlertDecision.Lost or ConnectionAlertDecision.StillDown)
             {
                 _lastDatabaseProtectionAlert[stateKey] = now;
-                var names = string.Join(", ", items.Select(i => i.Text));
+                /* #7202: capped like Identity Capacity. A server with hundreds of overdue databases would otherwise
+                   put every one in the detail, and a Teams card past its ~28 KB ceiling is rejected on every repeat. */
+                var names = string.Join(", ", items.Take(OverdueDetailDatabases).Select(i => i.Text)) +
+                    (items.Count > OverdueDetailDatabases
+                        ? string.Create(CultureInfo.InvariantCulture, $", and {items.Count - OverdueDetailDatabases} more")
+                        : string.Empty);
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
                     detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {items.Count} database(s): {names}." + consequence,
@@ -6339,6 +6349,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// Edge-applies the fleet-level "a mute rule has outlived its reason" condition (#3306): a rule that is
     /// ENABLED, has NO expiry, and was created longer than <see cref="StaleMuteAge"/> ago.
     ///
+    /// <para><b>Two exclusions (#7183).</b> A recurring rule with a real bound is skipped, because its schedule
+    /// is its bound: it leaves at least an hour of every day unmuted, or skips at least one day of the week
+    /// (see <see cref="MuteRecurrence.CoversNearlyEveryHour"/>). A digest rule is skipped too, because it holds
+    /// alerts for the daily digest and suppresses nothing. A recurring rule open 23 hours or longer on all seven
+    /// days has no real bound, so it is NOT excluded and is reported like a plain open-ended mute.</para>
+    ///
     /// <para><b>Why this condition exists at all.</b> A mute is a deliberate blind spot in a monitoring
     /// tool, and nothing else in this product reports that one is there. The only way to discover a mute is
     /// to ask <c>get_mute_rules</c>, which requires already suspecting it — so a mute whose justification
@@ -6389,6 +6405,21 @@ internal sealed class DarlingSelfAlertEvaluator
         foreach (var rule in rules)
         {
             if (rule is null || !rule.Enabled || rule.ExpiresAtUtc.HasValue)
+            {
+                continue;
+            }
+
+            /* #7183: a recurring window (#7040) is bounded by its schedule, so a missing expiry is the design
+               and not a forgotten rule. A digest rule (#7083) holds alerts for the daily digest and suppresses
+               nothing, so it is no blind spot. Neither belongs in the stale set.
+
+               The exception is a recurring window open 23 hours or longer on all seven days (00:00-23:59 daily,
+               or 00:01-00:00 across midnight): the validator only refuses start == end, so it is accepted, and it
+               mutes nearly around the clock with no expiry. The schedule is no bound then, so that rule is judged
+               like a plain open-ended mute. */
+            if (rule.IsDigestAction
+                || (rule.IsRecurring
+                    && !MuteRecurrence.CoversNearlyEveryHour(rule.RecurDays, rule.RecurStartTime, rule.RecurEndTime)))
             {
                 continue;
             }

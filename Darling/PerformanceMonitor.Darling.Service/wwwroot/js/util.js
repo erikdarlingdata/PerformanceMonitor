@@ -335,6 +335,11 @@ export function readErrorStrip(message) {
   return errorStrip(message);
 }
 
+/** #7257: true for the "window too wide" refusal readErrorStrip shows as a notice. Running the same range again shows the same notice. */
+export function isWindowTooWide(message) {
+  return keptHoursOf(message) != null;
+}
+
 /* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
    A `top` refusal (`exceeds maximum of 1000.`) carries no " hours" and so is never one. */
 function keptHoursOf(message) {
@@ -572,6 +577,18 @@ export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
 
+/** #7257: the Retry button under a failed panel read. `onRetry` runs that one panel again. */
+export function retryButton(onRetry) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
+  btn.addEventListener("click", () => onRetry());
+  return btn;
+}
+
+/** #7257: what a panel shows while it waits for one of the page's long-read slots (a loading strip, so a poll waits for it too). */
+export function waitingStrip() {
+  return loadingStrip("Waiting for the panels above to finish…");
+}
+
 /* ─────────────────────────── time (UTC -> local) ─────────────────────────── */
 
 /** Parse a naive-UTC ISO string (no zone) as UTC; pass through strings that already carry a zone. */
@@ -605,6 +622,20 @@ export function emptyMessageText(body) {
 export function localTime(s) {
   const d = parseUtc(s);
   return d ? d.toLocaleString() : "—";
+}
+
+/**
+ * A monitored server's own wall-clock stamp ("2025-12-07T13:32:48", as msdb stores it) in the grids' date-time format, with no zone
+ * shift (#7243). localTime reads a naive stamp as UTC and moves it into the browser's zone, which would state the wrong hour for a
+ * value that is already the server's local time, so the fields are read as written (through a UTC date, so a browser hour that a
+ * clock change skips cannot move them). Null or empty is an em dash, and text that is not a stamp comes back as given.
+ */
+export function serverClockTime(s) {
+  if (s == null || s === "") return "—";
+  const m = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)/.exec(String(s));
+  if (!m) return String(s);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  return d.toLocaleString(undefined, { timeZone: "UTC" });
 }
 
 /** Time-of-day only (HH:MM local), or an em dash — for compact "last collect" lines where the date is implied. */
