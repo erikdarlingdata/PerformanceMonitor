@@ -4954,10 +4954,49 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
-    /* Case B: the same folder the failed initdb used now holds a restored store backup. The marker does name this
-       folder, so the start sets it aside, and it never deletes: every restored file is still on disk. */
+    /* Case B, restored store that has run (postmaster.opts) or a base backup (backup_label): the marker names this
+       folder, but the folder is a real store. Nothing moves, the marker goes, the credential is not touched. */
+    [Theory]
+    [InlineData("postmaster.opts")]
+    [InlineData("backup_label")]
+    public async Task AStoreRestoredIntoTheFailedFolder_WithEvidenceItHasRun_IsKeptInPlace_AndTheStaleMarkerIsDeleted(string evidenceFile)
+    {
+        var store = Path.Combine(Path.GetTempPath(), "pm-initdb-restored-kept-" + Guid.NewGuid().ToString("N"));
+        var dataDirectory = Path.Combine(store, "pgdata");
+        Directory.CreateDirectory(store);
+        try
+        {
+            var result = await DarlingManagedPostgres.RunInitdbWithMarkerAsync(
+                dataDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
+            Assert.Equal(1, result.ExitCode);
+
+            var credential = DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            File.WriteAllText(credential, "credential of the restored store");
+            Directory.CreateDirectory(Path.Combine(dataDirectory, "base"));
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
+            File.WriteAllText(Path.Combine(dataDirectory, evidenceFile), "restored");
+            File.WriteAllText(Path.Combine(dataDirectory, "base", "1"), "restored from backup");
+
+            DarlingManagedPostgres.DiscardInterruptedInitdb(dataDirectory, NullLogger.Instance);
+
+            Assert.Equal("17", File.ReadAllText(Path.Combine(dataDirectory, "PG_VERSION")));
+            Assert.Equal("restored", File.ReadAllText(Path.Combine(dataDirectory, evidenceFile)));
+            Assert.Equal("restored from backup", File.ReadAllText(Path.Combine(dataDirectory, "base", "1")));
+            Assert.False(File.Exists(DarlingManagedPostgres.InitdbIncompleteMarkerPath(dataDirectory)));
+            Assert.Empty(MovedAsideFolders(store));
+            Assert.Equal("credential of the restored store", File.ReadAllText(credential));
+            Assert.Empty(Directory.GetFiles(store, "*" + DarlingManagedPostgres.InterruptedInitdbCredentialSuffix));
+        }
+        finally
+        {
+            try { Directory.Delete(store, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    /* Case B, a non-empty folder with neither file: it is moved aside, never deleted, and the credential the next
+       initdb overwrites is copied beside it first. */
     [Fact]
-    public async Task AStoreRestoredIntoTheFailedFolder_IsMovedAside_NotDeleted()
+    public async Task ANonEmptyFailedFolderWithNoEvidenceItHasRun_IsMovedAside_NotDeleted_WithACopyOfTheCredential()
     {
         var store = Path.Combine(Path.GetTempPath(), "pm-initdb-restored-" + Guid.NewGuid().ToString("N"));
         var dataDirectory = Path.Combine(store, "pgdata");
@@ -4968,6 +5007,8 @@ public sealed class DarlingManagedPostgresTests
                 dataDirectory, () => Task.FromResult((1, "initdb: error: could not create directory")));
             Assert.Equal(1, result.ExitCode);
 
+            var credential = DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            File.WriteAllBytes(credential, [1, 2, 3, 250]);
             Directory.CreateDirectory(Path.Combine(dataDirectory, "base"));
             File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17");
             File.WriteAllText(Path.Combine(dataDirectory, "base", "1"), "restored from backup");
@@ -4979,6 +5020,8 @@ public sealed class DarlingManagedPostgresTests
             var aside = Assert.Single(MovedAsideFolders(store));
             Assert.Equal("17", File.ReadAllText(Path.Combine(aside, "PG_VERSION")));
             Assert.Equal("restored from backup", File.ReadAllText(Path.Combine(aside, "base", "1")));
+            var copy = aside + DarlingManagedPostgres.InterruptedInitdbCredentialSuffix;
+            Assert.Equal(File.ReadAllBytes(credential), File.ReadAllBytes(copy));
         }
         finally
         {

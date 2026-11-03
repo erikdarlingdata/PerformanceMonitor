@@ -3229,9 +3229,10 @@ public sealed class DarlingManagedPostgres
            delegate included) sees only the Func<string> built from networkPlan.Value below. */
         var networkPlan = new Lazy<NetworkPlan>(BuildNetworkPlan);
 
+        DiscardInterruptedInitdb(_dataDirectory, _logger);
+
         /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
            extension for the quiesced update to move. */
-        DiscardInterruptedInitdb(_dataDirectory, _logger);
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
         if (!existingCluster)
         {
@@ -3905,6 +3906,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>The suffix <see cref="DiscardInterruptedInitdb"/> adds to the name of a half-made data directory it moves aside.</summary>
     internal const string InterruptedInitdbDirectorySuffix = ".interrupted-";
 
+    /// <summary>Appended to the moved folder's name for the copy of <c>pg-credential.dpapi</c> kept beside it (#7191).</summary>
+    internal const string InterruptedInitdbCredentialSuffix = ".pg-credential.dpapi";
+
+    /// <summary>Files a half-made initdb folder never holds but a store that has run (<c>postmaster.opts</c>) or a restored base backup (<c>backup_label</c>) does (#7191).</summary>
+    private static readonly string[] InterruptedInitdbStoreEvidenceFiles = ["postmaster.opts", "backup_label"];
+
     private static string FullDataDirectoryPath(string dataDirectory)
         => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
 
@@ -3950,7 +3957,10 @@ public sealed class DarlingManagedPostgres
     /// A first-run initdb that never finished left <see cref="InitdbIncompleteMarkerFileName"/> beside the data
     /// directory, naming it, and a half-made cluster that is not a store (#7191). Moves that folder aside to
     /// <c>&lt;dataDirectory&gt;.interrupted-yyyyMMddHHmmss</c> (an empty one is just removed) and removes the
-    /// marker, so the start initializes again. It never deletes a non-empty folder: the marker survives every
+    /// marker, so the start initializes again. A folder that holds <c>postmaster.opts</c> or <c>backup_label</c> is a
+    /// real store (a restored backup, say), not a half-made initdb: it is left exactly as it is, the stale marker is
+    /// deleted and the start goes on against it. Before any other non-empty folder is moved, a copy of the shared
+    /// <c>pg-credential.dpapi</c> is made beside it, because the next initdb overwrites that file. It never deletes a non-empty folder: the marker survives every
     /// non-zero initdb exit, so it can sit on disk until an operator has pointed <c>postgres.dataDirectory</c>
     /// at a sibling store or restored a backup into the same folder, and either would be lost to a delete.
     /// Acts only when the marker names exactly this directory (full paths, case-insensitive on Windows only). A
@@ -3996,10 +4006,37 @@ public sealed class DarlingManagedPostgres
         {
             if (Directory.EnumerateFileSystemEntries(full).Any())
             {
+                /* The marker alone does not prove the folder is half-made: an operator can restore a store backup
+                   into it after the failed run. initdb's bootstrap and single-user steps never write
+                   postmaster.opts (the postmaster does, on its first start), and a pg_basebackup copy leaves that
+                   file out but carries backup_label. Either file means a real store, so it is kept as it is. */
+                var keepFile = InterruptedInitdbStoreEvidenceFiles.FirstOrDefault(name => File.Exists(Path.Combine(full, name)));
+                if (keepFile is not null)
+                {
+                    logger.LogWarning(
+                        "The first-run initdb marker {Marker} named {DataDirectory}, but that folder holds {EvidenceFile}, which a half-made initdb folder never has, so it is a real store. The marker was stale: it was deleted and the folder was left as it is",
+                        marker, dataDirectory, keepFile);
+                    File.Delete(marker);
+                    return;
+                }
+
                 var aside = full + InterruptedInitdbDirectorySuffix + DateTime.Now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+
+                /* InitializeClusterAsync writes a new superuser credential over pg-credential.dpapi in the shared
+                   parent before initdb runs, so the moved folder would lose the password that opens it. Copy the
+                   file beside the moved folder first: a failed copy throws here with the marker kept and nothing
+                   moved. */
+                string? credentialCopy = null;
+                var credential = CredentialPathFor(full);
+                if (File.Exists(credential))
+                {
+                    credentialCopy = aside + InterruptedInitdbCredentialSuffix;
+                    File.Copy(credential, credentialCopy, overwrite: false);
+                }
+
                 logger.LogWarning(
-                    "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Moving the half-made data directory to {MovedTo} and initializing again. The moved folder can be deleted once you have checked it",
-                    dataDirectory, aside);
+                    "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Moving the half-made data directory to {MovedTo} and initializing again. The moved folder can be deleted once you have checked it. If it is actually a store you restored, it holds no postmaster.opts or backup_label; its superuser credential was copied to {CredentialCopy}, so to use it again, stop the service, put the folder back and copy that file over {Credential}",
+                    dataDirectory, aside, credentialCopy ?? "(none: there was no credential file)", credential);
                 Directory.Move(full, aside);
             }
             else
