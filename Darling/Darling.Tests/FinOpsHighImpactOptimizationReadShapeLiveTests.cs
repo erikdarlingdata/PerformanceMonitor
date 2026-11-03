@@ -37,7 +37,7 @@ public sealed class FinOpsHighImpactOptimizationReadShapeLiveTests
     private const string ServerName = "darling-finops-readshape-6803";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
-    /* The pre-#6803 High Impact statement, verbatim, with the interval-honest filter written out. */
+    /* The pre-#6803 High Impact statement with the interval-honest filter written out. Its memory column is the NEWEST row's grant (#7166), written here as a per-hash lookup so it checks the shipped window-function form. */
     private const string OldHighImpactSql = @"
 SELECT
     query_hash,
@@ -47,7 +47,11 @@ SELECT
     SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
-    SUM(COALESCE(max_grant_kb, 0)) / 1024.0 AS total_memory_mb,
+    COALESCE((SELECT qs3.max_grant_kb FROM v_query_stats qs3
+              WHERE qs3.query_hash = qs.query_hash AND qs3.server_id = $1 AND qs3.collection_time >= $2
+              AND qs3.delta_execution_count > 0 AND qs3.sample_interval_seconds IS DISTINCT FROM 0
+              ORDER BY qs3.collection_time DESC, qs3.creation_time DESC NULLS LAST, qs3.delta_worker_time DESC NULLS LAST
+              LIMIT 1), 0) / 1024.0 AS peak_memory_mb,
     (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
      WHERE qs2.query_hash = qs.query_hash AND qs2.server_id = $1 AND qs2.collection_time >= $2
      AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
@@ -71,7 +75,7 @@ AND   delta_execution_count > 0
 AND   sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY query_hash
 HAVING SUM(delta_execution_count) > 0
-ORDER BY SUM(delta_worker_time) DESC";
+ORDER BY SUM(delta_worker_time) DESC, query_hash";
 
     /* The pre-#6803 Optimization statement, verbatim. */
     private const string OldExpensiveSql = @"
@@ -315,7 +319,7 @@ LIMIT $3";
                         TotalDurationMs = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                         TotalReads = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
                         TotalWrites = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
-                        TotalMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                        PeakMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
                         SampleQueryText = reader.IsDBNull(8) ? "" : reader.GetString(8),
                         FullQueryText = reader.IsDBNull(9) ? "" : reader.GetString(9),
                         QueryPlanXml = PayloadDimensions.ResolveContent(
@@ -340,7 +344,7 @@ LIMIT $3";
                 Assert.Equal(e.TotalDurationMs, a.TotalDurationMs);
                 Assert.Equal(e.TotalReads, a.TotalReads);
                 Assert.Equal(e.TotalWrites, a.TotalWrites);
-                Assert.Equal(e.TotalMemoryMb, a.TotalMemoryMb);
+                Assert.Equal(e.PeakMemoryMb, a.PeakMemoryMb);
                 Assert.Equal(e.ImpactScore, a.ImpactScore);
                 Assert.Equal(e.SampleQueryText, a.SampleQueryText);
                 Assert.Equal(e.FullQueryText, a.FullQueryText);

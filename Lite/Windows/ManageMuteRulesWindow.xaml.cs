@@ -14,6 +14,7 @@ using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -138,7 +139,11 @@ public partial class ManageMuteRulesWindow : Window
 
     private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        EditRule_Click(sender, e);
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditRule_Click(sender, e);
+        }
     }
 
     private void RefreshList()

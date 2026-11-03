@@ -16,6 +16,7 @@ using System.Windows.Controls;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -421,7 +422,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async void PgDeadlocksGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        if (PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || PgDeadlocksGrid.SelectedItem is not DarlingPgDeadlockReader.PgDeadlockRow row)
         {
             return;
         }
