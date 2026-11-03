@@ -88,6 +88,28 @@ public class SensitiveStatementRawCleanTests
         Assert.Equal(TimeSpan.FromSeconds(1), budget.Elapsed);
     }
 
+    [Fact]
+    public void TheXmlEntryPointWithABudget_ChargesTheWalkOnTheBudgetsOwnClock_NotTheRealOne()
+    {
+        // #7348: the budget-taking Xml entry point hands the budget's clock to the walk. The clock moves 1 s on every
+        // read. A document with a named value skips the raw-text shortcut, so the pre-check and the walk both charge
+        // the budget from that clock. This document costs 29 reads, of which the charges span 20 steps (the rest
+        // set a mark and charge nothing), and both counts are fixed by the input. Read from the real clock, the
+        // walk's charges would be a few microseconds, not whole steps.
+        var step = TimeSpan.FromSeconds(1);
+        var now = TimeSpan.Zero;
+        var budget = new SensitiveStatements.JudgeBudget(
+            TimeSpan.FromDays(1),
+            clock: () => now += step);
+        var xml = "<r><n>" + Secret + "</n><n>" + Plain + "</n></r>";
+
+        var result = SensitiveStatements.Xml(xml, budget);
+
+        Assert.DoesNotContain("S3cret-canary-raw", result);
+        Assert.Equal(29 * step, now);
+        Assert.Equal(20 * step, budget.Elapsed);
+    }
+
     public static TheoryData<string> DocumentsThatMustBeWalked() => new()
     {
         // A named value: the walk replaces it.
