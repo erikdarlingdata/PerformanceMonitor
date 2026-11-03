@@ -3962,6 +3962,7 @@ public sealed class DarlingManagedPostgres
     /// nothing is touched. When the move throws, the exception propagates and the marker stays, so the start
     /// fails with the reason and nothing is lost. Does nothing when there is no marker.
     /// </summary>
+    [SupportedOSPlatform("windows")]
     internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
     {
         var marker = InitdbIncompleteMarkerPath(dataDirectory);
@@ -4025,7 +4026,12 @@ public sealed class DarlingManagedPostgres
                 if (File.Exists(credential))
                 {
                     credentialCopy = aside + InterruptedInitdbCredentialSuffix;
-                    File.Copy(credential, credentialCopy, overwrite: false);
+                    /* Written through the hardened create (#7363): File.Copy gives the copy the access of the folder it
+                       lands in, which under a drive root the service does not lock is the drive's, and this is the superuser
+                       credential. The create refuses an existing file, like the copy it replaces (overwrite: false). */
+                    var credentialBytes = File.ReadAllBytes(credential);
+                    using var copy = DarlingFileSecurity.CreateHardenedFile(credentialCopy, allowInteractiveRead: false);
+                    copy.Write(credentialBytes);
                 }
 
                 logger.LogWarning(
@@ -5905,7 +5911,7 @@ public sealed class DarlingManagedPostgres
     /// four "anyone on this box" groups, or, for a directory, writable by an account beyond the trusted ones. Null
     /// when it is not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? StoreItemExposure(string path, bool isDirectory)
+    internal static string? StoreItemExposure(string path, bool isDirectory)
     {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
@@ -5923,7 +5929,7 @@ public sealed class DarlingManagedPostgres
     /// <summary>The protected ACL on one store item, through a handle opened without following links, the way
     /// <c>--harden-files</c> applies it. Null on success, otherwise why not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? TightenStoreItem(string path, bool isDirectory, string anchor)
+    internal static string? TightenStoreItem(string path, bool isDirectory, string anchor)
     {
         try
         {
@@ -6049,8 +6055,9 @@ public sealed class DarlingManagedPostgres
     /// writes entries that every file and folder below it inherits, so on a drive root it would rewrite the access of the
     /// whole drive, again on every start. A drive root is left as it is and is not called locked. For a store that already
     /// exists the start goes on and logs an error that says so, because the data directory, pg.log, server.key and each
-    /// credential file beside it are still checked and restricted one by one. A new store under a drive root is refused
-    /// before initdb by <see cref="RefuseInitdbOnUnlockedStoreFolder"/>.
+    /// credential file beside it are still checked and restricted one by one at every start, and the new cluster of a
+    /// major upgrade is restricted as soon as initdb has made it (<c>DarlingStoreUpgrade.InitializeNewClusterAsync</c>).
+    /// A new store under a drive root is refused before initdb by <see cref="RefuseInitdbOnUnlockedStoreFolder"/>.
     /// </summary>
     /// <param name="harden">Locks one folder (<see cref="TryHardenDirectory"/> in production); never called for a drive root.</param>
     /// <returns>Whether the folder was locked.</returns>
@@ -6066,8 +6073,9 @@ public sealed class DarlingManagedPostgres
             logger.LogError(
                 "The store folder {StoreFolder} is a drive root, so the service did not lock it: that would change the " +
                 "permissions of every file and folder on the drive. The store keeps running. The data directory {DataDirectory}, " +
-                "pg.log, server.key and the credential files beside it are each checked and restricted on their own, but " +
-                "the drive root itself keeps the access it has. {Move}",
+                "pg.log, server.key and the credential files beside it are checked and restricted at every start, and the new " +
+                "cluster of a major upgrade is restricted as soon as initdb has made it, but the drive root itself keeps the " +
+                "access it has. {Move}",
                 storeFolder, dataDirectory, DriveRootMoveText(storeFolder, dataDirectory));
         }
 
