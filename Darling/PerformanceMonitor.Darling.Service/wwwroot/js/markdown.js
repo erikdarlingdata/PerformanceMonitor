@@ -188,9 +188,16 @@ function parseInlineImpl(text, allowLinks) {
       continue;
     }
 
+    /* An underscore inside a word (SOS_SCHEDULER_YIELD, sys_dm_exec_requests) is literal, as in CommonMark (#7172). */
+    if (c === "_" && isWordChar(text[i - 1])) {
+      buf += c;
+      i++;
+      continue;
+    }
+
     /* **bold** / __bold__ */
     if ((c === "*" || c === "_") && text[i + 1] === c) {
-      const close = text.indexOf(c + c, i + 2);
+      const close = indexOfDouble(text, c, i + 2);
       if (close > i + 1) {
         flush();
         nodes.push(el("strong", {}, parseInlineImpl(text.slice(i + 2, close), allowLinks)));
@@ -224,10 +231,25 @@ function parseInlineImpl(text, allowLinks) {
   return nodes;
 }
 
-/** The next LONE emphasis marker `c` at or after `from` (one whose next char isn't also `c`, so it's not a `**`). */
+/** True for a letter or digit: an underscore touching one on the wrong side is part of a word, not emphasis (#7172). */
+function isWordChar(ch) {
+  return ch !== undefined && /[\p{L}\p{N}]/u.test(ch);
+}
+
+/** The next LONE emphasis marker `c` at or after `from` (one whose next char isn't also `c`, so it's not a `**`). An `_` closes only when no letter or digit follows it. */
 function indexOfSingle(text, c, from) {
   for (let j = from; j < text.length; j++) {
-    if (text[j] === c && text[j + 1] !== c) {
+    if (text[j] === c && text[j + 1] !== c && !(c === "_" && isWordChar(text[j + 1]))) {
+      return j;
+    }
+  }
+  return -1;
+}
+
+/** The next doubled marker `cc` at or after `from`. A `__` closes only when no letter or digit follows it. */
+function indexOfDouble(text, c, from) {
+  for (let j = text.indexOf(c + c, from); j >= 0; j = text.indexOf(c + c, j + 1)) {
+    if (!(c === "_" && isWordChar(text[j + 2]))) {
       return j;
     }
   }

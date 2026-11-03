@@ -15,6 +15,54 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>#7174: the Database Sizes rows for <paramref name="databaseNames"/> (null or empty = every database), each with its
+    /// <see cref="DatabaseSizeRow.MonthlyCostShare"/> as its share of the SERVER's allocated size times the monthly cost. The grid is
+    /// narrowed by the saved database filter but the budget is the whole server's, so the total comes from the unfiltered snapshot:
+    /// dividing by the filtered total made one picked database cost 100% of the server. A file with no allocated size takes no share.
+    /// No cost (0 or less) leaves every share 0. The snapshot is resolved ONCE and both reads use it, so a size collection that
+    /// lands between the two reads cannot make a share come from two different snapshots. <paramref name="betweenReads"/> is a test
+    /// seam that runs after the rows are read and before the server total is.</summary>
+    public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestWithCostShareAsync(
+        int serverId, IReadOnlyList<string>? databaseNames, decimal monthlyCostUsd, Func<Task>? betweenReads = null)
+    {
+        var snapshot = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        if (snapshot is null) return new List<DatabaseSizeRow>();
+
+        var rows = await GetDatabaseSizeAtAsync(serverId, snapshot.Value, databaseNames);
+        if (betweenReads is not null) await betweenReads();
+        if (monthlyCostUsd <= 0m || rows.Count == 0) return rows;
+
+        var serverRows = databaseNames is { Count: > 0 }
+            ? await GetDatabaseSizeAtAsync(serverId, snapshot.Value, null)
+            : rows;
+        var totalMb = DatabaseSizeRow.AllocatedTotalMb(serverRows);
+        if (totalMb > 0m)
+        {
+            foreach (var d in rows)
+                d.MonthlyCostShare = ((d.TotalSizeMb ?? 0m) / totalMb) * monthlyCostUsd;
+        }
+        return rows;
+    }
+
+    /// <summary>#7216: a server's newest database size snapshot and the relation that answered for it. The one probe that picked
+    /// the relation travels with the timestamp, so the reads at that snapshot cannot probe again and land on the other relation.</summary>
+    internal readonly record struct DatabaseSizeSnapshot(DateTime CollectionTime, string Relation);
+
+    internal async Task<DatabaseSizeSnapshot?> GetLatestDatabaseSizeSnapshotAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        /* #7216: the unbounded MAX through the v_ view read every archived row of database_size_stats. The hot table holds the newest
+           snapshot of any server still being collected; the view is read only for a server with no hot row (collection stopped and
+           archival moved every row out), which still shows the last values it had. This is the refresh's only probe: GetDatabaseSizeAtAsync
+           reads the relation chosen here. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+        command.CommandText = $"SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        var value = await command.ExecuteScalarAsync();
+        return value is DateTime stamp ? new DatabaseSizeSnapshot(stamp, sizeRelation) : null;
+    }
+
     /// <summary>
     /// Gets the latest database size snapshot per server per file (cross-server).
     /// <para>#5312: <paramref name="databaseNames"/> is the saved per-server database filter (null or empty = every database,
@@ -23,9 +71,20 @@ public partial class LocalDataService
     /// </summary>
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, IReadOnlyList<string>? databaseNames = null)
     {
+        var snapshot = await GetLatestDatabaseSizeSnapshotAsync(serverId);
+        return snapshot is null
+            ? new List<DatabaseSizeRow>()
+            : await GetDatabaseSizeAtAsync(serverId, snapshot.Value, databaseNames);
+    }
+
+    internal async Task<List<DatabaseSizeRow>> GetDatabaseSizeAtAsync(int serverId, DatabaseSizeSnapshot snapshot, IReadOnlyList<string>? databaseNames)
+    {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
+        /* #7216: the relation the snapshot lookup chose, not a second probe: a hot row that lands between the two reads must not
+           send this read to a table that does not hold the archived snapshot's timestamp. */
+        var sizeRelation = snapshot.Relation;
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
         command.CommandText = $@"
 SELECT
     database_name,
@@ -42,16 +101,13 @@ SELECT
     growth_pct,
     vlf_count,
     file_id
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
-AND   collection_time = (
-    SELECT MAX(collection_time)
-    FROM v_database_size_stats
-    WHERE server_id = $1
-){dbClause}
+AND   collection_time = $2{dbClause}
 ORDER BY database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = snapshot.CollectionTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
 
@@ -96,6 +152,10 @@ ORDER BY database_name, file_type_desc, file_name";
         using var command = connection.CreateCommand();
 
         /* $1 server, $2 topN, so the optional database list starts at $3. */
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 3, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -104,10 +164,10 @@ SELECT
     /* Used is summed only over the files whose size counts, so used and allocated stay on one footing: the
        Hyperscale log file (NULL size, the log service) is in neither. */
     SUM(CASE WHEN total_size_mb IS NOT NULL THEN used_size_mb END) AS used_mb
-FROM v_database_size_stats
+FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = (
-    SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
+    SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1
 ){dbClause}
 GROUP BY database_name
 ORDER BY total_mb DESC
@@ -142,17 +202,22 @@ LIMIT $2";
 
         var cutoff = DateTime.UtcNow.AddDays(-daysBack);
 
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of database_size_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var sizeRelation = await HotTableHasServerAsync(connection, "database_size_stats", serverId) ? "database_size_stats" : "v_database_size_stats";
+
+        command.CommandText = $@"
 WITH db_sizes AS (
     SELECT
         database_name,
         SUM(total_size_mb) AS total_size_mb,
         COUNT(*) AS file_count
-    FROM v_database_size_stats
+    FROM {sizeRelation}
     WHERE server_id = $1
     AND   collection_time = (
         SELECT MAX(collection_time)
-        FROM v_database_size_stats
+        FROM {sizeRelation}
         WHERE server_id = $1
     )
     GROUP BY database_name
@@ -207,14 +272,19 @@ ORDER BY ds.total_size_mb DESC";
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
 
-        command.CommandText = @"
+        /* #7216: the "latest" row has no time bound, so through the v_ view it ordered every archived row of tempdb_stats. The hot table
+           holds the newest row of any server still being collected; the view is read only for a server with no hot row. The 24 hour
+           "peak" below is windowed and stays on the view. */
+        var latestRelation = await HotTableHasServerAsync(connection, "tempdb_stats", serverId) ? "tempdb_stats" : "v_tempdb_stats";
+
+        command.CommandText = $@"
 WITH latest AS (
     SELECT
         user_object_reserved_mb,
         internal_object_reserved_mb,
         version_store_reserved_mb,
         total_reserved_mb
-    FROM v_tempdb_stats
+    FROM {latestRelation}
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1

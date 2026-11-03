@@ -477,6 +477,50 @@ public static class PgLogEntryAssembler
     public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
         Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: null, zones: null, out foreignZoneLines);
 
+    /// <summary>
+    /// Where the last entry of a slab of log text begins: the start of its last primary line, or -1 when the text has no
+    /// primary line (#7186). That entry is the one the end of a read can cut between its primary line and a DETAIL or
+    /// STATEMENT companion, or through the middle of a line, and <see cref="Assemble(string?)"/> stores or drops it as
+    /// it arrived. The RDS stderr route is consume-once, so <c>RdsLogEventIngestor</c> holds the text from this index
+    /// until the next portion arrives, as the csvlog route holds a partial record.
+    /// </summary>
+    public static int UnfinishedTailStart(string? logBody)
+    {
+        if (string.IsNullOrEmpty(logBody))
+        {
+            return -1;
+        }
+
+        var start = -1;
+        var lineStart = 0;
+
+        while (lineStart < logBody.Length)
+        {
+            var newline = logBody.IndexOf('\n', lineStart);
+            var lineEnd = newline < 0 ? logBody.Length : newline;
+
+            if (logBody[lineStart] != '\t')
+            {
+                var line = logBody.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
+                var match = s_prefixLine.Match(line);
+
+                if (match.Success && s_primaryLabels.Contains(match.Groups["label"].Value))
+                {
+                    start = lineStart;
+                }
+            }
+
+            if (newline < 0)
+            {
+                break;
+            }
+
+            lineStart = newline + 1;
+        }
+
+        return start;
+    }
+
     /// <summary>The walk itself, parameterised over the #4501 forgery rule (see <see cref="IsForgedLabel"/>)
     /// so both the pre-#4501-shaped overloads (a bare check, the store's default separator) and the
     /// prefix-aware overload above share one implementation.</summary>
@@ -654,11 +698,7 @@ public static class PgLogEntryAssembler
                 /* #6866: the server rendered this instant back as exactly this line's text. */
                 _occurredAtUtc = DateTime.SpecifyKind(provenUtc.Value, DateTimeKind.Utc);
             }
-            else if (!DateTime.TryParse(
-                    _stamp,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-                    out _occurredAtUtc))
+            else if (!PgLogEntry.TryParseStampUtc(_stamp, out _occurredAtUtc))
             {
                 /* Unreachable through the pattern, which admits only digits in the stamp's shape; kept so a
                    future loosening of the pattern cannot store DateTime.MinValue as an occurrence. */

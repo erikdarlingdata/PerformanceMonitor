@@ -23,9 +23,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>collect.query_store_top_daily</c> (#5094), the table <c>get_query_store_top</c>'s long windows will read whole
 /// days from.
 ///
-/// <para><b>The summary is APPROXIMATE by design.</b> It stores exactly recombinable parts (row counts, sums, and the
-/// counts of non-NULL values behind each average), so a built day reproduces the unweighted mean of the interval
-/// averages and the sum of <c>execution_count</c> for that day. The only approximation is staleness: a day is summarized
+/// <para><b>The summary is APPROXIMATE by design.</b> It stores exactly recombinable parts (row counts, sums, the
+/// counts of non-NULL values behind each average, and V240's execution-weighted sums <c>sum(avg_x * execution_count)</c>),
+/// so a built day reproduces the execution-weighted mean of the interval averages (#7169) and the sum of
+/// <c>execution_count</c> for that day. The only approximation is staleness: a day is summarized
 /// once it has ended, and a wide-table row that changes after that is missed (a backfill or a replayed batch into a
 /// built day) or, for a row whose <c>collection_time</c> moves from day D to D+1 after D was built, counted in both
 /// days. Rebuilding every day a second time, a day later, clears the second case, so the window in which a total can be
@@ -45,7 +46,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// day marked as built.</para>
 ///
 /// <para>The service is the only writer. One tick builds at most <see cref="MaxBuildsPerTick"/> (server, day) items,
-/// oldest day first, and stops starting new builds once <see cref="MaxTickDuration"/> has passed; what it did not reach
+/// newest day first, and stops starting new builds once <see cref="MaxTickDuration"/> has passed; what it did not reach
 /// is reported as deferred and planned again next tick. A failing build is logged and skipped: the next tick plans it
 /// again. Only enabled servers are planned, and only days from the day after the server's wide-table coverage claim
 /// (<c>filled_since</c>), because the summary cannot speak for earlier days.</para>
@@ -114,7 +115,9 @@ WITH built AS
         avg_logical_io_writes_sum, avg_logical_io_writes_n,
         avg_physical_io_reads_sum, avg_physical_io_reads_n,
         avg_rowcount_sum, avg_rowcount_n,
-        last_execution_time_max, query_plan_hash_max, first_execution_time_min
+        last_execution_time_max, query_plan_hash_max, first_execution_time_min,
+        avg_duration_us_wsum, avg_cpu_time_us_wsum, avg_logical_io_reads_wsum, avg_logical_io_writes_wsum,
+        avg_physical_io_reads_wsum, avg_rowcount_wsum
     )
     SELECT
         w.server_id, $2, w.database_name, w.query_id, w.plan_id, w.query_hash, w.execution_type_desc, w.replica_role, w.module_name,
@@ -125,7 +128,10 @@ WITH built AS
         sum(w.avg_logical_io_writes::numeric), count(w.avg_logical_io_writes),
         sum(w.avg_physical_io_reads::numeric), count(w.avg_physical_io_reads),
         sum(w.avg_rowcount::numeric), count(w.avg_rowcount),
-        max(w.last_execution_time), max(w.query_plan_hash), min(w.first_execution_time)
+        max(w.last_execution_time), max(w.query_plan_hash), min(w.first_execution_time),
+        sum(w.avg_duration_us::numeric * w.execution_count), sum(w.avg_cpu_time_us::numeric * w.execution_count),
+        sum(w.avg_logical_io_reads::numeric * w.execution_count), sum(w.avg_logical_io_writes::numeric * w.execution_count),
+        sum(w.avg_physical_io_reads::numeric * w.execution_count), sum(w.avg_rowcount::numeric * w.execution_count)
     FROM collect.query_store_interval_wide AS w
     WHERE w.server_id = $1
       AND w.collection_time >= $2::timestamp
@@ -147,18 +153,44 @@ SET pass = EXCLUDED.pass,
     source_rows = EXCLUDED.source_rows;";
 
     /// <summary>
-    /// The builds due now, oldest day first. $1 now, $2 retention days, $3 <see cref="BuildAfter"/>,
+    /// A SQL predicate on an alias <c>b</c> of <c>collect.query_store_top_daily_built</c> that is true when the built (server, day)
+    /// can be trusted for the execution-weighted average (#7169): it was written by a V240-or-newer builder. Only that builder fills
+    /// the <c>*_wsum</c> columns, so a build written before V240, or by an older instance that still shares the store, has NULL
+    /// weighted sums beside a non-NULL <c>execution_count_sum</c> (and a non-zero count behind the average). Such a day is NOT built:
+    /// <c>get_query_store_top</c> reads it from the wide table, and <see cref="PlanSql"/> rebuilds it. A day with no summary rows
+    /// has nothing to be wrong and is trusted. The first <c>EXISTS</c> is the cheap path (a built day stops at its first filled
+    /// row); the second runs only for a day without one. A row whose <c>execution_count</c> was NULL in every interval has a NULL
+    /// <c>execution_count_sum</c> and a NULL weighted sum on any format, so it is not treated as old.
+    /// </summary>
+    public const string DayIsWeightedSql = @"(
+    EXISTS (SELECT 1 FROM collect.query_store_top_daily AS w
+            WHERE w.server_id = b.server_id AND w.day = b.day
+              AND (w.avg_duration_us_wsum IS NOT NULL OR w.avg_cpu_time_us_wsum IS NOT NULL OR w.avg_logical_io_reads_wsum IS NOT NULL
+                OR w.avg_logical_io_writes_wsum IS NOT NULL OR w.avg_physical_io_reads_wsum IS NOT NULL OR w.avg_rowcount_wsum IS NOT NULL))
+    OR NOT EXISTS (SELECT 1 FROM collect.query_store_top_daily AS o
+            WHERE o.server_id = b.server_id AND o.day = b.day AND o.execution_count_sum IS NOT NULL
+              AND ((o.avg_duration_us_n > 0 AND o.avg_duration_us_wsum IS NULL) OR (o.avg_cpu_time_us_n > 0 AND o.avg_cpu_time_us_wsum IS NULL)
+                OR (o.avg_logical_io_reads_n > 0 AND o.avg_logical_io_reads_wsum IS NULL) OR (o.avg_logical_io_writes_n > 0 AND o.avg_logical_io_writes_wsum IS NULL)
+                OR (o.avg_physical_io_reads_n > 0 AND o.avg_physical_io_reads_wsum IS NULL) OR (o.avg_rowcount_n > 0 AND o.avg_rowcount_wsum IS NULL))))";
+
+    /// <summary>
+    /// The builds due now, NEWEST day first. $1 now, $2 retention days, $3 <see cref="BuildAfter"/>,
     /// $4 <see cref="FinalBuildAfter"/>, $5 the cap. Servers are the enabled ones with a wide-table coverage claim, and a
     /// server's days start the day after its <c>filled_since</c>, since the summary cannot speak for earlier days. Days
-    /// run from two days after the retention horizon through yesterday: the purge deletes on
-    /// <c>first_execution_time</c> at the horizon, and a row collected on the horizon's next day can have started up to
-    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> earlier, so that day may already be cut. A day with no built row is due once its end plus $3 has
+    /// run from the oldest day <see cref="GcBuiltSql"/> keeps (one day before the retention horizon) through yesterday, so
+    /// every built day the cleanup keeps is one the plan can rebuild (#7169): a day built by a pre-V240 builder in the
+    /// last days before the horizon must not sit untrusted with no rebuild. (The purge deletes on <c>first_execution_time</c>
+    /// at the horizon, and a row collected on the day after can have started up to
+    /// <see cref="QueryStoreIntervalWide.PurgeEdgeMargin"/> earlier, so those last days may be rebuilt from a partly purged
+    /// wide table. That is the same rows the reader's own wide-table read sees for them.) A day with no built row is due once its end plus $3 has
     /// passed, at pass 1, or straight at pass 2 when its end plus $4 has passed too (nothing more could change it); a day
-    /// built at pass 1 is due for pass 2 once its end plus $4 has passed. Oldest day first, so a backlog works through the
-    /// oldest days once each and the next tick reaches newer ones.
+    /// built at pass 1 is due for pass 2 once its end plus $4 has passed. A built day that is not
+    /// <see cref="DayIsWeightedSql"/> is due again at once, at the pass its time allows. Newest day first, so that after
+    /// an upgrade (V240 leaves every old day to rebuild, <see cref="MaxBuildsPerTick"/> a tick) the short windows are back on the
+    /// summary within the first ticks and the older days follow; a backlog after an outage works the same way.
     /// </summary>
     public const string PlanSql = @"
-SELECT s.server_id, d.day, CASE WHEN b.server_id IS NULL AND d.day + interval '1 day' + $4 > $1 THEN 1 ELSE 2 END AS pass
+SELECT s.server_id, d.day, CASE WHEN d.day + interval '1 day' + $4 > $1 THEN 1 ELSE 2 END AS pass
 FROM
 (
     SELECT c.server_id, c.filled_since
@@ -169,14 +201,15 @@ FROM
 CROSS JOIN LATERAL
 (
     SELECT g::date AS day
-    FROM generate_series((($1 - make_interval(days => $2))::date + 2)::timestamp, ($1::date - 1)::timestamp, interval '1 day') AS g
+    FROM generate_series((($1 - make_interval(days => $2))::date - 1)::timestamp, ($1::date - 1)::timestamp, interval '1 day') AS g
 ) AS d
 LEFT JOIN collect.query_store_top_daily_built AS b
   ON b.server_id = s.server_id AND b.day = d.day
 WHERE d.day >= s.filled_since::date + 1
   AND ((b.server_id IS NULL AND d.day + interval '1 day' + $3 <= $1)
-    OR (b.pass = 1 AND d.day + interval '1 day' + $4 <= $1))
-ORDER BY d.day, s.server_id
+    OR (b.pass = 1 AND d.day + interval '1 day' + $4 <= $1)
+    OR (b.server_id IS NOT NULL AND NOT " + DayIsWeightedSql + @"))
+ORDER BY d.day DESC, s.server_id
 LIMIT $5;";
 
     /// <summary>
@@ -226,7 +259,7 @@ AND   day = $2::date;";
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
-    /// <summary>The builds due at <paramref name="nowUtc"/>, oldest day first, at most <see cref="MaxBuildsPerTick"/>.</summary>
+    /// <summary>The builds due at <paramref name="nowUtc"/>, newest day first, at most <see cref="MaxBuildsPerTick"/>.</summary>
     public static async Task<IReadOnlyList<Build>> PlanBuildsAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
     {

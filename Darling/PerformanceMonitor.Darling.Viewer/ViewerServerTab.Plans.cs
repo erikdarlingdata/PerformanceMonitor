@@ -167,7 +167,7 @@ public partial class ViewerServerTab
                 if (string.IsNullOrEmpty(stats.QueryHash)) return;
                 label = $"Stored Plan - {stats.QueryHash}";
                 queryText = stats.QueryText;
-                fetch = ct => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash, ct);
+                fetch = ct => _dataService.GetQueryStatsPlanXmlAsync(_server.ServerId, stats.DatabaseName, stats.QueryHash, cancellationToken: ct);
                 break;
             case ViewerQueryStoreRow qs:
                 label = $"Stored Plan - QS {qs.QueryId}";
@@ -178,7 +178,7 @@ public partial class ViewerServerTab
                 if (string.IsNullOrEmpty(proc.ObjectName)) return;
                 label = $"Stored Plan - {proc.FullName}";
                 queryText = null; /* the procedure grid carries no statement text; the plan XML holds its own */
-                fetch = ct => _dataService.GetProcedureStatsPlanXmlAsync(_server.ServerId, proc.DatabaseName, proc.SchemaName, proc.ObjectName, ct);
+                fetch = ct => _dataService.GetProcedureStatsPlanXmlAsync(_server.ServerId, proc.DatabaseName, proc.SchemaName, proc.ObjectName, cancellationToken: ct);
                 break;
             default:
                 /* Comparison items / anything else: no stored plan keyed on the row — deferred. */
@@ -257,7 +257,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Could not read the plan for this query from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -295,7 +295,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Could not read this Query Store plan from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read this Query Store plan from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -332,7 +332,7 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Could not read the plan for this procedure from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

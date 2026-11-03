@@ -55,6 +55,11 @@ public class ArchivableTableBareReadSweepTests
            sample still counts. */
         [("LocalDataService.FinOps.Recommendations.cs", "query_stats")] = 1,
 
+        /* #7216: the probe that picks the relation for the "newest server_properties row with an offset" reads. A hot row with a
+           non-NULL utc_offset_minutes proves the newest such row is hot (archival moves only older rows), so the read skips the
+           archive; no such row sends the read to v_server_properties. The probe itself must be on the hot table. */
+        [("LocalDataService.FinOps.Utilization.cs", "server_properties")] = 1,
+
         /* The newest AG snapshot. The alert path skips a snapshot that is not fresh, so an empty hot table right
            after a reset reads as "no data yet", not as healthy. */
         [("LocalDataService.AgTopology.cs", "ag_replica_states")] = 2,

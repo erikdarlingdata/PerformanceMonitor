@@ -149,6 +149,34 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     }
 
     [Fact]
+    public void BuildContext_CpuFindingWithAbnormalCpuPlansDrillDown_OffersNoClearPlanAction()
+    {
+        /* #7220: the clear-cached-plan builder read an abnormal_cpu_plans drill-down that nothing in Lite or
+           Darling writes, so it never produced an item and was removed. A finding that does carry the key
+           (only the retired Dashboard collector wrote it) must not grow a destructive DBCC FREEPROCCACHE item
+           or a remediation on any detail row. */
+        var finding = MakeFinding("clrplan000000001", severity: 2.0, rootFactKey: "CPU_SQL_PERCENT",
+            drillDown: new Dictionary<string, object>
+            {
+                ["abnormal_cpu_plans"] = new List<object>
+                {
+                    new
+                    {
+                        database = "SalesDB", query_hash = "0xABCDEF0123456789",
+                        current_cpu_per_exec_ms = 45.0, baseline_cpu_per_exec_ms = 9.0, anomaly_ratio = 5.0,
+                        cpu_percent = 62
+                    }
+                }
+            });
+
+        var context = FindingMessageFormatter.BuildContext(finding, notifyThreshold: 1.5);
+
+        Assert.DoesNotContain(context.Details, d => d.Heading.StartsWith("Clear cached plan", StringComparison.Ordinal));
+        Assert.DoesNotContain(context.Details, d => d.Remediation is not null);
+        Assert.Null(FactAdvice.GetForFinding(finding)?.Risks);
+    }
+
+    [Fact]
     public void BuildContext_BlockingDrillDown_EmitsContentiousObjectIncident()
     {
         var finding = MakeFinding("blfp000000000001", category: "blocking_events", rootFactKey: "BLOCKING_EVENTS",

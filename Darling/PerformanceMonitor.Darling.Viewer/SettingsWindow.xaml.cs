@@ -1782,6 +1782,9 @@ public partial class SettingsWindow : Window
             row.SmtpUsername = string.IsNullOrWhiteSpace(username) ? null : username;
             row.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
             row.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+            /* #7184: one entry the send cannot parse (an Outlook-style "a@x.com;b@x.com") fails every default-route email, and "a@x.com; b@x.com" silently drops the first. */
+            if (NotificationRouteWriter.RecipientsRefusal(row.SmtpRecipients) is { } recipientsRefusal)
+                errors.Add("Default recipients: " + recipientsRefusal, SmtpRecipientsBox);
             row.EmailSendResolutions = EmailSendResolutionsCheckBox.IsChecked == true;
             ResolveSmtpPassword(row, errors);
         }
@@ -2133,6 +2136,8 @@ public partial class SettingsWindow : Window
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
             errors.Add("Default recipients are needed for alerts that no notification route covers.");
+        else if (NotificationRouteWriter.RecipientsRefusal(SmtpRecipientsBox.Text) is { } recipientsRefusal)
+            errors.Add("Default recipients: " + recipientsRefusal);
 
         if (errors.Count == 0)
         {

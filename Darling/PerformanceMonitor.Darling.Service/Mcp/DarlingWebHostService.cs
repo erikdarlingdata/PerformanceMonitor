@@ -195,7 +195,7 @@ public sealed class DarlingWebHostService : BackgroundService
         _readLatency = readLatency;
     }
 
-    /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
+    /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort, webCredentialAppeared) so a
     /// unit test pins the whole decision table without a server (#1562, mirrors the MCP host).</summary>
     public enum WebSupervisorAction { None, Start, Stop, Restart, RestartForWebCredential }
 

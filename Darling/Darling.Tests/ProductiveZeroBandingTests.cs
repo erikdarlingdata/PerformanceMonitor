@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -253,11 +254,11 @@ public sealed class ProductiveZeroBandingTests
     [Fact]
     public void WithNoProductiveHistory_TheWindowHoldsNoRegression()
     {
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 10_080, null));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 10_080, null, frequencyMinutes: 5));
 
         /* The positive control for the negation above: the same call with the instant present is true, so
            a mutation that returned false unconditionally cannot pass here. */
-        Assert.True(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 3, Now.AddHours(-4)));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("memory_grant_stats", 3, Now.AddHours(-4), frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -455,7 +456,7 @@ public sealed class ProductiveZeroBandingTests
     public void QueryStore_ElevenZeroRunsAfterAnHourlyInterval_IsNotRegressed()
     {
         Assert.False(
-            CollectorHealthClassifier.ProducedThenStopped("query_store", 11, Now.AddMinutes(-55)));
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 11, Now.AddMinutes(-55), frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -467,7 +468,7 @@ public sealed class ProductiveZeroBandingTests
     public void QueryStore_ProductiveAFortnightAgo_IsRegressed()
     {
         Assert.True(
-            CollectorHealthClassifier.ProducedThenStopped("query_store", 1_900, Now.AddDays(-14)));
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 1_900, Now.AddDays(-14), frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -479,9 +480,9 @@ public sealed class ProductiveZeroBandingTests
     public void QueryStore_AtA1440MinuteInterval_TellsA23HourGapFromA25HourGap()
     {
         Assert.False(
-            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-23)));
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-23), frequencyMinutes: 5));
         Assert.True(
-            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-25)));
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-25), frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -496,10 +497,10 @@ public sealed class ProductiveZeroBandingTests
         var lastProductive = nowUtc - CollectorHealthClassifier.QueryStoreLongestIntervalSlack;
 
         Assert.False(
-            CollectorHealthClassifier.ProducedThenStopped("query_store", 100, lastProductive, nowUtc));
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 100, lastProductive, nowUtc, frequencyMinutes: 5));
         Assert.True(
             CollectorHealthClassifier.ProducedThenStopped(
-                "query_store", 100, lastProductive.AddTicks(-1), nowUtc));
+                "query_store", 100, lastProductive.AddTicks(-1), nowUtc, frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -511,7 +512,7 @@ public sealed class ProductiveZeroBandingTests
     public void ANonIntervalSourcedCollector_StillFlagsOnTheStreakAlone()
     {
         Assert.True(
-            CollectorHealthClassifier.ProducedThenStopped("wait_stats", 3, Now.AddMinutes(-10)));
+            CollectorHealthClassifier.ProducedThenStopped("wait_stats", 3, Now.AddMinutes(-10), frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -555,10 +556,13 @@ public sealed class ProductiveZeroBandingTests
             var stopped = ProducedThenStopped();
             stopped.CollectorName = name;
             stopped.LastProductiveTime = Now.AddHours(-73);
+            /* #7242: the bar is observed time, so the runs behind it must cover 73 hours at the interval they ran at. */
+            stopped.EffectiveFrequencyMinutes = 1;
+            stopped.TrailingZeroRowSuccessRuns = 73 * 60;
 
             Assert.True(stopped.ProducedThenStopped, name);
             Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
-            Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", stopped.AnyRegressionFinding!, StringComparison.Ordinal);
+            Assert.Contains("has recorded SUCCESS with zero rows on 4,380 runs since", stopped.AnyRegressionFinding!, StringComparison.Ordinal);
         }
     }
 
@@ -575,11 +579,11 @@ public sealed class ProductiveZeroBandingTests
         var nowUtc = new DateTime(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);
         var lastProductive = nowUtc - CollectorHealthClassifier.ActivitySourcedQuietBar;
 
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive, nowUtc));
-        Assert.True(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive.AddTicks(-1), nowUtc));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive, nowUtc, frequencyMinutes: 5));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive.AddTicks(-1), nowUtc, frequencyMinutes: 5));
 
         /* And the bar is not a substitute for the streak: past it, two zero-row runs are still not three. */
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 2, nowUtc.AddHours(-100), nowUtc));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 2, nowUtc.AddHours(-100), nowUtc, frequencyMinutes: 5));
     }
 
     /// <summary>
@@ -626,10 +630,130 @@ public sealed class ProductiveZeroBandingTests
         var stopped = ProducedThenStopped();
         stopped.CollectorName = "query_stats";
         stopped.LastProductiveTime = Now.AddHours(-73);
-        stopped.TrailingZeroRowSuccessRuns = 28;
+        /* #7242: 73 observed hours, so the runs cover the bar at the interval they ran at. */
+        stopped.EffectiveFrequencyMinutes = 1;
+        stopped.TrailingZeroRowSuccessRuns = 73 * 60;
 
         Assert.True(stopped.ProducedThenStopped);
         Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
+    }
+
+    /// <summary>
+    /// #7242, the field case: a productive run 75 hours back, then 1,141 zero-row runs at one minute (about 19 hours the service
+    /// actually saw). The 56 hours between are hours the service was stopped, which cannot say the server was quiet, so the bar
+    /// is not met. The same wall-clock gap with 72 hours of runs behind it is still a stop.
+    /// </summary>
+    [Fact]
+    public void TheActivityBar_CountsObservedTime_NotHoursTheServiceWasStopped()
+    {
+        var nowUtc = new DateTime(2026, 11, 2, 16, 57, 0, DateTimeKind.Utc);
+        var lastProductive = nowUtc.AddHours(-75);
+
+        foreach (var collector in new[] { "procedure_stats", "query_snapshots" })
+        {
+            Assert.False(
+                CollectorHealthClassifier.ProducedThenStopped(collector, 1_141, lastProductive, nowUtc, frequencyMinutes: 1),
+                collector + ": 19 observed hours inside a 75 hour wall-clock gap is not a stop");
+
+            /* 72 observed hours is on the bar and not past it (strictly greater, as the wall-clock bar was). */
+            Assert.False(
+                CollectorHealthClassifier.ProducedThenStopped(collector, 4_320, lastProductive, nowUtc, frequencyMinutes: 1));
+            Assert.True(
+                CollectorHealthClassifier.ProducedThenStopped(collector, 4_321, lastProductive, nowUtc, frequencyMinutes: 1),
+                collector + ": a service that saw more than 72 hours of zero-row runs has seen a stop");
+        }
+
+        /* The interval scales the count: 1,141 runs at 5 minutes is 95 observed hours. */
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("procedure_stats", 1_141, lastProductive, nowUtc, frequencyMinutes: 5));
+
+        /* The wall clock still has to pass the bar: a run count that large inside 60 wall hours cannot be a stop yet. */
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("procedure_stats", 4_321, nowUtc.AddHours(-60), nowUtc, frequencyMinutes: 1));
+    }
+
+    /// <summary>
+    /// #7242: observed time is the sum of the real gaps between the streak's runs, not runs times the interval. A collector whose runs
+    /// were spaced out to 2.5 times its interval for the whole 75 hours made 360 runs, which times the 5 minute interval reads as 30
+    /// observed hours and hid the stop. Its gaps add up to the 75 hours the service watched. A service stopped for 56 of the 75 hours
+    /// has one gap far over the cap, which counts only the cap.
+    /// </summary>
+    [Fact]
+    public void TheActivityBar_ReadsTheObservedGaps_SpacedRunsAreFlagged_AStoppedStretchIsCapped()
+    {
+        var nowUtc = new DateTime(2026, 11, 2, 16, 57, 0, DateTimeKind.Utc);
+        var lastProductive = nowUtc.AddHours(-75);
+
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("procedure_stats", 360, lastProductive, nowUtc, frequencyMinutes: 5),
+            "runs times the interval alone reads the spaced collector as 30 quiet hours");
+
+        var spaced = new ObservedQuietGaps(360, 75 * 60 - 10, [10]);
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped(
+            "procedure_stats", spaced.Runs, lastProductive, nowUtc, frequencyMinutes: 5, spaced.Minutes(5)));
+
+        /* 19 hours of one-minute runs after a 56 hour gap: the gap counts 60 minutes, so 20 hours in all. */
+        var stopped = new ObservedQuietGaps(1_141, 19 * 60, [56 * 60]);
+        Assert.Equal(19 * 60 + 60, stopped.Minutes(1), precision: 6);
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped(
+            "procedure_stats", stopped.Runs, lastProductive, nowUtc, frequencyMinutes: 1, stopped.Minutes(1)));
+    }
+
+    /// <summary>#7242: a gap counts at most three intervals, and never less than an hour as its cap.</summary>
+    [Fact]
+    public void ObservedQuietGaps_CountEachGapAtMostThreeIntervals_AnHourAtLeast()
+    {
+        var gaps = new ObservedQuietGaps(5, 100, [60.5, 3_360]);
+
+        Assert.Equal(60, ObservedQuietGaps.GapCapMinutes(5));
+        Assert.Equal(90, ObservedQuietGaps.GapCapMinutes(30));
+        Assert.Equal(100 + 60 + 60, gaps.Minutes(5), precision: 6);
+        Assert.Equal(100 + 60.5 + 90, gaps.Minutes(30), precision: 6);
+        Assert.Equal(100 + 60.5 + 3_360, gaps.Minutes(1_200), precision: 6);
+    }
+
+    /// <summary>
+    /// #7242 on the Viewer's fleet rows: the estimate divides elapsed time by the cadence and so hands the wall clock back, which is why a
+    /// row the quiet bar turns on carries the exact run count. With it the field case is not flagged. Without it (an estimate alone) the
+    /// 75 hours read as a stop, which is the defect.
+    /// </summary>
+    [Fact]
+    public void TheViewerFleetRow_UsesTheExactRunCount_WhenTheQuietBarTurnsOnIt()
+    {
+        var productive = DateTime.UtcNow.AddHours(-75);
+        var now = DateTime.UtcNow.AddMinutes(-1);
+
+        CollectorHealthRow Row() => new()
+        {
+            CollectorName = "procedure_stats",
+            TotalRuns = 1_142,
+            SuccessCount = 1_142,
+            LastRunTime = now,
+            LastSuccessTime = now,
+            LastNonSkipTime = now,
+            LastProductiveTime = productive,
+            LastZeroRowStreakBreakTime = productive,
+            EffectiveFrequencyMinutes = 1,
+        };
+
+        Assert.True(
+            CollectorHealthClassifier.NeedsObservedQuietRuns("procedure_stats", productive, DateTime.UtcNow));
+        Assert.False(
+            CollectorHealthClassifier.NeedsObservedQuietRuns("procedure_stats", DateTime.UtcNow.AddHours(-10), DateTime.UtcNow));
+        Assert.False(
+            CollectorHealthClassifier.NeedsObservedQuietRuns("memory_grant_stats", productive, DateTime.UtcNow));
+
+        var estimated = Row();
+        Assert.True(estimated.TrailingZeroRowSuccessRuns > 4_000, "the estimate is wall time over the cadence");
+        Assert.True(estimated.ProducedThenStopped);
+
+        var exact = Row();
+        exact.ObservedQuietRuns = 1_141;
+        Assert.Equal(1_141, exact.TrailingZeroRowSuccessRuns);
+        Assert.False(exact.ProducedThenStopped);
+
+        /* The gaps decide when the row carries them: 1,141 runs spaced 4 minutes apart for 75 hours is a stop at a 1 minute interval. */
+        var spaced = Row();
+        spaced.ObservedQuietRuns = 1_141;
+        spaced.ObservedQuietGaps = new ObservedQuietGaps(1_141, 75 * 60, []);
+        Assert.True(spaced.ProducedThenStopped);
     }
 
     /// <summary>
@@ -641,8 +765,8 @@ public sealed class ProductiveZeroBandingTests
     [Fact]
     public void JobHistory_TheMeasuredFortnightShape_IsStillCaught_AnIdleEveningIsNot()
     {
-        Assert.True(CollectorHealthClassifier.ProducedThenStopped("job_history", 1_900, Now.AddDays(-6.5)));
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("job_history", 3, Now.AddHours(-4)));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("job_history", 1_900, Now.AddDays(-6.5), frequencyMinutes: 5));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("job_history", 3, Now.AddHours(-4), frequencyMinutes: 5));
     }
 
     /// <summary>

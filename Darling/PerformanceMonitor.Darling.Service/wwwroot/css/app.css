@@ -337,10 +337,8 @@ a:hover { text-decoration: underline; }
 }
 .panel-grid .panel { margin-bottom: 0; }
 
-/* Time-range picker (view chrome): the preset <select> plus the inline custom-window input revealed by "Custom…". */
+/* Time-range picker (view chrome): the wrapper around the picker button in a saved view panel (views.js). */
 .range-select { display: inline-flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-.range-custom { display: inline-flex; align-items: center; gap: 0.35rem; }
-.range-custom-n { width: 4.5rem; }
 /* Multi-select picker (multi-picker.js): Wait Stats' checkbox list over a multi-series chart. */
 .multi-picker { margin: 8px 0; }
 .mp-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

@@ -143,6 +143,10 @@ public sealed class DarlingManagedPostgres
     /// access checks, so a handful is enough, and every pooled connection is a postgres.exe process.</summary>
     internal const int WebAdminMaxPoolSize = 4;
 
+    /// <summary>#7223: the pool bound every managed role connection string takes unless its caller names a smaller one (the web admin pool's
+    /// <see cref="WebAdminMaxPoolSize"/>). One definition, so a change here moves the owner string and all five stored-credential builders (#1559, #2819).</summary>
+    internal const int DefaultMaxPoolSize = 24;
+
     /// <summary>
     /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
     /// rest of #4442's pattern): the worker's data source, set through
@@ -3023,7 +3027,7 @@ public sealed class DarlingManagedPostgres
     /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
     /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = 24)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = DefaultMaxPoolSize)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -3071,13 +3075,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = CredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildConnectionString(config.Port, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, CredentialPathFor, UserName, null);
     }
 
     /// <summary>
@@ -3091,13 +3089,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildMcpConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = McpCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), McpApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, McpCredentialPathFor, McpRoleName, McpApplicationName);
     }
 
     /// <summary>
@@ -3111,13 +3103,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildViewerConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = ViewerCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, ViewerCredentialPathFor, ViewerRoleName, WebApplicationName);
     }
 
     /// <summary>
@@ -3129,13 +3115,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildWebConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = WebCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, WebRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, WebCredentialPathFor, WebRoleName, WebApplicationName);
     }
 
     /// <summary>
@@ -3147,14 +3127,25 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildWebAdminConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = AdminCredentialPathFor(ResolveDataDirectory(config));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, AdminCredentialPathFor, AdminRoleName, WebAdminApplicationName, WebAdminMaxPoolSize);
+    }
+
+    /// <summary>
+    /// The one body behind every <c>TryBuild*ConnectionStringFromStoredCredential</c>: resolve the credential file for the role, return null
+    /// when it has not been written yet, otherwise unprotect it and build the role's connection string. The five callers differ only in the
+    /// path function, the role, the application name and the pool size.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string? TryBuildRoleConnectionStringFromStoredCredential(
+        PostgresConfig config, Func<string, string> credentialPathFor, string role, string? applicationName, int maxPoolSize = DefaultMaxPoolSize)
+    {
+        var credentialPath = credentialPathFor(ResolveDataDirectory(config));
         if (!File.Exists(credentialPath))
         {
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, AdminRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()),
-            WebAdminApplicationName, WebAdminMaxPoolSize);
+        return BuildRoleConnectionString(config.Port, role, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), applicationName, maxPoolSize);
     }
 
     /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested
@@ -3228,6 +3219,8 @@ public sealed class DarlingManagedPostgres
            NetworkPlan/NetworkMode stay private to this class — every consumer outside it (UpgradeContext's own
            delegate included) sees only the Func<string> built from networkPlan.Value below. */
         var networkPlan = new Lazy<NetworkPlan>(BuildNetworkPlan);
+
+        DiscardInterruptedInitdb(_dataDirectory, _logger);
 
         /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
            extension for the quiesced update to move. */
@@ -3826,8 +3819,10 @@ public sealed class DarlingManagedPostgres
     /// First-run initdb. The credential is generated and DPAPI-persisted BEFORE initdb runs:
     /// if the order were reversed, a crash after a successful initdb would leave a cluster whose
     /// password nobody knows. A failed initdb leaves the credential file behind harmlessly —
-    /// the next attempt regenerates and overwrites it (initdb itself cleans up its partial data
-    /// directory on failure).
+    /// the next attempt regenerates and overwrites it. initdb cleans up its partial data directory
+    /// when it exits non-zero by itself, but not when it is killed (the 180 s timeout, a service stop, or a
+    /// kill from outside the service, which returns a non-zero code): the marker stays on any non-zero exit
+    /// and any throw, so that case is covered by <see cref="RunInitdbWithMarkerAsync"/> and <see cref="DiscardInterruptedInitdb"/> (#7191).
     /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
@@ -3852,11 +3847,13 @@ public sealed class DarlingManagedPostgres
         try
         {
             var initDb = Path.Combine(binDirectory, "initdb.exe");
-            var (exitCode, output) = await RunToolAsync(
-                initDb,
-                $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
-                s_initDbTimeout,
-                cancellationToken);
+            var (exitCode, output) = await RunInitdbWithMarkerAsync(
+                _dataDirectory,
+                () => RunToolAsync(
+                    initDb,
+                    $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
+                    s_initDbTimeout,
+                    cancellationToken));
 
             if (exitCode != 0)
             {
@@ -3885,6 +3882,161 @@ public sealed class DarlingManagedPostgres
         }
 
         _logger.LogInformation("Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)");
+    }
+
+    /// <summary>
+    /// The file beside the data directory that exists while a first-run initdb is in flight, or after one was
+    /// stopped. It holds the full path of the data directory it was written for (#7191), because the file name is
+    /// fixed and sits in the parent folder, which other data directories can share.
+    /// </summary>
+    internal const string InitdbIncompleteMarkerFileName = "pg-initdb-incomplete.marker";
+
+    internal static string InitdbIncompleteMarkerPath(string dataDirectory)
+        => Path.Combine(ParentOf(dataDirectory), InitdbIncompleteMarkerFileName);
+
+    /// <summary>The suffix <see cref="DiscardInterruptedInitdb"/> adds to the name of a half-made data directory it moves aside.</summary>
+    internal const string InterruptedInitdbDirectorySuffix = ".interrupted-";
+
+    /// <summary>Appended to the moved folder's name for the copy of <c>pg-credential.dpapi</c> kept beside it (#7191).</summary>
+    internal const string InterruptedInitdbCredentialSuffix = ".pg-credential.dpapi";
+
+    /// <summary>Files a half-made initdb folder never holds but a store that has run (<c>postmaster.opts</c>) or a restored base backup (<c>backup_label</c>) does (#7191).</summary>
+    private static readonly string[] InterruptedInitdbStoreEvidenceFiles = ["postmaster.opts", "backup_label"];
+
+    private static string FullDataDirectoryPath(string dataDirectory)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+
+    /// <summary>
+    /// Runs the first-run initdb between writing and removing <see cref="InitdbIncompleteMarkerFileName"/>
+    /// (#7191). initdb writes <c>PG_VERSION</c> long before the cluster is usable, and a killed initdb (the
+    /// 180 s timeout, a service stop, a power cut) cannot run its own cleanup, so without the marker the next
+    /// start would see <c>PG_VERSION</c>, take the existing-cluster branch and fail on a half-made cluster for
+    /// good. The marker is removed only on exit code 0. It stays on any non-zero exit and when
+    /// <paramref name="runInitdb"/> throws (<see cref="RunToolAsync"/> throws after killing the tree on both the
+    /// timeout and a stop), and when the process dies with the service: an initdb killed from outside the service
+    /// (Task Manager, a crash, an out-of-memory kill) returns a non-zero code instead of throwing, and removing
+    /// the marker on that return would leave its half-made folder blocking every later start. The marker is
+    /// written only when the data directory is absent or empty, so a folder that held anything never gets one
+    /// (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it: initdb exits 1 "exists but
+    /// is not empty" and touches nothing). The marker records the data directory's full path, so
+    /// <see cref="DiscardInterruptedInitdb"/>, which reads it on a later start, acts only on the directory this
+    /// initdb was started for.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
+        string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
+    {
+        if (Directory.Exists(dataDirectory) && Directory.EnumerateFileSystemEntries(dataDirectory).Any())
+        {
+            return await runInitdb();
+        }
+
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        File.WriteAllText(marker, FullDataDirectoryPath(dataDirectory) + Environment.NewLine);
+        var result = await runInitdb();
+
+        /* Only a clean exit removes the marker. A throw skips this line, and a non-zero exit (an initdb killed from
+           outside the service) keeps it so the next start sets the half-made folder aside. */
+        if (result.ExitCode == 0)
+        {
+            File.Delete(marker);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A first-run initdb that never finished left <see cref="InitdbIncompleteMarkerFileName"/> beside the data
+    /// directory, naming it, and a half-made cluster that is not a store (#7191). Moves that folder aside to
+    /// <c>&lt;dataDirectory&gt;.interrupted-yyyyMMddHHmmss</c> (an empty one is just removed) and removes the
+    /// marker, so the start initializes again. A folder that holds <c>postmaster.opts</c> or <c>backup_label</c> is a
+    /// real store (a restored backup, say), not a half-made initdb: it is left exactly as it is, the stale marker is
+    /// deleted and the start goes on against it. Before any other non-empty folder is moved, a copy of the shared
+    /// <c>pg-credential.dpapi</c> is made beside it, because the next initdb overwrites that file. It never deletes a non-empty folder: the marker survives every
+    /// non-zero initdb exit, so it can sit on disk until an operator has pointed <c>postgres.dataDirectory</c>
+    /// at a sibling store or restored a backup into the same folder, and either would be lost to a delete.
+    /// Acts only when the marker names exactly this directory (full paths, case-insensitive on Windows only). A
+    /// marker that names another directory, or holds no readable path, is left in place with one warning and
+    /// nothing is touched. When the move throws, the exception propagates and the marker stays, so the start
+    /// fails with the reason and nothing is lost. Does nothing when there is no marker.
+    /// </summary>
+    internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
+    {
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        if (!File.Exists(marker))
+        {
+            return;
+        }
+
+        var full = FullDataDirectoryPath(dataDirectory);
+        string? named = null;
+        try
+        {
+            var text = File.ReadLines(marker).FirstOrDefault()?.Trim();
+            if (!string.IsNullOrEmpty(text) && Path.IsPathFullyQualified(text))
+            {
+                named = FullDataDirectoryPath(text);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            named = null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (named is null || !string.Equals(named, full, comparison))
+        {
+            logger.LogWarning(
+                "The first-run initdb marker {Marker} {Names}, not {DataDirectory}, so it was left in place and nothing was touched. Delete the marker file once you have checked it is stale",
+                marker,
+                named is null ? "does not name a readable data directory" : "names " + named,
+                dataDirectory);
+            return;
+        }
+
+        if (Directory.Exists(full))
+        {
+            if (Directory.EnumerateFileSystemEntries(full).Any())
+            {
+                /* The marker alone does not prove the folder is half-made: an operator can restore a store backup
+                   into it after the failed run. initdb's bootstrap and single-user steps never write
+                   postmaster.opts (the postmaster does, on its first start), and a pg_basebackup copy leaves that
+                   file out but carries backup_label. Either file means a real store, so it is kept as it is. */
+                var keepFile = InterruptedInitdbStoreEvidenceFiles.FirstOrDefault(name => File.Exists(Path.Combine(full, name)));
+                if (keepFile is not null)
+                {
+                    logger.LogWarning(
+                        "The first-run initdb marker {Marker} named {DataDirectory}, but that folder holds {EvidenceFile}, which a half-made initdb folder never has, so it is a real store. The marker was stale: it was deleted and the folder was left as it is",
+                        marker, dataDirectory, keepFile);
+                    File.Delete(marker);
+                    return;
+                }
+
+                var aside = full + InterruptedInitdbDirectorySuffix + DateTime.Now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+
+                /* InitializeClusterAsync writes a new superuser credential over pg-credential.dpapi in the shared
+                   parent before initdb runs, so the moved folder would lose the password that opens it. Copy the
+                   file beside the moved folder first: a failed copy throws here with the marker kept and nothing
+                   moved. */
+                string? credentialCopy = null;
+                var credential = CredentialPathFor(full);
+                if (File.Exists(credential))
+                {
+                    credentialCopy = aside + InterruptedInitdbCredentialSuffix;
+                    File.Copy(credential, credentialCopy, overwrite: false);
+                }
+
+                logger.LogWarning(
+                    "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Moving the half-made data directory to {MovedTo} and initializing again. The moved folder can be deleted once you have checked it. If it is actually a store you restored, it holds no postmaster.opts or backup_label; its superuser credential was copied to {CredentialCopy}, so to use it again, stop the service, put the folder back and copy that file over {Credential}",
+                    dataDirectory, aside, credentialCopy ?? "(none: there was no credential file)", credential);
+                Directory.Move(full, aside);
+            }
+            else
+            {
+                Directory.Delete(full);
+            }
+        }
+
+        File.Delete(marker);
     }
 
     /// <summary>

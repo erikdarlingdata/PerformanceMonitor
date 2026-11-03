@@ -84,7 +84,8 @@ public sealed class FinOpsCostTests
         Assert.Equal(2, Count(tab, "FinOpsCost.WindowBudget(_server.MonthlyCostUsd, hoursBack)"));
         Assert.Contains("FinOpsCost.Share(w.TotalWaitTimeMs, (decimal)totalWait, windowBudget)", tab, StringComparison.Ordinal);
         Assert.Contains("FinOpsCost.Share(q.TotalCpuMs, (decimal)totalCpu, windowBudget)", tab, StringComparison.Ordinal);
-        Assert.Contains("FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, _server.MonthlyCostUsd)", tab, StringComparison.Ordinal);
+        var storage = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.FinOps.Storage.cs");
+        Assert.Contains("FinOpsCost.StorageShare(d.TotalSizeMb ?? 0m, totalMb, monthlyCostUsd)", storage, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -879,6 +879,7 @@ public partial class MainWindow : Window
         var previousServerId = (ServerListView.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(servers.Select(ToFleetServer).ToList());
         ApplyFleetTagsAndRebind(previousServerId);
+        RefreshRenamedServerTabs(servers);
 
         // Update UI based on server count
         if (servers.Count == 0 && _openServerTabs.Count == 0)
@@ -1248,7 +1249,7 @@ public partial class MainWindow : Window
 
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
-            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+            s => s.ShownCpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
 
         /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
         var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;
@@ -1541,13 +1542,38 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// After a server list reload, gives every open tab whose label is out of date (#7212) the new header text and the tab's
+    /// own server name line. The tab keeps its server record: the Edit Server dialog changes that record in place, and the
+    /// tab's store key was fixed from the server name, database and read-only intent when it opened. A server the list no
+    /// longer holds keeps its tab as it is.
+    /// </summary>
+    private void RefreshRenamedServerTabs(IReadOnlyList<ServerConnection> servers)
+    {
+        var shown = new Dictionary<string, string>();
+        foreach (var (serverId, tab) in _openServerTabs)
+        {
+            if (tab.Header is StackPanel header && header.Children.Count > 0 && header.Children[0] is TextBlock nameText)
+            {
+                shown[serverId] = nameText.Text;
+            }
+        }
+
+        foreach (var server in PerformanceMonitorLite.Helpers.ServerTabLabels.NeedingNewLabel(shown, servers))
+        {
+            var tab = _openServerTabs[server.Id];
+            ((TextBlock)((StackPanel)tab.Header).Children[0]).Text = PerformanceMonitorLite.Helpers.ServerTabLabels.HeaderLabel(server);
+            (tab.Content as ServerTab)?.ShowServerName(server);
+        }
+    }
+
     private StackPanel CreateTabHeader(ServerConnection server)
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
         /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
         panel.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
 
-        var tabLabel = server.ReadOnlyIntent ? $"{server.DisplayName} (RO)" : server.DisplayName;
+        var tabLabel = PerformanceMonitorLite.Helpers.ServerTabLabels.HeaderLabel(server);
         panel.Children.Add(new TextBlock
         {
             Text = tabLabel,

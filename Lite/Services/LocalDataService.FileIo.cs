@@ -28,6 +28,10 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of file_io_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var fileIoRelation = await HotTableHasServerAsync(connection, "file_io_stats", serverId) ? "file_io_stats" : "v_file_io_stats";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = $@"
 SELECT
@@ -44,9 +48,9 @@ SELECT
     delta_stall_write_ms,
     sample_interval_seconds,
     collection_time
-FROM v_file_io_stats
+FROM {fileIoRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1){dbClause}
+AND   collection_time = (SELECT MAX(collection_time) FROM {fileIoRelation} WHERE server_id = $1){dbClause}
 ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

@@ -28,9 +28,15 @@ public partial class LocalDataService
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<TimeSliceBucket>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -132,6 +138,7 @@ WHERE rn = 1
 GROUP BY date_trunc('hour', COALESCE(interval_start_time_utc, collection_time))
 ORDER BY bucket";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -161,13 +168,21 @@ ORDER BY bucket";
         }
         return items;
     }
+        }
 
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null, string? moduleName = null, QueryTagReadScope? tags = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row ranks on the hot table alone, and each candidate's latest row and text
+           come from it too. Only a candidate with no text in the hot table opens the archive (see the end of the round). */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         /* #5381: $4 used to be the page limit; the limit is applied after the text lookup now, so the filter parameters start at $4. */
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         /* #5992: the query tag filter, in the population before the ranking and the cap. */
@@ -193,8 +208,8 @@ WITH latest AS (
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
-       reached 40, and AVG(avg_*) becomes an avg-of-avgs weighted by how many times each interval happened
-       to be re-collected. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
+       reached 40, and the execution-weighted averages would count a re-collected interval again at its own
+       execution count. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
        payload column, so they are listed in `deduped`; #5381: query_text and query_plan_text are NOT among them.
        The text is read after the ranking, for the page's rows only (below).
 
@@ -269,12 +284,12 @@ ranked AS (
            is in the partition, so filtering first cannot change which row wins. */
         execution_type_desc,
         SUM(execution_count) AS total_executions,
-        AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
-        AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
-        AVG(CAST(avg_logical_io_reads AS DOUBLE PRECISION)) AS avg_logical_reads,
-        AVG(CAST(avg_logical_io_writes AS DOUBLE PRECISION)) AS avg_logical_writes,
-        AVG(CAST(avg_physical_io_reads AS DOUBLE PRECISION)) AS avg_physical_reads,
-        AVG(CAST(avg_rowcount AS DOUBLE PRECISION)) AS avg_rowcount,
+        SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_duration_ms,
+        SUM(CAST(avg_cpu_time_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_cpu_time_ms,
+        SUM(CAST(avg_logical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_logical_reads,
+        SUM(CAST(avg_logical_io_writes AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_logical_writes,
+        SUM(CAST(avg_physical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_physical_reads,
+        SUM(CAST(avg_rowcount AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_rowcount,
         MIN(min_dop) AS min_dop,
         MAX(max_dop) AS max_dop,
         MAX(last_execution_time) AS last_execution_time,
@@ -282,9 +297,9 @@ ranked AS (
         MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
         MAX(plan_forcing_type) AS plan_forcing_type,
         MIN(first_execution_time) AS first_execution_time,
-        AVG(CAST(avg_clr_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_clr_time_ms,
-        AVG(CAST(avg_tempdb_space_used AS DOUBLE PRECISION)) AS avg_tempdb_space_used,
-        AVG(CAST(avg_log_bytes_used AS DOUBLE PRECISION)) AS avg_log_bytes_used,
+        SUM(CAST(avg_clr_time_us AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) / 1000.0 AS avg_clr_time_ms,
+        SUM(CAST(avg_tempdb_space_used AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_tempdb_space_used,
+        SUM(CAST(avg_log_bytes_used AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_log_bytes_used,
         MAX(plan_type) AS plan_type,
         MAX(force_failure_count) AS force_failure_count,
         MAX(last_force_failure_reason) AS last_force_failure_reason,
@@ -307,17 +322,17 @@ ranked AS (
         MAX(CAST(max_log_bytes_used AS DOUBLE PRECISION)) AS max_log_bytes_used,
         MIN(CAST(min_tempdb_space_used AS DOUBLE PRECISION)) AS min_tempdb_space_used,
         MAX(CAST(max_tempdb_space_used AS DOUBLE PRECISION)) AS max_tempdb_space_used,
-        AVG(CAST(avg_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS avg_memory_mb,
+        SUM(CAST(avg_query_max_used_memory AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) * 8.0 / 1024.0 AS avg_memory_mb,
         MIN(CAST(min_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS min_memory_mb,
         MAX(CAST(max_query_max_used_memory AS DOUBLE PRECISION)) * 8.0 / 1024.0 AS max_memory_mb,
-        AVG(CAST(avg_num_physical_io_reads AS DOUBLE PRECISION)) AS avg_num_physical_io_reads,
+        SUM(CAST(avg_num_physical_io_reads AS DOUBLE PRECISION) * execution_count) / NULLIF(SUM(execution_count), 0) AS avg_num_physical_io_reads,
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
     WHERE 1 = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     /* #5299 round 3 (O16): the ranking ends on the whole group key - see GetTopQueriesByCpuAsync. */
-    ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+    ORDER BY SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     LIMIT " + candidates + @"
 ),
 /* #5381: `ranked` is read ONCE, here. Referencing it a second time (for a candidate count, or to find each candidate's
@@ -393,6 +408,7 @@ FROM page p
 ORDER BY p.page_ord";
 
         if (tags is not null) command.CommandText = tags.Apply(command.CommandText, moduleParameterIndex + (string.IsNullOrWhiteSpace(moduleName) ? 0 : 1));
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -473,8 +489,10 @@ ORDER BY p.page_ord";
 
         /* #5381: the row that holds each candidate's text (the latest row of its database and query_id over ALL history,
            as the old lateral picked), then the text of those rows, both by key and for the candidates only. */
-        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)));
-        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values);
+        /* #7256: with the window read from the hot table alone, a candidate's newest row is in the hot table (it has a row in the window,
+           and the archive holds nothing that new), so the latest row and its text are read there. */
+        var latestRows = await ReadQueryStoreLatestRowsAsync(connection, serverId, candidateRows.Select(r => (r.DatabaseName, r.QueryId)), relation);
+        var texts = await ReadQueryStoreTextByRowAsync(connection, serverId, latestRows.Values, relation);
         var items = new List<QueryStoreRow>();
         foreach (var row in candidateRows)
         {
@@ -483,7 +501,12 @@ ORDER BY p.page_ord";
             {
                 texts.TryGetValue(textRow, out text);
                 /* The old lateral skipped NULL texts: a latest row with no text resolves to the latest row WITH one. */
-                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+                text ??= await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId, relation);
+                /* #7256: only a candidate with no text anywhere in the hot table goes to the archive for it. */
+                if (text is null && relation != "v_query_store_stats")
+                {
+                    text = await ReadQueryStoreLatestNonNullTextAsync(connection, serverId, row.DatabaseName, row.QueryId);
+                }
             }
 
             /* The old statement's WHERE (NOT LIKE is case sensitive, a prefix test) and LIMIT $4, in page_ord order. */
@@ -505,6 +528,7 @@ ORDER BY p.page_ord";
         }
 
         return await TopFill.RunAsync(top, RunRoundAsync);
+        }
     }
 
     /// <summary>
@@ -518,6 +542,11 @@ ORDER BY p.page_ord";
         IReadOnlyList<string>? databaseNames = null)
     {
         using var _q = TimeQuery("GetQueryStoreComparisonAsync", "v_query_store_stats comparison");
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", currentStart < baselineStart ? currentStart : baselineStart, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStatsComparisonItem>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
@@ -699,6 +728,7 @@ SELECT 2, database_name, query_hash,
        collection_id, collection_time, query_id
 FROM baseline_winner;";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = currentStart });
         command.Parameters.Add(new DuckDBParameter { Value = currentEnd });
@@ -752,7 +782,7 @@ FROM baseline_winner;";
         /* #5381: the text, read by key after the ranking. COALESCE(current text, baseline text), each a MAX in UTF-8 order. */
         var texts = await ReadQueryStoreTextByRowAsync(
             connection, serverId,
-            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)));
+            currentKeys.Values.Concat(baselineKeys.Values).SelectMany(v => v).Select(v => (v.Item1, v.Item2)), relation);
         /* A query_id whose latest kept row in the period carries no text: the old MAX skipped NULLs, so it still showed
            an older kept row's text from the same period (the review of #5396). Read only those queries' other kept rows,
            newest UTC day first, until each has a text. */
@@ -765,6 +795,7 @@ FROM baseline_winner;";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -795,9 +826,15 @@ FROM baseline_winner;";
         int serverId, string databaseName, long queryId, long planId,
         int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreItemTimelinePoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH deduped AS
@@ -857,6 +894,7 @@ WHERE rn = 1
 -- zig-zag rather than a curve.
 ORDER BY point_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -877,6 +915,7 @@ ORDER BY point_time";
         }
         return points;
     }
+        }
 
     /// <summary>
     /// Gets collection-level history for ALL plans of a Query Store query (query-scoped, matching
@@ -900,9 +939,15 @@ ORDER BY point_time";
     /// </summary>
     public async Task<List<QueryStoreHistoryRow>> GetQueryStoreHistoryAsync(int serverId, string databaseName, long queryId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryStoreHistoryRow>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -965,6 +1010,7 @@ AND   collection_time >= $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = queryId });
@@ -1034,6 +1080,7 @@ ORDER BY collection_time";
 
         return items;
     }
+        }
 
     /// <summary>
     /// Fetches a query plan on-demand from Query Store by plan_id.
@@ -1120,10 +1167,16 @@ OPTION(RECOMPILE);',
     /// </summary>
     public async Task<List<QueryTrendPoint>> GetQueryStoreDurationTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
+
+        /* #7256: a window that starts after the newest archived row reads the hot table alone. */
+        return await ReadWindowSkippingEmptyArchiveAsync("query_store_stats", "collection_time", startTime.AddDays(-1), ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(string relation)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -1208,6 +1261,7 @@ SELECT
 FROM raw
 ORDER BY point_time";
 
+        command.CommandText = SwapArchiveView(command.CommandText, "query_store_stats", relation);
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
@@ -1229,6 +1283,7 @@ ORDER BY point_time";
         }
         return items;
     }
+        }
 }
 
 public class QueryStoreRow

@@ -811,6 +811,8 @@ public sealed class DarlingFleetReaderLivePostgresTests
     private const string XeName = "fleet-reader-e2e-xe";
     private const string DmvName = "fleet-reader-e2e-dmv";
     private const string NoHistoryName = "fleet-reader-e2e-no-history";
+    private const int PgServerId = -951004;   // a PostgreSQL target: no scheduler snapshot, ever (#7195)
+    private const string PgName = "fleet-reader-e2e-pg-threads";
 
     /// <summary>
     /// Regression test for a fleet false-Offline found live on the use1 monitoring host (2026-08-30): a server
@@ -1023,6 +1025,55 @@ public sealed class DarlingFleetReaderLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #7195: the tool description says a PostgreSQL card's whole threads block is null (no DMV equivalent). The card used to send
+    /// <c>threads_waiting_for_cpu</c> and <c>requests_waiting_for_threads</c> as 0, which an agent reads as "nothing waiting".
+    /// </summary>
+    [Fact]
+    public async Task GetFleetOverview_PostgresCard_SendsTheWholeThreadsBlockAsNull()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet-reader test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteSentinelRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            using (var insert = new NpgsqlCommand(
+                "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, engine_kind) VALUES ($1, $2, $2, TRUE, 0, $3)", connection))
+            {
+                insert.Parameters.AddWithValue(PgServerId);
+                insert.Parameters.AddWithValue(PgName);
+                insert.Parameters.AddWithValue(MonitoredEngineKind.Postgres);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            using var overview = JsonDocument.Parse(await DarlingMcpFleetTools.GetFleetOverview(postgres, hours_back: 1, detail: "cards", cancellationToken: ct));
+            var card = overview.RootElement.GetProperty("cards").EnumerateArray().Single(c => c.GetProperty("server_name").GetString() == PgName);
+
+            Assert.Equal(JsonValueKind.Null, card.GetProperty("total_threads").ValueKind);
+            Assert.Equal(JsonValueKind.Null, card.GetProperty("available_threads").ValueKind);
+            Assert.Equal(JsonValueKind.Null, card.GetProperty("threads_waiting_for_cpu").ValueKind);
+            Assert.Equal(JsonValueKind.Null, card.GetProperty("requests_waiting_for_threads").ValueKind);
+            Assert.Equal("Unknown", card.GetProperty("threads_severity").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteSentinelRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task InsertServerAsync(
         NpgsqlConnection connection, int serverId, string name, int engineEdition, System.Threading.CancellationToken ct, DateTime? createdDate = null)
     {
@@ -1090,7 +1141,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
         foreach (var table in new[] { "blocked_process_reports", "dmv_blocking_snapshots", "deadlocks", "collection_log", "servers" })
         {
             using var cleanup = new NpgsqlCommand(
-                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId}, {NoHistoryServerId});", connection);
+                $"DELETE FROM {table} WHERE server_id IN ({XeServerId}, {DmvServerId}, {NoHistoryServerId}, {PgServerId});", connection);
             await cleanup.ExecuteNonQueryAsync(ct);
         }
     }

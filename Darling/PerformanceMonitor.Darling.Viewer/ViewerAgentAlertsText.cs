@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -46,17 +47,21 @@ public static class ViewerAgentAlertsText
 
     private const string Dash = "—";
 
-    /// <summary>The status line: the alert setup word, the alerts defined and when the newest capture was taken.</summary>
-    public static string StatusLine(ViewerAgentAlertsRead read)
+    /// <summary>
+    /// The status line: the alert setup word, the alerts defined and when the newest capture was taken. The capture time is stored
+    /// naive UTC and belongs to the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343).
+    /// </summary>
+    public static string StatusLine(ViewerAgentAlertsRead read, ServerClock clock)
     {
         ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(clock);
         if (read.Read is not { HasCapture: true } capture || read.InstanceStatus is null)
         {
             return read.Message ?? NoCapture;
         }
 
         var captured = capture.NewestCapture is { } t
-            ? DateTime.SpecifyKind(t, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
+            ? ViewerTimeHelper.FormatForDisplay(t, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g")
             : Dash;
         return string.Create(CultureInfo.InvariantCulture,
             $"Alert setup: {read.InstanceStatus.Word}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");

@@ -494,7 +494,7 @@ public sealed class DarlingConfig
 
         /* #5240: a reference in a server's own secret slot is one the file declares for that server, so the entry read from
            the file may resolve it even when it is owned. The flags are set here and nowhere from a stored value. */
-        foreach (var server in config.Servers ?? new List<MonitoredServer>())
+        foreach (var server in config.Servers)
         {
             if (server is null)
             {

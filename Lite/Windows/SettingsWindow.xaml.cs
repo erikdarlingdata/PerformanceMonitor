@@ -190,6 +190,8 @@ public partial class SettingsWindow : Window
 
     private void ServerScheduleGrid_DoubleClick(object sender, MouseButtonEventArgs e)
     {
+        // A double-click on a column header, the scrollbar or the empty area is not a row (#7210).
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource)) return;
         OpenServerScheduleEditor();
     }
 
@@ -447,8 +449,10 @@ public partial class SettingsWindow : Window
             SaveTimeDisplayMode(root);
             SaveCheckForUpdates(root);
             alertsValid = SaveAlertSettings(root);
-            SaveSmtpSettings(root);
-            webhooksValid = SaveWebhookSettings(root);
+            var smtpValid = SaveSmtpSettings(root);
+            /* A refused recipient list is reported by its own dialog; folding it into webhooksValid makes the outcome
+               "written with objections" so no second success box contradicts it. */
+            webhooksValid = SaveWebhookSettings(root) && smtpValid;
         }
         catch (Exception ex)
         {
@@ -1466,7 +1470,7 @@ public partial class SettingsWindow : Window
     /// no longer performs a write, so there is no longer a failure for it to be unable to report. That is
     /// the difference between removing the partial-save state and describing it.
     /// </summary>
-    private void SaveSmtpSettings(JsonNode root)
+    private bool SaveSmtpSettings(JsonNode root)
     {
         App.SmtpEnabled = SmtpEnabledCheckBox.IsChecked == true;
         App.SmtpServer = SmtpServerBox.Text?.Trim() ?? "";
@@ -1475,7 +1479,23 @@ public partial class SettingsWindow : Window
         App.SmtpUseSsl = SmtpSslCheckBox.IsChecked == true;
         App.SmtpUsername = SmtpUsernameBox.Text?.Trim() ?? "";
         App.SmtpFromAddress = SmtpFromBox.Text?.Trim() ?? "";
-        App.SmtpRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+
+        /* #7184: one recipient the send cannot parse (an Outlook-style "a@x.com;b@x.com") fails every alert email, valid
+           addresses included, and "a@x.com; b@x.com" silently drops the first. An enabled channel keeps its stored recipients and says so, like the other writers do. */
+        var recipientsValid = true;
+        var typedRecipients = SmtpRecipientsBox.Text?.Trim() ?? "";
+        if (App.SmtpEnabled && EmailSendCore.RecipientsRefusal(typedRecipients) is { } recipientsRefusal)
+        {
+            recipientsValid = false;
+            NoteInvalid("Default recipients: " + recipientsRefusal, SmtpRecipientsBox);
+            MessageBox.Show(
+                "The default email recipients were not changed:\n\n" + recipientsRefusal,
+                "Settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        else
+        {
+            App.SmtpRecipients = typedRecipients;
+        }
 
         /* Save password securely */
         if (!string.IsNullOrEmpty(SmtpPasswordBox.Password))
@@ -1493,6 +1513,7 @@ public partial class SettingsWindow : Window
         root["smtp_username"] = App.SmtpUsername;
         root["smtp_from_address"] = App.SmtpFromAddress;
         root["smtp_recipients"] = App.SmtpRecipients;
+        return recipientsValid;
     }
 
     private void SmtpEnabledCheckBox_Changed(object sender, RoutedEventArgs e)
@@ -1528,6 +1549,8 @@ public partial class SettingsWindow : Window
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
             errors.Add("At least one recipient is required");
+        else if (EmailSendCore.RecipientsRefusal(SmtpRecipientsBox.Text) is { } recipientsRefusal)
+            errors.Add("Default recipients: " + recipientsRefusal);
 
         if (errors.Count == 0)
         {

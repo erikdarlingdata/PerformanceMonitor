@@ -59,6 +59,13 @@ public sealed class PeopleViewerTests
     }
 
     [Fact]
+    public void TheEmptyListNote_SaysAnApproveGrantDecidesWhoApproves_NotThatGrantsDoNothing()
+    {
+        Assert.DoesNotContain("Nothing reads a grant", PeopleText.NoPeopleNote, StringComparison.Ordinal);
+        Assert.Contains("An approve grant lets that person approve", PeopleText.NoPeopleNote, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AGrant_CarriesKindsOnlyWhereTheCapabilityTakesThem_AndOneScope()
     {
         using (var doc = JsonDocument.Parse(ViewerPersonCommands.AddGrantArgs(4, "approve", ["kill_session", "force_plan"], 7, 2)))

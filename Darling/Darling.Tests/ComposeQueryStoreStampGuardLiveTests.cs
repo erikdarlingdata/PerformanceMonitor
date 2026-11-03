@@ -89,4 +89,62 @@ public sealed class ComposeQueryStoreStampGuardLiveTests
             await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
         }
     }
+
+    private const string FleetPanelJson =
+        "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":50,\"groupBy\":[\"query_hash\"],\"viz\":\"bar\"}";
+    private const string FilteredFleetPanelJson =
+        "{\"source\":\"query_store_stats\",\"ratio\":\"qs_total_cpu_us\",\"topN\":50,\"groupBy\":[\"query_hash\"],\"viz\":\"bar\","
+        + "\"filters\":[{\"dimension\":\"database_name\",\"op\":\"like\",\"value\":\"%\"}]}";
+
+    /// <summary>#7285: the one-day, fleet-wide, unfiltered query_hash panel the fleet rollup serves, on a store whose wide rows a day are
+    /// so many that the stamp weight alone refuses it. It runs, and reads the fleet table. The same panel with a filter, which the fleet
+    /// table cannot serve, is refused as before. And a store whose raw tail alone is over the limit refuses it even so.</summary>
+    [Fact]
+    public async Task TheOneDayFleetPanelOnALargeFleet_PassesTheGuardOnTheFleetTablesSize_AFilteredPanelAndAHugeTailAreStillRefused()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        var bodySucceeded = false;
+        try
+        {
+            foreach (var server in new[] { 1, 2, 3 })
+            {
+                await ComposeStampLiveSupport.ExecAsync(connection,
+                    "INSERT INTO collect.query_store_top_daily_built (server_id, day, pass, built_at, source_rows) "
+                    + $"VALUES ({server}, DATE '{hourNow.AddDays(-1):yyyy-MM-dd}', 2, now() AT TIME ZONE 'UTC', 12000000)", ct);
+                await ComposeStampLiveSupport.InsertRowAsync(connection, server, hourNow.AddDays(-10), 8_000_000 + server, ct);
+            }
+
+            var end = DateTime.UtcNow;
+            var start = end.AddHours(-24);
+            var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct);
+            Assert.True(resolution.Eligible && resolution.FleetReady, "the seeded store must route the panel to the wide table with the fleet table built");
+            Assert.Equal(hourNow.AddHours(-2), resolution.StampThrough);
+
+            /* 36 M wide rows a day, the newest two hours (about 3 M) unstamped. At the stamp weight the day is 12 M and over the 6.8 M limit
+               (the figure before #7285). The fleet table holds a few hundred rows, so the day is the tail plus almost nothing. */
+            var fleetSpec = new JsonObject { ["panel"] = JsonNode.Parse(FleetPanelJson), ["hours"] = 24 };
+            var passed = await DarlingWebEndpoints.RunComposedPanelAsync(source, (JsonObject)fleetSpec.DeepClone(), ct);
+            Assert.True(passed.Payload is not null, "the fleet table serves the panel, so the guard must let it run: " + passed.Error);
+            Assert.Contains("query_store_compose_fleet", passed.Payload!["sql"]!.GetValue<string>(), StringComparison.Ordinal);
+
+            /* A panel outside the fleet conditions keeps the stamp estimate and is refused with the stamp branch's message. */
+            var filteredSpec = new JsonObject { ["panel"] = JsonNode.Parse(FilteredFleetPanelJson), ["hours"] = 24 };
+            var refused = await DarlingWebEndpoints.RunComposedPanelAsync(source, (JsonObject)filteredSpec.DeepClone(), ct);
+            Assert.True(refused.Payload is null, "a filtered panel cannot read the fleet table; the stamp-weighted 12 M must refuse it");
+            Assert.StartsWith("This panel reads too much Query Store history", refused.Error, StringComparison.Ordinal);
+
+            /* A raw tail that is over the limit by itself: 180 M wide rows a day puts the newest two hours at 15 M. */
+            await ComposeStampLiveSupport.ExecAsync(connection, "UPDATE collect.query_store_top_daily_built SET source_rows = 60000000", ct);
+            var tail = await DarlingWebEndpoints.RunComposedPanelAsync(source, (JsonObject)fleetSpec.DeepClone(), ct);
+            Assert.True(tail.Payload is null, "the tail alone is over the limit; the fleet table cannot make it fit");
+            Assert.StartsWith("This panel reads too much Query Store history", tail.Error, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await ComposeStampLiveSupport.CleanupAsync(scratch, connection, source, bodySucceeded);
+        }
+    }
 }

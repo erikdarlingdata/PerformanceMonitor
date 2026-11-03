@@ -43,6 +43,12 @@ public partial class ServerTab : UserControl
     private readonly int _serverId;
     public int ServerId => _serverId;
     public ServerConnection Server => _server;
+
+    /// <summary>The server name line at the top of the tab (#7212). Only the text: the tab keeps its server record and its store key.</summary>
+    public void ShowServerName(ServerConnection server)
+    {
+        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+    }
     private readonly CredentialResolver _credentialResolver;
     private readonly DispatcherTimer _refreshTimer;
     private bool _refreshPendingWhileHidden;
@@ -138,7 +144,8 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigChangeRow>? _serverConfigChangesFilterMgr;
     private DataGridFilterManager<DatabaseConfigChangeRow>? _databaseConfigChangesFilterMgr;
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
-    private CancellationTokenSource? _actualPlanCts;
+    /* #7181: owns the Get Actual Plan token so closing the tab stops a re-run that has no command timeout. */
+    private readonly ActualPlanRunScope _actualPlanRun = new();
     private bool _actualPlanRequestOpen;
 
     /// <summary>
@@ -198,7 +205,7 @@ public partial class ServerTab : UserControl
         _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
-        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+        ShowServerName(server);
         ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
@@ -327,7 +334,7 @@ public partial class ServerTab : UserControl
         _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
         _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: GetPickerZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
         _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
         _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);
@@ -683,6 +690,9 @@ public partial class ServerTab : UserControl
     public void StopRefresh()
     {
         _refreshTimer.Stop();
+        /* #7181: a Get Actual Plan re-run runs with no command timeout; closing the tab (or removing the
+           server) is the last chance to stop it on the monitored server. */
+        _actualPlanRun.CancelForClose();
     }
 
     public void DisposeChartHelpers()

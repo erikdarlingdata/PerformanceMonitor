@@ -927,7 +927,7 @@
                                     </ComboBox>
                                     <TextBlock TextWrapping="Wrap" Text="auto-detected from locale"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <TextBlock x:Name="TimeDisplayModeLabel" Text="Show timestamps in:" VerticalAlignment="Center"

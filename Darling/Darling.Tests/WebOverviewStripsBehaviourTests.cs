@@ -97,11 +97,29 @@ public sealed class WebOverviewStripsBehaviourTests
         var at12 = Samples(r.GetProperty("at12").GetProperty("blocking"));
         Assert.Equal((12.0, 3.0), at12[0]);
         Assert.Null(at12[1].V);
+        // #7219: the strip counts blocked-process report rows, so its readout names reports (not "Blocking 3 events").
+        Assert.Contains("Blocked-process reports 3 per min", r.GetProperty("at12Text").GetProperty("blocking").GetString(), StringComparison.Ordinal);
 
         Assert.Equal((30.0, 3.0), Samples(r.GetProperty("at30").GetProperty("io"))[0]);
         // A pointer move drives the same lookup, over one crosshair line.
         AssertReadout("07:30", "SQL 40 %  |  Total 45 %", r.GetProperty("pointerText").GetProperty("cpu").GetString());
         Assert.Equal(1, r.GetProperty("hoverLines").GetInt32());
+    }
+
+    /// <summary>
+    /// #7219: when the trend read answers from DMV snapshot rows (<c>source</c> = "DMV snapshot", no blocked-process reports in the window),
+    /// the strip names its series and its readout for snapshot rows, and the reports arm keeps "Blocked-process reports".
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesTheSourceTheReadCounted()
+    {
+        var r = Run("snapshot");
+
+        Assert.Equal(new[] { "Blocking snapshot rows", "Deadlocks" }, r.GetProperty("series").EnumerateArray().Select(e => e.GetString()).ToArray());
+        var readout = r.GetProperty("at12Text").GetProperty("blocking").GetString();
+        Assert.Contains("Blocking snapshot rows 3 per min", readout, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports", readout, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Blocked-process reports", "Deadlocks" }, r.GetProperty("reportsSeries").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
     /// <summary>

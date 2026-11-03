@@ -2507,6 +2507,34 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.FleetCreateSql;
 
     /// <summary>
+    /// V240 (#7169): the execution-weighted sums <c>collect.query_store_top_daily</c> needs so the long-window read of
+    /// <c>get_query_store_top</c> averages Query Store intervals by how often each ran. Six nullable <c>numeric</c> columns, one per
+    /// averaged column V161 summarizes: <c>avg_duration_us_wsum</c>, <c>avg_cpu_time_us_wsum</c>, <c>avg_logical_io_reads_wsum</c>,
+    /// <c>avg_logical_io_writes_wsum</c>, <c>avg_physical_io_reads_wsum</c> and <c>avg_rowcount_wsum</c>, each
+    /// <c>sum(avg_x * execution_count)</c> over the day's wide-table rows. A reader divides <c>SUM(_wsum)</c> by
+    /// <c>SUM(execution_count_sum)</c> and ranks on <c>SUM(avg_duration_us_wsum)</c>, which is the table read's weighted answer. V161's
+    /// <c>_sum</c> and <c>_n</c> (the unweighted mean of interval averages, a 1-execution interval counting as much as a
+    /// 10,000-execution one) stay and are still written, but no reader uses them.
+    ///
+    /// <para><b>The rung does not empty the summary.</b> A day built before it has NULL weighted sums. The reader treats such a day as
+    /// not built (<see cref="QueryStoreTopDaily.DayIsWeightedSql"/>) and reads it from the wide table, exact but slower, and the
+    /// service's tick rebuilds it, newest day first, <see cref="QueryStoreTopDaily.MaxBuildsPerTick"/> a tick. The same test
+    /// covers a rollback and roll-forward, and an older instance that still writes to the same store, with no manual step. Only
+    /// the lock timeout is here: the <c>ALTER</c> needs an ACCESS EXCLUSIVE lock the builder's transaction also holds, so it is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V239's. The columns are nullable with no default, catalog-only.
+    /// An older build ignores them.</para>
+    /// </summary>
+    private static readonly string V240Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + @"
+ALTER TABLE collect.query_store_top_daily
+    ADD COLUMN IF NOT EXISTS avg_duration_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_cpu_time_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_writes_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_physical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3003,6 +3031,7 @@ $rung$;";
         new Migration(237, "people-identities-grants", V237Sql),
         new Migration(238, "action-approval-proposals", V238Sql),
         new Migration(239, "compose-fleet-rollup", V239Sql),
+        new Migration(240, "query-store-top-daily-weighted", V240Sql),
     };
 
     /// <summary>
@@ -3266,7 +3295,7 @@ ALTER TABLE config.config_alert_log
     /// <c>ON DELETE CASCADE</c>: a server id is a hash of its host, database and read-only flag, so a grant left behind by a removed server
     /// would apply again when the same server is added back. The cascade drops the grant whichever login removes the server or tag (it runs
     /// as the table's owner), and removing one is never blocked. Three partial unique indexes keep one grant per person, capability and
-    /// scope (a store can run PostgreSQL 14, which has no <c>NULLS NOT DISTINCT</c>).</para>
+    /// scope (the store is PostgreSQL 15 or later, since earlier rungs already build <c>NULLS NOT DISTINCT</c> indexes, and the product minimum is 16).</para>
     /// <para><b>Owner-only.</b> Only the store owner writes them (<c>PersonDirectory</c>, which journals every change in the same
     /// transaction). Managed provisioning section 10e3 and <c>provision-roles.sql</c> step 3j3 take every privilege back from the four
     /// roles, as for <c>config.config_server_actions</c>, and give SELECT back. The rung itself takes the writes back too, as V198 does, so a

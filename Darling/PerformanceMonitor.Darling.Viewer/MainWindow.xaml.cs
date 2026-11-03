@@ -1161,6 +1161,7 @@ public partial class MainWindow : Window
             var previousSelection = (ServerList.SelectedItem as FleetServerRow)?.Server.ServerId;
             var previousRecoServer = (RecommendationsServerSelector.SelectedItem as DarlingServer)?.ServerId;
             _fleet.SetAll(servers);
+            RefreshRenamedServerTabs(servers);
             ServerListKeyboard.Rebind(ServerList, _fleet.Visible);
             UpdateServerCountText();
 
@@ -1397,6 +1398,31 @@ public partial class MainWindow : Window
         MainTabs.Items.Add(tabItem);
         MainTabs.SelectedItem = tabItem;
         return serverTab;
+    }
+
+    /// <summary>
+    /// After a reload, gives every open server tab whose display name changed (#7212) the new name: the header text and the
+    /// tab's server record. A tab for a server the reload no longer lists is left as it is (a removed server's tab stays open).
+    /// </summary>
+    private void RefreshRenamedServerTabs(IReadOnlyList<DarlingServer> servers)
+    {
+        var open = _openServerTabs.Values
+            .Select(tab => tab.Content as ViewerServerTab)
+            .OfType<ViewerServerTab>()
+            .ToDictionary(serverTab => serverTab.Server.ServerId);
+
+        foreach (var renamed in ViewerServerSetSync.RenamedForOpenTabs(open.Values.Select(serverTab => serverTab.Server), servers))
+        {
+            open[renamed.ServerId].UpdateServer(renamed);
+
+            if (_openServerTabs.TryGet(renamed.ServerId, out var tab)
+                && tab.Header is StackPanel header
+                && header.Children.Count > 0
+                && header.Children[0] is TextBlock nameText)
+            {
+                nameText.Text = renamed.DisplayName;
+            }
+        }
     }
 
     /// <summary>Removes a per-server tab and unwires it. WPF selects an adjacent tab when the closed one was active.</summary>
@@ -1765,12 +1791,14 @@ public partial class MainWindow : Window
     /// Renders the fleet roll-up above the Overview cards: sets the FleetRollupContainer's DataContext and
     /// toggles the worst-first "Needs Attention" ranking against the all-clear line (there is no
     /// inverse-visibility converter, so the swap is done here). The container shows only when there are
-    /// servers to roll up.
+    /// registered servers to roll up (a search that matches none keeps it, #7354).
     /// </summary>
     private void ApplyFleetRollup(FleetRollup rollup)
     {
         FleetRollupContainer.DataContext = rollup;
-        FleetRollupContainer.Visibility = rollup.TotalServers > 0 ? Visibility.Visible : Visibility.Collapsed;
+        /* #7354: gated on the registered fleet, not the servers the search left, so a search that matches
+           nothing keeps the Search box on screen to be cleared. */
+        FleetRollupContainer.Visibility = OverviewCardView.ShowsRollup(rollup) ? Visibility.Visible : Visibility.Collapsed;
 
         FleetWorstServersList.Visibility = rollup.HasProblems ? Visibility.Visible : Visibility.Collapsed;
         FleetAdditionalProblems.Visibility =
@@ -1779,7 +1807,7 @@ public partial class MainWindow : Window
            summary this cycle at all (IsAllClear, not HasProblems, is the gate) — and that gap gets its own
            line rather than being silently absorbed into either the healthy or the all-clear text. */
         FleetUnknownStatusText.Visibility = rollup.UnknownCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        FleetAllHealthyText.Visibility = rollup.IsAllClear ? Visibility.Visible : Visibility.Collapsed;
+        FleetAllHealthyText.Visibility = OverviewCardView.ShowsAllClear(rollup) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Empties the Overview: no cards, no roll-up, and no stale authority left behind for the filter

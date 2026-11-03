@@ -22,6 +22,8 @@ public partial class DuckDbFactCollector
     {
         try
         {
+            /* #7256: Reads the hot table alone when the file_io_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.LatestValueStartFor(FileIoStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -48,6 +50,7 @@ WHERE rn = 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(FileIoStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -73,6 +76,8 @@ WHERE rn = 1";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the file_io_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -95,6 +100,7 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -169,6 +175,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the tempdb_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("tempdb_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -195,6 +203,7 @@ AND   collection_time <= $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -262,6 +271,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the database_size_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -294,6 +305,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
             /* #5558: the file growth setting replicates from the primary; a secondary copy is the primary's to report. */
             cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "FILE_AUTOGROWTH_PERCENT", "database_name", 4);
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -333,6 +345,8 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
     {
         try
         {
+            /* #7256: Reads the hot table alone when the database_size_stats archive holds nothing at or after the lookback start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -348,18 +362,28 @@ WITH latest AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   volume_total_mb > 0
+),
+tightest AS (
+    /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
+       volume with the fewest MB. Ties on percent break on the mount point. */
+    SELECT volume_mount_point, volume_free_mb
+    FROM latest WHERE rn = 1
+    ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
+    LIMIT 1
 )
 SELECT
     MIN(volume_free_mb * 1.0 / volume_total_mb) AS min_free_pct,
-    MIN(volume_free_mb) AS min_free_mb,
+    (SELECT volume_free_mb FROM tightest) AS min_free_mb,
     COUNT(DISTINCT volume_mount_point) AS volume_count,
     SUM(volume_total_mb) AS total_volume_mb,
-    SUM(volume_free_mb) AS total_free_mb
+    SUM(volume_free_mb) AS total_free_mb,
+    (SELECT volume_mount_point FROM tightest) AS tightest_mount_point
 FROM latest WHERE rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -369,6 +393,7 @@ FROM latest WHERE rn = 1";
             var volumeCount = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalVolumeMb = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
             var totalFreeMb = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            var tightestMount = reader.IsDBNull(5) ? null : reader.GetString(5);
 
             if (volumeCount == 0) return;
 
@@ -378,6 +403,7 @@ FROM latest WHERE rn = 1";
                 Key = "DISK_SPACE",
                 Value = minFreePct,
                 ServerId = context.ServerId,
+                ObjectName = string.IsNullOrWhiteSpace(tightestMount) ? null : tightestMount,
                 Metadata = new Dictionary<string, double>
                 {
                     ["min_free_pct"] = minFreePct,
