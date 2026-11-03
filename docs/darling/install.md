@@ -520,6 +520,8 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    **No ownership step is needed when the service was running as the default virtual account** (the `NT SERVICE\PerformanceMonitor Darling` account `install-darling.ps1` creates). The service and `install-darling.ps1` trust a store item owned by SYSTEM, Administrators, TrustedInstaller, the account the service runs as, or *this service's own service SID* (`NT SERVICE\PerformanceMonitor Darling`, `S-1-5-80-…`), and everything the virtual account created is owned by that SID. Ownership is only a step when the service has already run as *another* account (a second switch, from one domain account or gMSA to the next): that account then owns the items, and the service refuses them as a possible pre-plant. Hand ownership to Administrators, which is trusted across any later account change, from an elevated prompt with the service stopped:
 
+   `/T` follows a junction or symbolic link into whatever it points at and changes that too. First list the links with `dir /s /a:l "C:\ProgramData\PerformanceMonitorDarling"` and remove each one (`rmdir "<link>"` removes the link and keeps what it points at). Make the links again after the command.
+
    ```
    icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
    ```
@@ -746,8 +748,21 @@ dir /q /a "C:\ProgramData" | findstr /C:"PerformanceMonitorDarling"
 - The folder is owned by `NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\TrustedInstaller`, `NT SERVICE\PerformanceMonitor Darling` or the account the service logs on as. Keep it, skip the `mkdir`, and run the two `icacls` commands below. The script does the same.
 - The folder is owned by anyone else. You did not make it, and the script refuses it. Delete it and make a new one. If it is your own store, for example after you changed the service's Log On account, take ownership first, then run the two `icacls` commands. The first command below makes Administrators the owner of the folder and everything in it.
 
+Before you run it, remove every junction or symbolic link below the folder, as the paragraphs after it describe. `/T` follows a link into whatever it points at and changes that too.
+
 ```
 icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner *S-1-5-32-544 /T /C /L
+```
+
+If you made the folder yourself, its items can also carry your account's grants, and one `/setowner` leaves those in place. `upgrade-darling.ps1` runs the four commands below for you, and prints each one, on a store the previous release was running when the account running the script or an administrator owns it. It stops before it changes anything when the store holds a junction or symbolic link anywhere below the folder, or when anyone else owns it. If another account was granted write access to the store, the script says that account could change the store's files. Review `postgresql.conf`, `postgresql.auto.conf`, `pg_hba.conf` and `pg_ident.conf` before the service starts. The script does not pause for that review. Run it with `-Check` first to get the same report without stopping the service or changing anything. If the script cannot fix or lock the folder after it has stopped the service, it ends with the service stopped and prints the four commands. Run them, then run `upgrade-darling.ps1` again with the same arguments. It finishes the upgrade and starts the service.
+
+To fix the whole folder by hand, `icacls` follows a junction or symbolic link into whatever it points at and changes that too. List the links with `dir /s /a:l "C:\ProgramData\PerformanceMonitorDarling"` and remove each one (`rmdir "<link>"` removes the link and keeps what it points at). Then run the four commands from an elevated prompt, in this order, and make the links again. Put your own folder path in each command. `PerformanceMonitor Darling` is the service name.
+
+```
+icacls "C:\ProgramData\PerformanceMonitorDarling" /setowner "*S-1-5-32-544" /T /C /L
+icacls "C:\ProgramData\PerformanceMonitorDarling" /reset /C /L
+icacls "C:\ProgramData\PerformanceMonitorDarling" /inheritance:r /grant "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "NT SERVICE\PerformanceMonitor Darling:(OI)(CI)F"
+icacls "C:\ProgramData\PerformanceMonitorDarling\*" /reset /T /C /L
 ```
 
 - The folder does not exist. Make it.

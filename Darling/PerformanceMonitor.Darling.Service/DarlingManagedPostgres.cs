@@ -5799,16 +5799,62 @@ public sealed class DarlingManagedPostgres
                 "service again. install-darling.ps1 creates this folder itself.");
         }
 
-        throw new InvalidOperationException(
-            $"Refusing to initialize a new store under {storeFolder}: {reason}" +
-            $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
-            "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
-            "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
-            "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
-            $"the same way, or, to keep the folder, from an ELEVATED prompt:   takeown /f \"{storeFolder}\" /a   then   " +
-            $"icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. Either way " +
-            "the service then checks the data directory, pg.log, server.key and the logs folder before it uses them.");
+        throw new InvalidOperationException(UnlockedStoreFolderRefusal(storeFolder, reason));
+    }
+
+    /// <summary>The refusal text for a new store under a folder that is not locked down (#7267): why, the two ways out, and for
+    /// keeping the folder the link advice and the four commands.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string UnlockedStoreFolderRefusal(string storeFolder, string reason) =>
+        $"Refusing to initialize a new store under {storeFolder}: {reason}" +
+        $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
+        "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
+        "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
+        "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
+        "the same way, or, to keep the folder, fix the folder and everything under it at once from an ELEVATED " +
+        $"prompt (#7267):{StoreRepairInstructions(storeFolder)}{Environment.NewLine}and start the " +
+        "service again. Either way the service then checks the data directory, pg.log, server.key and the logs folder " +
+        "before it uses them.";
+
+    /// <summary>
+    /// The sentence about links followed by <see cref="StoreRepairCommands"/>, one line each after a line break (#7267).
+    /// <c>icacls</c> follows a junction or symbolic link into whatever it points at even with <c>/L</c>, which governs only
+    /// a link named on the command line (measured: with a junction at <c>data\pg_tblspc\16384</c>, a reset with
+    /// <c>/T /C /L</c> reset the files inside the junction's target). So a link anywhere under the store folder sends the
+    /// owner change and the reset to its target, and every printed copy of the four commands says to take the links out
+    /// first and make them again after. Every refusal that prints the commands uses this, not the bare commands.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string StoreRepairInstructions(string storeFolder)
+    {
+        var folder = Path.TrimEndingDirectorySeparator(storeFolder);
+        return $"{Environment.NewLine}icacls follows a junction or symbolic link into whatever it points at and changes that too, " +
+               $"so list the links under the folder with dir /s /a:l \"{folder}\", remove each one (rmdir \"<link>\" removes " +
+               "the link and keeps its target), run these four commands, then make the links again:" +
+               StoreRepairCommands(storeFolder);
+    }
+
+    /// <summary>
+    /// The one command sequence that makes a whole store folder acceptable to <see cref="StoreContentsProblem"/> at
+    /// once (#7267), one command per line after a line break. A store folder made by hand has its maker as owner and
+    /// explicit or inherited access on items far below the folder (the data directory, its files, pg.log, the keys).
+    /// The service tightens an item it owns or can restore, but it cannot rewrite one that Administrators own and
+    /// that grants it nothing, so the earlier advice (one <c>/setowner</c>, then <c>/inheritance:r</c> on the single
+    /// item a start named) made each start name the next item. The sequence: Administrators own the folder and
+    /// everything in it, the folder itself is cleared of its own and inherited access, the folder is protected and
+    /// granted to SYSTEM, Administrators and the service account, and everything below it is reset to inherit that.
+    /// Principals are SIDs where the service account is not involved, so no account name has to translate.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string StoreRepairCommands(string storeFolder)
+    {
+        var folder = Path.TrimEndingDirectorySeparator(storeFolder);
+        var grants = $"\"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"";
+        var newLine = Environment.NewLine + "    ";
+        return $"{newLine}icacls \"{folder}\" /setowner \"*S-1-5-32-544\" /T /C /L" +
+               $"{newLine}icacls \"{folder}\" /reset /C /L" +
+               $"{newLine}icacls \"{folder}\" /inheritance:r /grant {grants}" +
+               $"{newLine}icacls \"{folder}\\*\" /reset /T /C /L";
     }
 
     /// <summary>
@@ -5993,20 +6039,25 @@ public sealed class DarlingManagedPostgres
             return;
         }
 
-        throw new InvalidOperationException(
-            $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
-            "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
-            "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
-            "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
-            "this service (the previous Log On account of an earlier install, say), from an ELEVATED prompt run   " +
-            $"icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service again. If it is " +
-            "readable or changeable by other accounts and the service could not restrict it, from an ELEVATED prompt run   " +
-            "icacls \"<the item named above>\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. If it is a " +
-            "link, or another user may have made it first, do not keep it: stop the service, delete the " +
-            $"item named above (deleting {_dataDirectory} destroys the collected history), and run install-darling.ps1 " +
-            "again, which creates the store folder with the right owner and ACL before the first start.");
+        throw new InvalidOperationException(UntrustedStoreContentsRefusal(storeFolder, problem, _dataDirectory));
     }
+
+    /// <summary>The refusal text for a store item the service cannot tell is its own (#7267): the item, why it matters, and the
+    /// link advice with the four commands that fix the whole store folder at once.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string UntrustedStoreContentsRefusal(string storeFolder, string problem, string dataDirectory) =>
+        $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
+        "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
+        "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
+        "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
+        "this service (the previous Log On account of an earlier install, or the account that made the folder by " +
+        "hand, say), or it is readable or changeable by other accounts and the service could not restrict it, " +
+        "fix the whole store folder at once from an ELEVATED prompt, so the next start does not name another item " +
+        $"under it:{StoreRepairInstructions(storeFolder)}{Environment.NewLine}and " +
+        "start the service again. If it is a " +
+        "link, or another user may have made it first, do not keep it: stop the service, delete the " +
+        $"item named above (deleting {dataDirectory} destroys the collected history), and run install-darling.ps1 " +
+        "again, which creates the store folder with the right owner and ACL before the first start.";
 
     /// <summary>
     /// Writes a secret to a file that carries the hardened ACL from its first byte, UTF-8 without a BOM like

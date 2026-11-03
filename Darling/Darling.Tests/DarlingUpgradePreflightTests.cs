@@ -301,7 +301,7 @@ public sealed class DarlingUpgradePreflightTests
 
         Assert.Contains("The pre-flight failed under PowerShell", all, StringComparison.Ordinal);
         Assert.Contains("could not be limited to SYSTEM and Administrators (stubbed failure)", all, StringComparison.Ordinal);
-        Assert.Contains("the service is still running and the install is untouched", all, StringComparison.Ordinal);
+        Assert.Contains("This run has not stopped or copied anything. If an earlier run stopped the service, it is still stopped and the new build is already in place.", all, StringComparison.Ordinal);
         Assert.Contains("exit=1", all, StringComparison.Ordinal);
         Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
         Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
@@ -363,7 +363,9 @@ public sealed class DarlingUpgradePreflightTests
         Assert.Contains(RefusalText, all, StringComparison.Ordinal);
         Assert.Contains("self-contained install", all, StringComparison.Ordinal);
         Assert.Contains("--runtime win-x64 --self-contained", all, StringComparison.Ordinal);
-        Assert.Contains("NOTHING has been stopped or copied", all, StringComparison.Ordinal);
+        Assert.Contains("This run has not stopped or copied anything. If an earlier run stopped the service, it is still stopped and the new build is already in place.", all, StringComparison.Ordinal);
+        Assert.DoesNotContain("still running", all, StringComparison.Ordinal);
+        Assert.DoesNotContain("untouched", all, StringComparison.Ordinal);
         Assert.Contains("exit=1", all, StringComparison.Ordinal);
         Assert.Contains("unchanged=True", all, StringComparison.Ordinal);
         Assert.Contains("stopCalled=False", all, StringComparison.Ordinal);
