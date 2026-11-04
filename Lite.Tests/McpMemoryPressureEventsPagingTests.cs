@@ -167,7 +167,7 @@ FROM generate_series(1, " + Samples + ") AS s(g)",
         /* Darling checks limit first, so a bad server name with a bad limit gets the limit refusal on both products. */
         var reply = await McpMemoryTools.GetMemoryPressureEvents(new LocalDataService(_duckDb), _serverManager, "NoSuchServer", 24, 0, AsOf);
 
-        /* The reply is JSON, which writes the quotes around the value as ': read the message, not the raw text. */
+        /* The reply is JSON, which escapes the quotes around the value: read the message, not the raw text. */
         var root = JsonDocument.Parse(reply).RootElement;
         Assert.Equal("invalid", root.GetProperty("status").GetString());
         Assert.Contains("Invalid limit value '0'", root.GetProperty("message").GetString(), StringComparison.Ordinal);
