@@ -671,7 +671,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. A row with status ok only states the setting and its value, and advice appears on the rows that fired plus the context settings (checkpoint_timeout, wal_compression, work_mem). get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -756,30 +756,30 @@ public sealed class DarlingMcpTools
                         var notApplicable = fact.Metadata.GetValueOrDefault("not_applicable") > 0
                             || (isAurora && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout);
 
+                        var settingName = PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key;
+                        var currentValue = FormatConfigPgValue(fact);
+
                         return new PgConfigRecommendation(
-                            Setting: PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key,
+                            Setting: settingName,
                             FactKey: fact.Key,
-                            CurrentValue: FormatConfigPgValue(fact),
+                            CurrentValue: currentValue,
                             Status: notApplicable ? "not_applicable"
                                 : fact.Severity >= 0.5 ? "warning"
                                 : fact.Severity > 0 ? "review"
                                 : "ok",
-                            /* Headline + remediation. max_wal_size needs no special case: lane 15 composed the
-                               not-applicable sentence INTO its advice block, so the same two fields carry it.
-                               checkpoint_timeout's block is the base-0 context one ("tune it with
-                               max_wal_size"), which has no Aurora arm — so the sentence is appended here, where
-                               the headline still states the value the parameter group holds and the rider says
-                               who actually decides it. The discriminator is the KEY, not the stamp: #3868
-                               stamped the fact, so "unstamped" would have silently stopped appending the one
-                               sentence rider 1 exists to guarantee. A key with no composed block (none today;
-                               a future key added without an advice arm) says so rather than rendering an empty
-                               sentence. */
-                            Recommendation: advice is null
-                                ? $"No composed advice for {fact.Key} in this build — get_analysis_facts carries the fact and its metadata."
-                                : advice.Headline + " " + advice.Remediation
-                                    + (notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout
-                                        ? " Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead."
-                                        : string.Empty),
+                            /* #7447: a row at severity 0 states the setting and its value in plain words, because most
+                               advice blocks are written for the fired case and would say something false beside a healthy
+                               value. The three context-by-design blocks, the not_applicable rows and every fired row keep
+                               their advice, joined with a full stop. max_wal_size needs no special case: lane 15 composed
+                               the not-applicable sentence INTO its advice block. checkpoint_timeout's block is the base-0
+                               context one ("tune it with max_wal_size"), which has no Aurora arm, so the sentence is
+                               appended here, where the headline still states the value the parameter group holds and the
+                               rider says who actually decides it. The discriminator is the KEY, not the stamp: #3868
+                               stamped the fact, so "unstamped" would have silently stopped appending the one sentence
+                               rider 1 exists to guarantee. */
+                            Recommendation: PgConfigAuditText.Compose(
+                                fact, settingName, currentValue, advice, notApplicable,
+                                isAuroraCheckpointTimeout: notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout),
                             /* The fact's own lineage stamp, passed through: 0 = the bar was chosen, not
                                measured; 1 = measured against the dogfood PostgreSQL fleet. ABSENT (null) is
                                the config family's normal case and means neither — the bar IS PostgreSQL's own

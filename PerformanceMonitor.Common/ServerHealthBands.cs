@@ -999,44 +999,128 @@ namespace PerformanceMonitor.Common
                 return HealthSeverity.Unknown;
             }
 
-            var blockingCount = blockingCountOrNullWhenUnmeasured.Value;
-            var tiers = thresholds ?? BlockingBandThresholds.Default;
+            var arms = BlockingArmsFor(
+                blockingCountOrNullWhenUnmeasured.Value,
+                maxBlockedSeconds,
+                window,
+                thresholds ?? BlockingBandThresholds.Default,
+                peakSnapshotWaitSeconds);
 
-            /* #7028: the snapshot arm reads the Blocking Wait Time alert's measure (the largest blocked wait summed
-               across one DMV snapshot, after the alert's persistence gate). It runs only when the caller carries a
-               value and a tier is above 0 (0 = off). */
-            var snapshotCritical = tiers.CriticalSnapshotWaitSeconds;
-            var snapshotWarn = tiers.WarnSnapshotWaitSeconds;
-            var snapshotSeconds = peakSnapshotWaitSeconds ?? 0;
-            var snapshotArm = peakSnapshotWaitSeconds.HasValue;
-
-            if (maxBlockedSeconds >= tiers.CriticalWaitSeconds
-                || (snapshotArm && snapshotCritical > 0 && snapshotSeconds >= snapshotCritical))
+            if (arms.Wait == HealthSeverity.Critical
+                || arms.Snapshot == HealthSeverity.Critical
+                || arms.Rate == HealthSeverity.Critical)
             {
                 return HealthSeverity.Critical;
             }
 
-            var ratePerHour = BlockingRatePerHour(blockingCount, window);
-            if (ratePerHour.HasValue && ratePerHour.Value >= tiers.CriticalPerHour)
-            {
-                return HealthSeverity.Critical;
-            }
-
-            if (maxBlockedSeconds >= tiers.WarnWaitSeconds
-                || (snapshotArm && snapshotWarn > 0 && snapshotSeconds >= snapshotWarn))
+            if (arms.Wait == HealthSeverity.Warning || arms.Snapshot == HealthSeverity.Warning)
             {
                 return HealthSeverity.Warning;
             }
 
-            if (!ratePerHour.HasValue)
+            return arms.Rate;
+        }
+
+        /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
+        /// the arm that fired it come from ONE evaluation and cannot disagree about which arm crossed. Wait and
+        /// Snapshot are Healthy, Warning or Critical (Snapshot is Healthy when its arm is off). Rate is the count
+        /// arm: Healthy, Warning or Critical on a rateable window, and on an unrateable one Warning for a
+        /// non-zero count and Unknown for zero (#3368's rule), in which case <c>RatePerHour</c> is null.</summary>
+        private readonly record struct BlockingArms(
+            HealthSeverity Wait,
+            HealthSeverity Snapshot,
+            HealthSeverity Rate,
+            double? RatePerHour);
+
+        private static BlockingArms BlockingArmsFor(
+            long blockingCount,
+            double maxBlockedSeconds,
+            TimeSpan window,
+            BlockingBandThresholds tiers,
+            double? peakSnapshotWaitSeconds)
+        {
+            /* #7028: the snapshot arm reads the Blocking Wait Time alert's measure (the largest blocked wait summed
+               across one DMV snapshot, after the alert's persistence gate). It runs only when the caller carries a
+               value and a tier is above 0 (0 = off). */
+            var snapshotSeconds = peakSnapshotWaitSeconds ?? 0;
+            var snapshotArm = peakSnapshotWaitSeconds.HasValue;
+            var snapshotCritical = tiers.CriticalSnapshotWaitSeconds;
+            var snapshotWarn = tiers.WarnSnapshotWaitSeconds;
+
+            var wait = maxBlockedSeconds >= tiers.CriticalWaitSeconds ? HealthSeverity.Critical
+                : maxBlockedSeconds >= tiers.WarnWaitSeconds ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            var snapshot = snapshotArm && snapshotCritical > 0 && snapshotSeconds >= snapshotCritical ? HealthSeverity.Critical
+                : snapshotArm && snapshotWarn > 0 && snapshotSeconds >= snapshotWarn ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            var ratePerHour = BlockingRatePerHour(blockingCount, window);
+            var rate = !ratePerHour.HasValue
+                ? (blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown)
+                : ratePerHour.Value >= tiers.CriticalPerHour ? HealthSeverity.Critical
+                : ratePerHour.Value >= tiers.WarnPerHour ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+
+            return new BlockingArms(wait, snapshot, rate, ratePerHour);
+        }
+
+        /// <summary>#7444: the blocking reason a fleet card prints, naming the arm of <see cref="BlockingSeverity"/>
+        /// that fired the band: <c>Blocking 1 (longest block 19.4 s)</c>, <c>Blocking 1 (peak snapshot 2.0 min)</c> or
+        /// <c>Blocking 40 (12.5 waits/hr)</c>. Before this the text always named the rate, so a card the longest block
+        /// had put at Warning read <c>Blocking 1 (0.0 waits/hr)</c>. Takes the band's own inputs and reads the same
+        /// arms (<c>BlockingArmsFor</c>) against the same tiers, so the two cannot drift. When more than one arm
+        /// fired it names the one with the higher severity, the longest block before the snapshot before the rate on a
+        /// tie. A window too short to rate, with no wait arm fired, prints the count alone, which is all the band had.
+        /// Durations use <see cref="DailyHealthBandCalculator"/>'s format, so the daily calendar and this line read
+        /// alike.</summary>
+        public static string BlockingReason(
+            long blockingCount,
+            double maxBlockedSeconds,
+            TimeSpan window,
+            BlockingBandThresholds? thresholds = null,
+            double? peakSnapshotWaitSeconds = null)
+        {
+            var arms = BlockingArmsFor(
+                blockingCount,
+                maxBlockedSeconds,
+                window,
+                thresholds ?? BlockingBandThresholds.Default,
+                peakSnapshotWaitSeconds);
+
+            var head = "Blocking " + blockingCount.ToString(CultureInfo.InvariantCulture);
+            var best = HealthSeverity.Warning;
+            string? qualifier = null;
+
+            if (arms.Wait >= best)
             {
-                return blockingCount > 0 ? HealthSeverity.Warning : HealthSeverity.Unknown;
+                best = arms.Wait;
+                qualifier = "longest block " + DailyHealthBandCalculator.FormatDurationMs(SecondsToMs(maxBlockedSeconds));
             }
 
-            return ratePerHour.Value >= tiers.WarnPerHour
-                ? HealthSeverity.Warning
-                : HealthSeverity.Healthy;
+            if (arms.Snapshot >= best && (qualifier is null || arms.Snapshot > best))
+            {
+                best = arms.Snapshot;
+                qualifier = "peak snapshot " + DailyHealthBandCalculator.FormatDurationMs(SecondsToMs(peakSnapshotWaitSeconds ?? 0));
+            }
+
+            if (arms.RatePerHour.HasValue && arms.Rate >= best && (qualifier is null || arms.Rate > best))
+            {
+                qualifier = arms.RatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture) + " waits/hr";
+            }
+
+            return qualifier is null ? head : head + " (" + qualifier + ")";
         }
+
+        private static long SecondsToMs(double seconds) => (long)Math.Round(seconds * 1000.0);
+
+        /// <summary>#7444: <see cref="BlockingReason(long, double, TimeSpan, BlockingBandThresholds?, double?)"/> over a
+        /// card's metrics, the same values <see cref="MetricSeverities"/> bands. A count the card did not measure reads
+        /// as a bare "Blocking" because no arm ran.</summary>
+        public static string BlockingReason(ServerHealthMetrics m) =>
+            m.BlockingCount.HasValue
+                ? BlockingReason(m.BlockingCount.Value, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds)
+                : "Blocking";
 
         /// <summary>The one division behind both rate bands: events per hour, or null below the band's own
         /// minimum window (which a zero, negative or undeclared window is). One function rather than two so
