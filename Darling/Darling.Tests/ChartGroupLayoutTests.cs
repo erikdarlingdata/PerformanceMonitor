@@ -1,0 +1,286 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Threading;
+using PerformanceMonitor.Ui;
+using ScottPlot;
+using ScottPlot.WPF;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #7385: charts shown together share one plot rectangle, a long legend wraps at the chart's width instead of stacking one
+/// line per series, an empty chart has its neighbors' frame and no legend box, and a block of charts takes its column count and
+/// height from the space it has. Every test drives real renders and a real measure and arrange on an STA thread.
+/// </summary>
+public sealed class ChartGroupLayoutTests
+{
+    // A window of the given size (DIPs), less what the tab strip, toolbar and margins take of it.
+    public static TheoryData<int, int, double> Windows => new()
+    {
+        { 1280, 720, 1.0 }, { 1280, 720, 2.0 },
+        { 1936, 1156, 1.0 }, { 1936, 1156, 2.0 },
+        { 3840, 2160, 1.0 }, { 3840, 2160, 2.0 },
+    };
+
+    private static Size Viewport(int windowWidth, int windowHeight) => new(windowWidth - 40, windowHeight - 260);
+
+    private static readonly string[] Names =
+    {
+        "Heap reads", "Index reads", "TOAST reads", "Temp reads",
+    };
+
+    private static WpfPlot DataChart(double dpi, string yLabel, string caption, int series, double magnitude, bool longNames = false)
+    {
+        var chart = new WpfPlot();
+        ChartDisplayScale.Apply(chart, dpi);
+        ChartStyle.ApplyThemeToChart(chart);
+        var t0 = new DateTime(2026, 11, 1).ToOADate();
+        var xs = Enumerable.Range(0, 120).Select(k => t0 + k / 144.0).ToArray();
+        for (var s = 0; s < series; s++)
+        {
+            var scatter = chart.Plot.Add.Scatter(xs, xs.Select(x => (Math.Sin((x - t0) * 20 + s) + 1.2) * magnitude / (s + 1)).ToArray());
+            scatter.LegendText = longNames ? $"{Names[s % Names.Length]} from disk (shared buffers)" : Names[s % Names.Length];
+        }
+        chart.Plot.Axes.DateTimeTicksBottom();
+        ChartStyle.ReapplyAxisColors(chart);
+        chart.Plot.YLabel(yLabel);
+        if (caption.Length > 0) chart.Plot.Title(caption);
+        new ChartRenderHelper().ShowChartLegend(chart);
+        return chart;
+    }
+
+    private static WpfPlot EmptyChart(double dpi)
+    {
+        var chart = new WpfPlot();
+        ChartDisplayScale.Apply(chart, dpi);
+        ChartStyle.ApplyThemeToChart(chart);
+        new ChartRenderHelper().RefreshEmptyChart(chart, "Execution Count", "Executions/sec");
+        return chart;
+    }
+
+    private static (ScrollViewer Viewer, ChartGridPanel Panel, WpfPlot[] Charts) Host(int windowWidth, int windowHeight, double dpi, int maxColumns, bool withEmpty = true)
+    {
+        var charts = new List<WpfPlot>
+        {
+            DataChart(dpi, "Read Ops/sec", "Reads per second, by relation kind, raw samples (one point per collection) since the start of the window", 4, 120000),
+            DataChart(dpi, "Write Ops/sec", "Writes", 3, 0.4),
+            DataChart(dpi, "Hit Ratio %", "", 1, 99),
+        };
+        if (withEmpty) charts.Add(EmptyChart(dpi));
+        var panel = new ChartGridPanel { MaxColumns = maxColumns };
+        foreach (var c in charts) panel.Children.Add(c);
+        var viewer = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = panel };
+        Layout(viewer, Viewport(windowWidth, windowHeight));
+        return (viewer, panel, charts.ToArray());
+    }
+
+    private static void Layout(ScrollViewer viewer, Size size)
+    {
+        for (var pass = 0; pass < 4; pass++)
+        {
+            viewer.Measure(size);
+            viewer.Arrange(new Rect(new Point(0, 0), size));
+            viewer.UpdateLayout();
+            Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ContextIdle);
+        }
+    }
+
+    /// <summary>Renders every chart at the size layout gave it, the way the control does.</summary>
+    private static void RenderAll(IEnumerable<WpfPlot> charts)
+    {
+        foreach (var chart in charts)
+        {
+            using var image = chart.Plot.GetImage((int)(chart.ActualWidth * chart.DisplayScale), (int)(chart.ActualHeight * chart.DisplayScale));
+        }
+    }
+
+    /// <summary>The way the app gets there: charts render, the debounce fires, the charts that changed render again.</summary>
+    private static void Settle(ChartGridPanel panel, WpfPlot[] charts)
+    {
+        RenderAll(charts);
+        ChartGroupAligner.Check(panel);
+        RenderAll(charts);
+        ChartGroupAligner.Check(panel);
+        RenderAll(charts);
+    }
+
+    private static PixelRect Data(WpfPlot chart) => chart.Plot.RenderManager.LastRender.DataRect;
+
+    private static void MaybeSavePng(string name, ChartGridPanel panel, WpfPlot[] charts)
+    {
+        var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
+        if (string.IsNullOrEmpty(dir)) return;
+        Directory.CreateDirectory(dir);
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(
+            (int)Math.Max(1, panel.ActualWidth), (int)Math.Max(1, panel.ActualHeight), 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+        var back = new System.Windows.Shapes.Rectangle { Width = panel.ActualWidth, Height = panel.ActualHeight, Fill = System.Windows.Media.Brushes.Black };
+        back.Measure(new Size(panel.ActualWidth, panel.ActualHeight));
+        back.Arrange(new Rect(0, 0, panel.ActualWidth, panel.ActualHeight));
+        bitmap.Render(back);
+        // Compose the charts' own renders at their cell positions.
+        var visual = new System.Windows.Media.DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            foreach (var chart in charts)
+            {
+                var pw = (int)(chart.ActualWidth * chart.DisplayScale);
+                var ph = (int)(chart.ActualHeight * chart.DisplayScale);
+                var bytes = chart.Plot.GetImage(pw, ph).GetImageBytes();
+                var source = new System.Windows.Media.Imaging.BitmapImage();
+                source.BeginInit();
+                source.StreamSource = new MemoryStream(bytes);
+                source.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                source.EndInit();
+                var origin = chart.TranslatePoint(new Point(0, 0), panel);
+                dc.DrawImage(source, new Rect(origin.X, origin.Y, chart.ActualWidth, chart.ActualHeight));
+            }
+        }
+        bitmap.Render(visual);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+        using var file = File.Create(Path.Combine(dir, name + ".png"));
+        encoder.Save(file);
+    }
+
+    [Theory]
+    [MemberData(nameof(Windows))]
+    public void ChartsInAGroup_ShareOnePlotRectangle_IncludingTheEmptyOne(int width, int height, double dpi) =>
+        StaTestThread.Run(() =>
+        {
+            var (_, panel, charts) = Host(width, height, dpi, maxColumns: 2);
+            Settle(panel, charts);
+            MaybeSavePng($"group-{width}x{height}-x{dpi}", panel, charts);
+
+            var first = Data(charts[0]);
+            foreach (var chart in charts)
+            {
+                var r = Data(chart);
+                Assert.True(Math.Abs(r.Left - first.Left) <= 1.5 && Math.Abs(r.Top - first.Top) <= 1.5
+                    && Math.Abs(r.Width - first.Width) <= 1.5 && Math.Abs(r.Height - first.Height) <= 1.5,
+                    $"plot rectangles differ: {first.Left:0.#},{first.Top:0.#} {first.Width:0.#}x{first.Height:0.#} vs {r.Left:0.#},{r.Top:0.#} {r.Width:0.#}x{r.Height:0.#}"
+                    + " | " + string.Join(" ; ", charts.Select(c => $"{ChartGroupAligner.LastFrame(c.Plot)} floors L{c.Plot.Axes.Left.MinimumSize:0.#} B{c.Plot.Axes.Bottom.MinimumSize:0.#} T{c.Plot.Axes.Title.MinimumSize:0.#} size {c.ActualWidth:0.#}x{c.ActualHeight:0.#}")));
+            }
+        });
+
+    [Theory]
+    [MemberData(nameof(Windows))]
+    public void ThePlotKeepsAHealthyShareOfTheChart(int width, int height, double dpi) =>
+        StaTestThread.Run(() =>
+        {
+            var (viewer, panel, charts) = Host(width, height, dpi, maxColumns: 4);
+            Settle(panel, charts);
+            Layout(viewer, Viewport(width, height)); // the chart chrome raised the panel's floor, as it does in the app
+            Settle(panel, charts);
+
+            foreach (var chart in charts)
+            {
+                var plot = Data(chart).Height;
+                var figure = chart.ActualHeight; // the plot's units are DIP-sized ("scaled")
+                Assert.True(plot >= ChartLayout.MinPlotAreaHeight - 0.5, $"plot {plot:0.#} px of a {figure:0.#} px chart is under {ChartLayout.MinPlotAreaHeight}");
+                Assert.True(plot >= figure * 0.3, $"plot {plot:0.#} px is under 30% of the {figure:0.#} px chart");
+            }
+        });
+
+    [Fact]
+    public void ALongLegend_WrapsAtTheChartWidth_AndIsNotClipped() =>
+        StaTestThread.Run(() =>
+        {
+            var narrow = DataChart(1.0, "Read Ops/sec", "", 4, 100, longNames: true);
+            var wide = DataChart(1.0, "Read Ops/sec", "", 4, 100, longNames: true);
+            using (narrow.Plot.GetImage(360, 420)) { }
+            using (wide.Plot.GetImage(1900, 420)) { }
+
+            var rowHeight = wide.Plot.Legend.LastRenderSize.Height;
+            Assert.True(narrow.Plot.Legend.LastRenderSize.Height > rowHeight * 1.5f,
+                $"legend {narrow.Plot.Legend.LastRenderSize.Height:0.#} px at 360 px wide should be several rows of {rowHeight:0.#} px");
+            // Not clipped: the legend panel in the layout holds the whole wrapped legend, and the legend fits the chart's width.
+            var panel = narrow.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>().Single();
+            var size = narrow.Plot.RenderManager.LastRender.Layout.PanelSizes[panel];
+            var needed = narrow.Plot.Legend.GetLayout(new PixelSize(Data(narrow).Width, float.PositiveInfinity), ScottPlot.Paint.NewDisposablePaint()).LegendRect.Height + panel.Padding.Vertical;
+            Assert.True(size >= needed - 0.5f, $"legend panel {size:0.#} px is under the {needed:0.#} px the wrapped legend needs");
+            Assert.True(narrow.Plot.Legend.LastRenderSize.Width <= 360, "legend is wider than the chart");
+            // And at a width that holds all four labels the legend is one line.
+            Assert.True(rowHeight < 40, $"a wide chart's legend is {rowHeight:0.#} px, more than one line");
+        });
+
+    [Fact]
+    public void AnEmptyChart_HasNoLegendBox_AndStillSaysNoData() =>
+        StaTestThread.Run(() =>
+        {
+            var chart = EmptyChart(1.0);
+            using (chart.Plot.GetImage(600, 300)) { }
+
+            Assert.Empty(chart.Plot.Axes.GetPanels().OfType<ScottPlot.Panels.LegendPanel>());
+            Assert.Contains(chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Text>(), t => t.LabelText.Contains("No Data") && t.LabelText.Contains("Execution Count"));
+        });
+
+    [Fact]
+    public void Columns_FollowTheWidth_AndHeight_FollowsTheVisibleHeight() =>
+        StaTestThread.Run(() =>
+        {
+            var small = Host(1280, 720, 1.0, maxColumns: 4).Panel.Chosen;
+            var mid = Host(1936, 1156, 1.0, maxColumns: 4).Panel.Chosen;
+            var big = Host(3840, 2160, 1.0, maxColumns: 4).Panel.Chosen;
+
+            Assert.True(small.Columns < big.Columns || small.Rows > big.Rows, $"1280 wide: {small.Columns}x{small.Rows}, 3840 wide: {big.Columns}x{big.Rows}");
+            Assert.Equal(4, big.Columns);
+            Assert.True(big.Height > mid.Height && mid.Height >= small.Height, $"chart heights {small.Height}, {mid.Height}, {big.Height} do not grow with the window");
+            Assert.True(small.Height >= 280, "the floor holds on a small window");
+        });
+
+    [Fact]
+    public void BelowTheFloor_TheTabScrolls_AboveItTheBlockFillsTheWindow() =>
+        StaTestThread.Run(() =>
+        {
+            var (small, _, _) = Host(1280, 720, 1.0, maxColumns: 2);
+            var (big, _, _) = Host(3840, 2160, 1.0, maxColumns: 2);
+
+            Assert.True(small.ExtentHeight > small.ViewportHeight + 1, "a small window scrolls");
+            Assert.True(big.ExtentHeight <= big.ViewportHeight + 1, $"a large window shows the whole block: extent {big.ExtentHeight:0}, viewport {big.ViewportHeight:0}");
+        });
+
+    [Fact]
+    public void AnUnboundedWidth_FallsBackToTheFloor_NotInfinity() =>
+        StaTestThread.Run(() =>
+        {
+            var panel = new ChartGridPanel { MaxColumns = 3 };
+            for (var i = 0; i < 3; i++) panel.Children.Add(new Border());
+            panel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+            Assert.True(double.IsFinite(panel.DesiredSize.Width) && double.IsFinite(panel.DesiredSize.Height));
+            Assert.True(panel.DesiredSize.Height >= panel.MinChartHeight);
+        });
+
+    [Fact]
+    public void AViewportBox_TakesAShareOfTheVisibleHeight_WithAFloor() =>
+        StaTestThread.Run(() =>
+        {
+            var boxes = new List<ViewportBox>();
+            foreach (var fraction in new[] { 0.3 })
+            {
+                foreach (var h in new[] { 720, 2160 })
+                {
+                    var box = new ViewportBox { Fraction = fraction, MinHeight = 180, Child = new Border() };
+                    var viewer = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = new StackPanel { Children = { box } } };
+                    Layout(viewer, new Size(1200, h - 260));
+                    boxes.Add(box);
+                }
+            }
+
+            Assert.True(boxes[0].ActualHeight >= 180, "the floor holds on a small window");
+            Assert.True(boxes[1].ActualHeight > boxes[0].ActualHeight * 1.5, $"a tall window gives taller grids: {boxes[0].ActualHeight} then {boxes[1].ActualHeight}");
+        });
+}

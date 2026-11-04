@@ -337,28 +337,14 @@
                 <Grid Margin="8">
                     <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Performance Trends">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="*"/>
-                                </Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <ui:ChartGridPanel MaxColumns="2">
                                     <ScottPlot:WpfPlot x:Name="QueryDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="ProcDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
                                     <ScottPlot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="ExecutionCountTrendChart"/>
-                                </Border>
-                            </Grid>
+                                </ui:ChartGridPanel>
+                            </ScrollViewer>
                         </TabItem>
                         <TabItem Header="Active Queries">
                             <Grid>
