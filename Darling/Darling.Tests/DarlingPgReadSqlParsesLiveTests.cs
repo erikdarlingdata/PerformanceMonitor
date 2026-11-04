@@ -94,6 +94,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            population, so the fragment is verified where it is used rather than left unverified. */
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
+        /* #7409: two expression fragments spliced into CurrentConfigSql (in the parse-checked population): the default
+           shown in the base of the value, and the "differs from the default" predicate. Verified where spliced. */
+        "DarlingPgServerConfigReader.DefaultAsSettingSql",
+        "DarlingPgServerConfigReader.DiffersFromDefaultSql",
         /* #3539: the PostgreSQL Long-Running Query read's switchable dump/restore opt-out - one AND
            predicate spliced into CurrentLongRunningSessionsSqlTemplate by BuildCurrentLongRunningSessionsSql.
            Not a statement; both renderings of the template it is spliced into

@@ -232,4 +232,84 @@ public sealed class PgLogNamedZoneTests
         var posix = await PgLogNamedZone.ResolveAsync(connection, "-03", pairs, 30, CancellationToken.None);
         Assert.Null(posix);
     }
+
+    /// <summary>
+    /// #7397: the check that the setting is a named zone reads <c>pg_timezone_names</c>, which opens every zone file on the
+    /// target, so it runs once per server and setting and not on every read. The server's own statement counter proves a
+    /// repeat read does not run it, a named zone still resolves, a POSIX offset and an unknown name still return no row
+    /// (the repeat of those without any round trip), and the connection's session zone is as it was.
+    /// </summary>
+    [Fact]
+    public async Task TheZoneNameIsLookedUpOncePerSetting_AndTheConnectionKeepsItsZone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = await OpenPinnedAsync();
+        /* The counter reads pg_stat_statements from a scratch database of its own, not from the shared store: CREATE
+           EXTENSION below is a persistent, database-level change, and in the shared store it is residue the live-postgres
+           collection's cleanup check fails the whole leg on (#7415). The view lists the statements of every database on the
+           cluster, so the scans the pinned connection above runs in the shared store are still counted. */
+        await using var scratch = await ScratchPostgres.CreateAsync(
+            Environment.GetEnvironmentVariable("DARLING_TEST_PG")!, ct, emptyStore: true);
+        await using var counter = new NpgsqlConnection(scratch.ConnectionString);
+        await counter.OpenAsync(ct);
+
+        long? ZoneScans()
+        {
+            try
+            {
+                using var create = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", counter);
+                create.ExecuteNonQuery();
+
+                /* The pattern is built from literals so this statement's own text does not match it. */
+                using var count = new NpgsqlCommand(
+                    "SELECT COALESCE(sum(calls), 0)::bigint FROM pg_stat_statements "
+                    + "WHERE query LIKE '%' || 'pg_timezone' || '_names AS n%' AND query LIKE '%' || 'set_' || 'config%'", counter);
+                return (long?)count.ExecuteScalar();
+            }
+            catch (PostgresException)
+            {
+                return null;
+            }
+        }
+
+        var baseline = ZoneScans();
+        Assert.SkipWhen(baseline is null, "pg_stat_statements is not loaded on DARLING_TEST_PG, so the scans cannot be counted.");
+
+        var pairs = new[] { new PgLogZonePair("2026-07-04 12:00:00", "PDT") };
+        var expected = new DateTime(2026, 7, 4, 19, 0, 0, DateTimeKind.Utc);
+
+        async Task<string?> SessionZoneAsync()
+        {
+            await using var read = new NpgsqlCommand("SELECT pg_catalog.current_setting('TimeZone')", connection);
+            return (string?)await read.ExecuteScalarAsync(ct);
+        }
+
+        var before = await SessionZoneAsync();
+        PgLogNamedZone.ForgetZoneNames();
+
+        /* The case a log setting may be spelled in: the name is looked up case-insensitively, once. */
+        for (var read = 0; read < 3; read++)
+        {
+            var zones = await PgLogNamedZone.ResolveAsync(connection, "america/los_angeles", pairs, 30, ct);
+            Assert.NotNull(zones);
+            Assert.True(zones!.TryGet("2026-07-04 12:00:00", "PDT", out var utc));
+            Assert.Equal(expected, utc);
+        }
+
+        Assert.Equal(baseline + 1, ZoneScans());
+
+        foreach (var notNamed in new[] { "-03", "Mars/Olympus_Mons" })
+        {
+            var scansBefore = ZoneScans();
+            Assert.Null(await PgLogNamedZone.ResolveAsync(connection, notNamed, pairs, 30, ct));
+
+            /* The repeat is answered from what the first found: no statement reaches the target, so a connection that
+               was never opened is not even noticed. */
+            await using var unopened = new NpgsqlConnection(connection.ConnectionString);
+            Assert.Null(await PgLogNamedZone.ResolveAsync(unopened, notNamed, pairs, 30, ct));
+            Assert.Equal(scansBefore + 1, ZoneScans());
+        }
+
+        Assert.Equal(before, await SessionZoneAsync());
+    }
 }

@@ -12,7 +12,7 @@
 
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -70,7 +70,7 @@ export const tab = {
         if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
-          noticeStrip(noticeText(data)),
+          captionStrip(noticeText(data)),
           VIZ.table(data, { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {

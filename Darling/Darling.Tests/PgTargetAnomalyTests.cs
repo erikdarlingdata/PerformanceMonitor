@@ -465,7 +465,7 @@ public sealed class PgTargetAnomalyTests
            precedes the gate and the absolute-fallback bar is unreachable (PositiveInfinity) — the ruling's "never the
            old absolute grade silently". */
         var queriesDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Queries.cs"));
-        Assert.Contains("baseline, candidate.PeakShare, candidate.MeanShare,", queriesDetector, StringComparison.Ordinal);
+        Assert.Contains("baseline, peakShare, meanShare,", queriesDetector, StringComparison.Ordinal);
         /* #3901: the keyed seam as ONE set read for the candidate list, ahead of the loop — never a keyed call per
            candidate, which re-read the 30-day slice once per statement. */
         Assert.Contains("MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken", queriesDetector, StringComparison.Ordinal);
