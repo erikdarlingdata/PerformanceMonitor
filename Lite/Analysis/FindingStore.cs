@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -736,6 +737,15 @@ RETURNING mute_id, story_path, muted_date, reason";
        hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
        wrong pick labels nothing rather than the wrong job.
 
+       #7450: two more columns ride the same rows. chain_fired_hours is the number of distinct UTC hours of the whole
+       window the chain has a saved row in, and watched_hours the number of distinct UTC hours with a saved row of
+       ANY chain for the server. The store keeps no record of an analysis pass that saved nothing, so a saved row is
+       the best existing evidence that the server was being analysed in that hour: a server that was off for part of
+       the window has no rows for those hours and they count against nothing. Both come off the same
+       server_id + analysis_time range the first CTE reads, over the two columns the chain test needs, and are
+       counted on the UTC hour so a clock change cannot merge or split an hour. The labeler turns them into
+       "this chain fires nearly all the time".
+
        Byte-identical to Darling's PgFindingStore.GetPriorOccurrencesSql: the server's clock is a separate
        one-row read (BaselineProvider.ServerClockSql here, PgBaselineProvider.ServerClockSql there), so nothing
        in this statement names a table the two products spell differently. A source pin in Darling.Tests holds
@@ -752,13 +762,40 @@ WITH local_rows AS
     WHERE f.server_id = $1
     AND   f.analysis_time >= $2
     AND   f.analysis_time <  $3
+),
+hour_rows AS
+(
+    SELECT DISTINCT
+        f.story_path_hash AS chain_hash,
+        date_trunc('hour', f.analysis_time) AS hour_utc
+    FROM analysis_findings AS f
+    WHERE f.server_id = $1
+    AND   f.analysis_time >= $2
+    AND   f.analysis_time <  $3
+),
+chain_hours AS
+(
+    SELECT
+        chain_hash,
+        COUNT(*) AS chain_fired_hours
+    FROM hour_rows
+    GROUP BY chain_hash
+),
+watched AS
+(
+    SELECT COUNT(DISTINCT hour_utc) AS watched_hours
+    FROM hour_rows
 )
 SELECT
     story_path_hash,
     root_fact_key,
     local_bucket,
-    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text,
+    MAX(chain_fired_hours) AS chain_fired_hours,
+    MAX(watched_hours) AS watched_hours
 FROM local_rows
+JOIN chain_hours ON chain_hash = story_path_hash
+CROSS JOIN watched
 WHERE (EXTRACT(HOUR FROM local_bucket) = $7 AND EXTRACT(DOW FROM local_bucket) = $8)
 OR    root_fact_key = 'RUNNING_JOBS'
 GROUP BY story_path_hash, root_fact_key, local_bucket
@@ -819,6 +856,7 @@ ORDER BY local_bucket, story_path_hash";
             cmd.Parameters.Add(new DuckDBParameter { Value = (int)referenceLocal.DayOfWeek });
 
             var occurrences = new List<PriorOccurrence>();
+            var watchedHours = 0;
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -826,10 +864,12 @@ ORDER BY local_bucket, story_path_hash";
                     reader.GetString(0),
                     reader.GetString(1),
                     reader.GetDateTime(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture)));
+                watchedHours = Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture);
             }
 
-            return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);
+            return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences, watchedHours);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {

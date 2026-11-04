@@ -26,9 +26,10 @@ namespace PerformanceMonitor.Analysis;
 /// such. <see cref="StoryText"/> is carried ONLY for <c>RUNNING_JOBS</c>-rooted rows (the store reads it
 /// through <c>MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' …)</c>) and is null otherwise: the frozen job
 /// card is the one place a prior week's job NAME survives, since <see cref="Fact.ObjectName"/> is not a
-/// finding-row column.
+/// finding-row column. <see cref="ChainFiredHours"/> (#7450) is how many distinct hours of the WHOLE read window the
+/// chain has a saved row in — the same for every row of one chain, and 0 when the store did not say.
 /// </summary>
-public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, DateTime LocalBucket, string? StoryText);
+public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, DateTime LocalBucket, string? StoryText, int ChainFiredHours = 0);
 
 /// <summary>
 /// What one finding-store read of the prior weeks returns to <see cref="RecurrenceLabeler.Label"/>.
@@ -43,8 +44,13 @@ public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, D
 /// store from the SAME <c>LocalClockWindow</c> that shifted every <see cref="PriorOccurrence.LocalBucket"/> (#4737),
 /// so the reference and the rows it is compared with can never sit on different offsets. Kind Unspecified, like
 /// the buckets. The labeler does no offset arithmetic of its own: every time it compares is already local.</para>
+///
+/// <para><see cref="WatchedHours"/> (#7450) is how many distinct hours of the same window have ANY saved finding row
+/// for the server: the hours the server was being analysed. The store keeps no record of an analysis pass that
+/// saved nothing, so a saved row is the best existing evidence that a pass ran in that hour. 0 means the store did
+/// not say, and the labeler then applies no spread test.</para>
 /// </summary>
-public sealed record PriorOccurrenceRead(int? UtcOffsetMinutes, DateTime ReferenceLocal, IReadOnlyList<PriorOccurrence> Occurrences)
+public sealed record PriorOccurrenceRead(int? UtcOffsetMinutes, DateTime ReferenceLocal, IReadOnlyList<PriorOccurrence> Occurrences, int WatchedHours = 0)
 {
     /// <summary>The read that labels nothing: no offset, no rows. What a store returns when it could not read.</summary>
     public static PriorOccurrenceRead Empty { get; } = new(null, default, Array.Empty<PriorOccurrence>());
@@ -149,6 +155,16 @@ public static class RecurrenceLabeler
     /// </summary>
     public const int MinimumConsecutiveWeeks = 3;
 
+    /// <summary>
+    /// The largest share of the watched hours a chain may fire in and still be called recurring at ONE hour (#7450).
+    /// A chain that fired in more than this share of the hours the server was analysed fires nearly all the time, so
+    /// its same-slot weeks say nothing about a schedule and the label would send the reader looking for a job that
+    /// does not exist. One half is a JUDGMENT, not a measurement: nobody has measured where a weekly job ends and an
+    /// always-on condition begins. A weekly job fires in a handful of the roughly 500 hours of three weeks, so any
+    /// value from about 0.1 to 0.9 separates the two cases seen so far, and half is the plainest of them.
+    /// </summary>
+    public const double MaximumFiredHourShare = 0.5;
+
     /// <summary>The long-running-job fact key — the maintenance edges' destination (#3632) and the moved-window arm's subject.</summary>
     public const string JobKey = "RUNNING_JOBS";
 
@@ -231,6 +247,7 @@ public static class RecurrenceLabeler
         // carries (the moved-window arm). Week 0 — earlier passes today, in this hour or another — is
         // dropped here: it is this week, not a prior one, on either arm.
         var sameSlotWeeksByChain = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        var firedHoursByChain = new Dictionary<string, int>(StringComparer.Ordinal);
         var priorJobRows = new List<(int WeeksAgo, DateTime Bucket, string? JobName)>();
 
         foreach (var occurrence in prior.Occurrences)
@@ -247,6 +264,7 @@ public static class RecurrenceLabeler
                 if (!sameSlotWeeksByChain.TryGetValue(occurrence.StoryPathHash, out var weeks))
                     sameSlotWeeksByChain[occurrence.StoryPathHash] = weeks = new HashSet<int>();
                 weeks.Add(weeksAgo);
+                firedHoursByChain[occurrence.StoryPathHash] = occurrence.ChainFiredHours;
             }
 
             if (string.Equals(occurrence.RootFactKey, JobKey, StringComparison.Ordinal))
@@ -286,7 +304,9 @@ public static class RecurrenceLabeler
                 continue;
 
             if (!string.IsNullOrEmpty(story.StoryPathHash)
+                && !IsConfigRoot(story.RootFactKey)
                 && !IsStaticSettingsStory(story, settingsByKey)
+                && !FiresMostOfTheTime(firedHoursByChain.GetValueOrDefault(story.StoryPathHash), prior.WatchedHours)
                 && sameSlotWeeksByChain.TryGetValue(story.StoryPathHash, out var weeks))
             {
                 // Consecutive from this week backwards: this pass is week 0 and counts; each prior week counts
@@ -303,6 +323,26 @@ public static class RecurrenceLabeler
                 ApplyMovedWindow(story, jobName!, lastWeekSlotsForJob.Min(), referenceBucket, offsetKnown);
         }
     }
+
+    /// <summary>
+    /// A chain rooted in a configuration fact (#7450): <c>DB_CONFIG</c> and the rest of the engine's config advisory
+    /// roots, and any <c>CONFIG_PG_*</c> key. A setting holds its value at every hour, so "the cause keeps a
+    /// schedule" cannot be true of it however often a pass finds it.
+    /// </summary>
+    private static bool IsConfigRoot(string? rootFactKey) =>
+        !string.IsNullOrEmpty(rootFactKey)
+        && (InferenceEngine.IsConfigAdvisoryRoot(rootFactKey)
+            || rootFactKey.StartsWith("CONFIG_PG_", StringComparison.Ordinal));
+
+    /// <summary>
+    /// True when the chain fired in more than <see cref="MaximumFiredHourShare"/> of the hours the server was
+    /// analysed over the read window (#7450). Both counts come from the one store read. Either one unknown (0) says
+    /// nothing, so a store that does not report them labels as it did before.
+    /// </summary>
+    private static bool FiresMostOfTheTime(int chainFiredHours, int watchedHours) =>
+        chainFiredHours > 0
+        && watchedHours > 0
+        && chainFiredHours > watchedHours * MaximumFiredHourShare;
 
     /// <summary>
     /// Key -> "this fact is a setting" for every fact of the pass (#6132). A key whose facts disagree counts as a

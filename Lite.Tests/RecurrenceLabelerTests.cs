@@ -157,6 +157,84 @@ public class RecurrenceLabelerTests
         Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
     }
 
+    /* #7450: a chain that fires in nearly every hour the server was watched keeps no schedule, however many
+       same-slot weeks it has. The store reports the chain's fired hours and the hours with any saved row. */
+
+    private static PriorOccurrence InSlotWithHours(string hash, int weeksAgo, int firedHours) =>
+        new(hash, "X", SlotLocal.AddDays(-7 * weeksAgo), null, firedHours);
+
+    private static PriorOccurrenceRead ReadWithWatched(int watchedHours, params PriorOccurrence[] rows) =>
+        new(Offset, ReferenceLocal, rows, watchedHours);
+
+    [Fact]
+    public void AChainThatFiredInEveryWatchedHour_GetsNoLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-always");
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], null, ReadWithWatched(504, InSlotWithHours("h-always", 1, 504), InSlotWithHours("h-always", 2, 504), InSlotWithHours("h-always", 3, 504)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+        Assert.Null(story.RootFactMetadata);
+    }
+
+    [Fact]
+    public void AChainThatFiredOnlyInThisSlotForThreeWeeks_KeepsTheLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-weekly");
+
+        RecurrenceLabeler.Label([story], null, ReadWithWatched(504, InSlotWithHours("h-weekly", 1, 3), InSlotWithHours("h-weekly", 2, 3), InSlotWithHours("h-weekly", 3, 3)));
+
+        Assert.Equal(4, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Theory]
+    [InlineData("DB_CONFIG")]
+    [InlineData("SERVER_CONFIG")]
+    [InlineData("CONFIG_MAXDOP")]
+    [InlineData("CONFIG_PG_SHARED_BUFFERS")]
+    [InlineData("CONFIG_PG_MAINT_WORK_MEM")] // evidence-gated, not in the root set, still a configuration fact
+    public void AChainRootedInAConfigurationFact_NeverGetsTheLabel(string rootKey)
+    {
+        var story = Story(rootKey, "h-config");
+        var before = story.StoryText;
+
+        // Few fired hours and no spread counts at all: only the root decides.
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-config", 1, rootKey), InSlot("h-config", 2, rootKey), InSlot("h-config", 3, rootKey)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Fact]
+    public void AServerThatWasOffMostOfTheTime_IsJudgedOnTheHoursItWasWatched()
+    {
+        // Only 20 hours had any saved row. Fired in 10 of them: exactly half, so still labelled.
+        var half = Story("SOS_SCHEDULER_YIELD", "h-half");
+        RecurrenceLabeler.Label([half], null, ReadWithWatched(20, InSlotWithHours("h-half", 1, 10), InSlotWithHours("h-half", 2, 10)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(half.StoryText));
+
+        // Fired in 11 of the 20 watched hours: more than half. The same 11 hours against a full 504 would be 2 percent.
+        var most = Story("SOS_SCHEDULER_YIELD", "h-most");
+        RecurrenceLabeler.Label([most], null, ReadWithWatched(20, InSlotWithHours("h-most", 1, 11), InSlotWithHours("h-most", 2, 11)));
+        Assert.Null(RecurrenceLabeler.TryReadLabel(most.StoryText));
+
+        var spread = Story("SOS_SCHEDULER_YIELD", "h-spread");
+        RecurrenceLabeler.Label([spread], null, ReadWithWatched(504, InSlotWithHours("h-spread", 1, 11), InSlotWithHours("h-spread", 2, 11)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(spread.StoryText));
+    }
+
+    [Fact]
+    public void AStoreThatReportsNoHourCounts_LabelsAsBefore()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-unknown");
+
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-unknown", 1), InSlot("h-unknown", 2)));
+
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
     [Fact]
     public void TwoWeeks_IsACoincidence_NoLabel()
     {
