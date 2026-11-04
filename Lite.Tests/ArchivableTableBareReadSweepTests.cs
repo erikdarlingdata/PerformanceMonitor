@@ -74,6 +74,12 @@ public class ArchivableTableBareReadSweepTests
            together from one table, so they never come from different sources. */
         [("LocalDataService.RuntimePrecondition.cs", "collection_log")] = 4,
 
+        /* #7386: the server's first collection for the charts' X axis, read only after the archive span probe proved the archive
+           holds nothing at or after the window start. Every row of the window is then hot, so the hot oldest row is the oldest
+           row the window can show: it is either before the start (the axis stays at the start) or the first row inside it. An
+           archive that may hold rows in the window, or an unknown span, never reaches this read, and the answer is null. */
+        [("LocalDataService.ServerDataStart.cs", "collection_log")] = 1,
+
         /* Collector path. The backfill's candidate databases share one rule with Darling's; its orphan prune
            compares against MAX(collection_time), which is NULL on an empty table, so it deletes nothing then.
            HasPriorCollectorSuccessAsync counts the live log first and v_collection_log when that is 0. */
