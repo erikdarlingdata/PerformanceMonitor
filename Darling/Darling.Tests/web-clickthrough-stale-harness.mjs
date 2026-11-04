@@ -20,7 +20,19 @@ class FakeNode {
     this.className = "";
     this.listeners = {};
     this.text = text == null ? null : String(text);
-    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+    /* Reads and writes className, which is what the CSS reads (.detail.clamp-lines.open), so a scenario can see whether a class was set. */
+    const tokens = () => String(this.className).split(/\s+/).filter(Boolean);
+    const write = (list) => { this.className = list.join(" "); };
+    this.classList = {
+      add: (name) => { if (!tokens().includes(name)) write([...tokens(), name]); },
+      remove: (name) => write(tokens().filter((t) => t !== name)),
+      toggle: (name, force) => {
+        const on = force === undefined ? !tokens().includes(name) : !!force;
+        write(on ? (tokens().includes(name) ? tokens() : [...tokens(), name]) : tokens().filter((t) => t !== name));
+        return on;
+      },
+      contains: (name) => tokens().includes(name),
+    };
   }
   get firstChild() {
     return this.children[0] || null;
@@ -189,6 +201,7 @@ const scenarios = {
     const closedAtFirst = detailOf(first, "Protection").expanded;
     click(first);
     const openedByClick = detailOf(first, "Protection").expanded;
+    const clsAfterClick = detailOf(first, "Protection").cls;
     const labelsAfterClick = Array.from(open);
     const poll = draw(25, open); // the next poll: different text, same tile
     const afterPoll = detailOf(poll, "Protection");
@@ -200,7 +213,7 @@ const scenarios = {
     const afterRegrown = detailOf(regrown, "Protection");
     const another = draw(20, new Set()); // another server: its own empty set
     const afterAnotherServer = detailOf(another, "Protection");
-    return { closedAtFirst, openedByClick, labelsAfterClick, afterPoll, labelsAfterPoll, afterShort, labelsAfterShort, afterRegrown, afterAnotherServer };
+    return { closedAtFirst, openedByClick, clsAfterClick, labelsAfterClick, afterPoll, labelsAfterPoll, afterShort, labelsAfterShort, afterRegrown, afterAnotherServer };
   },
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({

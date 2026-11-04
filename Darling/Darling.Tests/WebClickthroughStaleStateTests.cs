@@ -139,16 +139,20 @@ public sealed class WebClickthroughStaleStateTests
         var r = Run("serverTilesReopen");
         Assert.Equal("false", r.GetProperty("closedAtFirst").GetString());
         Assert.Equal("true", r.GetProperty("openedByClick").GetString());
+        // The CSS reads the open class (.detail.clamp-lines.open), not aria-expanded, so the class is what shows the tile open.
+        Assert.Contains("open", r.GetProperty("clsAfterClick").GetString()!.Split(' '));
         Assert.Equal(["Protection"], r.GetProperty("labelsAfterClick").EnumerateArray().Select(l => l.GetString()).ToArray());
 
         var poll = r.GetProperty("afterPoll");
         Assert.Equal("true", poll.GetProperty("expanded").GetString());
         Assert.Contains("clamp-lines", poll.GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Contains("open", poll.GetProperty("cls").GetString()!.Split(' '));
         Assert.Single(r.GetProperty("labelsAfterPoll").EnumerateArray());
 
         Assert.DoesNotContain("clamp-lines", r.GetProperty("afterShort").GetProperty("cls").GetString(), StringComparison.Ordinal);
         Assert.Empty(r.GetProperty("labelsAfterShort").EnumerateArray());
         Assert.Equal("false", r.GetProperty("afterRegrown").GetProperty("expanded").GetString());
+        Assert.DoesNotContain("open", r.GetProperty("afterRegrown").GetProperty("cls").GetString()!.Split(' '));
         Assert.Equal("false", r.GetProperty("afterAnotherServer").GetProperty("expanded").GetString());
     }
 
