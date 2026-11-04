@@ -109,9 +109,58 @@ public sealed class PgServerConfigDefaultsLivePostgresTests
         }
     }
 
+    [Fact]
+    public async Task AnOctalSettingWhoseStoredDefaultIsNotDecimalOrIsNull_KeepsItsStoredDefault_AndDoesNotFail()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7409 configuration round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var snapshot = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-3);
+
+            /* The conversion only applies to a stored default of one to four decimal digits. Anything else comes through as stored. */
+            await SeedAsync(connection, ct, snapshot, "log_file_mode", "0640", "configuration file", "0x180", false);
+            await SeedAsync(connection, ct, snapshot, "unix_socket_permissions", "0777", "configuration file", null, false);
+            await SeedAsync(connection, ct, snapshot, "data_directory_mode", "0700", "default", null, false);
+
+            var root = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 50, include_defaults: true)).RootElement;
+            var settings = root.GetProperty("settings").EnumerateArray().ToDictionary(s => s.GetProperty("name").GetString()!);
+
+            Assert.Equal("0x180", settings["log_file_mode"].GetProperty("default_value").GetString());
+            Assert.False(settings["log_file_mode"].GetProperty("is_default").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, settings["unix_socket_permissions"].GetProperty("default_value").ValueKind);
+            Assert.False(settings["unix_socket_permissions"].GetProperty("is_default").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, settings["data_directory_mode"].GetProperty("default_value").ValueKind);
+            Assert.True(settings["data_directory_mode"].GetProperty("is_default").GetBoolean());
+            Assert.Equal(2, root.GetProperty("non_default_count").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
+                servers.Parameters.AddWithValue(ServerId);
+                await servers.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static async Task SeedAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime,
-        string name, string setting, string source, string bootVal, bool pendingRestart)
+        string name, string setting, string source, string? bootVal, bool pendingRestart)
     {
         using var insert = new NpgsqlCommand(
             """
@@ -127,7 +176,7 @@ public sealed class PgServerConfigDefaultsLivePostgresTests
         insert.Parameters.AddWithValue(name);
         insert.Parameters.AddWithValue(setting);
         insert.Parameters.AddWithValue(source);
-        insert.Parameters.AddWithValue(bootVal);
+        insert.Parameters.AddWithValue((object?)bootVal ?? DBNull.Value);
         insert.Parameters.AddWithValue(pendingRestart);
         await insert.ExecuteNonQueryAsync(ct);
     }
