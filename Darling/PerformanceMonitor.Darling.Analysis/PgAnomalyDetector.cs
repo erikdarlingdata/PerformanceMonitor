@@ -313,15 +313,17 @@ LIMIT 6";
     public const string BlockingWindowSql = $@"
 /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking. */
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
-         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
          AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks,
+    /* #7537: the DMV arm fired (no blocked process reports in the window), so the spike text names snapshot rows. */
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}) AS bpr_count) AS b";
 
     /* The same read for an Azure SQL Database master target ($4 = the names of the databases monitored as their
        own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
@@ -329,16 +331,17 @@ SELECT
        rule, so this read carries no deadlock column. */
     public const string BlockingSkippingSeparateCountSql = $@"
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
-         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
-         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
          AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
-    0::bigint AS current_deadlocks";
+    0::bigint AS current_deadlocks,
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))) AS bpr_count) AS b";
 
     /* $4 is the raw scoped list and $5 the event-window floor, as in BlockingSkippingSeparateCountSql. */
     public const string DeadlockGraphsCountSql = @"
@@ -991,11 +994,13 @@ ORDER BY ms_delta DESC LIMIT 1";
             cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
 
             long currentBlocking, currentDeadlocks;
+            bool blockingFromDmv;
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
                 if (!await reader.ReadAsync(context.CancellationToken)) return;
                 currentBlocking = Convert.ToInt64(reader.GetValue(0));
                 currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
             }
             if (separate is not null)
                 currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
@@ -1027,7 +1032,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact

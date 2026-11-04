@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -296,7 +297,22 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
         var (_, filtered) = await RunAsync(plan, Separate, true);
         Assert.DoesNotContain(filtered, f => f.Key == "ANOMALY_BLOCKING_SPIKE");
         var (_, control) = await RunAsync(plan, null, true);
-        Assert.Contains(control, f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        var spike = control.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        Assert.Equal(bpr ? 0.0 : 1.0, spike.Metadata.GetValueOrDefault(CountFamilyMetadata.FromDmvSnapshotsKey));   /* #7537: the plain read stamps the DMV arm */
+    }
+
+    /* #7537: the scoped read (an Azure master target) stamps the arm too, so the spike text names the right unit there. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task BlockingSpike_ScopedRead_StampsTheDmvArmOnly_WhenNoBlockedProcessReportsExist(bool bpr)
+    {
+        var plan = new Plan(bpr, new string?[] { "GP", "HS", "HS", "HS", "HS", "HS" }, Array.Empty<string[]>());
+        var (_, filtered) = await RunAsync(plan, Separate, true);
+
+        var spike = filtered.Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+        Assert.Equal(5.0, spike.Value);
+        Assert.Equal(bpr ? 0.0 : 1.0, spike.Metadata.GetValueOrDefault(CountFamilyMetadata.FromDmvSnapshotsKey));
     }
 
     [Fact]
