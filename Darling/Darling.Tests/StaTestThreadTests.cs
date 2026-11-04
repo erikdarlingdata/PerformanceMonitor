@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -202,7 +203,14 @@ public sealed class StaTestThreadTests
 
             Assert.Contains("The runtime's state for the thread is", timedOut.Message);
             Assert.Contains("WaitSleepJoin", timedOut.Message);
-            Assert.Matches(@"Its native stack, leaf first, was ntdll!\w*Wait\w*\+0x", timedOut.Message);
+            /* A sub-second guard reads in ms: "within 0 s" named nothing. */
+            Assert.Contains("did not return within 300 ms:", timedOut.Message);
+
+            /* A frame of the stack is a wait call, in whatever module holds it: an STA thread's wait pumps messages, so the leaf can be
+               ntdll!NtWaitFor... on one machine and win32u!NtUserMsgWaitFor... on another. The whole message is the failure text: xunit cuts a long value. */
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"Its native stack, leaf first, was [^\r\n]*?[\w.]+!\w*Wait\w*\+0x"),
+                timedOut.Message);
             Assert.Contains("file reads", timedOut.Message);
             Assert.Contains("page faults", timedOut.Message);
             Assert.Contains("MB of memory free", timedOut.Message);
