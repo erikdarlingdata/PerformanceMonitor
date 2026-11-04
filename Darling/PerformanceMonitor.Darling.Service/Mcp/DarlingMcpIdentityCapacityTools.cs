@@ -83,7 +83,7 @@ public sealed class DarlingMcpIdentityCapacityTools
         try
         {
             var read = await DarlingIdentityCapacityReader.ReadAsync(
-                postgres, resolved.ServerId, databases, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
+                postgres, resolved.ServerId, databases, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
             /* #7010: the window is a data window here (each column's rate runs from its oldest stored value in it), so a window that reaches past

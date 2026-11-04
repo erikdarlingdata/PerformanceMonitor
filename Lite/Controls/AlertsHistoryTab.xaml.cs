@@ -600,7 +600,20 @@ public partial class AlertsHistoryTab : UserControl
         var owner = Window.GetWindow(this);
         var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         if (owner != null) detailWindow.Owner = owner;
-        detailWindow.ShowDialog();
+        ShowDetailDialog(detailWindow, Dispatcher);
+    }
+
+    /// <summary>
+    /// #7554: shows the Alert Details window, and when its link was clicked runs the link's action only after the dialog has closed
+    /// and focus has gone back to the grid, at input priority so the tab it selects is not taken back by that focus change.
+    /// </summary>
+    internal static void ShowDetailDialog(Windows.AlertDetailWindow window, Dispatcher dispatcher)
+    {
+        window.ShowDialog();
+        if (window.DeferredOpen is { } open)
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.Input, open);
+        }
     }
 
     private void ViewAlertDetails_Click(object sender, RoutedEventArgs e)

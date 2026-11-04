@@ -1363,6 +1363,13 @@ public partial class MainWindow : Window
             try
             {
                 await ConnectToServerAsync(server, (view, fromUtc, toUtc));
+                /* #7554: keyboard focus into the server tab, so the Alert History grid getting focus back does not select
+                   Alert History again (the Viewer's opener does the same). */
+                if (_openServerTabs.TryGetValue(server.Id, out var openedTab) && ReferenceEquals(ServerTabControl.SelectedItem, openedTab)
+                    && openedTab.Content is UIElement openedContent)
+                {
+                    openedContent.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+                }
             }
             catch (Exception ex)
             {

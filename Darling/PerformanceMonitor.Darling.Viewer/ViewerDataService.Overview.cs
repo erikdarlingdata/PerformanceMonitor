@@ -277,7 +277,7 @@ LIMIT 1";
     {
         var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
             _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ViewerStoreLogger.Instance, cancellationToken);
         var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
         var worst = read.Columns.Where(c => c.Band is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical)
             .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
