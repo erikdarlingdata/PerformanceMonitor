@@ -65,7 +65,8 @@ export const PG_BLOAT_COLUMNS = [
      nothing. */
   { key: "dead_tuples", label: "Dead Tuples", format: "int", hint: "Rows deleted or updated and not yet cleaned up by vacuum. A count from the server's own statistics, not an estimate." },
   { key: "dead_tuple_pct", label: "Dead Tuple %", format: "num2", hint: "Dead tuples as a share of live plus dead rows. Click a value for what it means for this table.", detailKey: "dead_tuple_finding" },
-  detailColumn("bloat_finding", "Finding", bloatVerdict,
+  /* #7410: "Bloat Level", not "Finding": the Severity column beside it reads "Low" too, and two columns headed differently that say the same word looked like a repeat. */
+  detailColumn("bloat_finding", "Bloat Level", bloatVerdict,
     "How large the estimated bloat is: under 20% low, 20% to 50% moderate, above that high. Click a verdict for what to do about it."),
   { key: "mods_since_analyze_pct_of_rows", label: "Modified Since Analyze %", format: "num1" },
   { key: "last_analyzed", label: "Last Analyzed", format: "time" },

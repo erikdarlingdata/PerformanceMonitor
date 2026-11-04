@@ -163,6 +163,22 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void APanelWithEmptyLineTrue_SaysItsOwnSentenceForATrueNegative_AndKeepsTheToolTextBehindAClick()
+    {
+        var r = Run();
+        const string line = "No lock activity was sampled in this window.";
+        var yes = r.GetProperty("emptyLineTrue");
+        Assert.StartsWith(line, yes.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, yes.GetProperty("hasDetails").GetInt32());
+        Assert.Equal(r.GetProperty("message").GetString(), yes.GetProperty("detailBody").GetString());
+
+        // A reply that is not a true negative (the server is offline, say) is not an "empty" answer, so the tool's text is what shows.
+        var no = r.GetProperty("emptyLineUnavailable");
+        Assert.Contains("collector is running against example-pg-01", no.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(0, no.GetProperty("hasDetails").GetInt32());
+    }
+
+    [Fact]
     public void ThePageCutFlag_IsASentenceUnderTheTiles_NotATile()
     {
         var r = Run();

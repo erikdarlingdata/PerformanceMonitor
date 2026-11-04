@@ -153,7 +153,7 @@ export function fanout(read, params, specs, intro = null) {
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
         markPartialSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -701,6 +701,14 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
   /* #7410: `noteShort` (the plain sentence over a long note) and `emptyLine` (the plain empty sentence), see panels.js. */
   if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
+}
+
+/**
+ * #7410: tablePanel() whose own empty sentence is the one the page says for a true negative (status "empty"). The tool's longer text for that
+ * answer stays behind "More detail". A reply that is not a true negative (unavailable, precondition) still shows the tool's text.
+ */
+export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2) {
+  return tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span, null, null, null, null, null, null, false, null, false, { emptyLine: true });
 }
 
 /**

@@ -41,6 +41,7 @@
 
 import { el, makeActivatable, noticeStrip, daysText } from "../util.js";
 import { worstFirst } from "../panels.js";
+import { evictionNoteShort } from "../pg-grid-text.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { statsHistoryColumn } from "./stats-history.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -61,7 +62,7 @@ import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
-import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
+import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
@@ -128,7 +129,7 @@ export const SERVER_TABS = [
     label: "Wait Stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
-      tablePanel(
+      tablePanelPlain(
         "Waiting Tasks",
         "get_waiting_tasks",
         { server, hours: ctx.hours, limit: 30 },
@@ -137,7 +138,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No waiting tasks were captured in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Latch Stats",
         "get_latch_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -147,7 +148,7 @@ export const SERVER_TABS = [
         "No latch classes accumulated waits in this window."
       ),
       namedTrendPanel(server, ctx, "latch"),
-      tablePanel(
+      tablePanelPlain(
         "Spinlock Stats",
         "get_spinlock_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -488,7 +489,7 @@ export const SERVER_TABS = [
     label: "File I/O",
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
-      tablePanel(
+      tablePanelPlain(
         "File I/O Stats",
         "get_file_io_stats",
         { server },
@@ -516,7 +517,7 @@ export const SERVER_TABS = [
         1,
         "note"
       ),
-      tablePanel(
+      tablePanelPlain(
         "Table & Index Sizes",
         "get_table_index_sizes",
         { server },
@@ -525,7 +526,7 @@ export const SERVER_TABS = [
         "daily collection",
         "No object size rows recorded. Index and object stats are collected daily."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Persistent Version Store",
         "get_pvs_stats",
         { server },
@@ -710,6 +711,7 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
+          noteShort: "Every database here that has Query Store is a readable secondary, so its Query Store is a copy of the primary's and no verdict is given for it. Read the primary for the clutter. The overhead panels below are still measured on this server.",
           emptyText:
             "No Query Store rows, no Query Store collection run and no Query Store health capture for this " +
             "server in this window. The read says which of those it found rather than showing an empty grid.",
@@ -809,7 +811,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "The audit found nothing to flag."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Server Configuration",
         "get_server_config",
         { server },
@@ -818,7 +820,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No sp_configure snapshot yet."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Database Configuration",
         "get_database_config",
         { server },
@@ -863,7 +865,7 @@ export const SERVER_TABS = [
     id: "changes",
     label: "Config Changes",
     build: (server, ctx) => [
-      tablePanel(
+      tablePanelPlain(
         "Server Configuration Changes",
         "get_server_config_changes",
         { server, hours: ctx.hours },
@@ -872,7 +874,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No server configuration changed in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Database Configuration Changes",
         "get_database_config_changes",
         { server, hours: ctx.hours },
@@ -881,7 +883,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No database configuration changed in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Trace Flag Changes",
         "get_trace_flag_changes",
         { server, hours: ctx.hours },
@@ -936,7 +938,7 @@ export const SERVER_TABS = [
         ctx.label + ", newest 100 runs (steps and job outcomes)",
         "No SQL Agent job runs were retained in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Index Usage",
         "get_index_usage",
         { server },
@@ -1300,6 +1302,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_extensions", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "Extensions",
+          emptyLine: true,
           subtitle: ctx.label + ", per database; 'available' means CREATE EXTENSION would work",
           viz: "table",
           rowsKey: "extensions",
@@ -1307,6 +1310,7 @@ export const POSTGRES_TABS = [
           emptyText:
             "No extension inventory in this window. It is collected once a day, so a short window can be empty.",
           noteKey: "note",
+          noteShort: "Each row is one extension in one database, so a server with many databases can have more rows than the limit shows. The Extension Install Census below counts every extension on the server whatever the limit.",
         },
         {
           title: "Extension Install Census",
@@ -1373,6 +1377,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_top_queries", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Statement Evictions",
+          emptyLine: "No query statistics were stored for this server in this window.",
           subtitle: ctx.label + ", pg_stat_statements passes",
           viz: "stat",
           stats: PG_EVICTION_STATS,
@@ -1387,6 +1392,7 @@ export const POSTGRES_TABS = [
           columns: PG_TOP_QUERY_COLUMNS,
           emptyText: "No query statistics in this window.",
           noteKey: "evictions.note",
+          noteShort: evictionNoteShort,
         },
       ]),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
@@ -1408,7 +1414,7 @@ export const POSTGRES_TABS = [
          is a different registry with a different shape; here it belongs beside the two reads whose absence
          it explains, and its own empty text is what stops that explanation being circular. Every facet is
          shown, satisfied ones included — a list of only the failures cannot show that capture is working. */
-      tablePanel(
+      tablePanelPlain(
         "Plan Capture Readiness",
         "get_pg_plan_capture_readiness",
         { server, hours: ctx.hours, limit: 25 },
@@ -1423,14 +1429,14 @@ export const POSTGRES_TABS = [
          read reports the snapshot time as captured_at. Every setting is shown whatever its
          verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
          cannot show that a target IS instrumented. */
-      tablePanel(
+      tablePanelPlain(
         "Logging Settings Audit",
         "get_pg_logging_audit",
         { server },
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
         "newest configuration snapshot, one row per setting",
-        "No configuration snapshot to audit. pg_server_config runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+        "No configuration snapshot to audit yet. The configuration collector runs hourly, so a server added in the last hour has none, and that says nothing about its logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
@@ -1441,6 +1447,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Database Activity",
+          emptyLine: true,
           subtitle: ctx.label + ", totals over every database that moved",
           viz: "stat",
           stats: PG_DATABASE_STATS,
@@ -1467,7 +1474,7 @@ export const POSTGRES_TABS = [
          Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
          question from that one: which modes and relations are contended OVER TIME, rather than who is
          blocking whom right now. */
-      tablePanel(
+      tablePanelPlain(
         "Lock Activity (sampled)",
         "get_pg_lock_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1479,16 +1486,16 @@ export const POSTGRES_TABS = [
       /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
          it is evidence about the workload, not about the disk — and it belongs beside top queries, since
          a predicate row and a query row are two views of the same execution. */
-      tablePanel(
+      tablePanelPlain(
         "Predicate Selectivity",
         "get_pg_predicate_stats",
         { server, hours: ctx.hours, limit: 25 },
         "predicates",
         PG_PREDICATE_COLUMNS,
         ctx.label + ", sampled counts - scale by 1/sample rate and treat the product as an estimate",
-        "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
+        "No predicate statistics in this window. pg_qualstats samples executions and needs a restart to load, so an empty panel here usually means it is not loaded."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Column Statistics",
         "get_pg_column_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1586,6 +1593,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
         {
           title: "What Holds the Horizon",
+          emptyLine: true,
           subtitle: ctx.label,
           viz: "stat",
           windowNote: false,
@@ -1607,6 +1615,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_autovacuum_health", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Autovacuum Backlog",
+          emptyLine: true,
           subtitle: ctx.label + ", worst 20 tables",
           viz: "stat",
           stats: PG_AUTOVACUUM_STATS,
@@ -1733,6 +1742,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_io_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "I/O Summary",
+          emptyLine: true,
           subtitle: ctx.label + ", differenced across the window",
           viz: "stat",
           stats: PG_IO_SUMMARY_STATS,
@@ -1788,6 +1798,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_replication_slots", { server, hours: ctx.hours }, [
         {
           title: "Slot Summary",
+          emptyLine: "This server has no replication slots. Slots live on the writer, so on a replica look at the writer.",
           subtitle: ctx.label,
           viz: "stat",
           stats: PG_SLOT_STATS,
@@ -1815,7 +1826,10 @@ export const POSTGRES_TABS = [
         "replicas",
         PG_REPLICATION_STATS_COLUMNS,
         ctx.label + ", worst-in-window beside latest; lag is spiky and one sample catches one instant",
-        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely."
+        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
+        2, null, null, null, null, null, null, false, null, false,
+        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail". */
+        { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
       ),
     ],
   },
@@ -1834,6 +1848,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Bloat Estimates",
+          emptyLine: true,
           subtitle: ctx.label + ", estimates only - the tables are never read",
           viz: "stat",
           stats: PG_BLOAT_STATS,
@@ -1854,12 +1869,13 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_index_usage", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Index Usage",
+          emptyLine: true,
           subtitle: ctx.label + ", candidates are not conclusions",
           viz: "stat",
           stats: PG_INDEX_USAGE_STATS,
           span: 2,
           emptyText:
-            "No index of at least 64 KB was recorded on this server. Below that floor an index costs effectively nothing to keep, so an empty panel here is the healthy answer rather than a missing read.",
+            "No index of at least 64 KB was recorded on this server. Smaller indexes cost almost nothing to keep, so an empty panel here is the healthy answer.",
         },
         {
           title: "By Index",
@@ -1937,7 +1953,7 @@ export const POSTGRES_TABS = [
     id: "config",
     label: "Configuration",
     build: (server, ctx) => [
-      tablePanel(
+      tablePanelPlain(
         "Configuration Changes",
         "get_pg_server_config_changes",
         { server, hours: ctx.hours },
@@ -1946,7 +1962,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", newest first",
         "No configuration parameter changed value in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Settings",
         "get_pg_server_config",
         { server },

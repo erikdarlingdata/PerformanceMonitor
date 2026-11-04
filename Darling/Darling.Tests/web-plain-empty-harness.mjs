@@ -82,6 +82,10 @@ out.unknownReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty
 /* A panel's agreed sentence (emptyWins) still replaces an empty reply's message. */
 out.emptyWins = describe(panelEmptyStrip({ emptyWins: true, emptyText: "No deadlocks." }, { kind: "empty", status: "empty", message: "Long tool text about deadlocks.", hints: null }));
 
+/* #7410: `emptyLine: true` says the panel's own empty sentence for a true negative and keeps the tool's text behind a click. A reply that is not a true negative keeps the tool's text. */
+out.emptyLineTrue = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "empty", message: longMessage, hints: null }));
+out.emptyLineUnavailable = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "unavailable", message: longMessage, hints: null }));
+
 /* The page-cut flag is a sentence under the tiles, not a tile. */
 const stats = [
   { key: "database_count", label: "Databases active", format: "int" },

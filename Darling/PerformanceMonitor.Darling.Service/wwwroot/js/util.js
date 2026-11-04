@@ -321,8 +321,10 @@ export function noticeStripWithDetail(short, full) {
  * the tool's note one click away. Any other note is drawn as it always was: a caveat about the data (a cut window, a floor) is not
  * shortened by a rule, only by a sentence somebody wrote for that panel.
  */
-export function noteStrip(desc, note) {
-  if (desc && typeof desc.noteShort === "string" && desc.noteShort) return noticeStripWithDetail(desc.noteShort, note);
+export function noteStrip(desc, note, data) {
+  /* `noteShort` is a sentence, or a function of the read's data for a note that has two cases (Statement Evictions: unknown, or a pass count). */
+  const short = desc && typeof desc.noteShort === "function" ? desc.noteShort(data) : desc && desc.noteShort;
+  if (typeof short === "string" && short) return noticeStripWithDetail(short, note);
   return noticeStrip(note);
 }
 

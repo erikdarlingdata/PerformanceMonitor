@@ -123,7 +123,7 @@ export function emptyHeadline(desc, res) {
 export function panelEmptyStrip(desc, res) {
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
   /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
-  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine);
+  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine === true ? desc.emptyText : desc.emptyLine);
   const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
   return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
@@ -279,7 +279,7 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
       floor,
       /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
       sourceStrip(res.data, desc),
-      typeof note === "string" && note.trim() ? noteStrip(desc, note) : null,
+      typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
     ]);

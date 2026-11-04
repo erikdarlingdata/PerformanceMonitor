@@ -107,3 +107,20 @@ export function detailColumn(key, label, word, hint, extra) {
   const short = (row) => word(row[key]);
   return { key, label, hint, display: (row) => short(row) ?? "—", sortValue: short, detailKey: key, ...extra };
 }
+
+/**
+ * #7410: the one sentence over Top Query Shapes in place of the eviction note. It is built from the read's own fields (`evictions.known`
+ * and `evictions.eviction_passes_in_window`), never from the note's text. Null when the counter was read and no pass happened, so the
+ * strip then falls back to the note as given, which is also null.
+ */
+export function evictionNoteShort(data) {
+  const e = data && typeof data === "object" ? data.evictions : null;
+  if (!e || typeof e !== "object") return null;
+  if (e.known === false) {
+    return "This server does not report how often pg_stat_statements dropped entries. That needs PostgreSQL 14 or later with the extension at version 1.9 or newer.";
+  }
+  const n = e.eviction_passes_in_window;
+  if (typeof n !== "number" || !(n > 0)) return null;
+  return "pg_stat_statements dropped its least-used entries " + n.toLocaleString("en-US") + (n === 1 ? " time" : " times") +
+    " in this window, so a rarely run statement may be missing and the totals can read low. A higher pg_stat_statements.max helps, and it needs a restart.";
+}
