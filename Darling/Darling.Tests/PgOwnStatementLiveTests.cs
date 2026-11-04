@@ -50,7 +50,26 @@ public sealed class PgOwnStatementLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var connection = new NpgsqlConnection(cs);
+        /* #1776 own-store: CREATE EXTENSION lands in the first schema of the store's search_path, which is collect, so on the
+           shared store it left collect.pg_stat_statements and collect.pg_stat_statements_info behind (LiveStoreResidueException).
+           A scratch database of its own takes the extension and goes with it. */
+        var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        var bodySucceeded = false;
+        try
+        {
+            await RunMarkerChecksAsync(scratch.ConnectionString, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    private static async Task RunMarkerChecksAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         try
         {
