@@ -142,7 +142,7 @@ public static partial class PgTargetAdvice
         /* #3691 lane 43 (M3): the next two persistently-backlogged tables BY NAME, with each one's own ratio and
            slope. Before it, the read stopped at one row and the card could only COUNT the others
            (tables_in_backlog) — an operator who read "4 other tables are past their line too" had to call
-           get_pg_autovacuum to learn which, and the collector had thrown the rows away. The clause rides on the
+           get_pg_autovacuum_health to learn which, and the collector had thrown the rows away. The clause rides on the
            subject's persistence sentence because Ranked[0] IS the subject, so "and two more" means "besides this
            table"; empty on a server with one backlogged table, which is the byte-identity arm. */
         var rest = FactAdvice.NameTheRest(f, o =>
@@ -200,7 +200,7 @@ public static partial class PgTargetAdvice
         /* The POPULATION, a different number from the named list above: every table that met the gate, which can
            exceed the three rows the read returns. So the count stays and so does the pointer to the tool. */
         if (others > 0)
-            inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too — get_pg_autovacuum lists them all by ratio. ");
+            inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too — get_pg_autovacuum_health lists them all by ratio. ");
 
         var rem = new StringBuilder();
         rem.Append("Never switch autovacuum off to make this quiet: the backlog becomes bloat, and an unfrozen table becomes a wraparound shutdown. ");
@@ -511,8 +511,19 @@ public static partial class PgTargetAdvice
 
     private static AdviceBlock ComposeConfigAutovacuumOff(IReadOnlyDictionary<string, Fact> facts)
     {
-        if (!facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out _))
+        if (!facts.TryGetValue(PgTargetFactKeys.ConfigAutovacuumOff, out var setting))
             return s_autovacuumOffStatic;
+
+        /* #7447: the fact's Value is 1 when autovacuum is off and 0 when it is on. The block above is written for
+           the off case, so a read that reaches it with the setting on (audit_config renders every CONFIG_PG_* fact,
+           fired or not) must not say the launcher is stopped. */
+        if (setting.Value <= 0)
+        {
+            return new AdviceBlock(
+                Headline: "autovacuum is on",
+                Investigation: "autovacuum = on in pg_settings, so the launcher is running and tables are vacuumed and analysed when they pass their own trigger line.",
+                Remediation: "Nothing to change for this setting.");
+        }
 
         if (facts.TryGetValue(PgTargetFactKeys.AutovacuumBacklog, out var bl) && bl.Severity > 0)
         {

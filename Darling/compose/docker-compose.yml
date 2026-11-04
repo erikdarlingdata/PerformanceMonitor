@@ -84,7 +84,13 @@ services:
     # all 23 overlap). The connection worst case and the restart burst do not coincide in practice (the
     # service's pools are idle while the store restarts), but a mem_limit under about 4 GB has no headroom for
     # both: give a store with real data 4 GB or more. cc #4310.
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB"]
+    # #7446: timescaledb.telemetry_level=off. TimescaleDB's default sends a usage report to Timescale's server
+    # about once a day, and a monitoring store should make no outbound call its operator did not choose. On the
+    # command line, like the flags above, so it reaches an existing volume too. Because the command line outranks
+    # ALTER SYSTEM, an operator who wants the report deletes the two entries "-c", "timescaledb.telemetry_level=off"
+    # from this list. With the level off the extension's policy_telemetry job still runs and records a Failed run
+    # each day. This compose stack does not unschedule it (the managed Windows store does); ignore that row.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB", "-c", "timescaledb.telemetry_level=off"]
     # Uncomment and set to the host's own budget if this container should be capped — left commented
     # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
     # 8 GB host:

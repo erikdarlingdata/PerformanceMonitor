@@ -237,7 +237,7 @@ BEGIN" + NoDatabaseAccessNote.LoopGuardDbCheck + @"
             (
                 SELECT
                     1
-                FROM sys.database_query_store_options
+                FROM sys.database_query_store_options AS PerformanceMonitorLite
                 WHERE actual_state IN (1, 2, 4)
                 AND   readonly_reason & 8 = 0
             );';
@@ -292,7 +292,7 @@ IF NOT EXISTS
 (
     SELECT
         1
-    FROM sys.database_query_store_options
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
     WHERE actual_state IN (1, 2, 4)
     AND   readonly_reason & 8 = 0
 )
@@ -399,6 +399,15 @@ END;
     /// are excluded CLIENT-SIDE in the shared read loop both paths use (#1565) — the old SQL-side
     /// NOT LIKE predicate was 75% of the read's elapsed time (a full nvarchar(max) scan per row on a
     /// column no index can serve), and the text is already materialized here anyway.
+    ///
+    /// <para><b>A leading comment is not enough for a statement that runs in a user database (#7443).</b> In a
+    /// database with PARAMETERIZATION FORCED, SQL Server stores the NORMALIZED text, which has no comments, so a
+    /// comment marker is gone from both the plan cache text and Query Store. An identifier survives, so each
+    /// statement a collector runs in a user database also carries this word as an alias (a table alias, or a column
+    /// alias on a SELECT with no FROM), and the comment stays for the statements that run elsewhere. Query Store
+    /// keeps each statement of a batch on its own, so the alias goes in every statement, not once per batch. The
+    /// match is ordinal, as the Query Stats <c>NOT LIKE</c> is on a case-sensitive collation too: the alias is
+    /// written with this exact case.</para>
     /// </summary>
     public const string SelfQueryMarker = "PerformanceMonitorLite";
 
@@ -790,8 +799,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_qs_query AS qsq
-    WHERE qsq.query_text_id = qst.query_text_id
+    FROM #pm_qs_query AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_text_id = qst.query_text_id
 )
 OPTION(RECOMPILE, HASH JOIN);
 ";
@@ -951,12 +960,12 @@ OPTION(RECOMPILE, HASH JOIN);
            open-snapshot must carry executions newer than the watermark, so the standing HAVING readmits
            it; one whose content did not change IS our last snapshot. */
         var intervalPreFilter = backfill
-            ? @"i.end_time > @floor_time
-    AND   i.start_time < @ceiling_time"
+            ? @"PerformanceMonitorLite.end_time > @floor_time
+    AND   PerformanceMonitorLite.start_time < @ceiling_time"
             : context.IncludeOpenInterval
-                ? "i.end_time > @cutoff_time"
-                : @"i.end_time > @cutoff_time
-    AND   i.end_time <= SYSUTCDATETIME()";
+                ? "PerformanceMonitorLite.end_time > @cutoff_time"
+                : @"PerformanceMonitorLite.end_time > @cutoff_time
+    AND   PerformanceMonitorLite.end_time <= SYSUTCDATETIME()";
         var intervalHaving = backfill
             ? @"MAX(qsrs.last_execution_time) > @floor_time
     AND MAX(qsrs.last_execution_time) < @ceiling_time"
@@ -1027,8 +1036,8 @@ FROM sys.query_store_runtime_stats AS qsrs
 WHERE qsrs.runtime_stats_interval_id IN
 (
     SELECT
-        i.runtime_stats_interval_id
-    FROM sys.query_store_runtime_stats_interval AS i
+        PerformanceMonitorLite.runtime_stats_interval_id
+    FROM sys.query_store_runtime_stats_interval AS PerformanceMonitorLite
     WHERE {intervalPreFilter}
 )
 GROUP BY
@@ -1064,8 +1073,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_qs_slice AS qsrs
-    WHERE qsrs.runtime_stats_interval_id = qsrsi.runtime_stats_interval_id
+    FROM #pm_qs_slice AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.runtime_stats_interval_id = qsrsi.runtime_stats_interval_id
 )
 OPTION(RECOMPILE);
 
@@ -1085,8 +1094,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_qs_slice AS qsrs
-    WHERE qsrs.plan_id = qsp.plan_id
+    FROM #pm_qs_slice AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.plan_id = qsp.plan_id
 )
 OPTION(RECOMPILE, HASH JOIN);
 
@@ -1103,8 +1112,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #pm_qs_plan AS qsp
-    WHERE qsp.query_id = qsq.query_id
+    FROM #pm_qs_plan AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_id = qsq.query_id
 )
 OPTION(RECOMPILE, HASH JOIN);
 
@@ -1166,15 +1175,15 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
-    interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC'),
-    interval_end_time_utc = CONVERT(datetime2, qsrsi.end_time AT TIME ZONE 'UTC')
+    interval_start_time_utc = CONVERT(datetime2, PerformanceMonitorLite.start_time AT TIME ZONE 'UTC'),
+    interval_end_time_utc = CONVERT(datetime2, PerformanceMonitorLite.end_time AT TIME ZONE 'UTC')
 FROM #pm_qs_slice AS qsrs
 JOIN #pm_qs_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
 JOIN #pm_qs_query AS qsq
   ON qsq.query_id = qsp.query_id
-{queryTextJoin}LEFT JOIN #pm_qs_interval AS qsrsi
-  ON qsrsi.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
+{queryTextJoin}LEFT JOIN #pm_qs_interval AS PerformanceMonitorLite
+  ON PerformanceMonitorLite.runtime_stats_interval_id = qsrs.runtime_stats_interval_id
 {replicaJoin}
 ORDER BY qsrs.last_execution_time {shipOrder}
 OPTION(RECOMPILE);
@@ -1436,12 +1445,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         var body = $@"SET NOCOUNT ON;
 
 SELECT /* PerformanceMonitorLite */
-    plan_id = qsp.plan_id,
-    query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
-    query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)
+    plan_id = PerformanceMonitorLite.plan_id,
+    query_plan_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_plan_hash, 1),
+    query_plan_text = CONVERT(nvarchar(max), PerformanceMonitorLite.query_plan)
 INTO #plan_fetch
-FROM sys.query_store_plan AS qsp
-WHERE qsp.plan_id IN ({idList})
+FROM sys.query_store_plan AS PerformanceMonitorLite
+WHERE PerformanceMonitorLite.plan_id IN ({idList})
 OPTION(RECOMPILE, HASH JOIN);
 
 SELECT /* PerformanceMonitorLite */
@@ -1451,12 +1460,12 @@ SELECT /* PerformanceMonitorLite */
 FROM
 (
     SELECT
-        plan_id = p.plan_id,
-        query_plan_hash = p.query_plan_hash,
-        query_plan_text = p.query_plan_text,
-        plan_bytes = COALESCE(DATALENGTH(p.query_plan_text), 0),
-        running_bytes = SUM(COALESCE(DATALENGTH(p.query_plan_text), 0)) OVER (ORDER BY p.plan_id ROWS UNBOUNDED PRECEDING)
-    FROM #plan_fetch AS p
+        plan_id = PerformanceMonitorLite.plan_id,
+        query_plan_hash = PerformanceMonitorLite.query_plan_hash,
+        query_plan_text = PerformanceMonitorLite.query_plan_text,
+        plan_bytes = COALESCE(DATALENGTH(PerformanceMonitorLite.query_plan_text), 0),
+        running_bytes = SUM(COALESCE(DATALENGTH(PerformanceMonitorLite.query_plan_text), 0)) OVER (ORDER BY PerformanceMonitorLite.plan_id ROWS UNBOUNDED PRECEDING)
+    FROM #plan_fetch AS PerformanceMonitorLite
 ) AS b
 WHERE b.running_bytes - b.plan_bytes < {budget}
 ORDER BY b.plan_id
@@ -1561,12 +1570,12 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
         var body = $@"SET NOCOUNT ON;
 
 SELECT /* PerformanceMonitorLite */
-    query_id = qsq.query_id,
-    query_hash = CONVERT(varchar(64), qsq.query_hash, 1),
-    query_text_id = qsq.query_text_id
+    query_id = PerformanceMonitorLite.query_id,
+    query_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_hash, 1),
+    query_text_id = PerformanceMonitorLite.query_text_id
 INTO #text_fetch_query
-FROM sys.query_store_query AS qsq
-WHERE qsq.query_id IN ({idList})
+FROM sys.query_store_query AS PerformanceMonitorLite
+WHERE PerformanceMonitorLite.query_id IN ({idList})
 OPTION(RECOMPILE, HASH JOIN);
 
 CREATE CLUSTERED INDEX c ON #text_fetch_query (query_text_id);
@@ -1581,8 +1590,8 @@ WHERE EXISTS
 (
     SELECT
         1/0
-    FROM #text_fetch_query AS q
-    WHERE q.query_text_id = qst.query_text_id
+    FROM #text_fetch_query AS PerformanceMonitorLite
+    WHERE PerformanceMonitorLite.query_text_id = qst.query_text_id
 )
 OPTION(RECOMPILE, HASH JOIN);
 
@@ -1595,12 +1604,12 @@ FROM
     SELECT
         query_id = q.query_id,
         query_hash = q.query_hash,
-        query_sql_text = t.query_sql_text,
-        text_bytes = t.text_bytes,
-        running_bytes = SUM(t.text_bytes) OVER (ORDER BY q.query_id ROWS UNBOUNDED PRECEDING)
+        query_sql_text = PerformanceMonitorLite.query_sql_text,
+        text_bytes = PerformanceMonitorLite.text_bytes,
+        running_bytes = SUM(PerformanceMonitorLite.text_bytes) OVER (ORDER BY q.query_id ROWS UNBOUNDED PRECEDING)
     FROM #text_fetch_query AS q
-    JOIN #text_fetch_text AS t
-      ON t.query_text_id = q.query_text_id
+    JOIN #text_fetch_text AS PerformanceMonitorLite
+      ON PerformanceMonitorLite.query_text_id = q.query_text_id
 ) AS b
 WHERE b.running_bytes - b.text_bytes < {budget}
 ORDER BY b.query_id

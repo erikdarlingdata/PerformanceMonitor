@@ -663,19 +663,20 @@ public sealed class ServerPageTabsTests
             "these PostgreSQL reads are in the SQL Server registry, which is applied to every SQL Server in " +
             "the fleet — each would render permanently empty there: " + string.Join(", ", strays));
 
-        /* And the PostgreSQL registry borrows exactly three SQL-Server-named reads. All three read the
-           collection log or the findings store rather than a SQL Server collector's output, so they answer a
+        /* And the PostgreSQL registry borrows exactly four SQL-Server-named reads. Three read the
+           collection log or the findings store rather than a SQL Server collector's output, and audit_config
+           (#7447) has a PostgreSQL arm that projects the CONFIG_PG_* facts, so all four answer a
            PostgreSQL target honestly; anything else added here would be a panel that cannot fill. Named
            explicitly, because the reads that LOOK engine-neutral and are not (get_server_summary,
            get_daily_summary) are the ones someone reaches for first. */
-        var neutral = new[] { "get_analysis_findings", "get_collection_health", "get_collection_log" };
+        var neutral = new[] { "audit_config", "get_analysis_findings", "get_collection_health", "get_collection_log" };
         var unexpected = onPg
             .Where(n => !n.StartsWith("get_pg_", StringComparison.Ordinal) && !neutral.Contains(n, StringComparer.Ordinal))
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
         Assert.True(
             unexpected.Length == 0,
-            "the PostgreSQL registry names SQL Server reads beyond the three engine-neutral ones — each of " +
+            "the PostgreSQL registry names SQL Server reads beyond the four engine-neutral ones — each of " +
             "these answers a PostgreSQL target with a sentence about a collector that will never run: " +
             string.Join(", ", unexpected));
     }

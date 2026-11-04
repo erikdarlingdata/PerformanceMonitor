@@ -439,7 +439,11 @@ public sealed partial class DarlingWorker
             await RunCollectionLoopAsync(
                 config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
                 managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification,
-                OperatingSystem.IsWindows() && managedPostgres is not null ? managedPostgres.ReconcileNetworkAfterRoleProvisioningAsync : null, stoppingToken);
+                OperatingSystem.IsWindows() && managedPostgres is not null ? managedPostgres.ReconcileNetworkAfterRoleProvisioningAsync : null,
+                OperatingSystem.IsWindows() && managedPostgres is not null
+                    ? async (connectionString, token) => await managedPostgres.ReconcileTelemetryJobAsync(connectionString, token)
+                    : null,
+                stoppingToken);
         }
         finally
         {
