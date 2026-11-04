@@ -1579,7 +1579,7 @@ public sealed class McpQueryTools
             return null;
         }
 
-        var facts = await dataService.GetCollectorRunFactsAsync(serverId, collector, window: (requestedStart, windowEnd));
+        var facts = await dataService.GetCollectorRunFactsAsync(serverId, collector, asOfUtc: windowEnd, window: (requestedStart, windowEnd));
         return facts is { SuccessfulRunsInWindow: > 0, FirstSuccessInWindowUtc: { } firstRun }
             ? WindowNotice(firstRun, requestedStart, table)
             : null;
