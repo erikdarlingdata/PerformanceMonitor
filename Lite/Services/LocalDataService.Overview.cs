@@ -73,17 +73,19 @@ LIMIT 1";
             {
                 cpuPercent = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
                 otherProcessCpuPercent = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1));
-                lastCollection = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
-                /* #3282: the SAME value, kept under its own name because the two have different jobs.
-                   lastCollection is overwritten below by the collection_log read and is freshness display;
-                   this one is the CPU persistence gate's observation identity and must stay the instant of
-                   the CPU reading these percentages came from. */
-                cpuSampleTime = lastCollection;
+                /* #3282: sample_time stays under its own name, the CPU persistence gate's observation identity: it
+                   must be the instant of the CPU reading these percentages came from, on the monitored server's
+                   local clock. */
+                cpuSampleTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
                 /* #3541 A10: the store's UTC clock for the same row — the stamp get_server_summary publishes
                    as cpu_captured_at. sample_time above is the monitored server's local wall clock and the
                    gate's identity; collection_time is the instant the monitor stored it, comparable with every
                    other captured_at on the MCP surface. */
                 cpuCollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                /* #7527: lastCollection is freshness display and list_servers stamps it UTC, so its CPU fallback is
+                   collection_time, the store's UTC clock, not the server-local sample_time (off by the server's UTC
+                   offset). The collection_log read below overwrites it whenever that table has a row. */
+                lastCollection = cpuCollectionTime;
                 /* #3744: the UTC twin, NULL on a pre-v63 row. Kept beside the local stamp rather than folded
                    into it so the summary says which clock each value is in; the alert snapshot does the
                    folding (twin ?? local) where the gate's identity is built. */
@@ -176,7 +178,7 @@ WHERE server_id = $1 AND deadlock_time >= $2";
         }
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
-           stamp above in place, exactly as the single view read did. #5643: the loop's skipped-slots row is not a
+           row's collection_time (UTC) above in place. #5643: the loop's skipped-slots row is not a
            collection, so it cannot make a stalled server read fresh. */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
