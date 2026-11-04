@@ -1043,7 +1043,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("averaged 62.5% across 48 five-minute samples", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated — a core was pinned — which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("get_pg_statement_stats", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("get_pg_top_queries", block.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("SQL Server", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
 
         var raw = CpuFact(100, measured: false);
