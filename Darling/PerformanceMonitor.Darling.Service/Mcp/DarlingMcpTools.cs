@@ -2012,7 +2012,7 @@ internal static class ToolRecommendations
         ["PLAN_WARNING"] =
         [
             new("get_top_queries_by_cpu", "Find the queries whose cached plans carry the warnings"),
-            new("analyze_query_plan", "Examine the plan for the warnings: spills, implicit conversions, missing statistics")
+            new("analyze_plan_xml", "Pass the plan XML of a query that carries these warnings to see them statement by statement: spills, implicit conversions, missing statistics")
         ],
         ["PLAN_CACHE_BLOAT"] =
         [
@@ -2124,6 +2124,12 @@ internal static class ToolRecommendations
                 // Handle dynamic keys by checking prefix
                 else if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("BAD_ACTOR", out recommendations);
+                /* #7449: the range-lock waits (LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_*) are each their own fact key
+                   (FactCollectorHelpers keeps them out of the grouped LCK), and none is named LCK_RANGE. FactAdvice
+                   routes the same prefix to one card; this routes it to that card's reads. No other key starts with
+                   LCK_M_R. */
+                else if (key.StartsWith("LCK_M_R", StringComparison.Ordinal))
+                    ByFactKey.TryGetValue("LCK_RANGE", out recommendations);
                 else if (key.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("ANOMALY_CPU", out recommendations);
                 else if (key.StartsWith("ANOMALY_WAIT_", StringComparison.OrdinalIgnoreCase))

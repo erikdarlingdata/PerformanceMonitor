@@ -151,6 +151,7 @@ public sealed class DarlingCoreToolProfileTests
     /// </summary>
     private static readonly List<string> ExpectedClosure =
     [
+        "analyze_plan_xml",
         "analyze_query_plan",
         "analyze_query_store_plan",
         "analyze_server",
