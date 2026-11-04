@@ -61,7 +61,9 @@ globalThis.location = { hash: "#/server/a/queries" };
 /* Two wait types at 01:11 (the case the line drew straight down through), one wait type at each other time. Blocked sessions: two
    databases at 01:11. */
 /* Times are hours back from now, so the 24 hour window the tab asks for always holds them. */
-const ago = (h) => new Date(Math.floor(Date.now() / 60000) * 60000 - h * 3600000).toISOString().replace("Z", "0000");
+// One clock read anchors every fixture time and every expectation (a second read can cross a minute).
+const NOW_MIN = Math.floor(Date.now() / 60000) * 60000;
+const ago = (h) => new Date(NOW_MIN - h * 3600000).toISOString().replace("Z", "0000");
 const WAITS = [
   { collection_time: ago(6), wait_type: "PREEMPTIVE_OS_CREATEFILE", total_wait_ms: 4 },
   { collection_time: ago(4), wait_type: "PREEMPTIVE_OS_CREATEFILE", total_wait_ms: 43 },
@@ -163,7 +165,7 @@ if (scenario === "default" || scenario === "many" || scenario === "close" || sce
     overlay.fire("mousemove", { clientX: firstX + Number(first[0].attrs.width) / 2 });
     const tip = all(panel).find((n) => /\bchart-tooltip\b/.test(n.className));
     out.tooltipTime = all(tip).find((n) => /\bt-time\b/.test(n.className)).textContent;
-    out.expectedTime = new Date(Date.parse(ago(3) + "Z")).toLocaleString();
+    out.expectedTime = new Date(Date.parse(nameBlocked[0].collection_time + "Z")).toLocaleString();
     out.tooltipRows = all(tip).filter((n) => /\bt-row\b/.test(n.className)).map((r) => r.children.slice(1).map((c) => c.textContent));
   }
 } else if (scenario === "grid") {
