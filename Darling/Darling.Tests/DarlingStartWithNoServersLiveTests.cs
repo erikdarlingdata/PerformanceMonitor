@@ -75,7 +75,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             stop.CancelAfter(TimeSpan.FromMinutes(3));
             var task = (Task)loop.Invoke(
-                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
 
             /* The loop runs until it is stopped. Wait for the line that says it is up and waiting, then stop it. */
             while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
@@ -170,7 +170,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             stop.CancelAfter(TimeSpan.FromMinutes(3));
             var task = (Task)loop.Invoke(
-                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
 
             while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
                 && !task.IsCompleted)
@@ -301,7 +301,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             stop.CancelAfter(TimeSpan.FromMinutes(3));
             var task = (Task)loop.Invoke(
-                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
 
             while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
                 && !task.IsCompleted)
@@ -380,7 +380,7 @@ public sealed class DarlingStartWithNoServersLiveTests
         logger.Entries.Where(e => e.Level >= LogLevel.Warning
             && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal));
 
-    private sealed class RecordingLogger : ILogger<DarlingWorker>
+    internal sealed class RecordingLogger : ILogger<DarlingWorker>
     {
         private readonly List<(LogLevel Level, string Message)> _entries = new();
 

@@ -511,8 +511,8 @@ public sealed class QueryStoreCollectorDefinitionTests
            hundreds of rows — never by scanning runtime_stats itself (measured 20 ms vs 426 ms for the
            identical id set on the field store that wedged). */
         Assert.Contains("WHERE qsrs.runtime_stats_interval_id IN", text, StringComparison.Ordinal);
-        Assert.Contains("FROM sys.query_store_runtime_stats_interval AS i", text, StringComparison.Ordinal);
-        Assert.Contains("WHERE i.end_time > @cutoff_time", text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.query_store_runtime_stats_interval AS PerformanceMonitorLite", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.end_time > @cutoff_time", text, StringComparison.Ordinal);
         Assert.DoesNotContain("FROM sys.query_store_runtime_stats AS f", text, StringComparison.Ordinal);
 
         /* #2133 STAGING: the aggregate lands in a temp table and the plan/query/text joins run FROM it,
@@ -591,7 +591,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            the remainder - every other column at its ordinal - must be identical between the two forms. */
         const string qstJoin = "JOIN #pm_qs_text AS qst\n  ON qst.query_text_id = qsq.query_text_id\n";
         var stageStart = Lf(inline).IndexOf("\nSELECT /* PerformanceMonitorLite */\n    qst.query_text_id", StringComparison.Ordinal);
-        const string stageEndMarker = "    WHERE qsq.query_text_id = qst.query_text_id\n)\nOPTION(RECOMPILE, HASH JOIN);\n";
+        const string stageEndMarker = "    WHERE PerformanceMonitorLite.query_text_id = qst.query_text_id\n)\nOPTION(RECOMPILE, HASH JOIN);\n";
         var stageEnd = Lf(inline).IndexOf(stageEndMarker, StringComparison.Ordinal) + stageEndMarker.Length;
         Assert.True(stageStart > 0 && stageEnd > stageStart, "the inline form stages the text view into #pm_qs_text");
         Assert.Equal(
@@ -615,13 +615,13 @@ public sealed class QueryStoreCollectorDefinitionTests
             budgetBytes: 12 * 1024 * 1024).Text;
 
         Assert.Contains("EXECUTE [SO].sys.sp_executesql", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE qsq.query_id IN (4242, 4243)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsq.query_id > ", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.query_id IN (4242, 4243)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerformanceMonitorLite.query_id > ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SELECT TOP", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY b.query_id", sql, StringComparison.Ordinal);
         Assert.Contains("b.running_bytes - b.text_bytes < 12582912", sql, StringComparison.Ordinal);
         /* query_id is only unique until a Query Store reset renumbers it; the hash is the reset detector. */
-        Assert.Contains("query_hash = CONVERT(varchar(64), qsq.query_hash, 1)", sql, StringComparison.Ordinal);
+        Assert.Contains("query_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_hash, 1)", sql, StringComparison.Ordinal);
         /* ROWS, not the RANGE default: RANGE tie-groups peers and forces a spool, and the frame has to be
            per-row because the cut falls BETWEEN two statements. */
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
@@ -1149,13 +1149,20 @@ public sealed class QueryStoreCollectorDefinitionTests
         using var reader = new FakeCollectorDataReader(
             MakeRow(1, "SELECT 1 FROM UserTable"),
             MakeRow(2, "SELECT /* " + QueryStoreCollector.SelfQueryMarker + " */ TOP (50000) query_id = qsq.query_id"),
-            MakeRow(3, "UPDATE Another SET x = 1"));
+            MakeRow(3, "UPDATE Another SET x = 1"),
+            /* #7443: in a PARAMETERIZATION FORCED database SQL Server stores the NORMALIZED text, which has no comments, so only an
+               identifier survives. These are the shapes the monitor's own statements take there, carrying the marker as an alias. */
+            MakeRow(4, "(@2 int,@1 int,@0 int,@3 int,@4 int)select 'SO' where exists ( select 1 from sys . database_query_store_options as "
+                + QueryStoreCollector.SelfQueryMarker + " where actual_state in ( @0 , @1 , @2 ) and readonly_reason & @3 = @4 )"),
+            MakeRow(5, "(@1 int,@0 int)select top ( @1 ) plan_id = " + QueryStoreCollector.SelfQueryMarker + " . plan_id from sys . query_store_plan as "
+                + QueryStoreCollector.SelfQueryMarker + " where " + QueryStoreCollector.SelfQueryMarker + " . is_forced_plan = @0"),
+            MakeRow(6, "(@0 int)select top ( @0 ) plan_id = qsp . plan_id from sys . query_store_plan as qsp where qsp . is_forced_plan = @0"));
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
         await QueryStoreCollector.Instance.ReadItemAsync("SO", reader, rows, context, CancellationToken.None);
 
-        Assert.Equal(2, rows.Count);
+        Assert.Equal(3, rows.Count);
         Assert.DoesNotContain(rows, r => r.QueryText!.Contains(QueryStoreCollector.SelfQueryMarker, StringComparison.Ordinal));
-        Assert.Equal(new[] { 1L, 3L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
+        Assert.Equal(new[] { 1L, 3L, 6L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
     }
 
     [Fact]
@@ -1250,8 +1257,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         /* #2133: the pre-filter's two-sided window asks the INTERVAL CATALOG which intervals OVERLAP
            (floor, ceiling) — end after the floor AND start before the ceiling — a superset the exact
            HAVING below then narrows, exactly like the live path's one-sided form. */
-        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitorLite.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitorLite.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @floor_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
@@ -1277,8 +1284,8 @@ public sealed class QueryStoreCollectorDefinitionTests
         var plan = QueryStoreCollector.Instance.BuildBackfillQuery(MakeContext(isAzureSqlDb: true), floor, ceiling);
 
         Assert.DoesNotContain("sp_executesql", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("i.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("i.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitorLite.end_time > @floor_time", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitorLite.start_time < @ceiling_time", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time DESC", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@cutoff_time", plan.Text, StringComparison.Ordinal);
         /* The same eligibility gate the live Azure query leads with. */
@@ -1300,7 +1307,7 @@ public sealed class QueryStoreCollectorDefinitionTests
            one-sided cutoff and ASC order byte-for-byte, or phase 1's watermark-exact resume breaks
            in the same PR that builds on it. */
         var live = QueryStoreCollector.Instance.BuildPerItemQuery("StackOverflow", MakeContext());
-        Assert.Contains("i.end_time > @cutoff_time", live.Text, StringComparison.Ordinal);
+        Assert.Contains("PerformanceMonitorLite.end_time > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("MAX(qsrs.last_execution_time) > @cutoff_time", live.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY qsrs.last_execution_time ASC", live.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("@floor_time", live.Text, StringComparison.Ordinal);
@@ -1343,11 +1350,11 @@ public sealed class QueryStoreCollectorDefinitionTests
            reads ''UTC'' there and 'UTC' on Azure — the one place this pair could have broken the escaping. */
         var quote = isAzureSqlDb ? "'" : "''";
         Assert.Contains("runtime_stats_interval_id = qsrs.runtime_stats_interval_id,", body, StringComparison.Ordinal);
-        Assert.Contains($"interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
+        Assert.Contains($"interval_start_time_utc = CONVERT(datetime2, PerformanceMonitorLite.start_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
 
         /* #4765: the interval's END, off the same joined interval row and converted the same way as the start.
            Selected LAST (the payload's 56th item) so the reader ordinal and the appended payload column agree. */
-        Assert.Contains($"interval_end_time_utc = CONVERT(datetime2, qsrsi.end_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
+        Assert.Contains($"interval_end_time_utc = CONVERT(datetime2, PerformanceMonitorLite.end_time AT TIME ZONE {quote}UTC{quote})", body, StringComparison.Ordinal);
         Assert.True(
             body.IndexOf("interval_start_time_utc =", StringComparison.Ordinal) < body.IndexOf("interval_end_time_utc =", StringComparison.Ordinal),
             "the interval end is selected after the interval start");
@@ -1357,8 +1364,8 @@ public sealed class QueryStoreCollectorDefinitionTests
 
         /* LEFT JOIN, never INNER: an interval row that failed to resolve must cost this collector ONE
            column, not every runtime-stats row for that database. Same lesson as the replica join. */
-        Assert.Contains("LEFT JOIN #pm_qs_interval AS qsrsi", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("JOIN #pm_qs_interval AS qsrsi\n  ON qsrsi", body.Replace("LEFT JOIN #pm_qs_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN #pm_qs_interval AS PerformanceMonitorLite", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("JOIN #pm_qs_interval AS PerformanceMonitorLite\n  ON PerformanceMonitorLite", body.Replace("LEFT JOIN #pm_qs_interval", "X", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1507,7 +1514,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var text = PayloadSql(context);
 
         Assert.Contains(
-            "WHERE i.end_time > @cutoff_time\n    AND   i.end_time <= SYSUTCDATETIME()",
+            "WHERE PerformanceMonitorLite.end_time > @cutoff_time\n    AND   PerformanceMonitorLite.end_time <= SYSUTCDATETIME()",
             text, StringComparison.Ordinal);
 
         /* Server-evaluated exclusion — the single-parameter sp_executesql contract is untouched. */
@@ -1524,7 +1531,7 @@ public sealed class QueryStoreCollectorDefinitionTests
     {
         var text = PayloadSql(MakeContext(probeResult: 16));
 
-        Assert.Contains("WHERE i.end_time > @cutoff_time\n", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.end_time > @cutoff_time\n", text, StringComparison.Ordinal);
         Assert.DoesNotContain("SYSUTCDATETIME", text, StringComparison.Ordinal);
     }
 
@@ -1543,7 +1550,7 @@ public sealed class QueryStoreCollectorDefinitionTests
         var closed = PayloadSql(closedContext);
 
         var normalized = closed.Replace(
-            "\n    AND   i.end_time <= SYSUTCDATETIME()", "", StringComparison.Ordinal);
+            "\n    AND   PerformanceMonitorLite.end_time <= SYSUTCDATETIME()", "", StringComparison.Ordinal);
         Assert.NotEqual(open, closed);
         Assert.Equal(open, normalized);
     }
