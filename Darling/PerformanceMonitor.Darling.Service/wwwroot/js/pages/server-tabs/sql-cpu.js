@@ -19,7 +19,7 @@ export const SCHEDULER_STATS = [
   { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },
   { key: "active_requests", label: "Active requests", format: "int" },
   { key: "queued_requests", label: "Queued requests", format: "int" },
-  { key: "recommendation", label: "Recommendation", format: "text", small: true },
+  { key: "recommendation", label: "Recommendation", format: "text", small: true, sentence: true },
 ];
 
 /* ─────────────────────────── line series ─────────────────────────── */

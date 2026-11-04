@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, fmtInt, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -15,7 +15,7 @@ import { statsHistoryColumn } from "../stats-history.js";
 import { windowParams } from "../../time-slicer.js";
 import { activePlanColumns, planColumn } from "../plan-viewer.js";
 import { comparePick, compareControl } from "../top-compare.js";
-import { codeDisclosure, listCell, panelShell, discontinuityNotes, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
+import { codeDisclosure, listCell, panelShell, discontinuityStrip, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
 
 /**
  * Top Queries by CPU, plus that ONE query's per-collection history — the browser's per-query drill-down (#2520).
@@ -120,7 +120,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   return panel;
 }
 
-async function drawQueryTrend(slot, server, ctx, query, signal) {
+export async function drawQueryTrend(slot, server, ctx, query, signal) {
   mount(slot, loadingStrip());
   const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
@@ -147,20 +147,14 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
      which this read has none of) is a different fact with the opposite remedy, and the two used to share a
      spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
   if (trend.data.window_truncated) {
-    notes.push(
-      "History for this query starts " +
-        trend.data.effective_hours_back +
-        " hours back, not the " +
-        trend.data.hours_back +
-        " the window asked for — earlier collections have aged out of the tier that answered."
-    );
+    notes.push(trendHeadNote(trend.data, "History for this query"));
   }
-  /* #3653 A5: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
-  notes.push(...discontinuityNotes(trend.data));
 
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
+    /* #3653 A5, #7416: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
+    discontinuityStrip(trend.data),
     zoomableLineChart({
       atTime: { server },
       points: trend.data.trend || [],
@@ -184,7 +178,7 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
   ]);
 }
 
-/** A grid drawn again on a tag pick: `build(picker)` draws the card with the tag filter under its title. Each draw aborts the one before it. */
+/** A grid drawn again on a tag pick: `build(picker, redraw)` draws the card with the tag filter under its title (`redraw` draws it again, for a control a card adds to the picker row). Each draw aborts the one before it. */
 export function tagFilteredCard(kind, build, cmp = null) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
@@ -197,7 +191,7 @@ export function tagFilteredCard(kind, build, cmp = null) {
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const picker = el("div", { class: "picker-row" }, [tagFilterPicker(kind, draw), ...(cmp ? [compareControl(draw, slot)] : [])]);
     setPanelSignal(mine.signal);
-    const card = cmp && comparePick.value !== "off" ? compareDrawn(kind, cmp, null, "Query Store", picker, mine.signal, () => build(picker)) : build(picker);
+    const card = cmp && comparePick.value !== "off" ? compareDrawn(kind, cmp, null, "Query Store", picker, mine.signal, () => build(picker, draw)) : build(picker, draw);
     setPanelSignal(outer);
     mount(slot, [card]);
   };
@@ -394,10 +388,30 @@ export const QUERY_STORE_COLUMNS = [
  * — the same sentences the MCP payload and the WPF grid carry), behind a disclosure because each one is a
  * paragraph; it is never re-worded here.
  */
+/* #7416: the reason tokens in words (QueryStoreClutter.ReasonText). Unknown is "not graded": nothing was judged, because Query Store is off,
+   the database is a read-only replica, or the window held nothing. The row says so beside its reasons. */
+const QS_REASON_TEXT = {
+  read_cost_dominant: "Read cost dominates",
+  plan_churn_high: "High plan churn",
+  one_shot_plans: "Mostly one-shot plans",
+  plans_per_query_at_cap: "Plans per query at the cap",
+  storage_near_cap: "Storage near the cap",
+  qs_read_only: "Query Store read-only",
+  qs_off: "Query Store off",
+  qs_read_only_replica: "Query Store read-only (replica)",
+  not_measured: "Nothing measured in this window",
+};
+
+export function qsReasonsText(row) {
+  const words = (Array.isArray(row && row.verdict_reasons) ? row.verdict_reasons : []).map((t) => QS_REASON_TEXT[t] || t).join(", ");
+  if (!row || row.verdict !== "Unknown") return words || "—";
+  return words ? words + " (not graded)" : "Not graded";
+}
+
 export const QS_CLUTTER_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "verdict", label: "Verdict", sevKey: "verdict" },
-  { key: "verdict_reasons", label: "Reasons", render: (r) => listCell(r.verdict_reasons) },
+  { key: "verdict_reasons", label: "Reasons", render: (r) => document.createTextNode(qsReasonsText(r)) },
   /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
   { key: "excluded_reason", label: "Excluded Because" },
   { key: "read_cost.runs_slowest_pct", label: "Slowest on %", format: "num1" },
@@ -438,7 +452,9 @@ export const QS_OVERHEAD_WAIT_COLUMNS = [
   { key: "waiting_tasks_total", label: "Waiting Tasks", format: "int" },
   { key: "measured_seconds", label: "Measured s", format: "int" },
   { key: "rows_observed", label: "Rows", format: "int" },
-  { key: "rows_unknowable", label: "Unrateable Rows", format: "int" },
+  /* #7416: a count of samples whose interval could not be measured, which are left out of the ms/hour rating. It is zero on almost every server, and a
+     column of zeros said nothing, so it shows only when some wait has such a sample. */
+  { key: "rows_unknowable", label: "Unrateable Rows", format: "int", hideWhenAllZero: true, hint: "Samples whose interval could not be measured. They count in Rows but are left out of the ms/hour rating." },
   { key: "last_observed", label: "Last Seen", format: "time" },
 ];
 

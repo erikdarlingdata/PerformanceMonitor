@@ -152,7 +152,7 @@ async function newestRows(server, names) {
 }
 
 function resultTable(rows) {
-  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Error"].map((h) => el("th", {}, [h])));
+  const head = el("tr", {}, ["Collector", "When", "Status", "Rows", "Error", "Run note"].map((h) => el("th", {}, [h])));
   const body = rows.map((run) =>
     el("tr", {}, [
       el("td", {}, [String(run.collector)]),
@@ -160,6 +160,7 @@ function resultTable(rows) {
       el("td", {}, [String(run.status || "")]),
       el("td", {}, [run.rows_collected == null ? "" : String(run.rows_collected)]),
       el("td", {}, [run.error_message ? plainTextCounts(String(run.error_message)) : ""]),
+      el("td", {}, [run.run_note ? plainTextCounts(String(run.run_note)) : ""]),
     ])
   );
   return el("table", { class: "data-table" }, [el("thead", {}, [head]), el("tbody", {}, body)]);

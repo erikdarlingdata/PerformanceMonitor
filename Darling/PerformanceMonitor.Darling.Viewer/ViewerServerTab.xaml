@@ -2396,7 +2396,7 @@
                         <TextBlock Grid.Row="0" Text="Resource Semaphore Pressure (every snapshot in the window)" Style="{StaticResource SectionHeader}"/>
                         <DataGrid Grid.Row="1" x:Name="ResourceSemaphorePressureGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
                                 <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
                                 <DataGridTextColumn Header="Snapshots" Binding="{Binding Snapshots, StringFormat=N0}" Width="85"/>
                                 <DataGridTextColumn Header="Peak Waiters" Binding="{Binding PeakWaiters, StringFormat=N0}" Width="100"/>
@@ -2418,7 +2418,7 @@
                         </StackPanel>
                         <DataGrid Grid.Row="3" x:Name="ResourceSemaphoreGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
                                 <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
                                 <DataGridTextColumn Header="Target MB" Binding="{Binding TargetMemoryMb, StringFormat=N1}" Width="95"/>
                                 <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1}" Width="110"/>
@@ -3061,11 +3061,11 @@
                     <RowDefinition Height="*" MinHeight="90"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="Session Counts Over Time" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" Style="{StaticResource SectionHeader}"/>
                 <scottplot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
                 <!-- Sessions by Application (#6388): the newest per-application snapshot, the read get_session_stats serves as applications. -->
                 <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
-                    <TextBlock Text="Sessions by Application (newest snapshot, a moment not the window)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Sessions by Application (newest snapshot, user sessions with an application name, the monitor left out)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <TextBlock x:Name="SessionsByApplicationCollectedText" Text="--" VerticalAlignment="Center"/>
                 </StackPanel>
@@ -4197,8 +4197,11 @@
                                 <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MessageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding ErrorFormatted}" Width="*">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -4223,6 +4226,11 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
+                <CheckBox Grid.Row="0" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                          HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,0,8"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Off by default: on an idle server every long completion can be the monitor's own. Turn on to see a slow collector run."
+                          Checked="LongQueriesIncludeMonitorCheckBox_Changed" Unchecked="LongQueriesIncludeMonitorCheckBox_Changed"/>
                 <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
                            Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>

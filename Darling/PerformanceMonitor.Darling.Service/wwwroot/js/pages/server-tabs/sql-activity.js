@@ -6,11 +6,11 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, windowFromHours, clampText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, windowFromHours, clampText } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityNotes, withPanelSignal } from "./shared.js";
+import { panelShell, discontinuityStrip, withPanelSignal } from "./shared.js";
 
 /** The most counters the Perfmon chart draws at once: one read each, and the palette has ten colors. */
 const MAX_COUNTERS_CHARTED = 10;
@@ -74,7 +74,7 @@ export function perfmonPanel(server, ctx) {
     mount(body, [
       VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
-        columns: PERFMON_COLUMNS,
+        columns: perfmonColumns(res.data.counters),
         emptyText: "No perfmon counters in the latest snapshot.",
       }),
       picker.node,
@@ -110,7 +110,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
   const notes = [];
   const kept = [];
   let keptHours = 0;
-  const seenNotes = new Set();
+  const seenSteps = new Map();
   let failed = 0;
   let allRates = true;
   results.forEach((trend, i) => {
@@ -129,11 +129,12 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
       kept.push(trend);
     }
     /* #3653 A5: the payload's baseline discontinuities render as a notice above the chart. They are about the
-       server, so the same sentence from two counters shows once. */
-    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+       server, so the same step from two counters shows once. */
     const points = trend.data.trend || [];
     /* A rate counter plots its per_second (its stored value only climbs); any other counter plots its value. */
     const rate = points.some((p) => p && "per_second" in p);
+    /* #7416: only a rate counter is a delta, so only it has a baseline that a restart starts over. */
+    if (rate) for (const d of trend.data.discontinuities || []) seenSteps.set(d.at + "|" + d.reason, d);
     if (!rate) allRates = false;
     drawn.push({
       key: "c" + i,
@@ -154,7 +155,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
   }
   mount(slot, [
     kept.length ? keptWindowStrip(kept[0]) : null,
-    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    discontinuityStrip({ discontinuities: [...seenSteps.values()] }),
     ...failures,
     zoomableLineChart({
       atTime: { server },
@@ -215,6 +216,8 @@ const SESSION_TREND_SERIES = [
   { key: "sessions_waiting_for_memory", label: "Waiting for memory" },
 ];
 
+export const SESSION_TREND_SCOPE = "Counts all sessions on the server, background (system) sessions and the monitor's own included. The Sessions tile counts user sessions with an application name and leaves the monitor out, so it reads lower.";
+
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
   ctx = withPanelSignal(ctx);
@@ -227,14 +230,13 @@ export function sessionStatsTrendPanel(server, ctx) {
     const points = res.data.trend || [];
     if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip("No session samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-    const notes = discontinuityNotes(res.data);
     const newest = points[points.length - 1];
     const top = [];
     if (newest.top_application_name) top.push("application " + newest.top_application_name + " (" + newest.top_application_connections + ")");
     if (newest.top_host_name) top.push("host " + newest.top_host_name + " (" + newest.top_host_connections + ")");
     mount(body, [
       keptWindowStrip(res),
-      notes.length ? noticeStrip(notes.join(" ")) : null,
+      discontinuityStrip(res.data, { delta: false }), /* #7416: session counts are levels */
       zoomableLineChart({
         atTime: { server },
         points,
@@ -244,6 +246,9 @@ export function sessionStatsTrendPanel(server, ctx) {
         unit: "sessions",
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
+      /* #7416: this trend counts every row of sys.dm_exec_sessions, background sessions and the monitor's own included. The Sessions tile
+         beside it counts user sessions with an application name and leaves the monitor out, so the two numbers differ by design. */
+      el("div", { class: "mp-metric-note", text: SESSION_TREND_SCOPE }),
       top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
       chartNote(res.data, "level"),
     ]);
@@ -290,14 +295,36 @@ function jobMessageCell(r) {
   return el("div", { class: "jh-message" }, [clampText(text)]);
 }
 
+/* #7416: a stored counter value is a whole number (a gauge's reading, a delta), and "1.00" or "86.00" claims a precision it does not
+   have. A whole number prints whole, a fraction keeps two places. */
+export function wholeOrTwoPlaces(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  return Number.isInteger(n) ? fmtInt(n) : fmtNum(n, 2);
+}
+
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
   { key: "per_second", label: "Per second", format: "rate" },
   { key: "running_total", label: "Total since counter start", format: "int" },
-  { key: "value", label: "Value", format: "num2" },
-  { key: "delta_value", label: "Delta", format: "num2" },
+  { key: "value", label: "Value", align: "right", display: (r) => wholeOrTwoPlaces(r.value) },
+  { key: "delta_value", label: "Delta", align: "right", display: (r) => wholeOrTwoPlaces(r.delta_value) },
 ];
+
+/* #7416: the same counter and instance can come from two objects (Transaction Delay with instance _Total is in both the database replica
+   and the database mirroring object), and the two rows then read alike. The Object column is drawn only when a row would repeat another. */
+export function perfmonColumns(counters) {
+  const seen = new Set();
+  let repeats = false;
+  for (const c of counters || []) {
+    const key = (c.counter_name || "") + "|" + (c.instance_name || "");
+    if (seen.has(key)) repeats = true;
+    seen.add(key);
+  }
+  if (!repeats) return PERFMON_COLUMNS;
+  return [PERFMON_COLUMNS[0], { key: "object_name", label: "Object" }, ...PERFMON_COLUMNS.slice(1)];
+}
 
 export const INDEX_COLUMNS = [
   { key: "database_name", label: "Database" },

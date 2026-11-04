@@ -2680,7 +2680,7 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Session Counts Over Time" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <ScottPlot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
                     <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -2802,8 +2802,11 @@
                                         <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
-                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MessageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        <DataGridTextColumn Binding="{Binding ErrorFormatted}" Width="*">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
@@ -3293,6 +3296,11 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
+                    <CheckBox Grid.Row="0" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                              HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,0,8"
+                              Foreground="{DynamicResource ForegroundBrush}"
+                              ToolTip="Off by default: on an idle server every long completion can be the monitor's own. Turn on to see a slow collector run."
+                              Checked="LongQueriesIncludeMonitorCheckBox_Changed" Unchecked="LongQueriesIncludeMonitorCheckBox_Changed"/>
                     <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                     <StackPanel Grid.Row="1">
                         <!-- Where the stored completions start, when that is after the window's start (the same "Showing since <time>"

@@ -218,6 +218,30 @@ internal static class DarlingSystemHealthReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
         => ReadNullableTimestampAsync(postgres, LastCaptureSql, serverId, eventType: null, cancellationToken);
 
+    /// <summary>
+    /// The host platform the newest <c>server_properties</c> row that carries one recorded (#7416 item 1): the one stored
+    /// fact that says whether this is SQL Server on Linux, where the system_health SYSTEM CPU figure cannot be known.
+    /// An index walk down <c>(server_id, collection_time)</c> to the first row with a value. $1 server_id.
+    /// </summary>
+    public const string HostOsVersionSql = """
+        SELECT host_os_version
+        FROM server_properties
+        WHERE server_id = $1
+        AND   host_os_version IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HostOsVersionSql"/>: null when the server has never stored a host platform.</summary>
+    public static async Task<string?> GetHostOsVersionAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HostOsVersionSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
     /// <summary>Runs <see cref="LastCaptureOfTypeSql"/>: null when no event of <paramref name="eventType"/>
     /// has ever been stored for the server.</summary>
     public static Task<DateTime?> GetLastCaptureOfTypeAsync(

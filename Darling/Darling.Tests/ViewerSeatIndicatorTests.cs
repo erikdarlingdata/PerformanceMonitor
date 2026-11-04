@@ -43,14 +43,14 @@ public class ViewerSeatIndicatorTests
         foreach (ViewerSeatState state in Enum.GetValues<ViewerSeatState>())
         {
             var text = ViewerSeatIndicator.Text(state);
-            Assert.StartsWith("Seat:", text, StringComparison.Ordinal);
+            Assert.StartsWith("Access:", text, StringComparison.Ordinal);
             texts.Add(text);
         }
 
         Assert.Equal(texts.Count, new HashSet<string>(texts, StringComparer.Ordinal).Count);
 
-        Assert.Equal("Seat: read-only", ViewerSeatIndicator.Text(ViewerSeatState.ReadOnly));
-        Assert.Equal("Seat: read-write", ViewerSeatIndicator.Text(ViewerSeatState.ReadWrite));
+        Assert.Equal("Access: read-only", ViewerSeatIndicator.Text(ViewerSeatState.ReadOnly));
+        Assert.Equal("Access: read-write", ViewerSeatIndicator.Text(ViewerSeatState.ReadWrite));
         Assert.DoesNotContain("read-only", ViewerSeatIndicator.Text(ViewerSeatState.Unreachable), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -65,7 +65,7 @@ public class ViewerSeatIndicatorTests
     {
         var tip = ViewerSeatIndicator.ToolTip(ViewerSeatState.Unreachable, storeIsOnThisMachine);
 
-        Assert.Contains("NOT a read-only seat", tip, StringComparison.Ordinal);
+        Assert.Contains("NOT read-only access", tip, StringComparison.Ordinal);
         Assert.DoesNotContain("connectAs", tip, StringComparison.Ordinal);
         Assert.DoesNotContain("network.role", tip, StringComparison.Ordinal);
     }
@@ -190,7 +190,7 @@ public class ViewerSeatIndicatorTests
         body = end > 0 ? body[..end] : body;
 
         Assert.Contains("x:Name=\"SeatText\"", body, StringComparison.Ordinal);
-        Assert.Contains("Text=\"Seat: --\"", body, StringComparison.Ordinal);
+        Assert.Contains("Text=\"Access: --\"", body, StringComparison.Ordinal);
 
         var columns = Count(body, "<ColumnDefinition ");
         var fields = Count(body, "<TextBlock ");

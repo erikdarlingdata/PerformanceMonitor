@@ -1199,8 +1199,11 @@ public sealed class McpHealthTools
                 status = r.Status,
                 /* #4198, matching Darling's twin exactly: a preview by default, full_text opts back into
                    the whole field. */
-                error_message = full_text ? r.ErrorMessage : McpHelpers.Truncate(r.ErrorMessage, ErrorMessagePreviewLength),
-                error_message_truncated = !full_text && r.ErrorMessage is not null && r.ErrorMessage.Length > ErrorMessagePreviewLength,
+                /* #7416, matching Darling's twin: error_message is a run that did not succeed, run_note is what a SUCCESS run left. */
+                error_message = full_text ? CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage) : McpHelpers.Truncate(CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage), ErrorMessagePreviewLength),
+                error_message_truncated = !full_text && CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage) is { } errText && errText.Length > ErrorMessagePreviewLength,
+                run_note = full_text ? CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage) : McpHelpers.Truncate(CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage), ErrorMessagePreviewLength),
+                run_note_truncated = !full_text && CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage) is { } noteText && noteText.Length > ErrorMessagePreviewLength,
             });
 
             /* #6180: a large limit (1000 measured at 70-86 KB) passes the shared response target, so the newest-first (or
@@ -1361,7 +1364,8 @@ public sealed class McpHealthTools
                 store_duration_ms = r.DuckDbDurationMs,
                 rows_collected = r.RowsCollected,
                 status = r.Status,
-                error_message = r.ErrorMessage,
+                error_message = CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage),
+                run_note = CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage),
             }).ToList();
 
             /* #6180: a large limit passes the shared response target, so the page is cut to the newest (or slowest) whole runs

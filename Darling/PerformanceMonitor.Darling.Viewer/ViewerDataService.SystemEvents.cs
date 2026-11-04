@@ -588,7 +588,7 @@ public sealed partial class ViewerDataService
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.SpServerDiagnosticsEvent, cancellationToken);
 
-        return await Task.Run(() =>
+        var rows = await Task.Run(() =>
         {
             var records = new List<SystemHealthRecord>();
             foreach (var xml in xmls)
@@ -601,7 +601,29 @@ public sealed partial class ViewerDataService
             records.Sort((a, b) => Nullable.Compare(a.EventTime, b.EventTime));
             return records;
         }, cancellationToken);
+
+        /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null there rather than a flat 100. */
+        return SystemHealthHostCpu.Apply(rows, await GetHostOsVersionAsync(serverId, cancellationToken));
     }
+
+    /// <summary>The newest stored host platform for the server, or null when none was ever stored (#7416 item 1). Twin of
+    /// <c>DarlingSystemHealthReader.HostOsVersionSql</c> and Lite's <c>GetHostOsVersionAsync</c>.</summary>
+    public async Task<string?> GetHostOsVersionAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(HostOsVersionSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter { Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    private const string HostOsVersionSql = """
+        SELECT host_os_version
+        FROM server_properties
+        WHERE server_id = $1
+        AND   host_os_version IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
 
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──
 

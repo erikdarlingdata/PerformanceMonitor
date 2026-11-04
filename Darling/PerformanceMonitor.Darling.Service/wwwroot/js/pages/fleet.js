@@ -16,7 +16,7 @@
 import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
 import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
-import { VIZ, navigateServer } from "../panels.js";
+import { VIZ, navigateServer, navigateServerPanel } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
 import { buildTagGroups, cardMatches } from "../fleet-groups.js";
 import { favoriteStar, alertBadge } from "../viewer-local-ui.js";
@@ -779,7 +779,7 @@ function serverCard(c, store, own = true) {
       ]),
       statusLine,
       tagPills(c),
-      metricBands(c),
+      metricBands(c, store),
     ]
   );
 }
@@ -799,7 +799,7 @@ function serverCard(c, store, own = true) {
    wrote a collection, or the read failed) is there no date, and the page then says what is known: the window's bound. */
 export const DARK_PAST_WINDOW = "last collected more than 2 days ago";
 
-export function metricBands(c) {
+export function metricBands(c, store) {
   const threadsValue =
     c.threads_severity === "Unknown"
       ? "n/a"
@@ -807,7 +807,7 @@ export function metricBands(c) {
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
       : c.available_threads != null
       ? fmtInt(c.available_threads) + " free"
-      : "ok";
+      : "OK";
   /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
      N in use). It says how many are in use, of the total. */
   const threadsInUse =
@@ -838,7 +838,7 @@ export function metricBands(c) {
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
 
-  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "ok";
+  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "OK";
   const memDetail =
     c.memory_mb != null
       ? fmtMb(c.memory_mb) + (c.buffer_pool_mb != null ? " · BP " + fmtMb(c.buffer_pool_mb) : "")
@@ -907,7 +907,7 @@ export function metricBands(c) {
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
-    ...identityCapacityChip(c),
+    ...identityCapacityChip(c, store),
     /* #6874: a chip only when the server's Agent alert setup has a gap. It is not a band: nothing above reads it, and a
        server without a gap shows no extra chip. */
     ...agentAlertChip(c),
@@ -923,28 +923,57 @@ function agentAlertChip(c) {
   return [chip("Agent alerts", fmtInt(gaps.length) + (gaps.length === 1 ? " gap" : " gaps"), "Warning", gaps.map((g) => g.message).join(" "))];
 }
 
+/* #7416: the count says what it counts. The Health Checks panel counts databases ("11 of 13 judged databases overdue"), and 25 overdue items
+   beside it read as a second, different number for the same thing. */
+export function databaseProtectionValue(overdue) {
+  const databases = new Set(overdue.map((o) => String(o.database).toLowerCase())).size;
+  return fmtInt(overdue.length) + (overdue.length === 1 ? " item" : " items") + " on " + fmtInt(databases) + (databases === 1 ? " database" : " databases");
+}
+
 function databaseProtectionChip(c) {
   const overdue = c.database_protection_overdue;
   if (!Array.isArray(overdue) || overdue.length === 0) return [];
-  return [chip("Protection", fmtInt(overdue.length) + " overdue", "Warning", overdue.map((o) => o.text).join(", "))];
+  return [chip("Protection", databaseProtectionValue(overdue), "Warning", overdue.map((o) => o.text).join(", "))];
 }
 
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
-function identityCapacityChip(c) {
+/* The service sends the remaining count as a digit string because an identity bigint does not fit a JSON number. Number() would round it above 2^53,
+   so group the digits themselves (BigInt keeps every digit and a leading minus, and groups in the reader's locale like fmtInt). */
+function groupDigits(v) {
+  const s = String(v).trim();
+  return /^-?\d+$/.test(s) ? BigInt(s).toLocaleString() : fmtInt(v);
+}
+
+/* #7416: the tile names the fullest column and its figures, and a click opens the Identity Capacity panel that lists every column. A service that
+   sends no column (an older one) keeps the generic sentence. */
+export function identityCapacityDetail(ic) {
+  const n = ic.columns_at_bar;
+  if (!ic.worst_column) return "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".";
+  const name = [ic.worst_database, ic.worst_table, ic.worst_column].filter(Boolean).join(".");
+  const pct = ic.worst_percent_used == null ? "" : ": " + fmtNum(ic.worst_percent_used, ic.worst_percent_used >= 99.95 || ic.worst_percent_used === 0 ? 0 : 1) + "% used";
+  const left = ic.worst_values_remaining == null ? "" : ", " + groupDigits(ic.worst_values_remaining) + " left";
+  return name + pct + left + (n > 1 ? ". The fullest of " + fmtInt(n) + " columns at 70% or more." : ".");
+}
+
+function identityCapacityChip(c, store) {
   const ic = c.identity_capacity;
   if (!ic || !ic.columns_at_bar) return [];
   const n = ic.columns_at_bar;
-  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning",
-    "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".")];
+  const server = c.server_name || c.display_name;
+  return [chip("Identity capacity", fmtInt(n) + (n === 1 ? " column" : " columns"), ic.worst_band === "critical" ? "Critical" : "Warning", identityCapacityDetail(ic), true, (e) => {
+    /* The card around the tile opens the server; the tile opens the panel, so it keeps the click to itself. */
+    if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+    navigateServerPanel(server, store, "config", "Identity Capacity");
+  })];
 }
 
 /* wrapDetail: the Collectors chip's count line is the one detail that carries counts a person acts on (not collected, need setup,
    #6932), and a nowrap ellipsis cut the newest clause off at every width, so it wraps and the other chips keep their one line. */
-function chip(label, value, sev, detail, wrapDetail) {
+function chip(label, value, sev, detail, wrapDetail, onActivate) {
   const badge = SEV_BADGE[sev];
-  return el("div", { class: "metric-chip sev-" + (sev || "Unknown") }, [
+  return el("div", { class: "metric-chip sev-" + (sev || "Unknown") + (onActivate ? " clickable" : ""), ...(onActivate ? { onActivate, title: "Open the panel" } : {}) }, [
     el("div", { class: "label" }, [
       el("span", { text: label }),
       badge ? el("span", { class: "sev-badge", text: badge }) : null,

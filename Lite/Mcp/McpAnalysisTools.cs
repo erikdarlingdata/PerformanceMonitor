@@ -1074,7 +1074,12 @@ public sealed class McpAnalysisTools
                         // header is worse than none).
                         remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
                         // #2138: the machine-first projection — see analyze_server's twin field.
-                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote)
+                        structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
+                        // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the same rule Darling's twin field uses.
+                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation),
+                        // #7416: the root is a standing state (a setting, a volume's free space), true at every hour whatever is running, so no running
+                        // query explains the finding. Same rule as Darling's twin field.
+                        standing_state = FactKinds.IsStandingStateKey(f.RootFactKey)
                     };
                 })
             }, McpHelpers.JsonOptions);

@@ -43,7 +43,7 @@ public sealed class McpPerfmonTools
                its delta over the stored interval, so the running total in value is never the only number a
                reader gets. */
             var result = filtered.Select(r => TrendPayloads.PerfmonLatestRow(
-                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType)).ToList();
+                r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType, r.ObjectName)).ToList();
 
             /* #3541 A10: captured_at is taken from the unfiltered snapshot, so a filter that matches nothing still says when.
                #6180: the page is cut to the shared response target (see TrendPayloads.PerfmonLatestReply). */

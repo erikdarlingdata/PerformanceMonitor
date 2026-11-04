@@ -730,7 +730,8 @@ FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= 
                 records.Add(record);
         }
         records.Sort((a, b) => Nullable.Compare(a.EventTime, b.EventTime));
-        return records;
+        /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null there rather than a flat 100. */
+        return SystemHealthHostCpu.Apply(records, await GetHostOsVersionAsync(serverId));
     }
 
     // ── Severe-Errors database name resolution ──

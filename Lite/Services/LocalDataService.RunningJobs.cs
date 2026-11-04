@@ -39,7 +39,7 @@ public partial class LocalDataService
     /// set only when <see cref="Jobs"/> is empty because the collector's last good collection is older than the freshness bound
     /// (#1812), so a tab or tool can say collection is not current instead of "no jobs are running".
     /// </summary>
-    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection, bool CollectorRan = true);
 
     /// <summary>The newest collection time for the running_jobs collector: its latest SUCCESS run (a run that found nothing logs
     /// SUCCESS with zero rows) or its newest snapshot, whichever is later. Darling's twin is <c>ViewerDataService.RunningJobsLastGoodCollectionSql</c>.</summary>
@@ -170,7 +170,7 @@ ORDER BY current_duration_seconds DESC";
         lastGood.Parameters.Add(new DuckDBParameter { Value = serverId });
         var last = await lastGood.ExecuteScalarAsync();
         DateTime? lastGoodTime = last is null or DBNull ? null : Convert.ToDateTime(last);
-        return new RunningJobsRead(items, RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
+        return new RunningJobsRead(items, RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff), lastGoodTime is not null);
     }
 
     /// <summary>
