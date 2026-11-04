@@ -232,6 +232,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgCollectorHealthGrid", "RowsCollected")] = "a row count",
         [("ViewerServerTab.xaml", "PgBlockingChainsGrid", "SamplesAsRoot")] = "a sample count",
         [("ViewerServerTab.xaml", "PgDeadlocksGrid", "TimesSeen")] = "a count of sightings",
+        [("ViewerServerTab.xaml", "PgWaitSamplingGrid", "BackendCount")] = "a count of backends, not a time",
         [("ViewerServerTab.xaml", "PgLogEventsGrid", "TimesSeen")] = "a count of sightings",
         [("ViewerServerTab.xaml", "PgLockStatsGrid", "Captures")] = "a count of captures",
         [("ViewerServerTab.xaml", "PgReplicationStatsGrid", "Samples")] = "a count of samples",

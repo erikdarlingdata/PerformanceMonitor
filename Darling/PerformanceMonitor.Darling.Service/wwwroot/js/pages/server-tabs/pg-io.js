@@ -139,7 +139,8 @@ export const PG_WRITE_STATS = [
 ];
 
 export const PG_BUFFER_USAGE_COLUMNS = [
-  { key: "relation_name", label: "Relation" },
+  /* #7455: relation_display is the name, or a word for a buffer that has none (another database, shared catalogs). */
+  { key: "relation_display", label: "Relation" },
   { key: "relation_kind", label: "Kind" },
   { key: "buffer_mb", label: "Resident", format: "mb" },
   { key: "pct_of_pool", label: "% of Pool", format: "num1" },

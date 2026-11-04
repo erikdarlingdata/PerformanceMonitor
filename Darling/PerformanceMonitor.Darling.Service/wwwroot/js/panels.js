@@ -1299,6 +1299,9 @@ export function reapplyGridSort(tbody) {
    the table never renders with no columns. */
 export function visibleColumns(cols, rows) {
   const kept = cols.filter((c) => {
+    /* #7416: `hideWhenAllZero` drops a count column that is zero (or missing) on every row: a column of zeros on a healthy server says nothing, and a
+       column that has a number says why it is there in its header hint. */
+    if (c.hideWhenAllZero && !rows.some((row) => Number(getPath(row, c.key)) > 0)) return false;
     if (!c.hideWhenEmpty && !c.hideWhenZero) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
@@ -1430,27 +1433,37 @@ function vizStat(data, desc) {
   /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
      so when it is true the panel says so in words (the stat's `pageCut` sentence) under the tiles. */
   const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(s.pageCut));
-  const tiles = el(
-    "div",
-    { class: "stats" },
-    shown.map((s) => {
-      const sev = s.sev || s.severity;
-      const raw = getPath(data, s.key);
-      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
-      /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
-         smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
-      const hasValue = raw != null || (why != null && why !== "");
-      const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
-      /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
-      const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
-      const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
-      return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
-        el("div", { class: "label", text: s.label }),
-      ]);
-    })
-  );
-  return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  const tile = (s) => {
+    const sev = s.sev || s.severity;
+    /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
+    const made = typeof s.display === "function" ? s.display(data) : null;
+    const raw = made != null ? made : getPath(data, s.key);
+    const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+    /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
+       smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
+    const hasValue = raw != null || (why != null && why !== "");
+    const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+    /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
+    const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
+    const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    return el("div", { class: "stat" }, [
+      el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
+      el("div", { class: "label", text: s.label }),
+    ]);
+  };
+  /* #7416: a `sentence` stat is prose, not a figure. Drawn as a bold tile it filled a tile track and pushed its neighbour wide;
+     it is a line of text across the panel instead, and the tiles that remain keep their natural width. */
+  const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
+  if (!sentences.length) {
+    const tiles = el("div", { class: "stats" }, shown.map(tile));
+    return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  }
+  const rest = shown.filter((s) => !s.sentence);
+  return el("div", { class: "stat-block" }, [
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
+    rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
+    ...cutNotes,
+  ]);
 }
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
@@ -1553,6 +1566,27 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName, store) {
   location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
+}
+
+/**
+ * Open one panel of a server's tab (#7416): a tile that says a column is nearly full goes to the panel that names it, not to the top of a tab
+ * that runs to tens of thousands of pixels. The panel is found by its `data-title` once the tab has drawn it (the tab builds its panels
+ * after the server's card arrives), then scrolled to the top of the view. It is looked for for four seconds and the scroll is repeated once
+ * after the tab's reads settle, because panels above it change height as they fill in.
+ */
+export function navigateServerPanel(serverName, store, tab, panelTitle) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName) + "/" + encodeURIComponent(tab), store);
+  let tries = 0;
+  const look = () => {
+    const panel = typeof document.querySelector === "function" ? document.querySelector('[data-title="' + panelTitle + '"]') : null;
+    if (panel && typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ block: "start" });
+      setTimeout(() => panel.scrollIntoView({ block: "start" }), 1500);
+      return;
+    }
+    if (++tries < 40) setTimeout(look, 100);
+  };
+  setTimeout(look, 100);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in

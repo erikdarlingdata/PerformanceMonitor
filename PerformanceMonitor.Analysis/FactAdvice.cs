@@ -2358,23 +2358,55 @@ public static class FactAdvice
         if (items.Count == 0)
             return fallback;
 
+        /* #7448: RCSI off is how a new SQL Server database starts, so when it is the ONLY item nothing has drifted:
+           the headline says what the fact found and the text does not claim a change. Another setting that really
+           moved keeps the drift wording. */
+        if (items.Count == 1 && f.Metadata.TryGetValue("rcsi_off_count", out var rcsiOff) && rcsiOff > 0)
+        {
+            return fallback with
+            {
+                Headline = $"RCSI is off on {Plural((long)rcsiOff, "database")} on this server",
+                Investigation = $"Across this server's databases: {items[0]}. Read committed snapshot isolation (RCSI) is off by default on every new SQL Server database, so this is the starting setting, not a change.",
+                Remediation =
+                    "Turn RCSI on only for a database where the blocking is readers waiting on writers: it makes readers " +
+                    "stop taking shared locks and read the last committed row version instead, at the cost of row-version " +
+                    "load in tempdb and a locking-behavior change the application should be tested against on a copy first. " +
+                    "A database with writer-versus-writer blocking or no blocking gains nothing from it."
+            };
+        }
+
         var inv = $"Across this server's databases: {string.Join("; ", items)}. These are per-database settings that have drifted from the safe defaults and quietly cost performance or stability.";
-        var rem =
-            "Bring each back to the safe default on the databases that matter: AUTO_SHRINK off (it fragments " +
-            "indexes and churns I/O re-growing what it shrank), AUTO_CLOSE off, page verify set to CHECKSUM so " +
-            "corruption is detected, auto-create and auto-update statistics on, and RCSI on where the blocking " +
-            "is readers-versus-writers. The Database Configuration view lists exactly which databases each applies to.";
+        /* #7448: name only the settings that fired. RCSI off is its own sentence, because it is a choice for
+           readers-versus-writers blocking and not a safe default to restore. */
+        bool Fired(string metaKey) => f.Metadata.TryGetValue(metaKey, out var n) && n > 0;
+        var fixes = new List<string>();
+        if (Fired("auto_shrink_on_count"))
+            fixes.Add("AUTO_SHRINK off (it fragments indexes and churns I/O re-growing what it shrank)");
+        if (Fired("auto_close_on_count"))
+            fixes.Add("AUTO_CLOSE off");
+        if (Fired("page_verify_not_checksum_count"))
+            fixes.Add("page verify set to CHECKSUM so corruption is detected");
+        if (Fired("auto_create_stats_off_count"))
+            fixes.Add("auto-create statistics on");
+        if (Fired("auto_update_stats_off_count"))
+            fixes.Add("auto-update statistics on");
+        var rem = new StringBuilder();
+        if (fixes.Count > 0)
+            rem.Append("Bring each back to the safe default on the databases that matter: ").Append(string.Join(", ", fixes)).Append(". ");
+        if (Fired("rcsi_off_count"))
+            rem.Append("Turn RCSI on only where the blocking is readers-versus-writers. ");
+        rem.Append("The Database Configuration view lists exactly which databases each applies to.");
         if (qsOff > 0)
-            rem +=
+            rem.Append(
                 " Where Query Store is off, enable it (ALTER DATABASE <db> SET QUERY_STORE = ON; then " +
                 "OPERATION_MODE = READ_WRITE) so query performance history is captured for troubleshooting " +
-                "and plan-regression detection.";
+                "and plan-regression detection.");
 
         return fallback with
         {
             Headline = "Database settings have drifted from the safe defaults on this server",
             Investigation = inv,
-            Remediation = rem
+            Remediation = rem.ToString()
         };
     }
 

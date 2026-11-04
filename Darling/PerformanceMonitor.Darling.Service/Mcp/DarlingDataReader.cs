@@ -211,7 +211,7 @@ internal static class DarlingDataReader
     /// before the rung. <c>SampleIntervalSeconds</c> is the seconds the delta covers under the three-state rule
     /// (0 = no delta knowable, null on a gauge), the denominator of the row's per-second figure.</summary>
     public sealed record PerfmonRow(
-        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null);
+        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null, string? ObjectName = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -1038,7 +1038,8 @@ internal static class DarlingDataReader
             delta_cntr_value,
             collection_time,
             cntr_type,
-            sample_interval_seconds
+            sample_interval_seconds,
+            object_name
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
@@ -1063,7 +1064,8 @@ internal static class DarlingDataReader
                 /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
             capturedAt ??= reader.GetDateTime(4);
         }
 

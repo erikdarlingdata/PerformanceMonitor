@@ -60,6 +60,9 @@ public sealed class ServerPageTabsTests
     private static string EditorJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
 
+    private static string UtilJs => ReadRepoFileLf(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
+
     /// <summary>
     /// Which collector each served <c>get_pg_*</c> read is served FROM.
     ///
@@ -257,22 +260,34 @@ public sealed class ServerPageTabsTests
     /// meant, unaligned, unrounded, unlabelled. I wrote <c>format: "bytes"</c> into this file believing it
     /// existed, and the page would have shipped rendering nine-digit integers in a size column.</para>
     ///
-    /// <para>The vocabulary is taken from <c>editor.js</c>'s <c>FORMAT_OPTIONS</c>, which is the list the
-    /// custom-view editor already offers users — one source, so adding a format to the renderer without
-    /// offering it in the editor (or the reverse) is caught here rather than by someone noticing a
-    /// misrendered column.</para>
+    /// <para>The vocabulary is the renderer's own registry, <c>FORMATTERS</c> in <c>util.js</c> (what <c>applyFormat</c> looks a name up in).
+    /// The custom-view editor offers a subset of it (<c>FORMAT_OPTIONS</c> in <c>editor.js</c>): a server tab may use a format the editor does not
+    /// offer (<c>status</c>, which normalises the casing of a status word, means nothing for a user's own column), but the editor must never offer
+    /// one the renderer lacks.</para>
     /// </summary>
     [Fact]
     public void EveryColumnFormat_IsOneTheRendererKnows()
     {
-        var known = Regex.Match(EditorJs, @"const FORMAT_OPTIONS = \[(?<list>[^\]]*)\]")
-            is { Success: true } match
-            ? Regex.Matches(match.Groups["list"].Value, @"""(?<name>[a-z0-9]+)""")
+        var registry = Regex.Match(UtilJs, @"export const FORMATTERS = \{(?<list>.*?)\n\};", RegexOptions.Singleline);
+        var known = registry.Success
+            ? Regex.Matches(registry.Groups["list"].Value, @"^\s+(?<name>[a-z0-9]+):", RegexOptions.Multiline)
                 .Select(m => m.Groups["name"].Value)
                 .ToHashSet(StringComparer.Ordinal)
             : new HashSet<string>(StringComparer.Ordinal);
 
-        Assert.True(known.Count >= 8, "FORMAT_OPTIONS was not parsed out of editor.js — the guard would pass vacuously.");
+        Assert.True(known.Count >= 8, "FORMATTERS was not parsed out of util.js — the guard would pass vacuously.");
+
+        var offered = Regex.Match(EditorJs, @"const FORMAT_OPTIONS = \[(?<list>[^\]]*)\]")
+            is { Success: true } match
+            ? Regex.Matches(match.Groups["list"].Value, @"""(?<name>[a-z0-9]+)""")
+                .Select(m => m.Groups["name"].Value)
+                .ToArray()
+            : [];
+
+        Assert.True(offered.Length >= 8, "FORMAT_OPTIONS was not parsed out of editor.js — the guard would pass vacuously.");
+        Assert.True(
+            offered.All(known.Contains),
+            "editor.js offers column format(s) the renderer does not know: " + string.Join(", ", offered.Where(n => !known.Contains(n))));
 
         var used = Regex.Matches(ServerTabsJs, @"format:\s*""(?<name>[a-z0-9]+)""")
             .Select(m => m.Groups["name"].Value)
@@ -458,8 +473,7 @@ public sealed class ServerPageTabsTests
         var body = ServerTabsJs[draw..end];
 
         Assert.Contains("if (trend.data.window_truncated) {", body, StringComparison.Ordinal);
-        Assert.Contains("trend.data.effective_hours_back", body, StringComparison.Ordinal);
-        Assert.Contains("History for this query starts ", body, StringComparison.Ordinal);
+        Assert.Contains("trendHeadNote(trend.data, \"History for this query\")", body, StringComparison.Ordinal);
         Assert.DoesNotContain("trend.data.truncated", body, StringComparison.Ordinal);
     }
 
@@ -900,7 +914,7 @@ public sealed class ServerPageTabsTests
         Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
+        Assert.Contains("const strip = captionStrip(note);", js, StringComparison.Ordinal);
         Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 

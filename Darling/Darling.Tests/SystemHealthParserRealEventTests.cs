@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using PerformanceMonitor.Common;
 using Xunit;
 
@@ -65,8 +66,38 @@ public class SystemHealthParserRealEventTests
         Assert.Equal(2786L, r.CurrentlyAllocated);
         Assert.Equal(2786L, r.PreviouslyAllocated);
         Assert.Equal("MEMORYBROKER_FOR_XTP", r.Broker);
-        Assert.Equal("GROW", r.Notification);          // not RESOURCE_MEMPHYSICAL_LOW -> not significant
+        Assert.Equal("GROW", r.Notification);          // the broker carries STABLE/GROW/SHRINK, only SHRINK is significant (#7466)
         Assert.False(SystemHealthSignificance.IsSignificant(r));
+    }
+
+    /// <summary>#7466: the recorded real GROW row is not significant and the same row as a SHRINK is. Under the old
+    /// RESOURCE_MEMPHYSICAL_LOW test the SHRINK row failed this assertion, because no broker event can carry that value.</summary>
+    [Fact]
+    public void MemoryBroker_RealEvent_AsShrink_IsSignificant()
+    {
+        var xml = LoadRealFixture("memory_broker_ring_buffer_recorded.xml");
+        Assert.Contains(">GROW<", xml, StringComparison.Ordinal);
+
+        var grow = SystemHealthParser.ParseMemoryBroker(xml)!;
+        var shrink = SystemHealthParser.ParseMemoryBroker(xml.Replace(">GROW<", ">SHRINK<", StringComparison.Ordinal))!;
+
+        Assert.False(SystemHealthSignificance.IsSignificant(grow));
+        Assert.Equal("SHRINK", shrink.Notification);
+        Assert.True(SystemHealthSignificance.IsSignificant(shrink));
+    }
+
+    [Fact]
+    public void MemoryBroker_NotificationCounts_CountEveryValueBeforeTheGate()
+    {
+        var records = new[] { "GROW", "STABLE", "GROW", "SHRINK", "STABLE", "STABLE", null }
+            .Select(n => new MemoryBrokerRecord { Notification = n })
+            .ToList();
+
+        var counts = SystemHealthSignificance.CountBrokerNotifications(records);
+
+        Assert.Equal(new[] { "(none)", "GROW", "SHRINK", "STABLE" }, counts.Keys.ToArray());
+        Assert.Equal(new[] { 1, 2, 1, 3 }, counts.Values.ToArray());
+        Assert.Equal(1, records.Count(SystemHealthSignificance.IsSignificant));
     }
 
     // ── wait_info: real event's sql_text carries a BACKUP statement, so it's captured but not significant ──

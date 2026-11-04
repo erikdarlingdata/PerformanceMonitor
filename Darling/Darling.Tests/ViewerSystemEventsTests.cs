@@ -135,7 +135,7 @@ public sealed class ViewerSystemEventsTests
         Assert.True(SystemEventSignificance.IsSignificant(record));
     }
 
-    // ── Significance: Memory Conditions / Memory Broker (RESOURCE_MEMPHYSICAL_LOW) ──
+    // ── Significance: Memory Conditions (RESOURCE_MEMPHYSICAL_LOW) / Memory Broker (SHRINK, #7466) ──
 
     [Theory]
     [InlineData("RESOURCE_MEMPHYSICAL_LOW", true)]
@@ -146,10 +146,12 @@ public sealed class ViewerSystemEventsTests
             new MemoryConditionsRecord { LastNotification = lastNotification }));
 
     [Theory]
-    [InlineData("RESOURCE_MEMPHYSICAL_LOW", true)]
-    [InlineData("RESOURCE_MEMPHYSICAL_HIGH", false)]
+    [InlineData("SHRINK", true)]
+    [InlineData("GROW", false)]
+    [InlineData("STABLE", false)]
+    [InlineData("RESOURCE_MEMPHYSICAL_LOW", false)]
     [InlineData(null, false)]
-    public void MemoryBroker_SignificantOnlyWhenLow(string? notification, bool expected) =>
+    public void MemoryBroker_SignificantOnlyWhenShrink(string? notification, bool expected) =>
         Assert.Equal(expected, SystemEventSignificance.IsSignificant(
             new MemoryBrokerRecord { Notification = notification }));
 
@@ -163,10 +165,10 @@ public sealed class ViewerSystemEventsTests
     }
 
     [Fact]
-    public void MemoryBroker_HighFixture_IsNotSignificant()
+    public void MemoryBroker_StableFixture_IsNotSignificant()
     {
         var record = SystemHealthParser.ParseMemoryBroker(LoadFixture("memory_broker.xml"))!;
-        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", record.Notification);
+        Assert.Equal("STABLE", record.Notification);
         Assert.False(SystemEventSignificance.IsSignificant(record));
     }
 
@@ -360,7 +362,7 @@ public sealed class ViewerSystemEventsTests
         Assert.Single(result.SevereErrors, SystemEventSignificance.IsSignificant);
         Assert.Single(result.MemoryNodeOom, SystemEventSignificance.IsSignificant);
         Assert.Single(result.SignificantWaits, SystemEventSignificance.IsSignificant);
-        // The memory-conditions / broker fixtures are RESOURCE_MEMPHYSICAL_HIGH — the warnings filter drops them.
+        // The memory-conditions fixture is RESOURCE_MEMPHYSICAL_HIGH and the broker fixture is STABLE — the warnings filter drops them.
         Assert.DoesNotContain(result.MemoryConditions, SystemEventSignificance.IsSignificant);
         Assert.DoesNotContain(result.MemoryBroker, SystemEventSignificance.IsSignificant);
         // CPU: the WARNING+15-pending event passes; the CLEAN one is dropped. I/O: both WARNING file rows pass.

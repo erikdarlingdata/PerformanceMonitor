@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, noticeStrip, daysText } from "../util.js";
+import { el, makeActivatable, captionStrip, daysText } from "../util.js";
 import { worstFirst } from "../panels.js";
 import { evictionNoteShort } from "../pg-grid-text.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
@@ -62,7 +62,7 @@ import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, pgWaitSamplingBackendsNote, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
-import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
+import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
@@ -84,6 +84,9 @@ export { topQueriesPanel } from "./server-tabs/sql-queries.js";
 export { waitsPanel, drawWaitTrends, namedTrendPanel, drawNamedTrends } from "./server-tabs/sql-waits.js";
 
 /* ─────────────────────────── the tabs ─────────────────────────── */
+
+/* #7416 item 11: whether the Long Query Completions grid includes the monitor's own statements (module scope so the rebuild keeps the pick). */
+let longQueriesIncludeMonitor = false;
 
 /**
  * The tab registry, in the order the desktop viewer presents them. `build(server, ctx)` returns the tab's nodes;
@@ -243,7 +246,8 @@ export const SERVER_TABS = [
         CLERK_COLUMNS,
         SNAPSHOT,
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
-        1
+        /* #7416: full width like every other panel on this tab. Half width, alone between full-width panels, left a blank half beside it. */
+        2
       ),
       ...memoryPressurePanels(server, ctx),
       /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
@@ -753,11 +757,25 @@ export const SERVER_TABS = [
           "No query executed in this window. Query stats are collected every cycle whether or not anything " +
           "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
       }),
-      tagFilteredCard("longqueries", (picker) =>
-        tablePanel(
+      tagFilteredCard("longqueries", (picker, redraw) => {
+        /* #7416 item 11: the monitor's own statements are left out by default (on an idle server every long completion is
+           the monitor's). This switch sends include_monitor so a slow collector run can still be looked at. The pick lives
+           at module scope so the 60 s rebuild keeps it. */
+        picker.appendChild(
+          pickerControl(
+            "Monitor statements",
+            [{ value: "hide", label: "Left out" }, { value: "show", label: "Included" }],
+            (value) => {
+              longQueriesIncludeMonitor = value === "show";
+              redraw();
+            },
+            longQueriesIncludeMonitor ? "show" : "hide"
+          )
+        );
+        return tablePanel(
           "Long Query Completions",
           "get_long_query_completions",
-          withTagPick({ server, hours: ctx.hours, limit: 30 }, "longqueries"),
+          withTagPick({ server, hours: ctx.hours, limit: 30, ...(longQueriesIncludeMonitor ? { include_monitor: true } : {}) }, "longqueries"),
           "completions",
           LONG_QUERY_COLUMNS,
           ctx.label,
@@ -767,8 +785,8 @@ export const SERVER_TABS = [
           null,
           LONG_QUERY_GROUPS,
           picker
-        )
-      ),
+        );
+      }),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
          for the recommendations work twice to render a slice that never varied with the window. */
@@ -902,10 +920,10 @@ export const SERVER_TABS = [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),
       ...fanout("get_session_stats", { server }, [
-        { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
+        { title: "Sessions", subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out", viz: "stat", stats: SESSION_STATS },
         {
           title: "Sessions by Application",
-          subtitle: SNAPSHOT,
+          subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out",
           viz: "table",
           rowsKey: "applications",
           columns: APPLICATION_COLUMNS,
@@ -968,6 +986,8 @@ export const SERVER_TABS = [
           series: HEALTH_CPU_SERIES,
           format: "pct",
           unit: "%",
+          /* #7416 item 1: on SQL Server on Linux the read leaves System CPU out and says why here. */
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
         /* The Corruption and Contention Events charts (#6295), off the same fetch. */
@@ -980,6 +1000,7 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "entries",
           columns: HEALTH_ENTRY_COLUMNS,
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
       ]),
@@ -2037,7 +2058,8 @@ export function runningJobsEmptyText(ctx) {
 export function tabNote(tab, widestHours) {
   const note = typeof tab.note === "function" ? tab.note(widestHours) : tab.note;
   if (!note) return null;
-  const strip = noticeStrip(note);
+  /* #7416: every tab note describes the page (what it reads, what it leaves to the desktop viewer), and warns about nothing. */
+  const strip = captionStrip(note);
   /* A longer background behind an info mark, not in the banner itself. */
   if (tab.noteInfo) strip.appendChild(el("span", { class: "info-tip", tabindex: "0", role: "img", title: tab.noteInfo, "aria-label": tab.noteInfo, text: " \u24d8" }));
   return strip;

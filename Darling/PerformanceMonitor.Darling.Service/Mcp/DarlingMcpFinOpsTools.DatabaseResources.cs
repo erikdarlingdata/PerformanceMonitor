@@ -93,11 +93,11 @@ public sealed partial class DarlingMcpFinOpsTools
         physical_reads = r.PhysicalReads,
         logical_writes = r.LogicalWrites,
         execution_count = r.ExecutionCount,
-        io_read_mb = r.IoReadMb,
-        io_write_mb = r.IoWriteMb,
+        io_read_mb = FinOpsWireFigures.Clean(r.IoReadMb),
+        io_write_mb = FinOpsWireFigures.Clean(r.IoWriteMb),
         io_stall_ms = r.IoStallMs,
-        cpu_share_pct = r.PctCpuShare,
-        io_share_pct = r.PctIoShare,
+        cpu_share_pct = FinOpsWireFigures.Clean(r.PctCpuShare),
+        io_share_pct = FinOpsWireFigures.Clean(r.PctIoShare),
     };
 
     /// <summary>One top-by-total-CPU row in the wire shape.</summary>
@@ -106,19 +106,19 @@ public sealed partial class DarlingMcpFinOpsTools
         database_name = r.DatabaseName,
         cpu_time_ms = r.CpuTimeMs,
         execution_count = r.ExecutionCount,
-        io_total_mb = r.IoTotalMb,
-        cpu_share_pct = r.PctCpu,
-        io_share_pct = r.PctIo,
+        io_total_mb = FinOpsWireFigures.Clean(r.IoTotalMb),
+        cpu_share_pct = FinOpsWireFigures.Clean(r.PctCpu),
+        io_share_pct = FinOpsWireFigures.Clean(r.PctIo),
     };
 
     /// <summary>One top-by-CPU-per-execution row in the wire shape; <c>AvgCpuMs</c> holds the unrounded average on these rows (#5644 W4).</summary>
     internal static object TopByAvgRow(TopResourceConsumer r) => new
     {
         database_name = r.DatabaseName,
-        avg_cpu_ms = r.AvgCpuMs,
+        avg_cpu_ms = FinOpsWireFigures.Clean(r.AvgCpuMs),
         execution_count = r.ExecutionCount,
         total_cpu_ms = r.TotalCpuTimeMs,
-        io_total_mb = r.IoTotalMb,
-        avg_io_mb = r.AvgIoMb,
+        io_total_mb = FinOpsWireFigures.Clean(r.IoTotalMb),
+        avg_io_mb = FinOpsWireFigures.Clean(r.AvgIoMb),
     };
 }

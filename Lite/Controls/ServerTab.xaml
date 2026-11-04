@@ -2653,6 +2653,9 @@
                             <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
                             <TextBlock Text="Oldest Plan Age:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBlock x:Name="PlanCacheOldestPlanText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                            <!-- #7445: the compiled single-use figure that decides Bloat Level (parse trees left out). -->
+                            <TextBlock Text="Compiled Single-Use:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock x:Name="PlanCacheCompiledSingleUseText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
                             <!-- Derived single-use bloat badge + forced-parameterization hint (install/47
                                  report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                             <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -2677,7 +2680,7 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Session Counts Over Time" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <ScottPlot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
                     <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
@@ -2799,8 +2802,11 @@
                                         <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                             <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
-                                        <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
-                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MessageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        <DataGridTextColumn Binding="{Binding ErrorFormatted}" Width="*">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                        </DataGridTextColumn>
+                                        <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
+                                            <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                         </DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
@@ -2979,7 +2985,7 @@
                         <Grid Margin="8">
                             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,4,0,8">
-                                <TextBlock Text="Memory Broker (low physical memory)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <TextBlock Text="Memory Broker (target shrinks)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                                 <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                                 <TextBlock x:Name="MemoryBrokerWindowTruncatedBanner" Visibility="Collapsed" Margin="12,0,0,0" Padding="8,4" VerticalAlignment="Center" FontWeight="Bold" Foreground="{DynamicResource ForegroundBrush}" Background="#22FFAA00"/>
@@ -3002,7 +3008,7 @@
                                         <DataGridTextColumn Binding="{Binding PreviouslyAllocated, StringFormat=N0}" Width="125" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PreviouslyAllocated" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Prev Allocated" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No low-physical-memory broker notifications (RESOURCE_MEMPHYSICAL_LOW) in the selected time window."/>
+                                <TextBlock x:Name="MemoryBrokerNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="480" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}" Text="No memory broker SHRINK notifications in the selected time window."/>
                             </Grid>
                         </Grid>
                     </TabItem>
@@ -3290,6 +3296,11 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
+                    <CheckBox Grid.Row="0" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                              HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,0,8"
+                              Foreground="{DynamicResource ForegroundBrush}"
+                              ToolTip="Off by default: on an idle server every long completion can be the monitor's own. Turn on to see a slow collector run."
+                              Checked="LongQueriesIncludeMonitorCheckBox_Changed" Unchecked="LongQueriesIncludeMonitorCheckBox_Changed"/>
                     <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                     <StackPanel Grid.Row="1">
                         <!-- Where the stored completions start, when that is after the window's start (the same "Showing since <time>"

@@ -47,7 +47,7 @@ public sealed class DarlingMcpPgPredicateTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the window held more predicates than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
@@ -63,8 +63,12 @@ public sealed class DarlingMcpPgPredicateTools
 
         try
         {
-            var rows = await DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch, so the reply can say whether the window held
+               more than the page. It reported only the count of the rows returned, which a reader takes for
+               the size of the window. */
+            var fetched = await DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -135,12 +139,14 @@ public sealed class DarlingMcpPgPredicateTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 predicate_count = rows.Count,
+                truncated,
                 sample_rates = rates,
                 note = "Counts are SAMPLED and are not scaled up here: multiply by 1/sample_rate to "
                      + "estimate the true volume, and treat the product as an estimate. A predicate with "
                      + "a high filtered_pct over many rows is an indexing candidate; a high "
                      + "worst_estimate_error_ratio is a planner-estimate problem instead, which an index "
                      + "will not fix."
+                     + (truncated ? " This page is cut at limit: the window held more predicates than it shows." : string.Empty)
                      + (rates.Length > 1
                          ? " The sample rate CHANGED inside this window, so rows are not directly comparable."
                          : string.Empty),

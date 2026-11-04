@@ -166,7 +166,7 @@ public class DeadlocksTelemetryCursorLiteTests
         foreach (var (host, readText, write, serverWriteText) in new[]
         {
             ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "batch = await definition.ReadAsync(dbReader", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
-            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
+            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(openingConnection, definition, rows"),
         })
         {
             var source = SplitRepoFile.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));

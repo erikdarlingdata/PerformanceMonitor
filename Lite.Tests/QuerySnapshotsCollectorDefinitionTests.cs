@@ -64,6 +64,62 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
     }
 
+    /* #7416 item 11: Active Queries on an idle server showed only the monitor's own plan read. Both reads (the standard one and
+       Azure SQL Database's staged one) leave out a session whose program name starts with the monitor's prefix, keep a NULL program
+       name, and share the pattern with SessionStatsCollector. The old text had no program_name predicate at all. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildSnapshotQuery_LeavesOutTheMonitorsOwnSessions_ByTheSharedPrefix(bool azure)
+    {
+        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: false, isAzureSqlDatabase: azure);
+
+        Assert.Contains("(des.program_name IS NULL OR des.program_name NOT LIKE N'PerformanceMonitor%')", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT LIKE N'PerformanceMonitor%'", PerformanceMonitor.Collectors.SessionStatsCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "s",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = s_deltas,
+        }).Text, StringComparison.Ordinal);
+    }
+
+    /* Every name the monitor connects to a monitored SQL Server under begins with the shared prefix, so the LIKE catches it. A user's
+       application that merely contains the words, or has no program name, is not the monitor's. */
+    [Theory]
+    [InlineData("PerformanceMonitorDarling", true)]
+    [InlineData("PerformanceMonitorDarling-Remediation", true)]
+    [InlineData("PerformanceMonitorDarling-HypotheticalIndex", true)]
+    [InlineData("PerformanceMonitorLite", true)]
+    [InlineData("MyPerformanceMonitorTool", false)]
+    [InlineData("Orders.Api", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void MonitorProgramNamePrefix_MatchesTheMonitorsConnectionNames_AndNotAUserApplicationThatContainsTheWords(string? name, bool monitors)
+    {
+        Assert.Equal(monitors, PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(name));
+    }
+
+    [Fact]
+    public void MonitorProgramNamePrefix_CoversEveryConstantTheConnectionBuildersUse()
+    {
+        Assert.True(PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(PerformanceMonitor.Common.MonitorApplicationNames.Darling));
+        Assert.True(PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(PerformanceMonitor.Common.MonitorApplicationNames.Lite));
+    }
+
+    /* #7416 item 35: a blank des.login_name fell through as '' and split one caller into two rows. The projection keeps the column name
+       and falls back to original_login_name (on sys.dm_exec_sessions in every engine this collector runs on, Azure SQL Database too). */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildSnapshotQuery_BlankLoginFallsBackToTheOriginalLogin(bool azure)
+    {
+        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: false, isAzureSqlDatabase: azure);
+
+        Assert.Contains("login_name = COALESCE(NULLIF(des.login_name, N''), des.original_login_name),", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("    des.login_name,", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildSnapshotQuery_Standard_WithoutLivePlan_NullColumnAndNoApply()
     {

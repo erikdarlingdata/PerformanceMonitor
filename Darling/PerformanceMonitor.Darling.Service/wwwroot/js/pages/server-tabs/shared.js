@@ -189,11 +189,43 @@ export function fanout(read, params, specs, intro = null) {
  * reader's clock like every other timestamp on this page. Empty array in, empty array out — a fully
  * continuous window adds no strip. Every value reaches the DOM through noticeStrip's text path (R4).
  */
-export function discontinuityNotes(data) {
+export function discontinuityNotes(data, opts) {
+  /* #7416: a chart of levels (memory clerks, tempdb allocated size) has no delta baseline to forget, so a restart is not a step in it. */
+  if (opts && opts.delta === false) return [];
   const list = data && Array.isArray(data.discontinuities) ? data.discontinuities : [];
-  return list.map(
-    (d) => "baseline discontinuity at " + localTime(d.at) + " (" + d.reason + ")" + (d.detail ? " — " + d.detail : "")
-  );
+  return list.map((d) => discontinuityWhat(d.reason) + " at " + localTime(d.at) + ". Rates start over there.");
+}
+
+/* #7416: what happened, in words for a person. The reason word is the payload's closed vocabulary (BaselineDiscontinuities.Reasons). */
+function discontinuityWhat(reason) {
+  switch (reason) {
+    case "restart": return "SQL Server restarted";
+    case "postmaster_restart": return "PostgreSQL restarted";
+    case "failover": return "The connection reached a different server";
+    case "rename": return "SQL Server was renamed";
+    case "identity": return "The server's identity changed";
+    case "stats_reset": return "Statistics were reset";
+    default: return "Collection started again";
+  }
+}
+
+/** The full tool wording of each entry, the sentence an MCP client reads (the reason word, with the payload's detail after a dash). */
+export function discontinuityFullNotes(data) {
+  const list = data && Array.isArray(data.discontinuities) ? data.discontinuities : [];
+  return list.map((d) => "baseline discontinuity at " + localTime(d.at) + " (" + d.reason + ")" + (d.detail ? " \u2014 " + d.detail : ""));
+}
+
+/**
+ * #7416: the strip beside a delta chart that crosses a restart, or null. It says in plain words what happened and that rates start over
+ * there. The tool's own wording (which collectors observed it, how many runs marked the epoch) is behind a "Full text" disclosure, one click
+ * away, as plain text. `opts.delta === false` draws nothing, for a chart of levels.
+ */
+export function discontinuityStrip(data, opts) {
+  const notes = discontinuityNotes(data, opts);
+  if (!notes.length) return null;
+  const strip = noticeStrip(notes.join(" "));
+  strip.appendChild(el("details", { class: "strip-detail" }, [el("summary", { text: "Full text" }), el("div", { text: discontinuityFullNotes(data).join(" ") })]));
+  return strip;
 }
 
 /**
@@ -570,10 +602,21 @@ function rankedSlicer(kind, cmp) {
   });
   if (!slicer.node) return null;
   const signal = getPanelSignal();
+  /* #7416: a window with no samples has nothing to narrow, so the strip (and the panel around it) is not drawn: a "Drag across the strip" line
+     over an empty strip, above a grid with no rows, sent the reader to a control that did nothing. A narrowing already held keeps its strip,
+     because the strip is where its Reset button lives. */
+  const hideEmpty = () => {
+    if (getSlice(server, rangeKey)) return;
+    const host = slicer.node.parentNode || slicer.node;
+    host.style.display = "none";
+  };
   readToolWithinKeptHistory(strip.tool, strip.params, signal).then((res) => {
+    if (res.kind === "empty") return hideEmpty();
     if (res.kind !== "data" || !res.data) return;
     const rows = strip.rows(res.data);
-    slicer.setPoints((Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) })));
+    const samples = (Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) }));
+    if (!samples.some((p) => Number.isFinite(p.t) && Number.isFinite(p.v))) return hideEmpty();
+    slicer.setPoints(samples);
     /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
     if (strip.note) slicer.setNote(strip.note(res.data));
   });
@@ -802,7 +845,7 @@ export const PROPERTY_STATS = [
   { key: "physical_memory_mb", label: "Physical memory", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "is_clustered", label: "Clustered", format: "bool" },
   { key: "is_hadr_enabled", label: "Always On", format: "bool" },
-  { key: "service_objective", label: "Service objective", format: "text", small: true },
+  { key: "service_objective", label: "Service objective", format: "text", small: true, showWhen: AZURE_SQL_DATABASE },
   { key: "vcore_count", label: "vCores", format: "int", showWhen: AZURE_SQL_DATABASE },
 ];
 
@@ -879,7 +922,7 @@ export const COLLECTION_CAVEATS_PANEL = {
 };
 
 export const SWEEP_STATS = [
-  { key: "sweep_pressure.verdict", label: "Verdict", format: "text", small: true },
+  { key: "sweep_pressure.verdict", label: "Verdict", format: "status", small: true },
   { key: "sweep_pressure.busy_percent", label: "Sweep busy %", format: "num1" },
   { key: "sweep_pressure.busy_ms_per_minute", label: "Busy ms/min", format: "int" },
   { key: "sweep_pressure.peak_cycle_ms", label: "Peak cycle", format: "ms" },
@@ -892,7 +935,7 @@ export const SWEEP_STATS = [
    when there is none rather than showing a dash. The Read tile says "ok", or "unavailable" when the read failed (every figure is
    then a dash, which is not the zero a real empty window reports). */
 export const SKIPPED_CYCLES_STATS = [
-  { key: "skipped_cycles.status", label: "Read", format: "text", small: true },
+  { key: "skipped_cycles.status", label: "Read", format: "status", small: true },
   { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },
   { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
   { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },
@@ -1105,11 +1148,9 @@ export function serverTrendPanel(server, ctx, kind) {
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
     const points = res.data.trend || [];
     if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
-    /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-    const notes = discontinuityNotes(res.data);
+    /* #7416: these trends are levels (scheduler tasks, plan cache, tempdb allocated size), so a restart is no step in them and draws no restart strip. */
     mount(body, [
       keptWindowStrip(res),
-      notes.length ? noticeStrip(notes.join(" ")) : null,
       zoomableLineChart({
         atTime: { server },
         points,
@@ -1168,9 +1209,11 @@ const SERIES_TRENDS = {
     title: "Collector Duration Trends",
     subtitle: "longest successful run per collector",
     seriesKey: "collector_name",
+    /* #7416: run durations are levels, not rates from a delta, so a restart draws no restart strip. */
+    levels: true,
     emptyText: "No successful collector runs in this window.",
     emptyWins: true,
-    note: "One line per collector, the five with the longest run in the window; the Viewer's chart draws every collector. Each point is the longest run in its bucket, and a collector needs runs in two buckets to draw a line, so a collector that ran in only one bucket of a short window has no line.",
+    note: "One line per collector, the five with the longest run in the window. Each point is the longest run in its bucket, and a collector needs runs in two buckets to draw a line, so a collector that ran in only one bucket of a short window has no line.",
     minPoints: 2,
     charts: [
       { title: "Longest run (ms)", unit: "ms", value: (r) => r.max_duration_ms, empty: "No collector ran in two or more buckets of this window, so there is no line to draw." },
@@ -1191,7 +1234,6 @@ export function seriesTrendPanel(server, ctx, kind) {
     const series = (res.data.series || []).filter((s) => s && s[spec.seriesKey] != null);
     if (!series.length) return mount(body, [keptWindowStrip(res), emptyStrip(spec.emptyText)]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the charts. */
-    const notes = discontinuityNotes(res.data);
     const draw = (chart) => {
       /* A file or collector keeps its colour in every chart of the panel: the palette index is its place in the read, not in the
          chart it has points in (the write chart skips a file that wrote nothing). */
@@ -1216,7 +1258,7 @@ export function seriesTrendPanel(server, ctx, kind) {
     };
     mount(body, [
       keptWindowStrip(res),
-      notes.length ? noticeStrip(notes.join(" ")) : null,
+      discontinuityStrip(res.data, { delta: spec.levels !== true }),
       ...spec.charts.flatMap(draw),
       el("div", { class: "mp-metric-note", text: spec.note }),
       chartNote(res.data, spec.noteKind),
@@ -1260,6 +1302,8 @@ export const COLLECTION_LOG_COLUMNS = [
   { key: "store_duration_ms", label: "On Store", format: "ms" },
   { key: "rows_collected", label: "Rows", format: "int" },
   { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
+  /* #7416: what a successful run left ("shred gated: 1"). The read keeps it out of error_message, so a note is never read as an error. */
+  { key: "run_note", label: "Run note", wrap: true, localizeText: true, plain: "counts", hideWhenEmpty: true },
 ];
 
 export function selectionInside(node) {

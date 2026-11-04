@@ -311,6 +311,7 @@ export const DASHBOARD_TEMPLATES = [
               { key: "summary.total_plans", label: "Plans", format: "int" },
               { key: "summary.single_use_plans", label: "Single-use", format: "int" },
               { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
+              { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
               { key: "summary.total_size_mb", label: "Cache size", format: "mb" },
               { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
             ],

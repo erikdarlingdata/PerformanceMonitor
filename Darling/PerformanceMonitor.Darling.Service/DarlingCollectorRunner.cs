@@ -409,6 +409,11 @@ public sealed partial class DarlingCollectorRunner
        the store, because a probe costs more than the render it would save (#2831). */
     private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsPlanCaches = new();
 
+    /* #7419: the text digests of statements whose text the store already holds, by the same plan identity, one cache per
+       server for the service's lifetime (a restart starts empty and each server reads its kept rows' texts once more).
+       Aged out at QueryStatsPlanCacheMaxAge like the plan cache. */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsTextCaches = new();
+
     /// <summary>How long a plan identity may go unseen before the host forgets it (#5158).</summary>
     internal static readonly TimeSpan QueryStatsPlanCacheMaxAge = TimeSpan.FromHours(1);
 
@@ -1091,6 +1096,15 @@ public sealed partial class DarlingCollectorRunner
     /// provider directly goes through here.
     /// </summary>
     internal bool CapturePlansFor(bool? serverCapturePlans) => serverCapturePlans ?? _capturePlans();
+
+    /// <summary>
+    /// #7419: whether query_stats reads its statement text in a second query. Every on-prem and RDS run does. Azure SQL Database
+    /// keeps the text in its main query, as it keeps its inline plan: the per-database path of that platform is not covered
+    /// by the cache of statements the store already holds.
+    /// </summary>
+    internal static bool ShouldDeferTextFetchFor(string collectorName, CollectorTargetInfo target) =>
+        string.Equals(collectorName, QueryStatsCollector.Instance.Name, StringComparison.Ordinal)
+        && !target.IsAzureSqlDb;
 
     /// <summary>
     /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a

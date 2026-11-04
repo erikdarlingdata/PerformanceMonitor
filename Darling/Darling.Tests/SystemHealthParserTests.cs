@@ -226,7 +226,7 @@ public class SystemHealthParserTests
         Assert.Equal(1000000L, r.CurrentlyAllocated);
         Assert.Equal(1100000L, r.PreviouslyAllocated);
         Assert.Equal("MEMORYBROKER_FOR_CACHE", r.Broker);
-        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", r.Notification);
+        Assert.Equal("STABLE", r.Notification);
     }
 
     // ── MemoryNodeOOM (memory_node_oom_ring_buffer_recorded) ──
