@@ -130,24 +130,24 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 /* Size + row counts (one scan of dm_db_partition_stats) */
 SELECT /* PerformanceMonitorLite */
-    dps.object_id,
-    dps.index_id,
+    PerformanceMonitorLite.object_id,
+    PerformanceMonitorLite.index_id,
     partition_count = COUNT_BIG(*),
-    reserved_pages = SUM(dps.reserved_page_count),
-    used_pages = SUM(dps.used_page_count),
-    in_row_pages = SUM(dps.in_row_data_page_count),
-    lob_pages = SUM(dps.lob_used_page_count),
-    row_overflow_pages = SUM(dps.row_overflow_used_page_count),
-    total_rows = SUM(dps.row_count)
+    reserved_pages = SUM(PerformanceMonitorLite.reserved_page_count),
+    used_pages = SUM(PerformanceMonitorLite.used_page_count),
+    in_row_pages = SUM(PerformanceMonitorLite.in_row_data_page_count),
+    lob_pages = SUM(PerformanceMonitorLite.lob_used_page_count),
+    row_overflow_pages = SUM(PerformanceMonitorLite.row_overflow_used_page_count),
+    total_rows = SUM(PerformanceMonitorLite.row_count)
 INTO #sizes
-FROM sys.dm_db_partition_stats AS dps
+FROM sys.dm_db_partition_stats AS PerformanceMonitorLite
 GROUP BY
-    dps.object_id,
-    dps.index_id
+    PerformanceMonitorLite.object_id,
+    PerformanceMonitorLite.index_id
 OPTION(RECOMPILE);
 
 /* Usage counters (one scan of dm_db_index_usage_stats for this database) */
-SELECT /* PerformanceMonitorLite */
+SELECT /* us */
     us.object_id,
     us.index_id,
     us.user_seeks,
@@ -165,30 +165,30 @@ OPTION(RECOMPILE);
 
 /* Locking/latch counters (one scan of dm_db_index_operational_stats - the heavy DMV) */
 SELECT /* PerformanceMonitorLite */
-    ios.object_id,
-    ios.index_id,
-    leaf_insert_count = SUM(ios.leaf_insert_count),
-    leaf_update_count = SUM(ios.leaf_update_count),
-    leaf_delete_count = SUM(ios.leaf_delete_count),
-    range_scan_count = SUM(ios.range_scan_count),
-    singleton_lookup_count = SUM(ios.singleton_lookup_count),
-    row_lock_count = SUM(ios.row_lock_count),
-    row_lock_wait_count = SUM(ios.row_lock_wait_count),
-    row_lock_wait_in_ms = SUM(ios.row_lock_wait_in_ms),
-    page_lock_count = SUM(ios.page_lock_count),
-    page_lock_wait_count = SUM(ios.page_lock_wait_count),
-    page_lock_wait_in_ms = SUM(ios.page_lock_wait_in_ms),
-    index_lock_promotion_attempt_count = SUM(ios.index_lock_promotion_attempt_count),
-    index_lock_promotion_count = SUM(ios.index_lock_promotion_count),
-    page_latch_wait_count = SUM(ios.page_latch_wait_count),
-    page_latch_wait_in_ms = SUM(ios.page_latch_wait_in_ms),
-    page_io_latch_wait_count = SUM(ios.page_io_latch_wait_count),
-    page_io_latch_wait_in_ms = SUM(ios.page_io_latch_wait_in_ms)
+    PerformanceMonitorLite.object_id,
+    PerformanceMonitorLite.index_id,
+    leaf_insert_count = SUM(PerformanceMonitorLite.leaf_insert_count),
+    leaf_update_count = SUM(PerformanceMonitorLite.leaf_update_count),
+    leaf_delete_count = SUM(PerformanceMonitorLite.leaf_delete_count),
+    range_scan_count = SUM(PerformanceMonitorLite.range_scan_count),
+    singleton_lookup_count = SUM(PerformanceMonitorLite.singleton_lookup_count),
+    row_lock_count = SUM(PerformanceMonitorLite.row_lock_count),
+    row_lock_wait_count = SUM(PerformanceMonitorLite.row_lock_wait_count),
+    row_lock_wait_in_ms = SUM(PerformanceMonitorLite.row_lock_wait_in_ms),
+    page_lock_count = SUM(PerformanceMonitorLite.page_lock_count),
+    page_lock_wait_count = SUM(PerformanceMonitorLite.page_lock_wait_count),
+    page_lock_wait_in_ms = SUM(PerformanceMonitorLite.page_lock_wait_in_ms),
+    index_lock_promotion_attempt_count = SUM(PerformanceMonitorLite.index_lock_promotion_attempt_count),
+    index_lock_promotion_count = SUM(PerformanceMonitorLite.index_lock_promotion_count),
+    page_latch_wait_count = SUM(PerformanceMonitorLite.page_latch_wait_count),
+    page_latch_wait_in_ms = SUM(PerformanceMonitorLite.page_latch_wait_in_ms),
+    page_io_latch_wait_count = SUM(PerformanceMonitorLite.page_io_latch_wait_count),
+    page_io_latch_wait_in_ms = SUM(PerformanceMonitorLite.page_io_latch_wait_in_ms)
 INTO #ops
-FROM sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL) AS ios
+FROM sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL) AS PerformanceMonitorLite
 GROUP BY
-    ios.object_id,
-    ios.index_id
+    PerformanceMonitorLite.object_id,
+    PerformanceMonitorLite.index_id
 OPTION(RECOMPILE);
 
 /* Stage the per-index DEFINITION catalog ONCE, then build the metadata set-based - the
@@ -205,12 +205,12 @@ SELECT /* PerformanceMonitorLite */
     ic.key_ordinal,
     ic.is_included_column,
     ic.is_descending_key,
-    column_name = c.name
+    column_name = PerformanceMonitorLite.name
 INTO #index_columns
 FROM sys.index_columns AS ic
-JOIN sys.columns AS c
-  ON  c.object_id = ic.object_id
-  AND c.column_id = ic.column_id
+JOIN sys.columns AS PerformanceMonitorLite
+  ON  PerformanceMonitorLite.object_id = ic.object_id
+  AND PerformanceMonitorLite.column_id = ic.column_id
 OPTION(RECOMPILE);
 
 CREATE CLUSTERED INDEX cx_index_columns
@@ -280,7 +280,7 @@ FROM
     SELECT DISTINCT
         object_id,
         index_id
-    FROM #index_columns
+    FROM #index_columns AS PerformanceMonitorLite
 ) AS d
 OPTION(RECOMPILE);
 
@@ -293,9 +293,9 @@ SELECT /* PerformanceMonitorLite */ DISTINCT
     ic.index_id
 INTO #foreign_key_supporting
 FROM #index_columns AS ic
-JOIN sys.foreign_key_columns AS fkc
-  ON  fkc.parent_object_id = ic.object_id
-  AND fkc.parent_column_id = ic.column_id
+JOIN sys.foreign_key_columns AS PerformanceMonitorLite
+  ON  PerformanceMonitorLite.parent_object_id = ic.object_id
+  AND PerformanceMonitorLite.parent_column_id = ic.column_id
 WHERE ic.is_included_column = 0
 OPTION(RECOMPILE);
 
@@ -304,9 +304,9 @@ SELECT /* PerformanceMonitorLite */ DISTINCT
     ic.index_id
 INTO #foreign_key_referenced
 FROM #index_columns AS ic
-JOIN sys.foreign_key_columns AS fkc
-  ON  fkc.referenced_object_id = ic.object_id
-  AND fkc.referenced_column_id = ic.column_id
+JOIN sys.foreign_key_columns AS PerformanceMonitorLite
+  ON  PerformanceMonitorLite.referenced_object_id = ic.object_id
+  AND PerformanceMonitorLite.referenced_column_id = ic.column_id
 WHERE ic.is_included_column = 0
 OPTION(RECOMPILE);
 
@@ -315,32 +315,32 @@ OPTION(RECOMPILE);
    One windowed scan instead of a correlated TOP(1) per index; ties resolve to the same lowest
    data_compression level, hence the same desc the correlated ORDER BY returned. */
 SELECT /* PerformanceMonitorLite */
-    p.object_id,
-    p.index_id,
-    p.data_compression_desc
+    PerformanceMonitorLite.object_id,
+    PerformanceMonitorLite.index_id,
+    PerformanceMonitorLite.data_compression_desc
 INTO #index_compression
 FROM
 (
     SELECT
-        p.object_id,
-        p.index_id,
-        p.data_compression_desc,
+        PerformanceMonitorLite.object_id,
+        PerformanceMonitorLite.index_id,
+        PerformanceMonitorLite.data_compression_desc,
         rn =
             ROW_NUMBER() OVER
             (
                 PARTITION BY
-                    p.object_id,
-                    p.index_id
+                    PerformanceMonitorLite.object_id,
+                    PerformanceMonitorLite.index_id
                 ORDER BY
-                    p.data_compression
+                    PerformanceMonitorLite.data_compression
             )
-    FROM sys.partitions AS p
-) AS p
-WHERE p.rn = 1
+    FROM sys.partitions AS PerformanceMonitorLite
+) AS PerformanceMonitorLite
+WHERE PerformanceMonitorLite.rn = 1
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
-    sqlserver_start_time = (SELECT osi.sqlserver_start_time FROM sys.dm_os_sys_info AS osi),
+    sqlserver_start_time = (SELECT PerformanceMonitorLite.sqlserver_start_time FROM sys.dm_os_sys_info AS PerformanceMonitorLite),
     database_name = DB_NAME(),
     database_id = DB_ID(),
     schema_name = s.name,
