@@ -128,6 +128,13 @@ public static class QueryTagUsageView
         QueryTagRollupData data, IReadOnlyList<(int Id, string Name)> scope, bool allServers, int? tagFilter, int limit = 200,
         IReadOnlyDictionary<int, string>? notCollected = null, IReadOnlyDictionary<int, string>? queryStoreNotCollected = null)
     {
+        /* #7376: a missing interval table is a gap that can close, so the section stays unavailable with the Missing reason, whatever a server reads (the tool's `!unavailable` guard). */
+        var tableMissing = QueryStoreTableMissing(data);
+        if (tableMissing)
+        {
+            queryStoreNotCollected = null;
+        }
+
         var tables = new List<QueryTagUsageTable>();
         var notServed = new List<string>();
         var anyUnfiltered = data.Deadlocks.Count > 0;
@@ -142,7 +149,7 @@ public static class QueryTagUsageView
             anyData |= tagFilter is null ? facts.Count > 0 : facts.Any(f => f.TagId is int id && IsUnder(id, tagFilter.Value, data.Tags));
             data.Unavailable.TryGetValue(section.Name, out var why);
             string? sectionNotCollected = null;
-            var qsExcluded = section == QueryTagRollupSection.QueryStore ? ExcludedFromGate(notCollected, queryStoreNotCollected) : [];
+            var qsExcluded = section == QueryTagRollupSection.QueryStore && !tableMissing ? ExcludedFromGate(notCollected, queryStoreNotCollected) : [];
             if (why is not null && qsExcluded.Count > 0 && data.Refused.Count > 0)
             {
                 /* #7374: the gate's refusal of a server that reads not_collected is no reason Query Store is unserved: say only what the others were refused for. */
@@ -215,6 +222,11 @@ public static class QueryTagUsageView
 
         return new QueryTagUsageResult(message, tables);
     }
+
+    /// <summary>#7376: the read found the Query Store interval table missing (its section is unavailable with the Missing reason), as opposed to the gate refusing every server. A missing table is a gap that can close, so no server is read not_collected for it.</summary>
+    public static bool QueryStoreTableMissing(QueryTagRollupData data) =>
+        data.Unavailable.TryGetValue(QueryTagRollupSection.QueryStore.Name, out var why)
+        && string.Equals(why, QueryTagUsageNotes.Missing(QueryTagRollupSection.QueryStore.Name), StringComparison.Ordinal);
 
     /// <summary>#7376: the servers the Query Store gate's refusal says nothing true about: those that read not_collected in every section (the engine, #7374) and those that read it in Query Store alone (a readable secondary).</summary>
     private static Dictionary<int, string> ExcludedFromGate(IReadOnlyDictionary<int, string>? notCollected, IReadOnlyDictionary<int, string>? queryStoreNotCollected)

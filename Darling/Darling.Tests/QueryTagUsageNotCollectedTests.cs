@@ -207,4 +207,28 @@ public sealed class QueryTagUsageNotCollectedTests
         Assert.Equal("unavailable", result.Tables.Single(t => t.Section == QueryTagRollupSection.QueryStore.Name).Status);
         Assert.Contains("secondary refusal reason", result.Message!, StringComparison.Ordinal);
     }
+
+    /// <summary>#7376: a missing Query Store interval table is a gap that can close, so the section stays unavailable with the Missing reason even
+    /// when the only server the gate refused is a readable secondary, as get_resource_use_by_tag answers it (its `!unavailable` guard). The allowed
+    /// server beside it wears the same reason, never a section-wide not_collected.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Build_WithTheQueryStoreTableMissing_KeepsTheMissingReason_WhateverTheSecondaryReads(bool allServers)
+    {
+        var servers = allServers ? new[] { Sql(1, "sql-one"), Sql(2, "sec-one") } : new[] { Sql(2, "sec-one") };
+        var missing = QueryTagUsageNotes.Missing(QueryTagRollupSection.QueryStore.Name);
+        var data = Data(
+            unavailable: new Dictionary<string, string> { [QueryTagRollupSection.QueryStore.Name] = missing },
+            refused: new Dictionary<int, string> { [2] = "secondary refusal reason" });
+
+        var result = QueryTagUsageView.Build(
+            data, Scope(servers), allServers, tagFilter: null, queryStoreNotCollected: new Dictionary<int, string> { [2] = SecondaryReason });
+
+        var queryStore = result.Tables.Where(t => t.Section == QueryTagRollupSection.QueryStore.Name).ToList();
+        Assert.All(queryStore, t => Assert.Equal("unavailable", t.Status));
+        Assert.All(queryStore, t => Assert.DoesNotContain(SecondaryReason, t.Message ?? string.Empty, StringComparison.Ordinal));
+        Assert.Contains(queryStore, t => t.Message == missing);
+        Assert.Contains(missing, result.Message!, StringComparison.Ordinal);
+    }
 }
