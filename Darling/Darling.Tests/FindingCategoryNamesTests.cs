@@ -20,7 +20,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// An analysis finding's category is the source of its root fact, an internal word such as <c>bad_actor</c> (#7486). Text a person
-/// reads shows a plain name instead; the raw value stays in stored rows, the MCP reply and alert-route matching. These cover the
+/// reads shows a plain name instead; the raw value stays in stored rows, the MCP reply (beside <c>category_name</c>) and alert-route
+/// matching. These cover the
 /// shared map, the desktop viewer's finding row, and the web viewer's grid under Node (<c>web-finding-category-harness.mjs</c>,
 /// skipped when Node is not installed).
 /// </summary>
@@ -102,14 +103,13 @@ public sealed class FindingCategoryNamesTests
         var root = RunGridHarness();
         var cells = root.GetProperty("cells").EnumerateArray().Select(e => e.GetString()).ToArray();
         Assert.Equal(new[] { "Expensive query", "Database settings", "weird_new_source" }, cells);
-        Assert.All(root.GetProperty("blank").EnumerateArray(), e => Assert.Equal("", e.GetString()));
     }
 
+    /// <summary>The alert notebook's "Finding evidence" table draws from <c>READ_FIELDS.get_analysis_findings</c>, not the grid's columns.</summary>
     [Fact]
-    public void TheWebViewersMap_EqualsTheSharedOne()
+    public void TheNotebooksEvidenceTable_ShowsThePlainName()
     {
-        var web = RunGridHarness().GetProperty("names").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
-        var shared = FindingCategoryNames.All.ToDictionary(p => p.Key, p => (string?)p.Value);
-        Assert.Equal(shared.OrderBy(p => p.Key, StringComparer.Ordinal), web.OrderBy(p => p.Key, StringComparer.Ordinal));
+        var cells = RunGridHarness().GetProperty("evidence").EnumerateArray().Select(e => e.GetString()).ToArray();
+        Assert.Equal(new[] { "Expensive query", "Database settings" }, cells);
     }
 }

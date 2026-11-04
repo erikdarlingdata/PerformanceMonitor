@@ -272,6 +272,15 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     }
 
     [Fact]
+    public void CurrentValue_NoRootFactKey_ShowsThePlainCategoryName()
+    {
+        var value = FindingMessageFormatter.CurrentValue(MakeFinding("h", category: "bad_actor", rootValue: null, rootFactKey: ""));
+
+        Assert.Contains("Expensive query", value, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", value, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CurrentValue_NullRootValue_EmitsKeyOnly()
     {
         var value = FindingMessageFormatter.CurrentValue(MakeFinding("h", rootValue: null));

@@ -148,13 +148,13 @@ try {
     },
     scoreWording: async () => {
       /* The severity score is labelled as a score and the category follows a dot: "0.80 waits" read as a count of waits. */
-      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits" })] });
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits", category_name: "Waits" })] });
       return { text: root.textContent };
     },
     categoryNames: async () => {
-      /* #7486: the card shows the plain category name, and a category the map does not know shows as it is. */
+      /* #7486: the card shows the name the reply carries, and a row with no name shows its category as it is. */
       const root = await run("srv-a", { findings: [
-        finding({ finding_id: 1, category: "bad_actor", incident_id: "inc-1" }),
+        finding({ finding_id: 1, category: "bad_actor", category_name: "Expensive query", incident_id: "inc-1" }),
         finding({ finding_id: 2, category: "weird_new_source", incident_id: "inc-2" }),
       ] });
       return { text: root.textContent };

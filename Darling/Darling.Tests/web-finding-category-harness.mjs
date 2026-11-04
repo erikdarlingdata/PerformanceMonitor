@@ -28,17 +28,20 @@ globalThis.location = { hash: "#/server/a/analysis" };
 const root = process.argv[2];
 const { VIZ } = await import(pathToFileURL(root + "/panels.js").href);
 const { FINDING_COLUMNS } = await import(pathToFileURL(root + "/pages/server-tabs/shared.js").href);
-const { FINDING_CATEGORY_NAMES, findingCategoryName } = await import(pathToFileURL(root + "/finding-categories.js").href);
+const { READ_FIELDS } = await import(pathToFileURL(root + "/read-fields.js").href);
 
-const row = (category) => ({ last_seen: "2026-11-01T00:00:00Z", category, story_path: "X", severity: 1, occurrences: 1, first_seen: "2026-11-01T00:00:00Z", advice: { headline: "Head" } });
-const rows = [row("bad_actor"), row("database_config"), row("weird_new_source")];
-const grid = VIZ.table({ rows }, { rowsKey: "rows", columns: FINDING_COLUMNS, title: "Findings", tools: false });
-const heads = grid.findAll((n) => n.tag === "th").map((n) => n.textContent.trim());
-const at = heads.findIndex((h) => h.startsWith("Category"));
-const body = grid.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody");
+const row = (category, category_name) => ({ last_seen: "2026-11-01T00:00:00Z", category, category_name, story_path: "X", severity: 1, occurrences: 1, first_seen: "2026-11-01T00:00:00Z", advice: { headline: "Head" } });
+const named = [row("bad_actor", "Expensive query"), row("database_config", "Database settings")];
+const categoryCells = (grid) => {
+  const heads = grid.findAll((n) => n.tag === "th").map((n) => n.textContent.trim());
+  const at = heads.findIndex((h) => h.startsWith("Category"));
+  const body = grid.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody");
+  return body.map((r) => r.children[at].textContent);
+};
+const grid = VIZ.table({ rows: [...named, row("weird_new_source")] }, { rowsKey: "rows", columns: FINDING_COLUMNS, title: "Findings", tools: false });
+const evidence = VIZ.table({ findings: named }, { ...READ_FIELDS.get_analysis_findings.table, title: "Finding evidence", tools: false });
 
 console.log(JSON.stringify({
-  cells: body.map((r) => r.children[at].textContent),
-  blank: [findingCategoryName(""), findingCategoryName(null), findingCategoryName(undefined)],
-  names: FINDING_CATEGORY_NAMES,
+  cells: categoryCells(grid),
+  evidence: categoryCells(evidence),
 }));

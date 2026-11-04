@@ -8,7 +8,7 @@ namespace PerformanceMonitor.Analysis;
 /// (<see cref="FactScorer.KnownSources"/>), an internal word such as <c>bad_actor</c> that reads like a security event next to "One
 /// expensive query dominated the server's work this window". The raw value stays in stored rows, the MCP reply, mute and alert-route
 /// matching (<c>Analysis: &lt;category&gt;</c>) and CSV export, because tools and rules read it. Only text a person reads goes through
-/// <see cref="DisplayName"/>. The web viewer keeps the same map in <c>wwwroot/js/finding-categories.js</c>, and a test holds the two equal.
+/// <see cref="DisplayName"/>. The web viewer has no copy of the map: get_analysis_findings returns the name as <c>category_name</c>.
 /// </summary>
 public static class FindingCategoryNames
 {
@@ -50,9 +50,6 @@ public static class FindingCategoryNames
         [PgTargetSources.WaitsSource] = "PostgreSQL waits",
         [PgTargetSources.WriteSource] = "PostgreSQL writes",
     };
-
-    /// <summary>Every raw category with a display name, for a test that holds a copy of the map equal.</summary>
-    public static IReadOnlyDictionary<string, string> All => Names;
 
     /// <summary>
     /// The display name for a category. A category the map does not know shows as it is, so a new source is never a blank cell,
