@@ -611,6 +611,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          seamKey: "routing.raw_from",
           emptyText:
             "No Query Store activity in this window.",
         }
