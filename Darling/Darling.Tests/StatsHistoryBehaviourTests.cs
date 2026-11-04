@@ -173,4 +173,26 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal("—", r.GetProperty("noDb").GetString());
         Assert.Equal("—", r.GetProperty("noHash").GetString());
     }
+
+    /// <summary>
+    /// #7416 item 21: a first point later than the window's start does not prove anything aged out (a query first run five hours ago gives
+    /// the same one). The panel says the earlier part aged out of the tier, and how long the tier keeps data, only when the read says the
+    /// requested start is older than the tier keeps.
+    /// </summary>
+    [Fact]
+    public void ALateFirstPoint_SaysAgedOutOnlyWhenTheStartIsOlderThanTheTierKeeps()
+    {
+        var r = Run("headNote");
+        string Note(string key) => Assert.Single(r.GetProperty(key).EnumerateArray(), n => n.GetString()!.Contains("starts")).GetString()!;
+
+        foreach (var late in new[] { Note("lateProcedure"), Note("lateQuery") })
+        {
+            Assert.Contains("starts 4.9 hours back, not the 24 the window asked for. The store holds nothing earlier in this window at this tier.", late);
+            Assert.DoesNotContain("aged out", late);
+        }
+
+        Assert.Contains("History starts 90 hours back, not the 168 the window asked for. The earlier part has aged out of this tier, which keeps 4 days of data.", Note("oldProcedure"));
+        Assert.Contains("The earlier part has aged out of this tier, which keeps 90 days of data.", Note("oldQuery"));
+        Assert.EndsWith("The earlier part has aged out of this tier.", Note("oldQueryNoDays"));
+    }
 }

@@ -265,6 +265,22 @@ export function chartNoteText(data, kind) {
  */
 const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
 
+/**
+ * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the
+ * one reason the read can name. A late first point alone proves nothing aged out (a query first run five hours ago, or a server that
+ * was off earlier, gives the same one), so "aged out" is said only when the read's own `start_older_than_tier` is true, with how long
+ * the tier keeps data from `tier_keeps_days`. Otherwise the note says only that the store holds nothing earlier at this tier.
+ * `subject` is the lead ("History", "History for this query").
+ */
+export function trendHeadNote(d, subject) {
+  const head = subject + " starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for. ";
+  if (d.start_older_than_tier === true) {
+    const days = Number(d.tier_keeps_days);
+    return head + "The earlier part has aged out of this tier" + (days > 0 ? ", which keeps " + days + (days === 1 ? " day" : " days") + " of data." : ".");
+  }
+  return head + "The store holds nothing earlier in this window at this tier.";
+}
+
 /** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
 export function chartNote(data, kind) {
   const text = chartNoteText(data, kind);
