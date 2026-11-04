@@ -1407,10 +1407,33 @@ export async function apiGetFleet(store) {
 
     const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    if (res.kind === "data") stampFleetWindow(res.data);
+    return res;
   } finally {
     scope.n--;
   }
+}
+
+/** #7507: the roll-up carries its window once (window_start / window_end), but the Blocking and Deadlocks tiles sit on each card, so
+    every card is stamped with the window length in hours. The tile then names the window the SERVER read, whatever it was, and no page
+    hardcodes "past hour". A reply with no usable window leaves the cards unstamped and their tiles as they were. */
+export function stampFleetWindow(data) {
+  if (!data || !Array.isArray(data.cards)) return data;
+  const start = parseUtc(data.window_start);
+  const end = parseUtc(data.window_end);
+  const minutes = start && end ? Math.round((end.getTime() - start.getTime()) / 60000) : 0;
+  if (minutes > 0) for (const c of data.cards) if (c && typeof c === "object") c.window_hours = minutes / 60;
+  return data;
+}
+
+/** #7507: a window length in hours as the words a tile uses: "past hour", "past 6 hours", "past day", "past 3 days", "past 90 minutes". */
+export function windowPhrase(hours) {
+  if (!(hours > 0)) return null;
+  if (hours === 1) return "past hour";
+  if (hours >= 24 && hours % 24 === 0) return hours === 24 ? "past day" : "past " + hours / 24 + " days";
+  if (Number.isInteger(hours)) return "past " + hours + " hours";
+  return "past " + Math.round(hours * 60) + " minutes";
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
