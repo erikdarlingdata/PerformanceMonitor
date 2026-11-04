@@ -175,9 +175,10 @@ SELECT d.database_name,
        (SELECT i.skip_reason FROM collect.identity_capacity AS i
         WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NOT NULL
         AND   i.collection_time >= $5 AND i.collection_time <= $2
-        ORDER BY i.collection_time DESC LIMIT 1)
+        ORDER BY i.collection_time DESC LIMIT 1),
+       d.capture_time
 FROM (
-    SELECT DISTINCT v.database_name FROM v_database_config AS v
+    SELECT DISTINCT v.database_name, v.capture_time FROM v_database_config AS v
     CROSS JOIN (
         SELECT COALESCE(array_agg(lower(btrim(s.name, E' \t\r\n'))) FILTER (WHERE btrim(s.name, E' \t\r\n') <> ''), ARRAY[]::text[]) AS names
         FROM unnest(COALESCE(
@@ -239,7 +240,12 @@ ORDER BY d.database_name";
             while (await names.ReadAsync(cancellationToken))
             {
                 var name = names.GetString(0);
-                if (scanned.ContainsKey(name) || CurrentDatabaseScope.IsDropped(current?.Databases, name))
+                if (scanned.ContainsKey(name))
+                    continue;
+
+                /* #7547: a database the snapshot does not name is dropped, unless the config capture that lists it is newer than the snapshot
+                   (it may have been created since), the same guard OmitDropped gives a marker. */
+                if (CurrentDatabaseScope.IsDropped(current?.Databases, name) && !(current is not null && names.GetDateTime(3) > current.TakenAt))
                     continue;
 
                 var lastScannedAt = names.IsDBNull(1) ? null : (DateTime?)names.GetDateTime(1);

@@ -1113,7 +1113,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         /* #7547: a column on a database the server no longer has stays in its last scan for the whole window, so it is left out here the way the
            tool, the alert and the Viewer leave it out (DarlingIdentityCapacityReader). A server with no current database list keeps every row. */
         rows = await CurrentDatabaseScope.OmitDroppedAsync(
-            postgres, rows, r => r.ServerId, r => r.Column.DatabaseName, DatabaseFilter.All, r => r.ScannedAt, logger: logger, cancellationToken: cancellationToken);
+            postgres, rows, r => r.ServerId, r => r.Column.DatabaseName, DatabaseFilter.All, r => r.ScannedAt, asOfUtc: nowUtc, logger: logger, cancellationToken: cancellationToken);
         foreach (var (serverId, percent, band, column, _) in rows)
         {
             counts.TryGetValue(serverId, out var seen);
