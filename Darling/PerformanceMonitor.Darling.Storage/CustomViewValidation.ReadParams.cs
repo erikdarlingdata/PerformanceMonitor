@@ -26,7 +26,7 @@ public static partial class CustomViewValidation
             ["compare_analysis"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("baseline_hours_back", false), new("as_of", false) },
             ["get_analysis_facts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("source", false), new("min_severity", false), new("as_of", false) },
             ["get_analysis_findings"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("limit", false), new("include_drilldown", false), new("full_text", false) },
-            ["get_active_queries"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("database_name", false), new("blocking_only", false), new("wait_type", false), new("limit", false), new("as_of", false), new("tag", false), new("collection_time", false), new("snapshots_only", false) },
+            ["get_active_queries"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("database_name", false), new("blocking_only", false), new("wait_type", false), new("limit", false), new("as_of", false), new("tag", false), new("collection_time", false), new("snapshots_only", false), new("include_monitor", false) },
             ["get_session_stats"] = new ReadPanelParam[] { new("server", false) },
             ["get_waiting_tasks"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("database_name", false), new("as_of", false) },
             ["get_alert_history"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false), new("include_dismissed", false), new("metric_name", false), new("family", false), new("include_streak", false) },

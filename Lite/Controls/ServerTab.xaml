@@ -369,6 +369,11 @@
                                                 VerticalAlignment="Center"/>
                                         <TextBlock x:Name="LiveSnapshotIndicator" Text="" FontSize="12"
                                                    Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        <CheckBox x:Name="ActiveQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                                                  VerticalAlignment="Center" Margin="16,0,0,0"
+                                                  Foreground="{DynamicResource ForegroundBrush}"
+                                                  ToolTip="Off by default: on a quiet server every active query can be the monitor's own. The rows are stored either way. Turn on to see them."
+                                                  Checked="ActiveQueriesIncludeMonitorCheckBox_Changed" Unchecked="ActiveQueriesIncludeMonitorCheckBox_Changed"/>
                                     </StackPanel>
                                 </StackPanel>
                                 <DataGrid Grid.Row="2" x:Name="QuerySnapshotsGrid"

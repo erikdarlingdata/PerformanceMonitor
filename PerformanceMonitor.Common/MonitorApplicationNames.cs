@@ -43,12 +43,13 @@ public static class MonitorApplicationNames
     public const string SqlProgramNameLikePattern = SqlProgramNamePrefix + "%";
 
     /// <summary>
-    /// The T-SQL predicate that keeps a session that is NOT the monitor's: <paramref name="alias"/>.program_name
-    /// is NULL (a NULL program name is never the monitor's, and a bare <c>NOT LIKE</c> would drop it as unknown) or
-    /// does not match <see cref="SqlProgramNameLikePattern"/>.
+    /// The predicate, for a read over a STORE (PostgreSQL or DuckDB, both <c>ILIKE</c>), that keeps a row that is NOT the monitor's:
+    /// <paramref name="column"/> is NULL (an old row, or a collector that stored no program name, is never hidden) or does not match
+    /// <see cref="SqlProgramNameLikePattern"/>. The ONE copy for the Active Queries and Waiting Tasks switches (#7573), on the same
+    /// prefix <see cref="SqlProgramNameLikePattern"/> that Long Query Completions and the session counts use.
     /// </summary>
-    public static string SqlNotMonitorSessionPredicate(string alias)
-        => $"({alias}.program_name IS NULL OR {alias}.program_name NOT LIKE N'{SqlProgramNameLikePattern}')";
+    public static string StoreNotMonitorProgramPredicate(string column)
+        => $"({column} IS NULL OR {column} NOT ILIKE '{SqlProgramNameLikePattern}')";
 
     /// <summary>The C# twin of the <c>LIKE</c> pattern above: true when the program name begins with
     /// <see cref="SqlProgramNamePrefix"/> (ordinal, ignoring case), so a test can check each name the monitor

@@ -155,7 +155,7 @@ LIMIT $4";
     /// The metric column is determined by the caller's sort preference.
     /// </summary>
     public async Task<List<TimeSliceBucket>> GetActiveQuerySlicerDataAsync(
-        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null)
+        int serverId, int hoursBack, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, bool includeMonitor = false)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
@@ -167,7 +167,7 @@ LIMIT $4";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues) + MonitorSnapshotClause("program_name", includeMonitor);
 
         command.CommandText = @"
 SELECT
@@ -214,9 +214,17 @@ ORDER BY bucket";
     }
 
     /// <summary>
+    /// #7573: leaves the monitor's own statements out of an Active Queries read unless <paramref name="includeMonitor"/> asks. The rows stay stored (a monitor
+    /// query that blocks or is blocked has to be findable); a NULL program name is never hidden. The rule is the one in <see cref="PerformanceMonitor.Common.MonitorApplicationNames"/>.
+    /// </summary>
+    internal static string MonitorSnapshotClause(string column, bool includeMonitor) => includeMonitor
+        ? ""
+        : " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate(column);
+
+    /// <summary>
     /// Gets query snapshots (currently running queries) for a server.
     /// </summary>
-    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, bool includeMonitor = false)
     {
         using var _q = TimeQuery("GetLatestQuerySnapshotsAsync", "v_query_snapshots latest");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -229,7 +237,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues) + MonitorSnapshotClause("program_name", includeMonitor);
 
         command.CommandText = @"
 SELECT
@@ -449,7 +457,7 @@ LIMIT 1";
     /// it. The wait value's index follows the database values, so it is <c>5 + dbValues.Count</c>.</para>
     /// </summary>
     public async Task<(List<QuerySnapshotRow> Rows, long PopulationCount)> GetActiveQueriesPageAsync(
-        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null)
+        int serverId, int hoursBack, int cap, string? databaseName = null, bool blockingOnly = false, string? waitType = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null, bool includeMonitor = false)
     {
         using var _q = TimeQuery("GetActiveQueriesPageAsync", "v_query_snapshots filtered page (MCP)");
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
@@ -463,7 +471,8 @@ LIMIT 1";
         using var command = connection.CreateCommand();
 
         var dbClause = BuildDbInClause(
-            string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues);
+            string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues)
+            + MonitorSnapshotClause("w.program_name", includeMonitor);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
         var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
         var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";

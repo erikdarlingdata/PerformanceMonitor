@@ -177,7 +177,7 @@ DECLARE
     @exec_sp nvarchar(256);
 
 DECLARE db_check CURSOR LOCAL FAST_FORWARD FOR
-    SELECT /* PerformanceMonitorLite */
+    SELECT /* PerformanceMonitor */
         d.name
     FROM sys.databases AS d
     LEFT JOIN sys.dm_hadr_database_replica_states AS drs

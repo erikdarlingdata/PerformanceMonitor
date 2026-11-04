@@ -286,6 +286,10 @@ export function rankedParams(params, ranking, kind) {
 
 /* The tag each grid is filtered to ("" = no filter, "untagged" = rows with no tag), one per grid at MODULE scope so the 60 s rebuild keeps it, as the
    ranking pick does. The pick is SENT to the read (the server applies it before the top-N cut); the page never filters a list on the client. */
+/* #7573: whether the Active Queries strip and grid include the monitor's own statements (left out by default). At MODULE scope so the 60 s rebuild keeps the pick, and
+   here rather than in sql-queries.js because the strip below reads it. */
+export const activeQueriesMonitor = { include: false };
+
 const tagPicks = { queries: "", procedures: "", querystore: "", longqueries: "", active: "" };
 const UNTAGGED_TAG = "untagged";
 
@@ -520,7 +524,7 @@ const PROCEDURE_OVERLAY_METRICS = {
  */
 function stripOf(kind, server, ctx) {
   if (kind === "active") {
-    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count", note: (d) => snapshotTruncatedNote(d.truncated === true, Array.isArray(d.snapshots) ? d.snapshots.length : 0, d.total_snapshot_times) };
+    return { title: "Active queries", tool: "get_active_queries", params: { server, hours: ctx.hours, limit: SNAPSHOT_LIST_CAP, snapshots_only: true, ...(activeQueriesMonitor.include ? { include_monitor: true } : {}) }, rows: (d) => d.snapshots, time: "collection_time", value: "row_count", note: (d) => snapshotTruncatedNote(d.truncated === true, Array.isArray(d.snapshots) ? d.snapshots.length : 0, d.total_snapshot_times) };
   }
   if (kind === "blocking" || kind === "deadlocks") {
     const blocking = kind === "blocking";

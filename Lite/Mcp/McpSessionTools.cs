@@ -29,7 +29,8 @@ public sealed class McpSessionTools
         [Description("Maximum number of rows to return. Default 25 (#4198, down from 50 — sized to fit the response budget). The page is bounded by limit, not hours_back — truncated says whether the window held more.")] int limit = DefaultLimit,
         [Description("Return each row's full query text instead of a 400-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null)
+        [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
+        [Description(McpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -56,7 +57,7 @@ public sealed class McpSessionTools
                the cap so truncation is OBSERVED on the filtered population; total_snapshots is that read's
                COUNT(*) OVER () of the same population. Darling's twin is DarlingSessionReader.ActiveQueriesSql. */
             var (rows, populationCount) = await dataService.GetActiveQueriesPageAsync(
-                resolved.ServerId, hours_back, limit + 1, filter, blocking_only, waitFilter, asOfUtc: windowEnd, tags: tagScope);
+                resolved.ServerId, hours_back, limit + 1, filter, blocking_only, waitFilter, asOfUtc: windowEnd, tags: tagScope, includeMonitor: include_monitor);
 
             /* #4966: where this server's query_snapshots start for the window, beside the page cut below — the two
                are different facts: truncated says the window held more than limit, this says the store did not hold
@@ -86,7 +87,7 @@ public sealed class McpSessionTools
 
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd,
-                        McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints()));
+                        McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."), notice.AsHints()));
             }
 
             var truncated = rows.Count > limit;
