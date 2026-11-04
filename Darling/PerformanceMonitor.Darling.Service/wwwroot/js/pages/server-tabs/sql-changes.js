@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { configValueCell } from "./config-values.js";
+
 
 export const SERVER_CHANGE_COLUMNS = [
   { key: "change_time", label: "Changed", format: "time" },
@@ -20,8 +22,9 @@ export const DB_CHANGE_COLUMNS = [
   { key: "change_time", label: "Changed", format: "time" },
   { key: "database_name", label: "Database" },
   { key: "setting_name", label: "Setting" },
-  { key: "old_value", label: "Old" },
-  { key: "new_value", label: "New" },
+  /* #7416 item 3: a value that only gained or lost whitespace shows it, so Old and New never read the same. */
+  { key: "old_value", label: "Old", display: (r) => configValueCell(r, "old_value", "new_value") },
+  { key: "new_value", label: "New", display: (r) => configValueCell(r, "new_value", "old_value") },
 ];
 
 export const TRACE_FLAG_CHANGE_COLUMNS = [

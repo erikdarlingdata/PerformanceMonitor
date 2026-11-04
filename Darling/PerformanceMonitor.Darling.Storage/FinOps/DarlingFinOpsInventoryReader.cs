@@ -52,6 +52,10 @@ public sealed record ServerInventoryDto(
 /// </summary>
 public static class DarlingFinOpsInventoryReader
 {
+    /// <summary>The host OS version as stored, trimmed (#7467): the collected text can end in a line break, and every surface
+    /// (the MCP tool, the web page and both desktop grids) reads it through here, so none shows one.</summary>
+    internal static string CleanHostOsVersion(string? raw) => raw?.Trim() ?? "";
+
     /// <summary>
     /// Collected 24h-CPU / storage / idle-DB / provisioning metrics for EVERY server, in one round trip (#4227).
     /// $1 cpu cutoff (24h), $2 idle cutoff (7d), $3 the idle-coverage start (first of the last 7 UTC days), $4 the days that must be
@@ -589,7 +593,7 @@ ORDER BY s.is_enabled DESC, server_name";
                 InventoryAsOfUtc: reader.IsDBNull(13) ? null : reader.GetDateTime(13),
                 /* sqlserver_start_time is the server's LOCAL clock — read verbatim. host OS + AG role are the collected guarded values. */
                 SqlServerStartTime: reader.IsDBNull(14) ? null : reader.GetDateTime(14),
-                HostOsVersion: reader.IsDBNull(15) ? "" : reader.GetString(15),
+                HostOsVersion: CleanHostOsVersion(reader.IsDBNull(15) ? null : reader.GetString(15)),
                 AgReplicaRole: reader.IsDBNull(16) ? "Standalone" : reader.GetString(16),
                 IsEnabled: reader.IsDBNull(17) || reader.GetBoolean(17),
                 MonthlyCost: reader.IsDBNull(18) ? 0m : Convert.ToDecimal(reader.GetValue(18)),

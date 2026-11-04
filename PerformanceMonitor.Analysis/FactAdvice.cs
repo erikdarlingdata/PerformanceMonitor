@@ -288,6 +288,7 @@ public static class FactAdvice
             "PARAMETER_SENSITIVITY" => ComposeParameterSensitivity(factsByKey),
             "PLAN_REGRESSION" => ComposePlanRegression(factsByKey),
             "TEMPDB_USAGE" => ComposeTempdbUsage(factsByKey),
+            "MEMORY_PRESSURE_EVENTS" => ComposeMemoryPressureEvents(factsByKey),
             // I/O latency + general lock contention.
             "IO_READ_LATENCY_MS" => ComposeIoLatency(factsByKey, "IO_READ_LATENCY_MS"),
             "IO_WRITE_LATENCY_MS" => ComposeIoLatency(factsByKey, "IO_WRITE_LATENCY_MS"),
@@ -1923,6 +1924,35 @@ public static class FactAdvice
     }
 
     /// <summary>
+    /// MEMORY_PRESSURE_EVENTS composed (#7449): the static card said the finding carries the event count and the peak
+    /// process/system indicators, but the reply showed only the peak in the root fact's value. This states the count and
+    /// both peaks from the fact's metadata. Falls back to the static block, which points at get_memory_pressure_events, when
+    /// the metadata is absent.
+    /// </summary>
+    private static AdviceBlock ComposeMemoryPressureEvents(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["MEMORY_PRESSURE_EVENTS"];
+        var process = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "max_process_indicator");
+        var system = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "max_system_indicator");
+        if (process is null && system is null)
+            return fallback;
+
+        var count = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "event_count");
+        var stated = new StringBuilder();
+        if (count is > 0)
+            stated.Append($"The window logged {count.Value:N0} pressure notification{(count.Value == 1 ? "" : "s")} at medium or worse");
+        else
+            stated.Append("The window logged pressure notifications");
+        stated.Append($". The process indicator peaked at {(process ?? 0):0.#} and the system indicator at {(system ?? 0):0.#}.");
+
+        const string Sentence = "`get_memory_pressure_events` lists each notification with its process and system indicators.";
+        return fallback with
+        {
+            Investigation = fallback.Investigation.Replace(Sentence, stated + " " + Sentence, StringComparison.Ordinal)
+        };
+    }
+
+    /// <summary>
     /// TEMPDB_USAGE composed: states peak reserved MB and PERMUTES on the dominant consumer — version
     /// store (long transactions), internal objects (spills), or user objects (#temp) — since each has
     /// a different fix. Falls back to the static block when the metadata is absent.
@@ -2328,23 +2358,55 @@ public static class FactAdvice
         if (items.Count == 0)
             return fallback;
 
+        /* #7448: RCSI off is how a new SQL Server database starts, so when it is the ONLY item nothing has drifted:
+           the headline says what the fact found and the text does not claim a change. Another setting that really
+           moved keeps the drift wording. */
+        if (items.Count == 1 && f.Metadata.TryGetValue("rcsi_off_count", out var rcsiOff) && rcsiOff > 0)
+        {
+            return fallback with
+            {
+                Headline = $"RCSI is off on {Plural((long)rcsiOff, "database")} on this server",
+                Investigation = $"Across this server's databases: {items[0]}. Read committed snapshot isolation (RCSI) is off by default on every new SQL Server database, so this is the starting setting, not a change.",
+                Remediation =
+                    "Turn RCSI on only for a database where the blocking is readers waiting on writers: it makes readers " +
+                    "stop taking shared locks and read the last committed row version instead, at the cost of row-version " +
+                    "load in tempdb and a locking-behavior change the application should be tested against on a copy first. " +
+                    "A database with writer-versus-writer blocking or no blocking gains nothing from it."
+            };
+        }
+
         var inv = $"Across this server's databases: {string.Join("; ", items)}. These are per-database settings that have drifted from the safe defaults and quietly cost performance or stability.";
-        var rem =
-            "Bring each back to the safe default on the databases that matter: AUTO_SHRINK off (it fragments " +
-            "indexes and churns I/O re-growing what it shrank), AUTO_CLOSE off, page verify set to CHECKSUM so " +
-            "corruption is detected, auto-create and auto-update statistics on, and RCSI on where the blocking " +
-            "is readers-versus-writers. The Database Configuration view lists exactly which databases each applies to.";
+        /* #7448: name only the settings that fired. RCSI off is its own sentence, because it is a choice for
+           readers-versus-writers blocking and not a safe default to restore. */
+        bool Fired(string metaKey) => f.Metadata.TryGetValue(metaKey, out var n) && n > 0;
+        var fixes = new List<string>();
+        if (Fired("auto_shrink_on_count"))
+            fixes.Add("AUTO_SHRINK off (it fragments indexes and churns I/O re-growing what it shrank)");
+        if (Fired("auto_close_on_count"))
+            fixes.Add("AUTO_CLOSE off");
+        if (Fired("page_verify_not_checksum_count"))
+            fixes.Add("page verify set to CHECKSUM so corruption is detected");
+        if (Fired("auto_create_stats_off_count"))
+            fixes.Add("auto-create statistics on");
+        if (Fired("auto_update_stats_off_count"))
+            fixes.Add("auto-update statistics on");
+        var rem = new StringBuilder();
+        if (fixes.Count > 0)
+            rem.Append("Bring each back to the safe default on the databases that matter: ").Append(string.Join(", ", fixes)).Append(". ");
+        if (Fired("rcsi_off_count"))
+            rem.Append("Turn RCSI on only where the blocking is readers-versus-writers. ");
+        rem.Append("The Database Configuration view lists exactly which databases each applies to.");
         if (qsOff > 0)
-            rem +=
+            rem.Append(
                 " Where Query Store is off, enable it (ALTER DATABASE <db> SET QUERY_STORE = ON; then " +
                 "OPERATION_MODE = READ_WRITE) so query performance history is captured for troubleshooting " +
-                "and plan-regression detection.";
+                "and plan-regression detection.");
 
         return fallback with
         {
             Headline = "Database settings have drifted from the safe defaults on this server",
             Investigation = inv,
-            Remediation = rem
+            Remediation = rem.ToString()
         };
     }
 
@@ -3001,7 +3063,7 @@ public static class FactAdvice
             Headline:
                 "SQL Server signalled physical-memory pressure — the resource monitor logged RESOURCE_MEMPHYSICAL_LOW notifications in the window",
             Investigation:
-                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. The finding carries the count of pressure events and the peak process/system indicators for the window. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
+                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. `get_memory_pressure_events` lists each notification with its process and system indicators. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
             Remediation:
                 "Confirm whether the pressure is SQL's or the box's: check `max server memory` against physical RAM and what else runs on the host. If `max server memory` is unset or too high, SQL can starve the OS and other processes into signalling system-wide low memory — cap it leaving headroom for the OS (and for other instances/services on the box). If `max server memory` is already conservative and the system indicator is what fired, an external consumer (another instance, an app, a runaway agent) is taking the memory — find and constrain it. If the server is genuinely short of memory for its workload after those checks, add RAM.");
 

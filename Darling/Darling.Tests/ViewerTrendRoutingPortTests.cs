@@ -326,9 +326,7 @@ public sealed class ViewerTrendRoutingPortTests
         var truncated = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
         Assert.StartsWith("Source: hourly rollup (one point per hour). Data begins ", truncated, StringComparison.Ordinal);
         Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), truncated, StringComparison.Ordinal);
-        /* #7386: what is known, not why: a server that was off or added late never held the rest of the window. */
-        Assert.EndsWith(". The store holds nothing earlier in this window at this tier.", truncated, StringComparison.Ordinal);
-        Assert.DoesNotContain("because", truncated, StringComparison.Ordinal);
+        Assert.EndsWith(" because the store holds nothing earlier in this window at this tier.", truncated, StringComparison.Ordinal);
 
         /* The word the chart leads with is the word the tool publishes. */
         foreach (var tier in new[] { RetentionTier.Raw, RetentionTier.Hourly })

@@ -81,6 +81,22 @@ public sealed class DarlingMcpPgTableBloatTools
                  + "compare the page count against. Run ANALYZE on the table and re-read.";
         }
 
+        if (r.LastAnalyzed is null)
+        {
+            /* #7456: statistics exist (the first two branches ruled out "no pg_stats" and "never analyzed")
+               but last_analyze and last_autoanalyze are both empty. PostgreSQL clears them, and
+               n_mod_since_analyze, whenever its statistics counters are lost, so the churn test below would
+               read 0 and call months-old widths fresh. The cause is not named as a crash: pg_stat_reset()
+               leaves the same trace. */
+            return "SUPPRESSED: PostgreSQL holds column statistics for this table but has no record of when "
+                 + "it was last analyzed (last_analyze and last_autoanalyze are both empty), so how stale "
+                 + "those statistics are cannot be judged. PostgreSQL discards that record, and the count of "
+                 + "rows modified since, when its statistics counters are lost: at crash recovery, after an "
+                 + "immediate shutdown, or after pg_stat_reset(). Stale statistics can put this estimate "
+                 + "tens of points off, so it is withheld rather than shown as fresh. Run ANALYZE on the "
+                 + "table, then re-read once the collector has run again.";
+        }
+
         {
             var pct = r.LiveTuples > 0
                 ? Math.Round((double)r.ModsSinceAnalyze / r.LiveTuples * 100, 1)
@@ -225,7 +241,9 @@ public sealed class DarlingMcpPgTableBloatTools
         + "Against pgstattuple on real tables with current statistics it was within about 2 percentage "
         + "points; with STALE statistics it was wrong by 81 percentage points, so the tool suppresses the "
         + "number outright rather than captioning it when the statistics behind it are stale, when the table "
-        + "has never been analyzed, or when the monitoring login cannot SELECT from the table (pg_monitor "
+        + "has never been analyzed, when PostgreSQL holds statistics for it but no record of when they were "
+        + "taken (statistics counters are lost at crash recovery, an immediate shutdown or pg_stat_reset(), so "
+        + "freshness cannot be judged until an ANALYZE runs), or when the monitoring login cannot SELECT from the table (pg_monitor "
         + "alone does not confer that, and in that state the estimator silently returns large numbers). "
         + "Measured sizes, the dead-tuple fraction from the server's own counters, and the growth across the "
         + "window are always reported, so a suppressed estimate degrades the answer rather than removing it. "

@@ -22,11 +22,13 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
     private static readonly DateTime HotOldest = new(2026, 6, 20, 8, 30, 0, DateTimeKind.Utc);
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
+    private DuckDbInitializer? _initializer;
 
     public ServerDataStartArchiveGuardTests() => Directory.CreateDirectory(Path.Combine(_tempDir, "archive"));
 
     public void Dispose()
     {
+        _initializer?.Dispose();
         try
         {
             if (Directory.Exists(_tempDir))
@@ -53,8 +55,8 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
     {
         const string columns = "(log_id, server_id, server_name, collector_name, collection_time, status)";
         var dbPath = Path.Combine(_tempDir, "test.duckdb");
-        var initializer = new DuckDbInitializer(dbPath);
-        await initializer.InitializeFromTemplateAsync();
+        _initializer = new DuckDbInitializer(dbPath);
+        await _initializer.InitializeFromTemplateAsync();
 
         using (var connection = new DuckDBConnection($"Data Source={dbPath}"))
         {
@@ -70,8 +72,8 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
             await ExecuteAsync(connection, $"INSERT INTO collection_log {columns} VALUES {Row(2, HotOldest)}, {Row(3, HotOldest.AddHours(1))}");
         }
 
-        await initializer.CreateArchiveViewsAsync();
-        return initializer;
+        await _initializer.CreateArchiveViewsAsync();
+        return _initializer;
     }
 
     [Theory]
@@ -79,7 +81,7 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
     [InlineData(10)]
     public async Task AnArchiveHoldingARowFromTheWindowStartOn_AnswersNull_NotTheHotBoundary(int archivedDay)
     {
-        using var initializer = await StoreAsync(new DateTime(2026, 6, archivedDay, 0, 0, 0, DateTimeKind.Utc));
+        var initializer = await StoreAsync(new DateTime(2026, 6, archivedDay, 0, 0, 0, DateTimeKind.Utc));
 
         var start = await new LocalDataService(initializer).GetServerDataStartAsync(ServerId, WindowStart, TestContext.Current.CancellationToken);
 
@@ -89,7 +91,7 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
     [Fact]
     public async Task AnArchiveThatEndsBeforeTheWindow_AnswersTheHotTablesOldestRow()
     {
-        using var initializer = await StoreAsync(new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc));
+        var initializer = await StoreAsync(new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc));
 
         var start = await new LocalDataService(initializer).GetServerDataStartAsync(ServerId, WindowStart, TestContext.Current.CancellationToken);
 
@@ -100,7 +102,7 @@ public sealed class ServerDataStartArchiveGuardTests : IDisposable
     [Fact]
     public async Task NoArchiveAtAll_AnswersTheHotTablesOldestRow()
     {
-        using var initializer = await StoreAsync(archived: null);
+        var initializer = await StoreAsync(archived: null);
 
         var start = await new LocalDataService(initializer).GetServerDataStartAsync(ServerId, WindowStart, TestContext.Current.CancellationToken);
 

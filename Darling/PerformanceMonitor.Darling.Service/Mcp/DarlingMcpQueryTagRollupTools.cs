@@ -378,7 +378,7 @@ public sealed class DarlingMcpQueryTagRollupTools
                 payload["message"] = "Sections not served: " + NotServedText(notServed);
             }
 
-            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.";
+            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children. For the plan_cache section: " + QueryStatsCoverage.StoredRowsNote;
             payload["sections"] = sections;
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }

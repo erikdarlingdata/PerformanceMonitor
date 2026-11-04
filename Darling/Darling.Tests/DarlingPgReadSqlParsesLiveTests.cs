@@ -94,6 +94,9 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            population, so the fragment is verified where it is used rather than left unverified. */
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
+        /* #7455: the two words a buffer row without a name shows. Display text, not a statement. */
+        "DarlingPgBufferUsageReader.NotResolvedLabel",
+        "DarlingPgBufferUsageReader.SharedOrDroppedLabel",
         /* #7409: two expression fragments spliced into CurrentConfigSql (in the parse-checked population): the default
            shown in the base of the value, and the "differs from the default" predicate. Verified where spliced. */
         "DarlingPgServerConfigReader.DefaultAsSettingSql",

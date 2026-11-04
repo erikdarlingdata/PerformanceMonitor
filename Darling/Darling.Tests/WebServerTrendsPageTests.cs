@@ -52,7 +52,7 @@ public sealed class WebServerTrendsPageTests
         var draw = Between(js, "export async function drawClerkTrends(", "export function memoryPressurePanels(");
         Assert.Contains("\"get_server_trend\",", draw);
         Assert.Contains("{ server, metric: \"memory_clerks\", hours: ctx.hours, clerk_types: clerkTypes.join(\",\") }", draw);
-        Assert.Contains("discontinuityNotes(trend.data)", draw);
+        // #7416: the clerk sizes are levels, so the clerk chart draws no restart strip (WebNoticesAndRangeStripBehaviourTests).
         Assert.Contains("missing_clerk_types", draw);
     }
 

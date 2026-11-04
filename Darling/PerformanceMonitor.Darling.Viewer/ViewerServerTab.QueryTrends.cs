@@ -157,10 +157,19 @@ public partial class ViewerServerTab
                     : $"{series.Source} (one point per collection)"
                 : $"{series.Source} rollup (one point per hour)",
             series.Truncated ? series.EffectiveStartUtc : null,
-            /* #7386: what is known, not a guess at why. A server that was off, or added late, never held the rest of the window, so
-               "because the store no longer holds it" was untrue for it. */
-            "The store holds nothing earlier in this window at this tier.",
-            asReason: false);
+            DescribeUnservedHead(series));
+
+    /// <summary>
+    /// Why a raw or hourly trend chart's head was not served (#7416 item 21). A late first point alone proves nothing aged out
+    /// (a query first run later, or a server that was off earlier, gives the same one), so the chart says the earlier part aged out of
+    /// the tier, and for how long the tier keeps data, only when the series says the requested start is older than that.
+    /// </summary>
+    internal static string DescribeUnservedHead(QueryTrendSeries series)
+        => series.StartOlderThanTier
+            ? series.TierKeepsDays is int days
+                ? $"the earlier part has aged out of this tier, which keeps {days} {(days == 1 ? "day" : "days")} of data"
+                : "the earlier part has aged out of this tier"
+            : "the store holds nothing earlier in this window at this tier";
 
     /// <summary>The bucket width named in a raw trend's coverage title (#4234): minutes below an hour, whole hours from it.</summary>
     private static string DescribeBucketWidth(int minutes)
@@ -196,7 +205,7 @@ public partial class ViewerServerTab
     /// while each says its own truth in the two slots. Terse in the common case on purpose: a long banner on
     /// every chart teaches the eye to skip the one that matters.
     /// </summary>
-    private static string ComposeTrendCoverage(string served, DateTime? dataBeginsUtc, string whyUnserved, bool asReason = true)
+    private static string ComposeTrendCoverage(string served, DateTime? dataBeginsUtc, string whyUnserved)
     {
         if (dataBeginsUtc is not DateTime head)
         {
@@ -204,9 +213,7 @@ public partial class ViewerServerTab
         }
 
         var from = ViewerTimeHelper.FormatForDisplay(head, "yyyy-MM-dd HH:mm");
-        return asReason
-            ? $"Source: {served}. Data begins {from} because {whyUnserved}."
-            : $"Source: {served}. Data begins {from}. {whyUnserved}";
+        return $"Source: {served}. Data begins {from} because {whyUnserved}.";
     }
 
     /// <summary>Puts <see cref="DescribeTrendCoverage"/> on a chart as its title, coloured like its tick

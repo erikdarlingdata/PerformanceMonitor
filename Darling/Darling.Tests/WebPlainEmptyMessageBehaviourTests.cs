@@ -163,6 +163,47 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void APanelWithEmptyLineTrue_SaysItsOwnSentenceForATrueNegative_AndKeepsTheToolTextBehindAClick()
+    {
+        var r = Run();
+        const string line = "No lock activity was sampled in this window.";
+        var yes = r.GetProperty("emptyLineTrue");
+        Assert.StartsWith(line, yes.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, yes.GetProperty("hasDetails").GetInt32());
+        Assert.Equal(r.GetProperty("message").GetString(), yes.GetProperty("detailBody").GetString());
+
+        // A reply that is not a true negative (the server is offline, say) is not an "empty" answer, so the tool's text is what shows.
+        var no = r.GetProperty("emptyLineUnavailable");
+        Assert.Contains("collector is running against example-pg-01", no.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(0, no.GetProperty("hasDetails").GetInt32());
+    }
+
+    [Fact]
+    public void TheQueryHeatmap_StoppedCollectorReply_IsShownAsTheToolSaidIt_NotAsAnIdleServer()
+    {
+        var shown = Run().GetProperty("heatmapStopped").GetString()!;
+        Assert.Contains("nothing collected IN the last 6 hours", shown, StringComparison.Ordinal);
+        Assert.Contains("a collector that stopped looks exactly like this", shown, StringComparison.Ordinal);
+        Assert.DoesNotContain("idle", shown, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("More detail", shown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SnapshotsWithoutAMeasuredDelta_AreAPlainSentenceBuiltFromTheHints_AndTheToolTextIsBehindAClick()
+    {
+        var r = Run();
+        var six = r.GetProperty("noDelta");
+        Assert.StartsWith("No query in this range changed enough between snapshots to attribute CPU to it. A range of the last 6 hours or more reaches one that did.", six.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(r.GetProperty("deltaMessage").GetString(), six.GetProperty("detailBody").GetString());
+        Assert.Contains("the last 1 hour or more", r.GetProperty("noDeltaOneHour").GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Contains("A longer range may.", r.GetProperty("noDeltaNoHours").GetProperty("text").GetString(), StringComparison.Ordinal);
+        // Some snapshot did measure a delta, so this is not the sentence for that case: the tool's own text stays.
+        var measured = r.GetProperty("deltaMeasured");
+        Assert.Equal(0, measured.GetProperty("hasDetails").GetInt32());
+        Assert.DoesNotContain("attribute CPU", measured.GetProperty("text").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ThePageCutFlag_IsASentenceUnderTheTiles_NotATile()
     {
         var r = Run();

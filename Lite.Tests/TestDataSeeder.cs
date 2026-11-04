@@ -1763,7 +1763,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// plan/size totals, so CollectPlanCacheFactsAsync SUMs it into a PLAN_CACHE_BLOAT fact. Stamped at
     /// TestPeriodEnd (the latest-snapshot the collector reads).
     /// </summary>
-    internal async Task SeedPlanCacheStatsAsync(int totalPlans, int singleUsePlans, int totalSizeMb, int singleUseSizeMb)
+    internal async Task SeedPlanCacheStatsAsync(int totalPlans, int singleUsePlans, int totalSizeMb, int singleUseSizeMb,
+        string cacheObjType = "Compiled Plan", string objType = "Adhoc")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -1780,8 +1781,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Compiled Plan" });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Adhoc" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = cacheObjType });
+        cmd.Parameters.Add(new DuckDBParameter { Value = objType });
         cmd.Parameters.Add(new DuckDBParameter { Value = totalPlans });
         cmd.Parameters.Add(new DuckDBParameter { Value = singleUsePlans });
         cmd.Parameters.Add(new DuckDBParameter { Value = totalSizeMb });

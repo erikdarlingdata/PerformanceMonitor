@@ -10,7 +10,8 @@ import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityNotes, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./shared.js";
+import { poolName } from "../memory-grant-charts.js";
+import { panelShell, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./shared.js";
 
 /* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
    target and available_physical_memory_mb as that target minus what is committed, so the first two tiles are the database's
@@ -34,10 +35,11 @@ export const PLAN_CACHE_STATS = [
   { key: "summary.total_plans", label: "Plans", format: "int" },
   { key: "summary.single_use_plans", label: "Single-use", format: "int" },
   { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
+  { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
   { key: "summary.total_size_mb", label: "Cached plans size", format: "mb" },
   { key: "summary.single_use_size_mb", label: "Single-use size", format: "mb" },
   { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
-  { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true },
+  { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true, sentence: true },
 ];
 
 export const MEMORY_SERIES = [
@@ -57,8 +59,11 @@ export const CLERK_COLUMNS = [
    grant, and when" is the question the window exists to answer; the sums come last because they are the
    per-interval deltas added up across the window, not a counter read at one instant. `snapshots_in_window`
    is the denominator that says how much of the window the peaks were taken over. */
+/* #7416: 1 and 2 are the internal and default pools, named as the grant charts name them. Any other pool keeps its number. */
+const POOL_COLUMN = { key: "pool_id", label: "Pool", display: (r) => (r.pool_id == null ? "" : poolName(r.pool_id)) };
+
 export const GRANT_WINDOW_COLUMNS = [
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
   { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
@@ -80,7 +85,7 @@ export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: 
    instant itself. */
 export const GRANT_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "granted_memory_mb", label: "Granted", format: "mb" },
   { key: "used_memory_mb", label: "Used", format: "mb" },
   { key: "available_memory_mb", label: "Available", format: "mb" },
@@ -92,7 +97,7 @@ export const GRANT_COLUMNS = [
 
 export const SEMAPHORE_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "target_memory_mb", label: "Target", format: "mb" },
   { key: "total_memory_mb", label: "Total", format: "mb" },
   { key: "granted_memory_mb", label: "Granted", format: "mb" },
@@ -107,9 +112,17 @@ export const SEMAPHORE_COLUMNS = [
 const PRESSURE_COLUMNS = [
   { key: "sample_time", label: "Time", format: "time" },
   { key: "memory_notification", label: "Notification" },
-  { key: "memory_indicators_process", label: "Process", format: "int" },
-  { key: "memory_indicators_system", label: "System", format: "int" },
+  { key: "memory_indicators_process", label: "SQL Server process", display: (r) => pressureLevelWord(r.memory_indicators_process), sortValue: (r) => r.memory_indicators_process },
+  { key: "memory_indicators_system", label: "Operating system", display: (r) => pressureLevelWord(r.memory_indicators_system), sortValue: (r) => r.memory_indicators_system },
 ];
+
+/** The resource monitor's indicator as words (#7416): 0 and 1 are normal, 2 is medium, 3 and above are severe, the collector's own reading of the number. */
+export function pressureLevelWord(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  if (value >= 3) return "Severe";
+  if (value >= 2) return "Medium";
+  return "Normal";
+}
 
 /** Both memory-pressure severities as the desktop chart counts them: indicator 2 is medium, 3 and above severe. */
 const PRESSURE_LINES = [
@@ -244,10 +257,9 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
   }));
   if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No clerk samples in this window.")]);
   /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-  const notes = discontinuityNotes(trend.data);
   mount(slot, [
     keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    /* #7416: memory clerk sizes are levels, not deltas, so a restart draws no restart strip. */
     missingStrip(trend.data),
     zoomableLineChart({
       atTime: { server },
@@ -270,7 +282,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
  */
 export function memoryPressurePanels(server, ctx) {
   const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2, "get_memory_pressure_events");
-  const grid = panelShell("Memory Pressure Events", ctx.label, 1, "get_memory_pressure_events");
+  const grid = panelShell("Memory Pressure Events", ctx.label, 2,"get_memory_pressure_events");
   const signal = getPanelSignal();
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours }, signal);

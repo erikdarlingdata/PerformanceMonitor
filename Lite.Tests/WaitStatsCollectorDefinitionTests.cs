@@ -179,10 +179,11 @@ internal static class CollectorTestContext
         bool isAzureSqlDb = false,
         DateTime? watermark = null,
         bool capturePlanXml = false,
-        bool watermarkFromUtcColumn = false)
+        bool watermarkFromUtcColumn = false,
+        int serverId = 42)
         => new()
         {
-            ServerId = 42,
+            ServerId = serverId,
             ServerName = "test-server",
             CollectionTime = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc),
             Deltas = deltas,

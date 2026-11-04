@@ -204,6 +204,14 @@ public static class CollectorRuntimePrecondition
     public const int FirstRunSlackMinutes = 10;
 
     /// <summary>
+    /// #7416: the empty answer of <c>get_running_jobs</c> on both SKUs. The read knows whether the collector has ever run for the server
+    /// (a SUCCESS run or a snapshot in the store), so the message says which of the two empties it is instead of hedging between them.
+    /// </summary>
+    public static string RunningJobsEmptyMessage(bool collectorRan) => collectorRan
+        ? "No SQL Agent job is running."
+        : "The running_jobs collector has not run for this server yet, so no job state is known.";
+
+    /// <summary>
     /// What could stop the running_jobs collector, as <c>get_running_jobs</c> words it on both SKUs. One copy, so
     /// the Lite and Darling tools cannot drift apart. Each cause is named as possible, because the gated-off arm
     /// cannot see which one applies.
@@ -515,6 +523,40 @@ public static class CollectorRuntimePrecondition
         string.Join(
             " ",
             collectorName.Split('_').Select(w => w.Length == 0 ? w : char.ToUpperInvariant(w[0]) + w[1..]));
+
+    /// <summary>
+    /// #7410: the structured fields the web page builds its one plain sentence from, so it never has to read the tool's message. The
+    /// <c>message</c> beside them is unchanged. <c>reason</c> is <c>extension_missing</c> (with <c>extensions</c>, the names the
+    /// collector declares it needs, and <c>restart_required</c> when one of them has to be in shared_preload_libraries),
+    /// <c>source_unreadable</c> (the skip that is a refused grant or a source this server does not have) or <c>capture_session_missing</c>.
+    /// Null for any other status, which keeps the bare envelope. Lite and Darling both call it, so a SQL Server collector's precondition reply carries the same fields on both.
+    /// </summary>
+    public static object? StructuredReason(string collectorName, string? status)
+    {
+        if (string.Equals(status, ExtensionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            var required = CollectorCatalog.Find(collectorName)?.RequiredPgExtensions ?? Array.Empty<PgExtensionDependency>();
+            return new
+            {
+                reason = "extension_missing",
+                collector = collectorName,
+                extensions = required.Select(r => r.ExtensionName).ToArray(),
+                restart_required = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries),
+            };
+        }
+
+        if (string.Equals(status, DegradedStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "source_unreadable", collector = collectorName };
+        }
+
+        if (string.Equals(status, CaptureSessionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "capture_session_missing", collector = collectorName };
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// #6453: the sentence for a read that found no stored rows while the collector serving it is HEALTHY, or null when it is

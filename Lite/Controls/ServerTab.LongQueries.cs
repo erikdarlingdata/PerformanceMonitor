@@ -57,6 +57,18 @@ public partial class ServerTab
     /// (<see cref="LongQueryRowTimeUtc"/>), so the notice then names the oldest completion shown
     /// (<see cref="EarlierOfFloorAndRowShown"/>), the same rule the Darling viewer's event grids follow.</para>
     /// </summary>
+    /// <summary>#7416 item 11: the grid leaves the monitor's own statements out until the box is ticked (on an idle server every long
+    /// completion is the monitor's). A change reads the tab's data again; before the control has loaded there is nothing to redo.</summary>
+    private async void LongQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await RefreshAllDataAsync();
+    }
+
     private async Task RefreshLongQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_isAzureSqlDatabase);
@@ -67,10 +79,11 @@ public partial class ServerTab
         /* Release walk V12a: the empty grid says why it is empty (the trace is opt-in and off), not the generic "No data". */
         EmptyState.SetText(LongQueryCompletionsGrid, LongQueriesEmptyText.Text(traceEnabled, LongQueriesSwitchLocation));
 
+        var includeMonitor = LongQueriesIncludeMonitorCheckBox.IsChecked == true;
         try
         {
             var task = Task.Run(() => SafeQueryAsync(() =>
-                QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetRecentLongQueryCompletionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
+                QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetRecentLongQueryCompletionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, tags: tags, includeMonitor: includeMonitor))));
             await task;
             _longQueryFilterMgr!.UpdateData(task.Result);
 

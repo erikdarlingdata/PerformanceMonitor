@@ -94,7 +94,7 @@ public sealed class BlockingSourceLabelTests
     public void BlockingTrendChart_PutsTheLabelOnTheAxisOnlyWhenItDrawsRows()
     {
         var src = Read("ServerTab.Charts.cs");
-        var chart = Between(src, "private void UpdateBlockingTrendChart(", "private void UpdateDeadlockTrendChart(");
+        var chart = Between(src, "void UpdateBlockingTrendChart(", "void UpdateDeadlockTrendChart(");
 
         Assert.Single(Occurrences(chart, "BlockingTrendLabels.LegendFor(sources)"));
         /* The zero-row branch returns early with the plain label: nothing answered, so nothing is named. */
@@ -107,7 +107,7 @@ public sealed class BlockingSourceLabelTests
     public void BlockingStatsCharts_PutTheLabelOnTheAxisOnlyWhenTheyDrawRows()
     {
         var src = Read("ServerTab.BlockingStats.cs");
-        var duration = Between(src, "private void UpdateBlockingDurationChart(", "private void UpdateBlockingTotalDurationChart(");
+        var duration = Between(src, "void UpdateBlockingDurationChart(", "private void UpdateBlockingTotalDurationChart(");
         var total = Between(src, "private void UpdateBlockingTotalDurationChart(", "private void UpdateDeadlockWaitChart(");
 
         Assert.Single(Occurrences(duration, "BlockingSourceLabel.For(\"Block Duration (ms)\", data.Select(d => d.Source))"));

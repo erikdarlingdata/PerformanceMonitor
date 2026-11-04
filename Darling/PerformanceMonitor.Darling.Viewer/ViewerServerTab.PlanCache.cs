@@ -116,6 +116,7 @@ public partial class ViewerServerTab
         {
             PlanCacheTotalPlansText.Text = "--";
             PlanCacheOldestPlanText.Text = "--";
+            PlanCacheCompiledSingleUseText.Text = "--";
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
@@ -123,12 +124,18 @@ public partial class ViewerServerTab
             return;
         }
 
-        /* Derived single-use bloat badge + forced-parameterization hint (install/47 report.plan_cache_bloat
-           parity): a pure client-side CASE on the single-use / total ratio Darling already reads. */
-        var bloat = ViewerDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
+        /* Derived single-use bloat badge and its recommendation (#7445): the shared PlanCacheBloatRule over
+           compiled plans, with a 100 MB single-use floor, from figures Darling already reads. */
+        var bloat = ViewerDataService.ClassifyPlanCacheBloat(summary);
         PlanCacheBloatLevelText.Text = bloat.Level;
         PlanCacheBloatLevelText.Foreground = BloatLevelBrush(bloat.Level);
         PlanCacheRecommendationText.Text = bloat.Recommendation;
+        /* The figure the badge is judged on, so a Normal badge beside a busy cache is explained: single-use
+           COMPILED plans as a share of compiled plans, and the MB they take (the badge's floor is on that). */
+        PlanCacheCompiledSingleUseText.Text = summary.CompiledPlans > 0
+            ? string.Format(CultureInfo.CurrentCulture, "{0:0.0}% ({1:N0} MB)",
+                summary.CompiledSingleUsePlans * 100.0 / summary.CompiledPlans, summary.CompiledSingleUseSizeMb)
+            : "--";
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0", CultureInfo.CurrentCulture);
         /* #4966: the totals are one snapshot (the newest in the window); say when it was collected. */

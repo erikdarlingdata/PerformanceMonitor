@@ -41,6 +41,10 @@ public sealed class TopRankingNoticeBehaviourTests
             "query_stats", ComposeRoute.Raw, now.AddDays(-7), now, RollupAvailability.All, RollupCoverage.Unknown)!;
     }
 
+    /// <summary>#7416: the service writes "partial window:" in lowercase for an MCP client, and a page draws it capitalised (<c>noticeStrip</c>).</summary>
+    private static string ShownOnThePage(string notice) =>
+        notice.StartsWith("partial window:", StringComparison.Ordinal) ? "P" + notice[1..] : notice;
+
     private static JsonElement Run(string scenario)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -94,7 +98,7 @@ public sealed class TopRankingNoticeBehaviourTests
         var run = Run("both");
         foreach (var card in Cards)
         {
-            Assert.Equal([RetentionNotice()], NoticesOf(run, card));
+            Assert.Equal([ShownOnThePage(RetentionNotice())], NoticesOf(run, card));
             Assert.EndsWith("by Reads", run.GetProperty("cards").GetProperty(card).GetProperty("title").GetString());
         }
 
@@ -121,7 +125,7 @@ public sealed class TopRankingNoticeBehaviourTests
         var run = Run("retentionOnly");
         foreach (var card in Cards)
         {
-            Assert.Equal([RetentionNotice()], NoticesOf(run, card));
+            Assert.Equal([ShownOnThePage(RetentionNotice())], NoticesOf(run, card));
         }
     }
 

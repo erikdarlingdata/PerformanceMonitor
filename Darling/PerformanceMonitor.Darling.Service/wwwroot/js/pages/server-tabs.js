@@ -39,8 +39,9 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, noticeStrip, daysText } from "../util.js";
+import { el, makeActivatable, captionStrip, daysText } from "../util.js";
 import { worstFirst } from "../panels.js";
+import { evictionNoteShort } from "../pg-grid-text.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { statsHistoryColumn } from "./stats-history.js";
 import { pgPlanColumn } from "./pg-plan-viewer.js";
@@ -61,7 +62,7 @@ import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
-import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
+import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
@@ -84,10 +85,20 @@ export { waitsPanel, drawWaitTrends, namedTrendPanel, drawNamedTrends } from "./
 
 /* ─────────────────────────── the tabs ─────────────────────────── */
 
+/* #7416 item 11: whether the Long Query Completions grid includes the monitor's own statements (module scope so the rebuild keeps the pick). */
+let longQueriesIncludeMonitor = false;
+
 /**
  * The tab registry, in the order the desktop viewer presents them. `build(server, ctx)` returns the tab's nodes;
  * `ctx` is `{ hours, label }` — the page's time range and its human label.
  */
+/* #7410: the two Index Bloat panels read one tool whose note is a long paragraph (population counts, accuracy figures, the exact-measurement
+   command). The page says one sentence and keeps the tool's own text one click away. Its empty reply is not shortened: it warns that the
+   daily collector may not have run in a short window, and the page does not drop that. */
+const INDEX_BLOAT_PLAIN = {
+  noteShort: "These are estimates from catalog statistics, not page reads. An index with a reason in Not Measured has no estimate, which is not the same as healthy.",
+};
+
 export const SERVER_TABS = [
   {
     id: "overview",
@@ -121,7 +132,7 @@ export const SERVER_TABS = [
     label: "Wait Stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
-      tablePanel(
+      tablePanelPlain(
         "Waiting Tasks",
         "get_waiting_tasks",
         { server, hours: ctx.hours, limit: 30 },
@@ -130,7 +141,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No waiting tasks were captured in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Latch Stats",
         "get_latch_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -140,7 +151,7 @@ export const SERVER_TABS = [
         "No latch classes accumulated waits in this window."
       ),
       namedTrendPanel(server, ctx, "latch"),
-      tablePanel(
+      tablePanelPlain(
         "Spinlock Stats",
         "get_spinlock_stats",
         { server, hours: ctx.hours, top: 10 },
@@ -235,7 +246,8 @@ export const SERVER_TABS = [
         CLERK_COLUMNS,
         SNAPSHOT,
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
-        1
+        /* #7416: full width like every other panel on this tab. Half width, alone between full-width panels, left a blank half beside it. */
+        2
       ),
       ...memoryPressurePanels(server, ctx),
       /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
@@ -481,7 +493,7 @@ export const SERVER_TABS = [
     label: "File I/O",
     build: (server, ctx) => [
       fileIoPanel(server, ctx),
-      tablePanel(
+      tablePanelPlain(
         "File I/O Stats",
         "get_file_io_stats",
         { server },
@@ -509,7 +521,7 @@ export const SERVER_TABS = [
         1,
         "note"
       ),
-      tablePanel(
+      tablePanelPlain(
         "Table & Index Sizes",
         "get_table_index_sizes",
         { server },
@@ -703,6 +715,7 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
+          noteShort: "Every database here that has Query Store is a readable secondary, so its Query Store is a copy of the primary's and no verdict is given for it. Read the primary for the clutter. The overhead panels below are still measured on this server.",
           emptyText:
             "No Query Store rows, no Query Store collection run and no Query Store health capture for this " +
             "server in this window. The read says which of those it found rather than showing an empty grid.",
@@ -716,6 +729,7 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
+          noteShort: "Query Store's idle sleep waits are left out of this table on purpose. It lists only the waits that cost something, and it is not the whole of Query Store's cost.",
           emptyText:
             "No non-sleep QDS_* wait deltas in this window. Query Store's four sleep waits are dropped at " +
             "collection on purpose, so their absence here is the filter working, not a quiet server.",
@@ -728,8 +742,7 @@ export const SERVER_TABS = [
           viz: "stat",
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
-          emptyText:
-            "The Query Store memory clerk was not among the top 25 clerks over 1 MB in any capture in this window, so this is a rank, not a zero.",
+          emptyText: "No memory clerk figures in this window.",
         },
       ]),
       /* #2484, #6293: the Query Heatmap, drawn as the Viewer draws it: a colour grid of query counts by time and
@@ -744,11 +757,25 @@ export const SERVER_TABS = [
           "No query executed in this window. Query stats are collected every cycle whether or not anything " +
           "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
       }),
-      tagFilteredCard("longqueries", (picker) =>
-        tablePanel(
+      tagFilteredCard("longqueries", (picker, redraw) => {
+        /* #7416 item 11: the monitor's own statements are left out by default (on an idle server every long completion is
+           the monitor's). This switch sends include_monitor so a slow collector run can still be looked at. The pick lives
+           at module scope so the 60 s rebuild keeps it. */
+        picker.appendChild(
+          pickerControl(
+            "Monitor statements",
+            [{ value: "hide", label: "Left out" }, { value: "show", label: "Included" }],
+            (value) => {
+              longQueriesIncludeMonitor = value === "show";
+              redraw();
+            },
+            longQueriesIncludeMonitor ? "show" : "hide"
+          )
+        );
+        return tablePanel(
           "Long Query Completions",
           "get_long_query_completions",
-          withTagPick({ server, hours: ctx.hours, limit: 30 }, "longqueries"),
+          withTagPick({ server, hours: ctx.hours, limit: 30, ...(longQueriesIncludeMonitor ? { include_monitor: true } : {}) }, "longqueries"),
           "completions",
           LONG_QUERY_COLUMNS,
           ctx.label,
@@ -758,8 +785,8 @@ export const SERVER_TABS = [
           null,
           LONG_QUERY_GROUPS,
           picker
-        )
-      ),
+        );
+      }),
       /* One read, two panels. get_plan_corrections returns both arrays, and automatic_tuning comes from an
          unconditional latest-snapshot query that ignores hours/limit entirely — so the second fetch was paying
          for the recommendations work twice to render a slice that never varied with the window. */
@@ -802,7 +829,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "The audit found nothing to flag."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Server Configuration",
         "get_server_config",
         { server },
@@ -811,7 +838,7 @@ export const SERVER_TABS = [
         SNAPSHOT,
         "No sp_configure snapshot yet."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Database Configuration",
         "get_database_config",
         { server },
@@ -893,10 +920,10 @@ export const SERVER_TABS = [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),
       ...fanout("get_session_stats", { server }, [
-        { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
+        { title: "Sessions", subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out", viz: "stat", stats: SESSION_STATS },
         {
           title: "Sessions by Application",
-          subtitle: SNAPSHOT,
+          subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out",
           viz: "table",
           rowsKey: "applications",
           columns: APPLICATION_COLUMNS,
@@ -929,7 +956,7 @@ export const SERVER_TABS = [
         ctx.label + ", newest 100 runs (steps and job outcomes)",
         "No SQL Agent job runs were retained in this window."
       ),
-      tablePanel(
+      tablePanelPlain(
         "Index Usage",
         "get_index_usage",
         { server },
@@ -959,6 +986,8 @@ export const SERVER_TABS = [
           series: HEALTH_CPU_SERIES,
           format: "pct",
           unit: "%",
+          /* #7416 item 1: on SQL Server on Linux the read leaves System CPU out and says why here. */
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
         /* The Corruption and Contention Events charts (#6295), off the same fetch. */
@@ -971,6 +1000,7 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "entries",
           columns: HEALTH_ENTRY_COLUMNS,
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
       ]),
@@ -1300,6 +1330,7 @@ export const POSTGRES_TABS = [
           emptyText:
             "No extension inventory in this window. It is collected once a day, so a short window can be empty.",
           noteKey: "note",
+          noteShort: "Each row is one extension in one database, so a server with many databases can have more rows than the limit shows. The Extension Install Census below counts every extension on the server whatever the limit.",
         },
         {
           title: "Extension Install Census",
@@ -1366,6 +1397,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_top_queries", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Statement Evictions",
+          emptyLine: "No query statistics were stored for this server in this window.",
           subtitle: ctx.label + ", pg_stat_statements passes",
           viz: "stat",
           stats: PG_EVICTION_STATS,
@@ -1380,6 +1412,7 @@ export const POSTGRES_TABS = [
           columns: PG_TOP_QUERY_COLUMNS,
           emptyText: "No query statistics in this window.",
           noteKey: "evictions.note",
+          noteShort: evictionNoteShort,
         },
       ]),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
@@ -1407,7 +1440,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "facets",
         PG_PLAN_CAPTURE_READINESS_COLUMNS,
-        ctx.label + ", the newest reading of each facet in it; in the order to fix them, top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
+        ctx.label + ", newest reading of each setting, in the order to fix them",
         "No readiness state collected. The collector has not run for this server yet, or the window is shorter than its hourly run."
       ),
       /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
@@ -1422,8 +1455,8 @@ export const POSTGRES_TABS = [
         { server },
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
-        "newest configuration snapshot; verdict describes the log lines each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
-        "No configuration snapshot to audit. pg_server_config runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
+        "newest configuration snapshot, one row per setting",
+        "No configuration snapshot to audit yet. The configuration collector runs hourly, so a server added in the last hour has none, and that says nothing about its logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
          time makes no sense from its row count usually spilled, and pg_stat_database's temp counters are the
@@ -1434,6 +1467,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_database_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Database Activity",
+          emptyLine: true,
           subtitle: ctx.label + ", totals over every database that moved",
           viz: "stat",
           stats: PG_DATABASE_STATS,
@@ -1460,7 +1494,7 @@ export const POSTGRES_TABS = [
          Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
          question from that one: which modes and relations are contended OVER TIME, rather than who is
          blocking whom right now. */
-      tablePanel(
+      tablePanelPlain(
         "Lock Activity (sampled)",
         "get_pg_lock_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1479,7 +1513,7 @@ export const POSTGRES_TABS = [
         "predicates",
         PG_PREDICATE_COLUMNS,
         ctx.label + ", sampled counts - scale by 1/sample rate and treat the product as an estimate",
-        "No predicate statistics in this window. pg_qualstats samples executions (1% by default) and needs shared_preload_libraries plus a restart, so an empty panel here usually means it is not loaded."
+        "No predicate statistics in this window. pg_qualstats samples executions and needs a restart to load, so an empty panel here usually means it is not loaded."
       ),
       tablePanel(
         "Column Statistics",
@@ -1514,7 +1548,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
-        ctx.label + ", newest 50 across every family; messages as PostgreSQL wrote them, SQL in them normalized, the statement never stored; Sightings counts re-reads of the same line, not repeats",
+        ctx.label + ", newest 50 across every family, statements never stored",
         "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
@@ -1579,6 +1613,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
         {
           title: "What Holds the Horizon",
+          emptyLine: true,
           subtitle: ctx.label,
           viz: "stat",
           windowNote: false,
@@ -1600,6 +1635,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_autovacuum_health", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "Autovacuum Backlog",
+          emptyLine: true,
           subtitle: ctx.label + ", worst 20 tables",
           viz: "stat",
           stats: PG_AUTOVACUUM_STATS,
@@ -1781,6 +1817,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_replication_slots", { server, hours: ctx.hours }, [
         {
           title: "Slot Summary",
+          emptyLine: "This server has no replication slots. Slots live on the writer, so on a replica look at the writer.",
           subtitle: ctx.label,
           viz: "stat",
           stats: PG_SLOT_STATS,
@@ -1808,7 +1845,10 @@ export const POSTGRES_TABS = [
         "replicas",
         PG_REPLICATION_STATS_COLUMNS,
         ctx.label + ", worst-in-window beside latest; lag is spiky and one sample catches one instant",
-        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely."
+        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
+        2, null, null, null, null, null, null, false, null, false,
+        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail". */
+        { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
       ),
     ],
   },
@@ -1827,6 +1867,7 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Bloat Estimates",
+          emptyLine: true,
           subtitle: ctx.label + ", estimates only - the tables are never read",
           viz: "stat",
           stats: PG_BLOAT_STATS,
@@ -1847,12 +1888,13 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_index_usage", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Index Usage",
+          emptyLine: true,
           subtitle: ctx.label + ", candidates are not conclusions",
           viz: "stat",
           stats: PG_INDEX_USAGE_STATS,
           span: 2,
           emptyText:
-            "No index of at least 64 KB was recorded on this server. Below that floor an index costs effectively nothing to keep, so an empty panel here is the healthy answer rather than a missing read.",
+            "No index of at least 64 KB was recorded on this server. Smaller indexes cost almost nothing to keep, so an empty panel here is the healthy answer.",
         },
         {
           title: "By Index",
@@ -1882,10 +1924,11 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "indexes",
         PG_INDEX_BLOAT_COLUMNS,
-        ctx.label + ", estimated from catalog statistics with no page reads; a row with a reason instead of a number has no answer, which is not the same as healthy",
+        ctx.label + ", estimated from catalog statistics, no page reads",
         "Nothing recorded for this server yet. It is collected once a day, so a short window or a new install is empty here.",
         2,
-        "note"
+        "note", null, null, null, null, null, false, null,
+        false, INDEX_BLOAT_PLAIN
       ),
       /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
          whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
@@ -1911,7 +1954,8 @@ export const POSTGRES_TABS = [
         ctx.label + ", only the indexes that have an answer, biggest reclaimable bytes first",
         "Nothing recorded for this server in this window. It is collected once a day.",
         2,
-        "note"
+        "note", null, null, null, null, null, false, null,
+        false, INDEX_BLOAT_PLAIN
       ),
     ],
   },
@@ -1928,13 +1972,13 @@ export const POSTGRES_TABS = [
     id: "config",
     label: "Configuration",
     build: (server, ctx) => [
-      tablePanel(
+      tablePanelPlain(
         "Configuration Changes",
         "get_pg_server_config_changes",
         { server, hours: ctx.hours },
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
-        ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
+        ctx.label + ", newest first",
         "No configuration parameter changed value in this window."
       ),
       tablePanel(
@@ -2010,7 +2054,8 @@ export function runningJobsEmptyText(ctx) {
 export function tabNote(tab, widestHours) {
   const note = typeof tab.note === "function" ? tab.note(widestHours) : tab.note;
   if (!note) return null;
-  const strip = noticeStrip(note);
+  /* #7416: every tab note describes the page (what it reads, what it leaves to the desktop viewer), and warns about nothing. */
+  const strip = captionStrip(note);
   /* A longer background behind an info mark, not in the banner itself. */
   if (tab.noteInfo) strip.appendChild(el("span", { class: "info-tip", tabindex: "0", role: "img", title: tab.noteInfo, "aria-label": tab.noteInfo, text: " \u24d8" }));
   return strip;

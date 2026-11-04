@@ -1284,6 +1284,12 @@ public class CollectionLogRow
     /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
     public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
+    /// <summary>#7416: the Error cell. The stored message is an error only on a row that did not succeed, so a run's notes stay out of it.</summary>
+    public string ErrorFormatted => CollectorHealthClassifier.FormatRunError(Status, ErrorMessage);
+
+    /// <summary>#7416: the Note cell. The notes a successful run left, with the run's read source after them when it has one.</summary>
+    public string NoteFormatted => CollectorHealthClassifier.FormatRunNoteCell(Status, ErrorMessage, ReadSource);
+
     /// <summary>
     /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
     /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active

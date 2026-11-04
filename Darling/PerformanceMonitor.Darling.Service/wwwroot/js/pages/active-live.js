@@ -189,8 +189,10 @@ export function activeQueriesLiveBar(server, columns) {
         notify(server);
       }
     });
-    const note = el("span", { class: "muted" }, [
-      " Reads the running requests from the monitored server once, now. The result is shown here and also kept on the store: a newer request more than an hour later removes it, otherwise retention does.",
+    /* #7416: the sentence says what the button does, then how long
+       the result stays: until a live read made more than an hour later replaces it, or retention removes it first. */
+    const note = el("p", { class: "muted" }, [
+      "Reads the running requests from the monitored server once, now. The result is shown here and kept on the store. A newer live read more than an hour later replaces it, and without one retention removes it.",
     ]);
     mount(slot, [el("div", { class: "run-row" }, [button, note]), status, output]);
     slot.dataset.status = "ready";

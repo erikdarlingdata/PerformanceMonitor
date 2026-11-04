@@ -45,6 +45,11 @@ const root = process.argv[2];
 const { VIZ } = await import(pathToFileURL(root + "/panels.js").href);
 const g = await import(pathToFileURL(root + "/pg-grid-text.js").href);
 const input = JSON.parse(process.env.HARNESS_INPUT);
+/* #7410: the one sentence over Top Query Shapes, built from the read's own eviction fields (the real C# BuildEvictions output). */
+if (input.evictions) {
+  console.log(JSON.stringify({ evictionShort: input.evictions.map((e) => g.evictionNoteShort({ evictions: e })) }));
+  process.exit(0);
+}
 const out = {
   bloat: input.bloat.map(g.bloatVerdict),
   droppability: input.droppability.map(g.droppabilityVerdict),

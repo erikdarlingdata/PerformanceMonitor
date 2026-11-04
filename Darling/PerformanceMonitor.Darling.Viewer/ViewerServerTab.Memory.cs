@@ -339,7 +339,7 @@ public partial class ViewerServerTab
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
                 var plot = MemoryGrantSizingChart.Plot.Add.TimeSeries(times, values);
-                var label = $"Pool {poolId}: {metric.Name}";
+                var label = $"{ResourceGovernorPools.Name(poolId)}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
@@ -380,7 +380,7 @@ public partial class ViewerServerTab
             {
                 var values = poolData.Select(d => metric.Selector(d)).ToArray();
                 var plot = MemoryGrantActivityChart.Plot.Add.TimeSeries(times, values);
-                var label = $"Pool {poolId}: {metric.Name}";
+                var label = $"{ResourceGovernorPools.Name(poolId)}: {metric.Name}";
                 plot.LegendText = label;
                 plot.Color = ScottPlot.Color.FromHex(SeriesColors[colorIndex % SeriesColors.Length]);
                 ChartStyle.StyleScatter(plot);
