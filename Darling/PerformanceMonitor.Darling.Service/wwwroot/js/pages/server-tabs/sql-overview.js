@@ -105,7 +105,7 @@ function dailyRangeGrid(rows, missing) {
   const plural = missing.length === 1 ? "" : "s";
   return [
     noticeStrip(
-      "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+      "Stored query count not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
         "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
         " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
     ),
@@ -126,7 +126,7 @@ export const DAILY_STATS = [
   { key: "health_band", label: "Band", format: "text", small: true },
   { key: "top_wait_type", label: "Top wait", format: "text", small: true },
   { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
-  { key: "unique_queries", label: "Unique queries", format: "int" },
+  { key: "unique_queries", label: "Queries stored", format: "int" },
   { key: "blocking_events", label: "Blocking", format: "int" },
   { key: "deadlock_count", label: "Deadlocks", format: "int" },
   { key: "alert_count", label: "Alerts", format: "int" },
@@ -145,7 +145,7 @@ const DAILY_RANGE_COLUMNS = [
      dailySummaryPanels lists the same days above the grid from the read's days_missing[]. */
   {
     key: "unique_queries",
-    label: "Unique queries",
+    label: "Queries stored",
     render: (row) =>
       row.unique_queries == null
         ? el("span", { class: "muted", title: "The rollup tier that answers this day never materialized it for this server; the day is listed above the grid." }, ["not materialized"])
