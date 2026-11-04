@@ -30,8 +30,10 @@ public enum RcsiLockClass
 
 /// <summary>
 /// Canonical reference classifier for the RCSI reader/writer split over the FULL
-/// <c>lock_mode</c> vocabulary (M-1). The Dashboard drill-down collector's
-/// server-side <c>CASE</c> expressions in CollectRcsiInactionFigures MIRROR this
+/// <c>lock_mode</c> vocabulary (M-1). The Lite and Darling DB_CONFIG drill-downs (#7448)
+/// read their waits grouped by lock_mode and classify each through RcsiFigureAccumulator,
+/// which calls this class, so no store carries a second copy in SQL. A store SQL that ever
+/// classifies server-side must mirror this
 /// exactly: reader = S / IS / RangeS-*; writer = X / IX / U / UIX / RangeX-* /
 /// RangeI-*; Sch-S / Sch-M / BU and any unknown token are Excluded. Pure + exhaustively
 /// golden-tested so the classification cannot drift unnoticed.

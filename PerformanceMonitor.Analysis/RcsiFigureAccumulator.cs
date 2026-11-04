@@ -1,0 +1,71 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+
+namespace PerformanceMonitor.Analysis;
+
+/// <summary>
+/// Builds the per-database RCSI inaction figures (#7448) that the DB_CONFIG drill-down writes as
+/// <c>rcsi_blocking_events</c>, <c>rcsi_deadlocks</c> and <c>rcsi_reader_writer_pct</c>. Each store reads its
+/// own blocked-process waits grouped by (database, lock_mode) and its own deadlock counts, and hands the rows
+/// here. The classification is <see cref="RcsiLockModeClassifier"/> itself, so no store keeps a second copy of
+/// the lock-mode vocabulary in SQL. A tracked database with no rows gets zeros: measured, and none found. A
+/// database that was never tracked has no figures (the caller writes null for it).
+/// </summary>
+public sealed class RcsiFigureAccumulator
+{
+    private sealed class Counts
+    {
+        public long Events;
+        public long Deadlocks;
+        public long Readers;
+        public long Writers;
+    }
+
+    private readonly Dictionary<string, Counts> _byDatabase = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Starts a database at zero, so it reads as measured with nothing found.</summary>
+    public void Track(string database)
+    {
+        if (!string.IsNullOrEmpty(database))
+            _byDatabase.TryAdd(database, new Counts());
+    }
+
+    /// <summary>Adds <paramref name="waitCount"/> blocked-process waits that held <paramref name="lockMode"/>.</summary>
+    public void AddWaits(string database, string? lockMode, long waitCount)
+    {
+        if (!_byDatabase.TryGetValue(database, out var c)) return;
+        c.Events += waitCount;
+        switch (RcsiLockModeClassifier.Classify(lockMode))
+        {
+            case RcsiLockClass.Reader: c.Readers += waitCount; break;
+            case RcsiLockClass.Writer: c.Writers += waitCount; break;
+        }
+    }
+
+    /// <summary>Adds <paramref name="deadlockCount"/> deadlocks attributed to <paramref name="database"/>.</summary>
+    public void AddDeadlocks(string database, long deadlockCount)
+    {
+        if (_byDatabase.TryGetValue(database, out var c))
+            c.Deadlocks += deadlockCount;
+    }
+
+    /// <summary>The figures for a tracked database, or null when it was never tracked. The percent is the
+    /// whole-number reader share of reader plus writer waits, and 0 when there were none.</summary>
+    public RcsiInactionFigures? Get(string database)
+    {
+        if (!_byDatabase.TryGetValue(database, out var c)) return null;
+        var denominator = c.Readers + c.Writers;
+        var pct = denominator > 0 ? (int)(100 * c.Readers / denominator) : 0;
+        return new RcsiInactionFigures(Clamp(c.Events), Clamp(c.Deadlocks), pct);
+    }
+
+    private static int Clamp(long value) => (int)Math.Min(int.MaxValue, value);
+}
