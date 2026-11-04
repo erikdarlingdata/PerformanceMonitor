@@ -19,8 +19,9 @@
  * cannot drift). Neither holds a key or calls a model.
  *
  * Which findings are "incidents" follows the desktop: a finding that carries a structured_remediation is a
- * standing config fix and gets no Active Queries link; every other finding with a time_range does. The link
- * opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only.
+ * standing config fix and gets no Queries link, and neither does a standing state (a setting, a volume's free space: standing_state
+ * on the read, #7416). The link opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only
+ * and says "Open Queries tab", not a sub-tab it cannot reach.
  *
  * State: which groups the reader has opened or closed lives in module scope (`openState`, keyed by server then
  * by group key), because the server page rebuilds this tab on every 60 s poll and on every Range change.
@@ -44,9 +45,49 @@ function badgeClass(label) {
   return "badge " + bandClass(label === "Info" ? "Unknown" : label);
 }
 
-/** An incident finding: not a standing config fix (the read's is_config_fix, the desktop's rule; force-plan stays an incident), with a time window to point at. */
+/**
+ * A finding that running queries can explain (#7416): not a standing config fix (the read's is_config_fix, the desktop's rule;
+ * force-plan stays an incident), not a standing state (the read's standing_state: a setting or the free space of a volume, true at
+ * every hour whatever is running), and with a time window to point at.
+ */
 export function showsActiveQueriesLink(f) {
-  return !f.is_config_fix && !!(f.time_range && f.time_range.start && f.time_range.end);
+  return !f.is_config_fix && !f.standing_state && !!(f.time_range && f.time_range.start && f.time_range.end);
+}
+
+/** The root fact a finding hangs from: two chains that start at the same root are one cause seen two ways. */
+function rootKeyOf(f) {
+  return (f.root_fact && f.root_fact.key) || "";
+}
+
+/**
+ * One card per root fact in a group (#7416): the chain seen most recently speaks, with its own figures, and the other chains on the
+ * same root are named under it in `also`. The read keeps every chain; only the page folds them. A finding with no root key is never folded.
+ */
+function foldByRoot(items) {
+  const byRoot = new Map();
+  const out = [];
+  for (const f of items) {
+    const root = rootKeyOf(f);
+    if (!root) {
+      out.push({ ...f, also: [] });
+      continue;
+    }
+    const seen = byRoot.get(root);
+    if (!seen) {
+      const card = { ...f, also: [] };
+      byRoot.set(root, card);
+      out.push(card);
+      continue;
+    }
+    const newer = (Date.parse(f.last_seen) || 0) > (Date.parse(seen.last_seen) || 0);
+    if (newer) {
+      const { also, ...rest } = seen;
+      Object.assign(seen, f, { also: [...also, rest] });
+    } else {
+      seen.also.push(f);
+    }
+  }
+  return out;
 }
 
 /**
@@ -66,7 +107,7 @@ export function groupFindings(findings) {
     buckets.get(key).push(f);
   }
   const groups = order.map((key) => {
-    const items = buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0));
+    const items = foldByRoot(buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0)));
     const primary = items[0];
     return { key, items, primary, label: severityLabel(primary.severity) };
   });
@@ -268,6 +309,12 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
+/** One folded chain, named under the card that stands for its root: its path, its band and when it was last seen. */
+function alsoText(f) {
+  const path = String(f.story_path || "").trim() || readableStory(rootKeyOf(f)) || "another chain";
+  return path + " (" + severityLabel(f.severity).toUpperCase() + ", last seen " + localTime(f.last_seen) + ")";
+}
+
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -282,6 +329,9 @@ function card(server, f, showTitle) {
     advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
   ];
+  if (f.also && f.also.length) {
+    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join("; ") }));
+  }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));
   }
@@ -289,7 +339,7 @@ function card(server, f, showTitle) {
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
   actions.push(askAiButton(server, f));
   if (showsActiveQueriesLink(f)) {
-    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open in Active Queries" }));
+    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open Queries tab" }));
   }
   if (actions.length) kids.push(el("div", { class: "reco-actions" }, actions));
   return el("div", { class: "card reco-card" }, kids);

@@ -142,7 +142,7 @@ function panelFor(kind, key, state, hours, onMetric) {
   if (state.widened) notes.push(state.widened);
   if (d.window_truncated) {
     notes.push(
-      "History starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for: earlier samples have aged out of the tier that answered."
+      "History starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for. The store holds nothing earlier in this window at this tier."
     );
   }
   /* #6359: the facts only. The read's own `aggregate_note` is written for an MCP caller ("pass bucket_minutes (1-1440) for

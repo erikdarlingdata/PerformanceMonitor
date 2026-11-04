@@ -146,15 +146,79 @@ public class RecurrenceLabelerTests
         Assert.Null(RecurrenceLabeler.TryReadLabel(settingStory.StoryText));
     }
 
-    [Fact]
-    public void AChainWithAnyTimeSeriesFactOnItsPath_StaysEligible_EvenWhenItsRootIsASetting()
-    {
-        var story = Story("MAXDOP_CONFIG", "h-mixed", path: ["MAXDOP_CONFIG", "CXPACKET"]);
-        var facts = new List<Fact> { FactOf("config", "MAXDOP_CONFIG"), FactOf("waits", "CXPACKET") };
+    /* #7416 item 25: the ROOT decides. A setting's chain ending in a wait is still the setting's story. */
 
-        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-mixed", 1), InSlot("h-mixed", 2)));
+    [Fact]
+    public void AChainRootedInASetting_IsNotLabelledRecurring_WhateverWaitItEndsIn()
+    {
+        var story = Story("DB_CONFIG", "h-dbcfg", path: ["DB_CONFIG", "LCK_M_S"]);
+        var facts = new List<Fact> { FactOf("database_config", "DB_CONFIG"), FactOf("waits", "LCK_M_S") };
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-dbcfg", 1), InSlot("h-dbcfg", 2), InSlot("h-dbcfg", 3)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Fact]
+    public void AChainRootedInATimeSeries_ThatEndsInASetting_StaysEligible()
+    {
+        var story = Story("CXPACKET", "h-cx", path: ["CXPACKET", "CONFIG_MAXDOP"]);
+        var facts = new List<Fact> { FactOf("waits", "CXPACKET"), FactOf("config", "CONFIG_MAXDOP") };
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-cx", 1), InSlot("h-cx", 2)));
 
         Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Fact]
+    public void FreeSpaceIsAStandingState_SoItIsNeverLabelledRecurring_ButAScheduledBurstStillIs()
+    {
+        var disk = Story("DISK_SPACE", "h-disk");
+        var burst = Story("IO_READ_LATENCY_MS", "h-burst");
+        var facts = new List<Fact> { FactOf("disk", "DISK_SPACE"), FactOf("io", "IO_READ_LATENCY_MS") };
+        var before = disk.StoryText;
+
+        RecurrenceLabeler.Label(
+            [disk, burst],
+            facts,
+            Read(InSlot("h-disk", 1), InSlot("h-disk", 2), InSlot("h-disk", 3), InSlot("h-burst", 1), InSlot("h-burst", 2)));
+
+        Assert.Equal(before, disk.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(disk.StoryText));
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(burst.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Theory]
+    [InlineData("MISSING_INDEX", "queries")]
+    [InlineData("PLAN_CACHE_BLOAT", "memory")]
+    public void AStandingAdvisoryOnAMeasurementSource_IsNotLabelledRecurring(string key, string source)
+    {
+        var story = Story(key, "h-adv");
+        var facts = new List<Fact> { FactOf(source, key) };
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-adv", 1), InSlot("h-adv", 2), InSlot("h-adv", 3)));
+
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Theory]
+    [InlineData("DISK_SPACE", true)]
+    [InlineData("DB_CONFIG", true)]
+    [InlineData("CONFIG_MAXDOP", true)]
+    [InlineData("SERVER_MEMORY_DUMPS", true)]
+    [InlineData("TRACE_FLAGS", true)]
+    [InlineData("PG_POSTURE_FSYNC", true)]
+    [InlineData("PLAN_CACHE_BLOAT", true)]
+    [InlineData("LCK_M_S", false)]
+    [InlineData("CXPACKET", false)]
+    [InlineData("CPU_SQL_PERCENT", false)]
+    [InlineData("IO_READ_LATENCY_MS", false)]
+    [InlineData("", false)]
+    public void TheRootKeyOfAPersistedFinding_SaysWhetherItIsAStandingState(string key, bool standing)
+    {
+        Assert.Equal(standing, FactKinds.IsStandingStateKey(key));
     }
 
     [Fact]
