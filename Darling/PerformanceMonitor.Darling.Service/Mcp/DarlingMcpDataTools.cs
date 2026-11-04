@@ -92,8 +92,17 @@ public sealed class DarlingMcpDataTools
     /// #7010: an <c>empty</c> or <c>unavailable</c> status answer with the window floor under <c>hints</c>, merged into the hints it already
     /// has. Any other status (not_collected, precondition, an error) is permanent or not about the window and is left as it is, as is an
     /// answer whose hints already say <c>window_truncated</c>, and so is every answer when the probe failed.
+    ///
+    /// <para>#7442: an <c>empty</c> answer that counts the collector's successful runs in the window (<paramref name="ran"/> carries them, with the window's <paramref name="requestedStart"/> and <paramref name="table"/>)
+    /// is not a window the store "holds no collection" for: a collector that ran and stored nothing leaves no row for the probe to find, and
+    /// a note that says the store holds none beside a sentence that counts the runs contradicts it. Such an answer measures coverage from
+    /// the earliest of those runs, as an answer with rows measures it from its floor: a first run within
+    /// <see cref="DurationTrendRouting.TruncationSlack"/> of the start is a covered window at the start that was asked for, and a later one
+    /// is a truncated window that begins at that run (a run in the window does not show when collection began). The decision lives here,
+    /// beside the one place the keys are written, so a call site cannot pair a run count with the not-covered note. The procedure tools
+    /// pass none: their probe reads the collector's logged runs as coverage (#5449).</para>
     /// </summary>
-    private static string WithWindowHints(string statusJson, McpWindowNotice notice)
+    private static string WithWindowHints(string statusJson, McpWindowNotice notice, CollectorRunFacts? ran = null, DateTime requestedStart = default, string table = "")
     {
         if (notice.IsUnavailable
             || JsonNode.Parse(statusJson) is not JsonObject node
@@ -101,6 +110,12 @@ public sealed class DarlingMcpDataTools
             || node["hints"] is JsonObject { } existing && existing.ContainsKey("window_truncated"))
         {
             return statusJson;
+        }
+
+        if (node["status"]?.GetValue<string>() == "empty" && ran is { SuccessfulRunsInWindow: > 0, FirstSuccessInWindowUtc: { } firstRun }
+            && node["hints"] is JsonObject { } runs && runs.ContainsKey("successful_runs_in_window"))
+        {
+            notice = DarlingMcpWindowNotice.Build(firstRun, requestedStart, table, emptyAnswer: false);
         }
 
         var hints = node["hints"] as JsonObject ?? new JsonObject();
@@ -928,6 +943,7 @@ public sealed class DarlingMcpDataTools
             }
 
             /* #7010: an empty page carries the window floor under hints (the floor the data answer's keys are built from). */
+            CollectorRunFacts? ranFacts = null;
             async Task<string> EmptyPageAsync()
             {
                 /* #5984: a tag that matched nothing is an answer, not a collection miss. */
@@ -986,14 +1002,14 @@ public sealed class DarlingMcpDataTools
                    not_collected, which names an engine that never runs the collector. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
                     ?? (hourly ? null : EmptyCollectorRan(
-                        await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_stats", requestedStart, now, cancellationToken),
+                        ranFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_stats", requestedStart, now, cancellationToken),
                         "query_stats", hours_back, "executed statements", databases))
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
-                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true)), cancellationToken);
+                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), ranFacts, requestedStart, "query_stats"), cancellationToken);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1635,6 +1651,7 @@ public sealed class DarlingMcpDataTools
                Store is not READ_WRITE there, the answer says so and names get_query_store_health, because an empty page from a
                read-only Query Store looks like a tool error or a quiet database. The ladder is unchanged; its answer gets one
                more sentence when it is an empty or unavailable status. */
+            CollectorRunFacts? ranFacts = null;
             async Task<string> EmptyAnswerAsync()
             {
                 /* #5984: a tag that matched nothing is an answer, not a missing collection. */
@@ -1699,7 +1716,7 @@ public sealed class DarlingMcpDataTools
                        rollups armed, and collection_log outlives it, so a longer window's runs prove nothing about the dropped part). */
                     ?? (tablePlan is null && read.DailyDaysUsed == 0 && now - requestedStart <= TimescaleSupport.RawRetentionSpan
                         ? EmptyCollectorRan(
-                            await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_store", requestedStart, now, cancellationToken),
+                            ranFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "query_store", requestedStart, now, cancellationToken),
                             "query_store", hours_back, "Query Store intervals", databases)
                         : null)
                     ?? McpHelpers.Status(
@@ -1714,7 +1731,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true)), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
