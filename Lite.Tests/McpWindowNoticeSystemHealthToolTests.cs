@@ -126,10 +126,10 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         Tool.SevereErrors => (SystemHealthParser.ErrorReportedEvent, "error_reported.xml", null),
         Tool.IoIssues => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_io_subsystem.xml", null),
         Tool.SchedulerIssues => (SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor_high_sql_cpu.xml", null),
-        /* The fixtures carry the HIGH notification, which the memory gates drop; LOW is the one they keep. */
+        /* The memory-conditions fixture carries HIGH and the broker fixture STABLE, which the gates drop; LOW and SHRINK (#7466) are the ones they keep. */
         Tool.MemoryConditions => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_resource.xml", "LOW"),
         Tool.CpuTasks => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_query_processing_warning.xml", null),
-        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "LOW"),
+        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "SHRINK"),
         Tool.MemoryNodeOom => (SystemHealthParser.MemoryNodeOomEvent, "memory_node_oom.xml", null),
         Tool.SignificantWaits => (SystemHealthParser.WaitInfoEvent, "wait_info.xml", null),
         _ => throw new ArgumentOutOfRangeException(nameof(tool))
@@ -157,7 +157,9 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         var xml = LoadFixture(fixture);
         if (replace is not null)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
+            xml = tool == Tool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">" + replace + "<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
         }
 
         return ExecuteAsync(@"

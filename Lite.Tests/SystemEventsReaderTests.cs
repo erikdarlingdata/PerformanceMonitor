@@ -100,7 +100,7 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
         Assert.Single(await service.GetSevereErrorsAsync(ServerId));
         Assert.Single(await service.GetMemoryNodeOomAsync(ServerId));
         Assert.Single(await service.GetSignificantWaitsAsync(ServerId));
-        // The memory-conditions / broker fixtures are RESOURCE_MEMPHYSICAL_HIGH — warnings_only drops them.
+        // The memory-conditions fixture is RESOURCE_MEMPHYSICAL_HIGH and the broker fixture is STABLE — the gates drop them.
         Assert.Empty(await service.GetMemoryConditionsAsync(ServerId));
         Assert.Empty(await service.GetMemoryBrokerAsync(ServerId));
         // CPU: the WARNING+15-pending event passes, the CLEAN one is dropped. I/O: both WARNING file rows pass.
@@ -132,6 +132,27 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(6, row.DatabaseId);
         Assert.Equal("ProdDB", row.DatabaseName);
         Assert.Contains("operating system returned error", row.Message);
+    }
+
+    /// <summary>#7466: the broker gate keeps SHRINK, and the counts report the whole window by notification value.</summary>
+    [Fact]
+    public async Task MemoryBroker_KeepsShrinkAndCountsEveryNotification_7466()
+    {
+        var service = new LocalDataService(_duckDb);
+        var xml = LoadFixture("memory_broker.xml");
+        Assert.Contains(">STABLE<", xml, StringComparison.Ordinal);
+        foreach (var (notification, minutesAgo) in new[] { ("STABLE", 10), ("GROW", 20), ("GROW", 30), ("SHRINK", 40) })
+        {
+            await SeedHealthEventAsync(SystemHealthParser.MemoryBrokerEvent,
+                xml.Replace(">STABLE<", ">" + notification + "<", StringComparison.Ordinal), Truncate(DateTime.UtcNow.AddMinutes(-minutesAgo)));
+        }
+
+        var (rows, counts) = await service.GetMemoryBrokerWithCountsAsync(ServerId);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("SHRINK", row.Notification);
+        Assert.Equal(new Dictionary<string, int> { ["GROW"] = 2, ["SHRINK"] = 1, ["STABLE"] = 1 }, counts.ToDictionary(kv => kv.Key, kv => kv.Value));
+        Assert.Single(await service.GetMemoryBrokerAsync(ServerId));
     }
 
     [Fact]

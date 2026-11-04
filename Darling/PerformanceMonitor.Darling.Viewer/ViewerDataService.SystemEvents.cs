@@ -130,7 +130,7 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
     public long? LastOsError => record.LastOsError;
 }
 
-/// <summary>One RESOURCE_MEMPHYSICAL_LOW memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
+/// <summary>One SHRINK memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);

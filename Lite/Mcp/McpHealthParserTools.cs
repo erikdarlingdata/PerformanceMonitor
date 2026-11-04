@@ -432,7 +432,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: RESOURCE_MEMPHYSICAL_LOW notifications only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (RESOURCE_MEMPHYSICAL_LOW; the gate returns no other). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: SHRINK notifications only (the broker carries STABLE, GROW or SHRINK; a shrink is not always an incident, since a broker lowers its target under ordinary workload shifts too). An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out, with notification_counts splitting that count by notification value (for example GROW 12, SHRINK 0, STABLE 40). status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (SHRINK; the gate returns no other, and notification_counts shows how many STABLE, GROW and SHRINK events the window held). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryBroker(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -449,11 +449,11 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var rows = await dataService.GetMemoryBrokerAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var (rows, notificationCounts) = await dataService.GetMemoryBrokerWithCountsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
-                    "none carried a low-memory notification (broker adjustments that are not a shrink under pressure are routine)", capturedInWindow: null, lastCapturedAt));
+                    "none carried a SHRINK notification (STABLE and GROW broker adjustments are routine; notification_counts shows what the window held)", capturedInWindow: null, lastCapturedAt, notificationCounts));
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -469,6 +469,9 @@ public sealed class McpHealthParserTools
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
+                /* #7466: what the window held by notification value, so a reader sees what the SHRINK gate filtered out. */
+                events_in_window = notificationCounts.Values.Sum(),
+                notification_counts = notificationCounts,
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new
                 {
@@ -676,7 +679,7 @@ public sealed class McpHealthParserTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         LocalDataService dataService, int serverId, string serverName, int hoursBack, DateTime windowEnd, string eventType,
-        string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt)
+        string noneQualifiedBecause, int? capturedInWindow, DateTime? lastCapturedAt, IReadOnlyDictionary<string, int>? notificationCounts = null)
     {
         var captured = capturedInWindow
             ?? await dataService.CountSystemHealthEventsAsync(serverId, eventType, hoursBack, asOfUtc: windowEnd);
@@ -695,7 +698,7 @@ public sealed class McpHealthParserTools
             return WitnessStatus(
                 "unavailable",
                 RingBufferTruncationNote.HealthParserMessage(eventType, serverName, hoursBack, truncation, truncatedRuns, captured, noneQualifiedBecause),
-                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured);
+                sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured, notificationCounts: notificationCounts);
         }
 
         if (captured > 0)
@@ -708,7 +711,7 @@ public sealed class McpHealthParserTools
                     factual: $"{captured} {eventType} event(s) were captured for {serverName} in the last {hoursBack} hour(s) and {noneQualifiedBecause}",
                     coveredClaim: ". Events ARE being captured, so this is the healthy answer for this read rather than missing data."),
                 sourceObserved: true, lastCapturedAt, lastCapturedOfTypeAt: lastOfType, eventsInWindow: captured,
-                hints: notice.AsHints());
+                hints: notice.AsHints(), notificationCounts: notificationCounts);
         }
 
         if (lastOfType is DateTime seen)
@@ -772,7 +775,7 @@ public sealed class McpHealthParserTools
     /// </summary>
     private static string WitnessStatus(
         string status, string message, bool sourceObserved, DateTime? lastCapturedAt, DateTime? lastCapturedOfTypeAt, int eventsInWindow,
-        object? hints = null)
+        object? hints = null, IReadOnlyDictionary<string, int>? notificationCounts = null)
     {
         /* The serializer writes a null member, so hints is added only when there is one: the unavailable rung keeps its shape. */
         var answer = new Dictionary<string, object?>
@@ -784,6 +787,8 @@ public sealed class McpHealthParserTools
             ["last_captured_of_type_at"] = Stamp(lastCapturedOfTypeAt),
             ["events_in_window"] = eventsInWindow,
         };
+        /* #7466: only the memory-broker read passes counts. */
+        if (notificationCounts is not null) answer["notification_counts"] = notificationCounts;
         if (hints is not null) answer["hints"] = hints;
         return JsonSerializer.Serialize(answer, McpHelpers.JsonOptions);
     }

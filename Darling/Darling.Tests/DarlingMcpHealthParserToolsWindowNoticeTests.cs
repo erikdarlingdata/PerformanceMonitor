@@ -82,7 +82,10 @@ public sealed class DarlingMcpHealthParserToolsWindowNoticeLiveTests
         var xml = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture));
         if (low)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
+            /* The memory-conditions fixture carries HIGH and the broker fixture STABLE; the gates keep LOW and SHRINK (#7466). */
+            xml = tool == HealthTool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">SHRINK<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
         }
 
         /* The row's event time is the event's own timestamp, as a real capture has it; the read windows on the column. */
