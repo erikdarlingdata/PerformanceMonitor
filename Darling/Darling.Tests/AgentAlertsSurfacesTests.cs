@@ -109,8 +109,8 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
         var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-        Assert.Equal($"Alert setup: gaps   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
-        Assert.StartsWith("Alert setup: ok   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
     }
 
     [Fact]

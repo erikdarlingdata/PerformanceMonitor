@@ -8,6 +8,7 @@
 
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -130,5 +131,40 @@ public sealed class WebCollectorRunHistoryTests
         Assert.Equal("1 / -1", chip[0].GetString());
         Assert.Equal("start", chip[1].GetString());
         Assert.DoesNotContain("span-2", chip[2].GetString());
+    }
+
+    /// <summary>#7416 item 28: the status filter is an argument of the log read, so it applies before the 200-row cap. The scripted answer
+    /// holds only the stored runs of the status it is asked for, so a page that filtered afterward (and sent none) would be shown the mixed list.</summary>
+    [Fact]
+    public void TheFailuresButton_SendsTheStatusOnTheRead_AndShowsOnlyWhatThatReadReturned()
+    {
+        var f = RunHarness().GetProperty("statusFlow");
+
+        var unfiltered = f.GetProperty("unfiltered");
+        Assert.False(Assert.Single(unfiltered.GetProperty("reads").EnumerateArray()).TryGetProperty("status", out _));
+        Assert.Equal(["SUCCESS", "SUCCESS", "ERROR", "SKIPPED"], unfiltered.GetProperty("shown").EnumerateArray().Select(x => x.GetString()).ToArray());
+
+        var read = Assert.Single(f.GetProperty("failuresReads").EnumerateArray());
+        Assert.Equal("ERROR", read.GetProperty("status").GetString());
+        Assert.Equal("200", read.GetProperty("limit").GetString());
+        Assert.Equal("24", read.GetProperty("hours").GetString());
+        Assert.Equal(["ERROR"], f.GetProperty("failuresShown").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.Equal("true", f.GetProperty("failuresPressed").GetString());
+    }
+
+    [Fact]
+    public void TheStatusPick_SurvivesARebuild_TheSelectReachesOtherStatuses_AndAllRunsClearsIt()
+    {
+        var f = RunHarness().GetProperty("statusFlow");
+
+        Assert.Equal("ERROR", Assert.Single(f.GetProperty("afterStatusRebuild").EnumerateArray()).GetProperty("status").GetString());
+        Assert.Equal("SKIPPED", Assert.Single(f.GetProperty("selectReads").EnumerateArray()).GetProperty("status").GetString());
+        Assert.Equal(["SKIPPED"], f.GetProperty("selectShown").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.False(Assert.Single(f.GetProperty("allReads").EnumerateArray()).TryGetProperty("status", out _));
+        Assert.Equal(4, f.GetProperty("allShown").GetArrayLength());
+        var options = f.GetProperty("options").EnumerateArray().Select(x => x.GetString()).ToArray();
+        Assert.Equal("", options[0]);
+        Assert.Contains("ERROR", options);
+        Assert.Contains("EXTENSION_MISSING", options);
     }
 }

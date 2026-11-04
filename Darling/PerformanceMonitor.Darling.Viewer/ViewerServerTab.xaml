@@ -2396,7 +2396,7 @@
                         <TextBlock Grid.Row="0" Text="Resource Semaphore Pressure (every snapshot in the window)" Style="{StaticResource SectionHeader}"/>
                         <DataGrid Grid.Row="1" x:Name="ResourceSemaphorePressureGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
                                 <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
                                 <DataGridTextColumn Header="Snapshots" Binding="{Binding Snapshots, StringFormat=N0}" Width="85"/>
                                 <DataGridTextColumn Header="Peak Waiters" Binding="{Binding PeakWaiters, StringFormat=N0}" Width="100"/>
@@ -2418,7 +2418,7 @@
                         </StackPanel>
                         <DataGrid Grid.Row="3" x:Name="ResourceSemaphoreGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolId}" Width="60"/>
+                                <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
                                 <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
                                 <DataGridTextColumn Header="Target MB" Binding="{Binding TargetMemoryMb, StringFormat=N1}" Width="95"/>
                                 <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1}" Width="110"/>

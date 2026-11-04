@@ -7,6 +7,11 @@
      - Memory Pressure Events: the words in its cells, and its width
      - the Memory Grant Sizing legend: the pool names
      - Perfmon Counters: whole numbers, and the Object column when a counter and instance repeat
+     - the Alert setup tile (a count of gaps) and the casing of the status words on the fleet card, the sweep and the skipped-cycles tiles (#7416 item 29)
+     - the Recommendation tiles of Scheduler Pressure and Plan Cache, drawn as a sentence (item 30)
+     - the Pool column of the Memory Grants grids, named
+     - the Platform column of Backups and CHECKDB by Database, dropped when no row names a platform (item 33)
+     - the Unrateable Rows column of Query Store Overhead, dropped when every row is zero (item 32)
        node web-tile-truths-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -90,6 +95,8 @@ try {
   const memory = await imp("pages/server-tabs/sql-memory.js");
   const activity = await imp("pages/server-tabs/sql-activity.js");
   const grant = await imp("pages/memory-grant-charts.js");
+  const cpu = await imp("pages/server-tabs/sql-cpu.js");
+  const queries = await imp("pages/server-tabs/sql-queries.js");
 
   const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
   const findAll = (n, pred) => { const out = []; walk(n, (x) => { if (pred(x)) out.push(x); }); return out; };
@@ -154,7 +161,58 @@ try {
   const perfmonRepeat = await perfmon(COUNTERS);
   const perfmonPlain = await perfmon(COUNTERS.slice(0, 4));
 
+  /* Item 29: the Alert setup tile counts the gaps of the grid below it, and a status word has one casing wherever it is drawn. */
+  const tiles = (root) => Object.fromEntries(findAll(root, (n) => hasClass(n, "stat")).map((n) => [n.children[1].textContent, n.children[0].textContent]));
+  const agentSpec = config.AGENT_ALERT_SPECS[0];
+  const gapRow = (message) => ({ code: "x", message, alerts: [], missing: [] });
+  const alertSetup = {
+    gaps3: tiles(panels.VIZ.stat({ instance_status: "gaps", gaps: [gapRow("a"), gapRow("b"), gapRow("c")] }, agentSpec))["Alert setup"],
+    gaps1: tiles(panels.VIZ.stat({ instance_status: "gaps", gaps: [gapRow("a")] }, agentSpec))["Alert setup"],
+    ok: tiles(panels.VIZ.stat({ instance_status: "ok", gaps: [] }, agentSpec))["Alert setup"],
+  };
+  const quietCard = fleet.metricBands({ server_name: "srv-q", display_name: "srv-q", is_online: true, has_memory_pressure: false, available_threads: null }, null);
+  const quietChips = Object.fromEntries(findAll(quietCard, (n) => hasClass(n, "metric-chip")).map((n) => [n.textContent, true]));
+  const sweepTiles = tiles(panels.VIZ.stat({ sweep_pressure: { verdict: "ok" }, skipped_cycles: { status: "unavailable" } }, { stats: [...shared.SWEEP_STATS, ...shared.SKIPPED_CYCLES_STATS] }));
+
+  /* Item 30: a sentence is text across the panel, never a stat tile. */
+  const sentenceOf = (stats, key, text) => {
+    const root = panels.VIZ.stat(key.split(".").reduceRight((v, k) => ({ [k]: v }), text), { stats });
+    return { sentences: findAll(root, (n) => hasClass(n, "stat-sentence")).map((n) => n.textContent), tileLabels: Object.keys(tiles(root)) };
+  };
+  const recommendations = {
+    scheduler: sentenceOf(cpu.SCHEDULER_STATS, "recommendation", "Scheduler pressure is low; no change needed."),
+    planCache: sentenceOf(memory.PLAN_CACHE_STATS, "summary.bloat_recommendation", "Trim single-use plans with optimize for ad hoc workloads."),
+  };
+
+  /* #7416: the Pool column of the Memory Grants grids reads the pool's name. */
+  const poolRow = (id) => ({ pool_id: id, resource_semaphore_id: 0, snapshots_in_window: 9 });
+  const poolCells = (columns) => cellsOf(panels.VIZ.table({ rows: [poolRow(1), poolRow(2), poolRow(7)] }, { rowsKey: "rows", columns }));
+  const pools = {
+    grants: poolCells(memory.GRANT_COLUMNS),
+    semaphores: poolCells(memory.SEMAPHORE_COLUMNS),
+    semaphoreWindow: poolCells(memory.SEMAPHORE_WINDOW_COLUMNS),
+  };
+
+  /* Item 33: the Platform column of Backups and CHECKDB by Database. */
+  const protectionSpec = config.DATABASE_PROTECTION_SPECS.find((s) => s.title === "Backups and CHECKDB by Database");
+  const dbRow = (name, platform) => ({ database_name: name, database: name, state: "ONLINE", platform });
+  const platformHeaders = (rows) => headersOf(panels.VIZ.table({ databases: rows }, protectionSpec));
+  const platform = {
+    boxed: platformHeaders([dbRow("a", "native"), dbRow("b", "native")]),
+    managed: platformHeaders([dbRow("a", "native"), dbRow("b", "platform_managed")]),
+    managedCells: cellsOf(panels.VIZ.table({ databases: [dbRow("a", "native"), dbRow("b", "platform_managed")] }, protectionSpec)),
+  };
+
+  /* Item 32: the Unrateable Rows column of Query Store Overhead. */
+  const waitRow = (name, unknowable) => ({ wait_type: name, rows_observed: 4, rows_unknowable: unknowable });
+  const overheadHeaders = (rows) => headersOf(panels.VIZ.table({ rows }, { rowsKey: "rows", columns: queries.QS_OVERHEAD_WAIT_COLUMNS }));
+  const unrateable = {
+    allZero: overheadHeaders([waitRow("QDS_A", 0), waitRow("QDS_B", 0)]),
+    someSamples: overheadHeaders([waitRow("QDS_A", 0), waitRow("QDS_B", 2)]),
+  };
+
   console.log(JSON.stringify({
+    alertSetup, quietChips, sweepTiles, recommendations, pools, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     identityClickStopped: stopped,

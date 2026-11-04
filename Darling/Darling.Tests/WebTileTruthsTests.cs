@@ -164,4 +164,75 @@ public sealed class WebTileTruthsTests
         Assert.Equal("", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("missing_severity_alerts", "No alert for severity 21.", [], [21])));
         Assert.Equal("Sev 20, Sev 19", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("alert_disabled", "An alert is disabled, so it cannot fire.", ["Sev 20", "Sev 19"], [])));
     }
+
+    [Fact]
+    public void TheAlertSetupTile_CountsTheGaps_AndAStatusWordHasOneCasing()
+    {
+        var r = Run();
+        var setup = r.GetProperty("alertSetup");
+        Assert.Equal("3 gaps", setup.GetProperty("gaps3").GetString());
+        Assert.Equal("1 gap", setup.GetProperty("gaps1").GetString());
+        Assert.Equal("OK", setup.GetProperty("ok").GetString());
+
+        var chips = r.GetProperty("quietChips").EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.Contains("ThreadsOK", chips);
+        Assert.Contains("MemoryOK", chips);
+
+        var sweep = r.GetProperty("sweepTiles");
+        Assert.Equal("OK", sweep.GetProperty("Verdict").GetString());
+        Assert.Equal("Unavailable", sweep.GetProperty("Read").GetString());
+    }
+
+    [Fact]
+    public void TheRecommendationTiles_AreSentencesAcrossThePanel_NotStatTiles()
+    {
+        var r = Run().GetProperty("recommendations");
+        foreach (var page in new[] { "scheduler", "planCache" })
+        {
+            var one = r.GetProperty(page);
+            Assert.Single(one.GetProperty("sentences").EnumerateArray());
+            Assert.DoesNotContain("Recommendation", Strings(one.GetProperty("tileLabels")));
+        }
+    }
+
+    [Fact]
+    public void ThePoolColumn_OfTheMemoryGrantsGrids_NamesThePool()
+    {
+        var pools = Run().GetProperty("pools");
+        foreach (var grid in new[] { "grants", "semaphores", "semaphoreWindow" })
+        {
+            var cells = Strings(pools.GetProperty(grid));
+            Assert.Contains("Internal pool", cells);
+            Assert.Contains("Default pool", cells);
+            Assert.Contains("Pool 7", cells);
+            Assert.DoesNotContain("1", cells);
+            Assert.DoesNotContain("2", cells);
+        }
+    }
+
+    [Fact]
+    public void ThePlatformColumn_IsDroppedWhenNoRowNamesAPlatform_AndKeptWhenOneDoes()
+    {
+        var p = Run().GetProperty("platform");
+        Assert.DoesNotContain("Platform", Strings(p.GetProperty("boxed")));
+        Assert.Contains("Platform", Strings(p.GetProperty("managed")));
+        Assert.Contains("platform managed", Strings(p.GetProperty("managedCells")));
+    }
+
+    [Fact]
+    public void TheUnrateableRowsColumn_IsDroppedWhenEveryRowIsZero_AndKeptWhenOneSampleIsLeftOut()
+    {
+        var u = Run().GetProperty("unrateable");
+        Assert.DoesNotContain("Unrateable Rows", Strings(u.GetProperty("allZero")));
+        Assert.Contains("Unrateable Rows", Strings(u.GetProperty("someSamples")));
+    }
+
+    [Fact]
+    public void TheDesktopAlertSetupWord_IsOkOrTheGapCount()
+    {
+        AgentAlertGap Gap(string m) => new("missing_severity_alerts", m, [], [21]);
+        Assert.Equal("OK", ViewerAgentAlertsText.SetupWord(new AgentAlertInstanceStatus("ok", [])));
+        Assert.Equal("1 gap", ViewerAgentAlertsText.SetupWord(new AgentAlertInstanceStatus("gaps", [Gap("a")])));
+        Assert.Equal("3 gaps", ViewerAgentAlertsText.SetupWord(new AgentAlertInstanceStatus("gaps", [Gap("a"), Gap("b"), Gap("c")])));
+    }
 }

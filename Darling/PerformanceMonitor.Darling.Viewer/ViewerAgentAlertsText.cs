@@ -64,7 +64,28 @@ public static class ViewerAgentAlertsText
             ? ViewerTimeHelper.FormatForDisplay(t, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g")
             : Dash;
         return string.Create(CultureInfo.InvariantCulture,
-            $"Alert setup: {read.InstanceStatus.Word}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");
+            $"Alert setup: {SetupWord(read.InstanceStatus)}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");
+    }
+
+    /// <summary>
+    /// The setup word the web tile shows (#7416): "OK" for ok, and the number of gaps ("1 gap", "3 gaps") for gaps, the count of the rows of the gap list
+    /// below. A gaps word with no gap row falls back to the word.
+    /// </summary>
+    public static string SetupWord(AgentAlertInstanceStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        var word = status.Word;
+        if (string.Equals(word, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            return "OK";
+        }
+
+        if (string.Equals(word, "gaps", StringComparison.OrdinalIgnoreCase) && status.Gaps.Count > 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{status.Gaps.Count} {(status.Gaps.Count == 1 ? "gap" : "gaps")}");
+        }
+
+        return word.Length > 0 ? char.ToUpperInvariant(word[0]) + word[1..] : word;
     }
 
     /// <summary>The gaps, one row each. Empty when the status is ok or the read holds no capture.</summary>
