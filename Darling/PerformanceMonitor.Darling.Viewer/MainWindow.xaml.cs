@@ -2289,6 +2289,8 @@ public partial class MainWindow : Window
     /// the alert's server tab and show its Blocked Process Reports or Deadlocks grid over a window around the alert's
     /// time, through the same open-tab path the Recommendations deep link uses. Null (no link) for any other alert, a
     /// server no longer registered, or a PostgreSQL server, whose tab has no Blocking tab.
+    /// #7554: the action runs after the Alert Details dialog has closed (<see cref="AlertsHistoryTab.ShowDetailDialog"/>) and moves
+    /// keyboard focus into the server tab, so the Alert History grid's focus coming back does not select Alert History again.
     /// </summary>
     private AlertChainOpener? FullChainOpenerFor(ViewerAlertRow row)
     {
@@ -2320,6 +2322,7 @@ public partial class MainWindow : Window
                     var serverTab = OpenServerTab(server);
                     if (serverTab is not null)
                     {
+                        serverTab.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
                         await serverTab.DeepLinkToTabAsync(tab, tabFrom, tabTo);
                     }
                 }
@@ -2338,6 +2341,7 @@ public partial class MainWindow : Window
                 var serverTab = OpenServerTab(server);
                 if (serverTab is not null)
                 {
+                    serverTab.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
                     await serverTab.DeepLinkToIncidentAsync(view, fromUtc, toUtc);
                 }
             }
