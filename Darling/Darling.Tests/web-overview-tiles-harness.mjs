@@ -41,6 +41,8 @@ const day = { summary_date: "2026-11-01", health_band: "Healthy", top_wait_type:
 const props = (edition) => ({ engine_edition: edition, product_version: "1", edition: "e", product_level: "RTM", cpu_count: 2, socket_count: 1, cores_per_socket: 1, hyperthread_ratio: 1, physical_memory_mb: 1024, is_clustered: false, is_hadr_enabled: false, service_objective: edition === 5 ? "GP_S_Gen5_1" : null, vcore_count: 1 });
 
 console.log(JSON.stringify({
+  /* Built here, because the tile formats in this machine's locale. */
+  expectedTotal: (1082).toLocaleString(undefined, { maximumFractionDigits: 0 }),
   daily: tiles(VIZ.stat(day, { stats: DAILY_STATS })),
   onPrem: tiles(VIZ.stat(props(3), { stats: PROPERTY_STATS })),
   azureDb: tiles(VIZ.stat(props(5), { stats: PROPERTY_STATS })),

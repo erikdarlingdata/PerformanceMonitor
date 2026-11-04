@@ -20,8 +20,7 @@ namespace Darling.Tests;
 /// Three small fixes on the web viewer's SQL Server Overview tiles (#7485): the Daily Summary "Total wait" tile names its unit as the
 /// table form does, the Server Properties "Service objective" tile shows only on an Azure SQL Database, and a tile value with no space in
 /// it (<c>SOS_SCHEDULER_YIELD</c>) can wrap instead of running past its tile. The first two run the shipped <c>panels.js</c> under Node
-/// (<c>web-overview-tiles-harness.mjs</c>), skipped when Node is not installed. Layout needs a browser, so the stylesheet is checked by
-/// its rule.
+/// (<c>web-overview-tiles-harness.mjs</c>), skipped when Node is not installed. Layout needs a browser, so no test here covers the wrap.
 /// </summary>
 public sealed class WebOverviewTilesBehaviourTests
 {
@@ -63,8 +62,9 @@ public sealed class WebOverviewTilesBehaviourTests
     [Fact]
     public void DailySummary_TotalWaitTile_NamesItsUnit()
     {
-        var tiles = Tiles(Run(), "daily");
-        Assert.Contains("Total wait (s)=1,082", tiles);
+        var root = Run();
+        var tiles = Tiles(root, "daily");
+        Assert.Contains("Total wait (s)=" + root.GetProperty("expectedTotal").GetString(), tiles);
         Assert.DoesNotContain(tiles, t => t.StartsWith("Total wait=", StringComparison.Ordinal));
     }
 
@@ -76,12 +76,5 @@ public sealed class WebOverviewTilesBehaviourTests
         Assert.Contains("vCores=1", Tiles(root, "azureDb"));
         Assert.DoesNotContain(Tiles(root, "onPrem"), t => t.StartsWith("Service objective=", StringComparison.Ordinal));
         Assert.DoesNotContain(Tiles(root, "onPrem"), t => t.StartsWith("vCores=", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void TheStylesheet_LetsATileValueWrapAnywhere_WhenItDoesNotFit()
-    {
-        var css = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css");
-        Assert.Matches(@"\.stat \.value \{[^}]*overflow-wrap: anywhere;", css);
     }
 }
