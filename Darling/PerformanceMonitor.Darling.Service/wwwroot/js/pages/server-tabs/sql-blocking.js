@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { routeHash, el, mount, disclosure, noticeStrip, getActiveDatabaseFilter } from "../../util.js";
+import { routeHash, el, mount, disclosure, noticeStrip, getActiveDatabaseFilter, readTool } from "../../util.js";
 import { VIZ } from "../../panels.js";
 import { windowParams } from "../../time-slicer.js";
 import { downloadText } from "../../grid-tools.js";
@@ -287,6 +287,71 @@ function deadlockXmlColumns(server, scope = null) {
   ];
 }
 
+/**
+ * #7545: the XML of one report the read left out to stay within its reply size, fetched alone (the tool's own advice: as_of at the
+ * report's event time, limit 1). The row is filled in on success, so the Report cell and the Save XML button share one fetch, and a
+ * failure is not remembered so the next click tries again. Rejects with a sentence for the person.
+ */
+export function loadReportXml(row) {
+  if (row.blocked_process_report_xml) return Promise.resolve(row.blocked_process_report_xml);
+  if (row.xmlLoading) return row.xmlLoading;
+  const pending = readTool("get_blocked_process_xml", { server: row.server, hours: 1, as_of: row.event_time, limit: 1 })
+    .then((res) => {
+      const found = res && res.kind === "data" && res.data && Array.isArray(res.data.reports) ? res.data.reports[0] : null;
+      const xml = found && found.blocked_process_report_xml;
+      if (!xml) throw new Error("The report could not be read now. Try again, or narrow the time range.");
+      row.blocked_process_report_xml = xml;
+      row.xml_left_out = false;
+      return xml;
+    })
+    .finally(() => {
+      row.xmlLoading = null;
+    });
+  row.xmlLoading = pending;
+  return pending;
+}
+
+/* The Report cell of a row with no XML in the read: a Load XML button that becomes the usual disclosure once the report is fetched. */
+function reportCell(row) {
+  if (!row.xml_left_out) return xmlDisclosure(row.blocked_process_report_xml);
+  const host = el("span", {});
+  const btn = el("button", { class: "btn small", type: "button", text: "Load XML" });
+  btn.setAttribute("title", "This report was left out of the read to keep the reply small. Click to read it alone.");
+  const status = el("span", { class: "muted" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    status.textContent = " Loading...";
+    try {
+      await loadReportXml(row);
+      mount(host, xmlDisclosure(row.blocked_process_report_xml));
+    } catch (e) {
+      btn.disabled = false;
+      status.textContent = " " + (e && e.message ? e.message : String(e));
+    }
+  });
+  host.appendChild(btn);
+  host.appendChild(status);
+  return host;
+}
+
+/* Save XML for a row with no XML in the read: loads the report first, then downloads it. */
+function loadAndSaveButton(row) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Save XML" });
+  btn.setAttribute("title", "This report was left out of the read to keep the reply small. Saving reads it first.");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      const xml = await loadReportXml(row);
+      downloadText("blocked_process_" + fileStamp(row.event_time) + ".xml", [xml], "application/xml;charset=utf-8");
+      btn.setAttribute("title", "Saved.");
+    } catch (e) {
+      btn.setAttribute("title", "Save failed: " + (e && e.message ? e.message : "the report could not be read."));
+    }
+    btn.disabled = false;
+  });
+  return btn;
+}
+
 /* The desktop Blocked Process Reports columns get_blocked_process_xml returns, under the desktop's headers. */
 export const BPR_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
@@ -295,13 +360,14 @@ export const BPR_COLUMNS = [
     label: "XML",
     sortable: false,
     csv: false,
-    render: (r) => saveXmlButton(r.blocked_process_report_xml, "blocked_process_" + fileStamp(r.event_time) + ".xml", "application/xml;charset=utf-8", false),
+    render: (r) =>
+      r.xml_left_out ? loadAndSaveButton(r) : saveXmlButton(r.blocked_process_report_xml, "blocked_process_" + fileStamp(r.event_time) + ".xml", "application/xml;charset=utf-8", false),
   },
   { key: "database_name", label: "Database" },
   { key: "blocked_spid", label: "Blocked SPID", format: "int" },
   { key: "blocking_spid", label: "Blocking SPID", format: "int" },
   { key: "wait_time_ms", label: "Wait Time", format: "ms" },
-  { key: "blocked_process_report_xml", label: "Report", valueList: false, render: (r) => xmlDisclosure(r.blocked_process_report_xml) },
+  { key: "blocked_process_report_xml", label: "Report", valueList: false, render: (r) => reportCell(r) },
 ];
 
 export const OBJECT_LOCK_COLUMNS = [

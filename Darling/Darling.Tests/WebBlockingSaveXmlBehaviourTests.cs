@@ -101,4 +101,22 @@ public sealed class WebBlockingSaveXmlBehaviourTests
         Assert.True(r.GetProperty("disabled").GetBoolean());
         Assert.False(r.GetProperty("hasClick").GetBoolean());
     }
+
+    /* #7545: a report the read left out for size is a grid row with a Load XML button, the note says why, and loading it reads that
+       report alone (as_of at its event time, limit 1) and fills the Report cell and the Save XML button. */
+    [Fact]
+    public void AReportLeftOutForSize_IsARowThatLoadsItsXmlOnClick()
+    {
+        var r = Run("leftout");
+        Assert.Equal(2, r.GetProperty("rows").GetInt32());
+        Assert.True(r.GetProperty("noteShown").GetBoolean());
+        Assert.Equal(1, r.GetProperty("loadButtons").GetInt32());
+        Assert.Equal(1, r.GetProperty("loadFetches").GetInt32());
+        var url = r.GetProperty("loadUrl").GetString()!;
+        Assert.Contains("limit=1", url);
+        Assert.Contains("as_of=2026-07-01T10%3A40%3A00", url);
+        Assert.True(r.GetProperty("reportShown").GetBoolean());
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Contains("<loaded-report/>", downloads);
+    }
 }

@@ -114,7 +114,9 @@ public static partial class DarlingWebEndpoints
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), AsOf(c), databases, logger, c.RequestAborted)
+                ? WebBlockedReportFold.FoldAsync(
+                    DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), AsOf(c), databases, logger, c.RequestAborted),
+                    Rows(c, "limit", 5))
                 : DatabaseNamesRefusal(c),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
