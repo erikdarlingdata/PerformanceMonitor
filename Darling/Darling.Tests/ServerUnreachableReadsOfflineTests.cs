@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -74,6 +75,44 @@ public class ServerUnreachableReadsOfflineTests
 
     /* #1776 own-store: this fact mints its own scratch database through ScratchPostgres. */
     [Fact]
+    public void List_servers_reads_a_failed_connect_Offline_with_the_reason_while_a_quiet_server_keeps_the_age_rule()
+    {
+        var json = DarlingMcpDataTools.RenderServerList(
+            new[]
+            {
+                new DarlingDataReader.ServerListRow(1, "down", null, 16, FiveMinutesAgo, MonitoredEngineKind.SqlServer, null, FiveMinutesAgo.AddDays(-3),
+                    ConnectDownSince: DownSince, LastConnectError: ConnectError),
+                new DarlingDataReader.ServerListRow(2, "quiet", null, 16, FiveMinutesAgo, MonitoredEngineKind.SqlServer, null, FiveMinutesAgo.AddDays(-3)),
+            },
+            Now,
+            DarlingPeerDirectory.Snapshot.Empty);
+
+        using var document = JsonDocument.Parse(json);
+        var rows = document.RootElement.GetProperty("servers").EnumerateArray()
+            .ToDictionary(e => e.GetProperty("server_name").GetString()!, e => e, StringComparer.Ordinal);
+
+        Assert.Equal("Offline", rows["down"].GetProperty("status").GetString());
+        Assert.Equal("Server unreachable since 2026-11-04 11:56 UTC: " + ConnectError, rows["down"].GetProperty("reason").GetString());
+        Assert.Equal(DownSince.ToString("o"), rows["down"].GetProperty("connect_down_since").GetString());
+        Assert.Equal(ConnectError, rows["down"].GetProperty("last_connect_error").GetString());
+
+        Assert.Equal("Warning", rows["quiet"].GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, rows["quiet"].GetProperty("reason").ValueKind);
+        Assert.Equal(JsonValueKind.Null, rows["quiet"].GetProperty("connect_down_since").ValueKind);
+    }
+
+    [Fact]
+    public void The_admin_servers_grid_reads_a_failed_connect_Offline_too()
+    {
+        DarlingAdminServersReader.Row Row(DateTime? downSince) =>
+            new(1, "cfg", "host", null, false, "sqlserver", 0, "integrated", true, 0m, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Unspecified),
+                "srv", "srv", 16, null, null, MonitoredEngineKind.SqlServer, FiveMinutesAgo.AddDays(-3), FiveMinutesAgo, null, downSince);
+
+        Assert.Equal("Offline", DarlingAdminServersReader.Build(new[] { Row(DownSince) }, Now).Single().freshness);
+        Assert.Equal("Warning", DarlingAdminServersReader.Build(new[] { Row(null) }, Now).Single().freshness);
+    }
+
+    [Fact]
     public async Task A_failed_connect_is_stored_read_back_by_the_fleet_read_and_a_good_connect_clears_it()
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -114,6 +153,14 @@ public class ServerUnreachableReadsOfflineTests
             return (reader.IsDBNull(6) ? null : reader.GetDateTime(6), reader.IsDBNull(7) ? null : reader.GetString(7));
         }
 
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await using var config = new NpgsqlCommand(
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (77, 'sql-live', 'sql-live', TRUE)", connection);
+            await config.ExecuteNonQueryAsync(ct);
+        }
+
         /* A server that has never connected has no registry row: the failed-connect write matches nothing and does not invent one. */
         await DarlingObservability.MarkConnectFailedAsync(postgres, 77, "no route", null, ct);
         await using (var count = postgres.CreateCommand("SELECT count(*) FROM servers WHERE server_id = 77"))
@@ -135,11 +182,20 @@ public class ServerUnreachableReadsOfflineTests
         Assert.Equal(firstSince, secondSince);
         Assert.Equal("second error", secondError);
 
+        /* list_servers and the admin grid read the same two columns and band the row Offline. */
+        var listed = Assert.Single(await DarlingDataReader.GetServerListAsync(postgres, ct));
+        Assert.Equal(secondSince, listed.ConnectDownSince);
+        Assert.Equal("second error", listed.LastConnectError);
+        Assert.Equal("Offline", DarlingMcpDataTools.FreshnessStatus(DateTime.UtcNow, listed.RegisteredAt, DateTime.UtcNow, listed.ConnectDownSince));
+        var admin = Assert.Single(await DarlingAdminServersReader.ReadAsync(postgres, ct));
+        Assert.Equal(secondSince, admin.ConnectDownSince);
+
         var connection2 = await DarlingMcpDataTools.ReadServerConnectionAsync(postgres, 77, DateTime.UtcNow, null, ct);
         Assert.Equal("waiting_on_connection", JsonDocument.Parse(JsonSerializer.Serialize(connection2)).RootElement.GetProperty("status").GetString());
 
         await UpsertAsync(postgres, ct);
         Assert.Equal((null, null), await FleetReadAsync(postgres, ct));
+        Assert.Null(Assert.Single(await DarlingDataReader.GetServerListAsync(postgres, ct)).ConnectDownSince);
         Assert.Null(await DarlingMcpDataTools.ReadServerConnectionAsync(postgres, 77, DateTime.UtcNow, null, ct));
     }
 

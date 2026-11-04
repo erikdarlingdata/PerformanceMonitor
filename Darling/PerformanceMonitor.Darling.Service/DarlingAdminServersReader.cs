@@ -71,7 +71,8 @@ internal static class DarlingAdminServersReader
             s.engine_kind,
             s.created_date,
             latest.collection_time AS last_collection,
-            {DarlingDataReader.SameMachineAsColumnSql}
+            {DarlingDataReader.SameMachineAsColumnSql},
+            s.connect_down_since
         FROM config.config_monitored_servers c
         LEFT JOIN servers s ON s.server_id = c.server_id
         LEFT JOIN LATERAL
@@ -107,7 +108,8 @@ internal static class DarlingAdminServersReader
         string? EngineKind,
         DateTime? RegisteredAt,
         DateTime? LastCollection,
-        IReadOnlyList<string>? SameMachineAs = null);
+        IReadOnlyList<string>? SameMachineAs = null,
+        DateTime? ConnectDownSince = null);
 
     internal static async Task<List<Row>> ReadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -137,7 +139,8 @@ internal static class DarlingAdminServersReader
                 reader.IsDBNull(16) ? null : reader.GetString(16),
                 reader.IsDBNull(17) ? null : reader.GetDateTime(17),
                 reader.IsDBNull(18) ? null : reader.GetDateTime(18),
-                reader.IsDBNull(19) ? null : reader.GetFieldValue<string[]>(19)));
+                reader.IsDBNull(19) ? null : reader.GetFieldValue<string[]>(19),
+                reader.IsDBNull(20) ? null : reader.GetDateTime(20)));
         }
 
         return rows;
@@ -189,7 +192,7 @@ internal static class DarlingAdminServersReader
             engine = engineKind,
             version = MonitoredEngineVersion.DescribeEngineVersion(
                 engineKind, r.SqlMajorVersion, r.PostgresMajorVersion, r.SqlEngineEdition),
-            freshness = DarlingMcpDataTools.FreshnessStatus(r.LastCollection, r.RegisteredAt, nowUtc),
+            freshness = DarlingMcpDataTools.FreshnessStatus(r.LastCollection, r.RegisteredAt, nowUtc, r.ConnectDownSince),
             read_only = r.ReadOnlyIntent || serverName.EndsWith(":RO", StringComparison.Ordinal),
             last_collected = r.LastCollection?.ToString("o", CultureInfo.InvariantCulture),
             status = r.IsEnabled ? "Enabled" : "Disabled",
