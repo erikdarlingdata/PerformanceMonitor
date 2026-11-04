@@ -404,7 +404,7 @@ public static partial class DarlingWebEndpoints
             ["get_memory_grants"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), AsOf(c), QueryBool(c, "chart", false), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEventsUncapped(pg, Server(c), Hours(c, 24), AsOf(c), logger: null, cancellationToken: c.RequestAborted),
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── object / index stats ── */
