@@ -135,6 +135,22 @@ public sealed class WebChartAxisBehaviourTests
         Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith("MB", l, StringComparison.Ordinal));
     }
 
+    /// <summary>#7515: the panels pass the size unit themselves. A composed panel (renderComposedResult, left axis and overlay axis) and a
+    /// "format: mb" panel (VIZ.line, the public way into vizLine) are drawn with a series near 60,000 MB and nothing sets sizeUnit by hand,
+    /// so a panel that stops passing it reads 19.5, 39.1, 58.6 GB again. A small "mb" panel keeps its MB ticks.</summary>
+    [Fact]
+    public void ThePanels_PassTheSizeUnit_SoABigSizeAxisReadsInGb()
+    {
+        var a = Run().GetProperty("panelAxis");
+        var left = Strings(a.GetProperty("expectedLeft"));
+        var right = Strings(a.GetProperty("expectedRight"));
+        Assert.Equal(left, Strings(a.GetProperty("composedLeft")));
+        Assert.Equal(left, Strings(a.GetProperty("composedOverlayLeft")));
+        Assert.Equal(right, Strings(a.GetProperty("composedOverlayRight")));
+        Assert.Equal(left, Strings(a.GetProperty("mbPanel")));
+        Assert.Equal(Strings(a.GetProperty("mbPanelSmallWithout")), Strings(a.GetProperty("mbPanelSmall")));
+    }
+
     /// <summary>The Custom View chart: 80,000 MB reads "78.1 GB" and the axis margins are as wide as the widest label, left and
     /// right, so no digit is cut. A chart with small numbers keeps its 58 px left margin and 56 px right gutter.</summary>
     [Fact]

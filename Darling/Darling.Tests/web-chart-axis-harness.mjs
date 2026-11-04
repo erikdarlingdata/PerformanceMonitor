@@ -70,13 +70,14 @@ globalThis.document = {
 globalThis.location = { hash: "#/server/A/cpu" };
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-axis-")));
-let charts, util, compose;
+let charts, util, compose, panels;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
   compose = await import(pathToFileURL(path.join(scratch, "compose.js")).href);
+  panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -98,7 +99,10 @@ const rows = (values, key = "a", values2 = null) =>
 /* The y axis a chart draws: tick labels on the left (anchor "end", left of the plot), and on the right when series2 is given
    (anchor "start"); the plot's left edge and right edge come from its gridlines, and the widest label's estimated width in px. */
 function axes(spec) {
-  const host = charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], ...spec });
+  return axesOf(charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], ...spec }));
+}
+/* The same reading, taken off any node tree that holds a drawn chart (a panel's or a composed result's). */
+function axesOf(host) {
   const texts = find(host, (n) => n.tag === "text" && !cls(n).includes("axis-unit"));
   const grid = find(host, (n) => n.tag === "line" && cls(n).includes("grid-line") && n.attrs.x2 !== n.attrs.x1);
   const left = Number(grid[0].attrs.x1);
@@ -180,6 +184,35 @@ out.sizeAxis = {
   composedRight: composedBoth.rightLabels,
   composedLeftExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
   composedRightExpected: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+};
+
+/* #7515: the same axes, drawn the way the pages draw them. A composed panel goes through renderComposedResult (the left axis and the
+   overlay axis each pass their own size unit), and a "format: mb" panel through the panel table's line viz (VIZ.line, the public way
+   into vizLine). Nothing here sets sizeUnit by hand: a panel that stops passing it reads 19.5, 39.1, 58.6 GB again. Expected words are
+   built with the page's own formatter, so the test holds in any locale. */
+const composedRows = (values, values2) => values.map((v, i) => ({ bucket: iso(T0 + i * 60000), value: v, ...(values2 ? { value2: values2[i] } : {}) }));
+const composedAxes = (panel, values, values2) => {
+  const nodes = compose.renderComposedResult({ sql: "", rows: composedRows(values, values2) }, panel);
+  const holder = new FakeNode("div");
+  nodes.filter(Boolean).forEach((n) => holder.appendChild(n));
+  return axesOf(holder);
+};
+const composedPlain = composedAxes({ viz: "line", unit: "mb", measure: "memory" }, [42000, 51000, 60000, 58000]);
+const composedOverlay = composedAxes({ viz: "line", unit: "mb", measure: "memory", overlay: { measure: "other", unit: "mb" } }, [42000, 51000, 60000, 58000], [10000, 20000, 30000, 24000]);
+const mbPanel = (values) => {
+  const holder = new FakeNode("div");
+  holder.appendChild(panels.VIZ.line({ trend: rows(values) }, { rowsKey: "trend", xKey: "t", series: [{ key: "a", label: "A" }], format: "mb" }));
+  return axesOf(holder);
+};
+out.panelAxis = {
+  composedLeft: composedPlain.leftLabels,
+  composedOverlayLeft: composedOverlay.leftLabels,
+  composedOverlayRight: composedOverlay.rightLabels,
+  mbPanel: mbPanel([42000, 51000, 60000, 58000]).leftLabels,
+  mbPanelSmall: mbPanel([120, 340, 500, 410]).leftLabels,
+  mbPanelSmallWithout: unsized([120, 340, 500, 410]).leftLabels,
+  expectedLeft: [util.fmtMb(0), GB(20), GB(40), GB(60)],
+  expectedRight: [util.fmtMb(0), GB(10), GB(20), GB(30)],
 };
 
 /* A chart of counts keeps every tick on a whole number (integerTicks), where the same range without it steps by 0.2. */
