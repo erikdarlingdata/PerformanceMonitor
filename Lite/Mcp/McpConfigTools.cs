@@ -203,6 +203,13 @@ public sealed class McpConfigTools
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
+            /* #7584: the on-prem health capture always holds a tempdb row, so on a readable secondary the read is never empty and the
+               miss path above never runs. A capture of only tempdb has no database Query Store is read for, so it gets the same
+               readable-secondary answer; a server that is not one answers null here and keeps showing the rows as before. */
+            if (rows.All(r => string.Equals(r.DatabaseName, "tempdb", StringComparison.OrdinalIgnoreCase))
+                && await McpRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(dataService, resolved.ServerId, resolved.DisplayName) is { } secondaryStatus)
+                return secondaryStatus;
+
             IEnumerable<QueryStoreHealthRow> filtered = rows;
             if (!string.IsNullOrWhiteSpace(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));

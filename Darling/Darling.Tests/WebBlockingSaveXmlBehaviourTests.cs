@@ -101,4 +101,66 @@ public sealed class WebBlockingSaveXmlBehaviourTests
         Assert.True(r.GetProperty("disabled").GetBoolean());
         Assert.False(r.GetProperty("hasClick").GetBoolean());
     }
+
+    /* #7545: a report the read left out for size is a grid row with a Load XML button, the note says why, and loading it reads that
+       report alone (as_of at its event time, a few rows, the matching one taken) and fills the Report cell and the Save XML button. */
+    [Fact]
+    public void AReportLeftOutForSize_IsARowThatLoadsItsXmlOnClick()
+    {
+        var r = Run("leftout");
+        Assert.Equal(2, r.GetProperty("rows").GetInt32());
+        Assert.True(r.GetProperty("noteShown").GetBoolean());
+        Assert.Equal(1, r.GetProperty("loadButtons").GetInt32());
+        Assert.Equal(1, r.GetProperty("loadFetches").GetInt32());
+        var url = r.GetProperty("loadUrl").GetString()!;
+        Assert.Contains("limit=5", url);
+        Assert.Contains("as_of=2026-07-01T10%3A40%3A00", url);
+        Assert.True(r.GetProperty("reportShown").GetBoolean());
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Contains("<loaded-report/>", downloads);
+    }
+
+    /* #7545: two reports share one event_time and the read answers with the OTHER one first. The row gets its own report, matched on
+       event time, database and both session ids, never the first row of the answer. Fails on a page that takes reports[0]. */
+    [Fact]
+    public void LoadXml_WhenTwoReportsShareAnEventTime_AttachesOnlyTheMatchingReport()
+    {
+        var r = Run("sametime");
+        Assert.Equal(0, r.GetProperty("loadButtonsAfter").GetInt32());
+        Assert.False(r.GetProperty("otherShown").GetBoolean());
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Contains("<loaded-report/>", downloads);
+        Assert.DoesNotContain("<other-report/>", downloads);
+    }
+
+    /* #7545: only another report comes back (the row's own is gone). The row says it could not be read and to try again, attaches
+       nothing and Save XML writes no file for it. */
+    [Fact]
+    public void LoadXml_WhenOnlyAnotherReportComesBack_SaysSoAndAttachesNothing()
+    {
+        var r = Run("nomatch");
+        Assert.False(r.GetProperty("otherShown").GetBoolean());
+        Assert.True(r.GetProperty("errorShown").GetBoolean());
+        Assert.True(r.GetProperty("tryAgainShown").GetBoolean());
+        Assert.False(r.GetProperty("shareTimeShown").GetBoolean());
+        Assert.Equal(1, r.GetProperty("loadButtonsAfter").GetInt32());
+        /* The first row has its own XML and saves it; the row with none writes no file, and the other report is nowhere. */
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Equal(new[] { "<blocked-process-report/>" }, downloads);
+    }
+
+    /* #7545: the row's own report is left out again. The page gets the web fold's output, not the tool's: the other report with its XML
+       and the row's own with xml_left_out true and no XML, and no left_out_reports key. The row says other reports share its time (a retry
+       cannot help) and not "Try again"; Save XML writes no file for it. Fails on a page that looks for left_out_reports. */
+    [Fact]
+    public void LoadXml_WhenTheRowsOwnReportIsLeftOutAgain_SaysOtherReportsShareItsTime()
+    {
+        var r = Run("leftagain");
+        Assert.False(r.GetProperty("otherShown").GetBoolean());
+        Assert.True(r.GetProperty("shareTimeShown").GetBoolean());
+        Assert.False(r.GetProperty("tryAgainShown").GetBoolean());
+        Assert.Equal(1, r.GetProperty("loadButtonsAfter").GetInt32());
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Equal(new[] { "<blocked-process-report/>" }, downloads);
+    }
 }

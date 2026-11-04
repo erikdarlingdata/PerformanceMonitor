@@ -461,7 +461,11 @@ export const SERVER_TABS = [
             "reports",
             BPR_COLUMNS,
             w.label,
-            "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target."
+            "No blocked-process report XML in this window. The report is only written when the blocked process threshold is configured on the target.",
+            2,
+            null,
+            /* #7545: why some rows have no XML, from the reply that folded the left-out reports into the grid. */
+            ["left_out_note"]
           ),
         false
       ),

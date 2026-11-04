@@ -221,7 +221,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         const string Cut = "AND   collection_time <= $3";
         Assert.Equal(plain[..(plain.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)],
                      withXml[..(withXml.IndexOf(Cut, StringComparison.Ordinal) + Cut.Length)]);
-        Assert.EndsWith("ORDER BY event_time DESC\nLIMIT $4", withXml.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        Assert.EndsWith("ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC\nLIMIT $4", withXml.Replace("\r\n", "\n"), StringComparison.Ordinal);
     }
 
     [Fact]

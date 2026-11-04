@@ -390,6 +390,47 @@ public class McpStatusEnvelopeTests : IClassFixture<SharedDuckDbFixture>, IDispo
         Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
+    /// <summary>#7584: get_query_store_health on a readable secondary with no health rows answers the readable-secondary text, as the other Query Store reads do.</summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnASecondaryRole_WithNoHealthRows_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7584: the on-prem health capture always holds a tempdb row, so a readable secondary's snapshot is never empty. A capture of only
+    /// tempdb has no database Query Store is read for and answers the readable-secondary text, not a tempdb-only OFF row.
+    /// </summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnASecondaryRole_WithOnlyTempdbInTheCapture_AnswersNotCollected()
+    {
+        await SeedAgReplicaRoleAsync("Secondary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
+
+        var root = Parse(await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager));
+
+        Assert.Equal("not_collected", root.GetProperty("status").GetString());
+        Assert.Contains("readable secondary", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7584: a primary whose capture holds only tempdb keeps its rows (the secondary check answers null for it).</summary>
+    [Fact]
+    public async Task GetQueryStoreHealth_OnAPrimary_WithOnlyTempdbInTheCapture_KeepsTheRows()
+    {
+        await SeedAgReplicaRoleAsync("Primary");
+        await SeedQueryStoreHealthAsync("tempdb", "OFF", readonlyReason: 0, captureTime: DateTime.UtcNow.AddMinutes(-5));
+
+        var json = await McpConfigTools.GetQueryStoreHealth(_dataService, _serverManager);
+
+        Assert.DoesNotContain("readable secondary", json, StringComparison.Ordinal);
+        Assert.Contains("tempdb", json, StringComparison.Ordinal);
+    }
+
     /// <summary>Tempdb (OFF) beside the secondary-flagged rows of a pre-#6252 capture: the flagged rows are every database Query Store is read for.</summary>
     [Fact]
     public async Task GetQueryStoreTop_WithTempdbOffBesideSecondaryFlaggedRows_AnswersNotCollected()
