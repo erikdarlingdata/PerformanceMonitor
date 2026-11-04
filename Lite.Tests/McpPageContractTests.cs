@@ -820,6 +820,27 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
     }
 
     /// <summary>
+    /// #7502: in a chain of 80, blocked by 81, blocked by 82, only 82 is the head. 81 blocks 80 and stays on the page, with
+    /// its own blocker named.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_InABlockingChain_OnlyTheTopIsTheHeadBlocker()
+    {
+        var t = WholeSecondsNow().AddMinutes(-2);
+        await SeedSnapshotAsync(t, 80, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 81, cpuMs: 10);
+        await SeedSnapshotAsync(t, 81, "Db", "UPDATE Users SET Reputation = 0", blockingSessionId: 82, cpuMs: 10);
+        await SeedSnapshotAsync(t, 82, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+
+        var reply = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
+        var rows = reply.GetProperty("queries").EnumerateArray().ToArray();
+
+        Assert.True(Row(rows, 82).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 81).GetProperty("is_head_blocker").ValueKind);
+        Assert.Equal(82, Row(rows, 81).GetProperty("blocking_session_id").GetInt32());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 80).GetProperty("is_head_blocker").ValueKind);
+    }
+
+    /// <summary>
     /// #5235: the wait_type filter is in the query, like database_name, so the count, the cap and the truncation flag all see it. One
     /// capture holds the waits the filter has to tell apart, and a capture two minutes earlier holds one more row on the same wait:
     /// <code>

@@ -286,6 +286,49 @@ public sealed class McpFilterSemanticsLivePostgresTests
     }
 
     /// <summary>
+    /// #7502: in a chain of 80, blocked by 81, blocked by 82, only 82 is the head. 81 blocks 80 and stays on the page, with
+    /// its own blocker named.
+    /// </summary>
+    [Fact]
+    public async Task ActiveQueries_InABlockingChain_OnlyTheTopIsTheHeadBlocker()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live filter-semantics test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            await PlantSnapshotAsync(connection, ct, t, 80, Db, "UPDATE Posts SET Score = 1", blockingSessionId: 81, cpuMs: 10);
+            await PlantSnapshotAsync(connection, ct, t, 81, Db, "UPDATE Users SET Reputation = 0", blockingSessionId: 82, cpuMs: 10);
+            await PlantSnapshotAsync(connection, ct, t, 82, Db, "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+
+            var reply = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, limit: 50)).RootElement;
+            var rows = reply.GetProperty("queries").EnumerateArray().ToArray();
+
+            Assert.True(Row(rows, 82).GetProperty("is_head_blocker").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, Row(rows, 81).GetProperty("is_head_blocker").ValueKind);
+            Assert.Equal(82, Row(rows, 81).GetProperty("blocking_session_id").GetInt32());
+            Assert.Equal(JsonValueKind.Null, Row(rows, 80).GetProperty("is_head_blocker").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #5235: the wait_type filter is IN the query, like database_name, so the count, the cap and the truncation flag all see it. One
     /// capture holds the waits the filter has to tell apart, and a capture two minutes earlier holds one more row on the same wait:
     /// <code>
