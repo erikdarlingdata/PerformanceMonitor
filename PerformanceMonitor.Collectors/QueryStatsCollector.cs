@@ -96,6 +96,15 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         /// </summary>
         public string? KnownPlanDigest { get; set; }
 
+        /// <summary>
+        /// #7419: the digest the host's store already holds for this row's statement text, set by a host that reads the
+        /// text in a second query (<see cref="CollectorContext.DeferTextFetch"/>) and recognizes the statement from an
+        /// earlier commit. When set, <see cref="QueryText"/> is null and the writer stores the digest instead of the text
+        /// (<see cref="ICollectorRowWriter.PayloadOrDigest"/>). Null for a row that carries its own text, a row whose text
+        /// is new, and a row whose text could not be read (stored with no text and filled in by a later run).
+        /// </summary>
+        public string? KnownTextDigest { get; set; }
+
         public long PlanGenerationNum { get; set; }
 
         /// <summary>
@@ -313,6 +322,40 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
             execInterval, workerInterval, elapsedInterval);
     }
 
+    /// <summary>
+    /// The candidate query's <c>query_text</c> expression: the statement's slice of its batch text, by the DMV's byte offsets.
+    /// A constant so <see cref="DeferredQueryTextExpression"/> can replace exactly this text, and no other, and so the default
+    /// form of the query stays byte-identical (<c>QueryStatsSqlGoldenTests</c> pins its hash).
+    /// </summary>
+    private const string QueryTextExpression = @"
+        CASE
+            WHEN qs.statement_start_offset = 0
+            AND  qs.statement_end_offset = -1
+            THEN st.text
+            ELSE
+                SUBSTRING
+                (
+                    st.text,
+                    (qs.statement_start_offset / 2) + 1,
+                    (
+                        CASE
+                            WHEN qs.statement_end_offset = -1
+                            THEN DATALENGTH(st.text)
+                            ELSE qs.statement_end_offset
+                        END - qs.statement_start_offset
+                    ) / 2 + 1
+                )
+        END,";
+
+    /// <summary>
+    /// #7419: what the candidate query returns for <c>query_text</c> when the host reads the text in a second query
+    /// (<see cref="CollectorContext.DeferTextFetch"/>). The <c>dm_exec_sql_text</c> apply STAYS in the candidate query, because
+    /// the collector's own-statement self-filter (<c>st.text NOT LIKE N'%PerformanceMonitorLite%'</c>) and the host object name
+    /// read it, so what a deferred run saves is the <c>SUBSTRING</c> and the transfer of the text, not the apply.
+    /// </summary>
+    private const string DeferredQueryTextExpression = @"
+        CONVERT(nvarchar(max), NULL),";
+
     private const string SelectColumnsText = @"
     query_hash = CONVERT(varchar(64), qs.query_hash, 1),
     query_plan_hash = CONVERT(varchar(64), qs.query_plan_hash, 1),
@@ -351,25 +394,7 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     max_spills = qs.max_spills,
     sql_handle = CONVERT(varchar(130), qs.sql_handle, 1),
     plan_handle = CONVERT(varchar(130), qs.plan_handle, 1),
-    query_text =
-        CASE
-            WHEN qs.statement_start_offset = 0
-            AND  qs.statement_end_offset = -1
-            THEN st.text
-            ELSE
-                SUBSTRING
-                (
-                    st.text,
-                    (qs.statement_start_offset / 2) + 1,
-                    (
-                        CASE
-                            WHEN qs.statement_end_offset = -1
-                            THEN DATALENGTH(st.text)
-                            ELSE qs.statement_end_offset
-                        END - qs.statement_start_offset
-                    ) / 2 + 1
-                )
-        END,
+    query_text =" + QueryTextExpression + @"
     plan_generation_num = qs.plan_generation_num,
     statement_start_offset = qs.statement_start_offset,
     statement_end_offset = qs.statement_end_offset,
@@ -732,6 +757,132 @@ OPTION(RECOMPILE);";
     }
 
     /// <summary>
+    /// #7419: the second target query for a host that sets <see cref="CollectorContext.DeferTextFetch"/>. The candidate query
+    /// returns no statement text, and this reads it for only the keys the host does not yet hold a digest for. Row <c>ord</c>
+    /// is the key's position in <paramref name="keys"/>.
+    ///
+    /// <para>The text is read from the PLAN, <c>sys.dm_exec_sql_text(plan_handle)</c>, not from the <c>sql_handle</c>. A plan
+    /// is compiled from one text, so the offsets of a key always slice the text they were taken against. A <c>sql_handle</c> of a
+    /// module is the module's database and object ids, not its text, so after an <c>ALTER</c> the same handle and offsets could slice a
+    /// different text. A plan that left the cache between the two queries returns no text (NULL) and never another plan's.</para>
+    ///
+    /// <para>The slice is the candidate query's own (<see cref="QueryTextExpression"/>), by the same byte offsets. The statement
+    /// carries the collector's marker comment, so the collector's own-statement filter would drop it if it were ever cached.
+    /// The handles are inlined as hex literals, rendered host-side from bytes, exactly as <see cref="BuildPlanFetchQuery"/> does.</para>
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The host does not defer the text, or <paramref name="keys"/> is empty or too long.</exception>
+    public static CollectorQuery BuildTextFetchQuery(CollectorContext context, IReadOnlyList<PlanFetchKey> keys)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!context.DeferTextFetch)
+        {
+            throw new InvalidOperationException(
+                "A text fetch needs DeferTextFetch: a host that reads the text in the main query must not issue one.");
+        }
+
+        if (keys is null || keys.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "The text fetch key list must be non-empty; an empty list means no fetch should be issued at all.");
+        }
+
+        if (keys.Count > MaxPlanFetchKeys)
+        {
+            throw new InvalidOperationException(
+                "The text fetch key list holds " + keys.Count.ToString(CultureInfo.InvariantCulture)
+                + " keys; one call takes at most " + MaxPlanFetchKeys.ToString(CultureInfo.InvariantCulture)
+                + ", so the caller must split it.");
+        }
+
+        var values = new System.Text.StringBuilder();
+        for (var ord = 0; ord < keys.Count; ord++)
+        {
+            var key = keys[ord];
+            if (key.PlanHandle is null || key.PlanHandle.Length == 0 || key.PlanHandle.Length > 64)
+            {
+                throw new InvalidOperationException(
+                    "Text fetch key " + ord.ToString(CultureInfo.InvariantCulture)
+                    + " has no valid plan_handle; it must be 1 to 64 bytes.");
+            }
+
+            if (ord > 0)
+            {
+                values.Append(",\n        ");
+            }
+
+            values
+                .Append('(')
+                .Append(ord.ToString(CultureInfo.InvariantCulture))
+                .Append(", 0x").Append(Convert.ToHexString(key.PlanHandle))
+                .Append(", ").Append(key.StartOffset.ToString(CultureInfo.InvariantCulture))
+                .Append(", ").Append(key.EndOffset.ToString(CultureInfo.InvariantCulture))
+                .Append(')');
+        }
+
+        var text = @"SELECT /* PerformanceMonitorLite */
+    k.ord,
+    query_text =
+        CASE
+            WHEN k.s = 0
+            AND  k.e = -1
+            THEN st.text
+            ELSE
+                SUBSTRING
+                (
+                    st.text,
+                    (k.s / 2) + 1,
+                    (
+                        CASE
+                            WHEN k.e = -1
+                            THEN DATALENGTH(st.text)
+                            ELSE k.e
+                        END - k.s
+                    ) / 2 + 1
+                )
+        END
+FROM
+(
+    VALUES
+        " + values + @"
+) AS k (ord, plan_handle, s, e)
+OUTER APPLY sys.dm_exec_sql_text(k.plan_handle) AS st
+OPTION(RECOMPILE);";
+
+        return new CollectorQuery(text);
+    }
+
+    /// <summary>
+    /// Reads <see cref="BuildTextFetchQuery"/>'s result into <c>ord</c> -> statement text, each through the caller's statement
+    /// filter session (#4348). A key whose plan left the cache maps to null.
+    ///
+    /// <para><paramref name="unjudged"/> receives the <c>ord</c> of each text the session's budget could not cover. Its result
+    /// is the filter's marker, so a caller must not cache it: the next cycle, with a fresh budget, can judge the text.</para>
+    /// </summary>
+    public static async ValueTask<Dictionary<int, string?>> ReadTextFetchAsync(
+        DbDataReader reader, SensitiveStatements.Session scrub, CancellationToken cancellationToken,
+        ISet<int>? unjudged = null)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(scrub);
+
+        var results = new Dictionary<int, string?>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var ord = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+            string? text = null;
+            if (!reader.IsDBNull(1) && !scrub.TryText(reader.GetString(1), out text))
+            {
+                unjudged?.Add(ord);
+            }
+
+            results[ord] = text;
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// True when the main query carries the plan columns itself: the host captures plans and has not
     /// deferred the fetch to <see cref="BuildPlanFetchQuery"/> (#5158). One definition for the query text
     /// and the read, so the ordinals cannot disagree with the SELECT.
@@ -764,6 +915,12 @@ OPTION(RECOMPILE);";
     /// </summary>
     public override TimeSpan? PerItemWallClockBudget => TimeSpan.FromSeconds(120);
 
+    /// <summary>#7419: the query with its <c>query_text</c> expression swapped for NULL when the host reads the text itself.</summary>
+    private static string WithTextExpression(string queryText, CollectorContext context) =>
+        context.DeferTextFetch
+            ? queryText.Replace(QueryTextExpression, DeferredQueryTextExpression, StringComparison.Ordinal)
+            : queryText;
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var inlinePlan = InlinePlanCapture(context);
@@ -774,7 +931,7 @@ OPTION(RECOMPILE);";
         if (context.Target.IsAzureSqlDb)
         {
             return new CollectorQuery(
-                AzureSqlDbQueryText
+                WithTextExpression(AzureSqlDbQueryText, context)
                     .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                     .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
                     .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal));
@@ -782,7 +939,7 @@ OPTION(RECOMPILE);";
 
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
         return new CollectorQuery(
-            StandardQueryText
+            WithTextExpression(StandardQueryText, context)
                 .Replace("/*EXCLUSION_FILTER*/", exclusionClause, StringComparison.Ordinal)
                 .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                 .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
@@ -1017,7 +1174,7 @@ OPTION(RECOMPILE);";
             .Value(row.MaxUsedThreads)
             .Value(row.MinSpills)
             .Value(row.MaxSpills)
-            .Value(row.QueryText)
+            .PayloadOrDigest(row.QueryText, row.KnownTextDigest) /* #7419: the text, or the digest of a text the store holds */
             .PayloadOrDigest(row.QueryPlanXml, row.KnownPlanDigest) /* null unless CapturePlanXml captured it (Darling); #5158: or the digest of a plan the store holds */
             .Value(row.SqlHandle)
             .Value(row.PlanHandle)

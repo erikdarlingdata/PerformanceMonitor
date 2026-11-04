@@ -626,6 +626,9 @@ public sealed partial class DarlingCollectorRunner
             /* #5158: query_stats' main query leaves the plan out and the plan fetch below renders only the plans this
                host has not committed. */
             DeferPlanXmlFetch = planFetchFlags.DeferPlanXmlFetch,
+            /* #7419: query_stats' main query returns no statement text and the text fetch below reads it for only the
+               kept rows whose text this host has not committed. */
+            DeferTextFetch = ShouldDeferTextFetchFor(definition.Name, server.Target),
             /* #5158: procedure_stats' identity columns, so the host can recognize a module plan. Both flags come from one
                resolution of the mode (StampPlanFetchFlags); the reader close and the reuse pass read it back from here. */
             PlanIdentityColumns = planFetchFlags.PlanIdentityColumns,
@@ -2187,6 +2190,7 @@ public sealed partial class DarlingCollectorRunner
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
                 List<QueryStatsPlanKey>? pendingPlanKeys = null;
+                List<QueryStatsPlanKey>? pendingTextKeys = null;
                 List<ProcedureStatsPlanKey>? pendingProcedureKeys = null;
                 /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
                    Set before the read rather than after it so the wall-clock-budget catch below reports the
@@ -2352,6 +2356,14 @@ public sealed partial class DarlingCollectorRunner
 
                     /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
                        inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
+                    /* #7419: the deferred text fetch, before the plan fetch and under the same item budget. */
+                    if (context.DeferTextFetch && (object)rows is List<QueryStatsCollector.Row> textRows)
+                    {
+                        await reader.CloseAsync();
+                        pendingTextKeys = await FetchDeferredQueryStatsTextAsync(
+                            targetProvider, targetConnection, server, context, textRows, itemToken);
+                    }
+
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
                     {
                         await reader.CloseAsync();
@@ -2459,6 +2471,20 @@ public sealed partial class DarlingCollectorRunner
                         else
                         {
                             planCache.DiscardPending(pendingPlanKeys);
+                        }
+                    }
+
+                    /* #7419: the same rule for the texts this run read. */
+                    if (pendingTextKeys is not null
+                        && _queryStatsTextCaches.TryGetValue(server.ServerId, out var textCache))
+                    {
+                        if (committed)
+                        {
+                            textCache.ConfirmPending(pendingTextKeys, DateTime.UtcNow);
+                        }
+                        else
+                        {
+                            textCache.DiscardPending(pendingTextKeys);
                         }
                     }
 

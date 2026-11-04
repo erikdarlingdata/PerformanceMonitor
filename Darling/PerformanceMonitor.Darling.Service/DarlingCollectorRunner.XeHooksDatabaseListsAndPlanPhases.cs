@@ -314,6 +314,175 @@ public sealed partial class DarlingCollectorRunner
             SqlServerTargetProvider.Instance, server, databaseName, cancellationToken);
 
     /// <summary>
+    /// #7419: the second half of a deferred query_stats text read. The main query returned the kept rows with no statement
+    /// text; this gives each its text, reading on the monitored server only the texts this host has not already committed.
+    ///
+    /// <para>A row whose identity (<see cref="QueryStatsPlanKey"/>, the plan the statement belongs to) is in the host's text
+    /// cache carries the cached digest, so the writer stores the digest and no text crosses the wire. The rest go to
+    /// <see cref="QueryStatsCollector.BuildTextFetchQuery"/>, split above <see cref="QueryStatsCollector.MaxPlanFetchKeys"/>
+    /// keys, on the same connection as the main read. A run keeps at most four times
+    /// <see cref="QueryStatsCollector.RowsPerRankingPerRun"/> rows, so the misses are bounded by that and no row waits for a
+    /// later run to get its first text.</para>
+    ///
+    /// <para><b>What a row stores when its text is not read.</b> A row whose plan left the cache between the two queries comes
+    /// back empty, a fetch that fails ships its rows with no text, and a text the statement filter could not judge in its
+    /// budget stores the filter's marker. None of them is cached or confirmed, so the next run that sees the statement reads its
+    /// text again, and the row is stored with a NULL <c>query_text_digest</c>, which the readers already treat as "no text
+    /// on this row" and answer from another row of the statement. The rows are never stored with an empty string as if it were final.</para>
+    ///
+    /// <para><b>Why the key is the plan, not the query hash.</b> Two statements that differ only in a literal share a
+    /// <c>query_hash</c> and have different texts, so a query_hash key would store one statement's text under the other's.
+    /// The plan identity (plan handle, offsets, creation time, plan generation) names one compiled statement, and a
+    /// statement recompile or an <c>ALTER</c> of a module presents a new creation time, so the key cannot serve an old text for a
+    /// changed statement.</para>
+    /// </summary>
+    private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsTextAsync(
+        ITargetProvider provider,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CollectorContext context,
+        List<QueryStatsCollector.Row> rows,
+        CancellationToken cancellationToken)
+    {
+        var cache = _queryStatsTextCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<QueryStatsPlanKey>());
+        var pending = new List<QueryStatsPlanKey>();
+        var now = DateTime.UtcNow;
+
+        cache.Prune(now - QueryStatsPlanCacheMaxAge);
+
+        var misses = PartitionDeferredQueryStatsText(server.ServerId, rows, cache, now);
+
+        var textsRead = 0;
+        var fetchWatch = Stopwatch.StartNew();
+        if (misses.Count == 0)
+        {
+            fetchWatch.Stop();
+            StampTextFetch(context, 0, 0);
+            return pending;
+        }
+
+        try
+        {
+            for (var offset = 0; offset < misses.Count; offset += QueryStatsCollector.MaxPlanFetchKeys)
+            {
+                var chunk = misses.GetRange(offset, Math.Min(QueryStatsCollector.MaxPlanFetchKeys, misses.Count - offset));
+                var query = QueryStatsCollector.BuildTextFetchQuery(context, chunk.ConvertAll(m => m.Key.ToFetchKey()));
+
+                Dictionary<int, string?> fetched;
+                var unjudged = new HashSet<int>();
+                using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
+                using (var textReader = await command.ExecuteReaderAsync(cancellationToken))
+                {
+                    /* #4348: the digest below is taken from the FILTERED text, the same string the writer stores. */
+                    fetched = await QueryStatsCollector.ReadTextFetchAsync(textReader, context.BeginStatementScrub(), cancellationToken, unjudged);
+                }
+
+                textsRead += ApplyFetchedQueryStatsText(chunk, fetched, unjudged, cache, now, pending);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
+                                   && !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogWarning(
+                ex,
+                "{Collector} on '{Server}': the text fetch failed, so this run's rows ship without text for the statements not yet stored; they are read again next cycle (#7419).",
+                QueryStatsCollector.Instance.Name, server.Config.DisplayName);
+        }
+        finally
+        {
+            fetchWatch.Stop();
+            StampTextFetch(context, textsRead, fetchWatch.ElapsedMilliseconds);
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// #7419: gives each fetched text to its row and remembers it. A row whose text came back empty (its plan left the cache
+    /// between the two queries) keeps a null text and is not cached, so a later run reads it. A text the statement filter
+    /// could not judge in its budget is the filter's marker: the row stores the marker, nothing is cached, and the next run reads
+    /// and judges it again. Every other text is cached as pending under the row's key, with the digest of the text the writer
+    /// stores, and its key joins <paramref name="pending"/> for the confirm after the commit.
+    /// </summary>
+    /// <returns>How many rows received a text.</returns>
+    internal static int ApplyFetchedQueryStatsText(
+        IReadOnlyList<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> chunk,
+        IReadOnlyDictionary<int, string?> fetched,
+        ISet<int> unjudged,
+        PlanDigestCache<QueryStatsPlanKey> cache,
+        DateTime now,
+        List<QueryStatsPlanKey> pending)
+    {
+        var applied = 0;
+        foreach (var (ord, text) in fetched)
+        {
+            var (key, row) = chunk[ord];
+            if (string.IsNullOrEmpty(text))
+            {
+                continue;
+            }
+
+            row.QueryText = text;
+            applied++;
+            if (unjudged.Contains(ord))
+            {
+                continue;
+            }
+
+            cache.AddPending(
+                key,
+                Convert.ToHexString(PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(text))),
+                text.Length,
+                now);
+            pending.Add(key);
+        }
+
+        return applied;
+    }
+
+    /// <summary>
+    /// The hit-or-miss split of <see cref="FetchDeferredQueryStatsTextAsync"/>, pulled out so it is testable without a target. A
+    /// row with a cached digest takes it and is not a miss (its <c>QueryText</c> is cleared, so the writer stores the digest
+    /// alone); a row with no usable plan handle cannot be read and is skipped; every other row is a miss, in input order.
+    /// </summary>
+    internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> PartitionDeferredQueryStatsText(
+        int serverId,
+        IEnumerable<QueryStatsCollector.Row> rows,
+        PlanDigestCache<QueryStatsPlanKey> cache,
+        DateTime now)
+    {
+        var misses = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        foreach (var row in rows)
+        {
+            if (QueryStatsPlanKey.TryCreate(serverId, row) is not { } key)
+            {
+                continue;
+            }
+
+            if (cache.TryGet(key, now, out var hit) && hit.Digest is not null)
+            {
+                row.KnownTextDigest = hit.Digest;
+                row.QueryText = null;
+            }
+            else
+            {
+                misses.Add((key, row));
+            }
+        }
+
+        return misses;
+    }
+
+    /// <summary>#7419: records one deferred text read on the context, beside the plan fetch's stamp. The text fetch is inside <c>sql:</c>, not drain.</summary>
+    internal static void StampTextFetch(CollectorContext context, int textsRead, long fetchMs)
+    {
+        context.PerItemTextFetchMs = fetchMs;
+        context.PerItemTextTargetMs = fetchMs;
+        context.Measure("texts_read", textsRead);
+        context.Measure("text_fetch_ms", fetchMs);
+    }
+
+    /// <summary>
     /// #5158: the second half of a deferred query_stats read. The main query returned stats rows with no plan; this
     /// gives each row its plan, rendering on the monitored server only the plans this host has not already committed.
     ///

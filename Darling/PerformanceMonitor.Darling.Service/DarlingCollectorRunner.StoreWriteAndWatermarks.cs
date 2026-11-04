@@ -774,6 +774,14 @@ public sealed partial class DarlingCollectorRunner
                         absentCache.Evict(absentDigests);
                     }
 
+                    /* #7419: the same for a statement text the store no longer holds (its dimension row aged out). */
+                    if (absentDigests.Count > 0
+                        && definition is QueryStatsCollector
+                        && _queryStatsTextCaches.TryGetValue(server.ServerId, out var absentTextCache))
+                    {
+                        absentTextCache.Evict(absentDigests);
+                    }
+
                     if (absentDigests.Count > 0
                         && definition is ProcedureStatsCollector
                         && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var absentProcedureCache))
