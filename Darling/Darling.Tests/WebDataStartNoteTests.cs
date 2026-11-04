@@ -634,7 +634,8 @@ public sealed class WebDataStartNoteTests
     /// answers the three note fields, and the panels that draw them are exactly the ones named. Every panel of these
     /// fanouts shows the window's figures (the stat tiles are window totals, the grids window aggregates or trend
     /// points), so none opts out and the stat tile draws beside its grid. The sibling reads on the same tab answer
-    /// nothing and draw none.</summary>
+    /// nothing and draw none. The four trend reads (#7394) are charts, and a chart draws no data-start note (windowFloorStrip): its time axis
+    /// already shows where the data begins, so they expect none.</summary>
     [Theory]
     [InlineData("activity", "get_pg_blocking", "Blocking Sampling|Blocking Chains|Lock Cycles")]
     [InlineData("activity", "get_pg_top_queries", "Statement Evictions|Top Query Shapes")]
@@ -642,10 +643,10 @@ public sealed class WebDataStartNoteTests
     [InlineData("vacuum", "get_pg_session_states", "Sessions Holding a Transaction Open|By Session")]
     [InlineData("io", "get_pg_io_stats", "I/O Summary|By Backend, Object and Context")]
     [InlineData("replication", "get_pg_replication_stats", "Connected Replicas")]
-    [InlineData("activity", "get_pg_database_trend", "Database Trend")]
-    [InlineData("activity", "get_pg_query_duration_trend", "Query Duration Trend")]
-    [InlineData("waits", "get_pg_wait_trend", "Wait Trend")]
-    [InlineData("io", "get_pg_io_trend", "I/O Trend")]
+    [InlineData("activity", "get_pg_database_trend", "")]
+    [InlineData("activity", "get_pg_query_duration_trend", "")]
+    [InlineData("waits", "get_pg_wait_trend", "")]
+    [InlineData("io", "get_pg_io_trend", "")]
     [InlineData("activity", "get_pg_plans", "Captured Plans")]
     [InlineData("overview", "get_pg_autovacuum_health", "Autovacuum Backlog")]
     [InlineData("vacuum", "get_pg_autovacuum_health", "Autovacuum Backlog|Tables Behind")]
@@ -710,7 +711,7 @@ public sealed class WebDataStartNoteTests
         }
     }
 
-    /// <summary>The same decision in the source text, so it holds without Node: none of the eleven PostgreSQL window reads
+    /// <summary>The same decision in the source text, so it holds without Node: none of the seven PostgreSQL window reads that draw grids or tiles
     /// opts a panel out of the note, because each one shows the window's own figures. The check reads only the spec block of
     /// each listed read (its <c>fanout(</c> or <c>tablePanel(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
     [Fact]
@@ -722,7 +723,7 @@ public sealed class WebDataStartNoteTests
         foreach (var read in new[]
         {
             "get_pg_top_queries", "get_pg_blocking", "get_pg_database_stats", "get_pg_session_states", "get_pg_io_stats",
-            "get_pg_replication_stats", "get_pg_database_trend", "get_pg_query_duration_trend", "get_pg_wait_trend", "get_pg_io_trend", "get_pg_plans",
+            "get_pg_replication_stats", "get_pg_plans",
         })
         {
             var at = postgres.IndexOf("\"" + read + "\"", StringComparison.Ordinal);

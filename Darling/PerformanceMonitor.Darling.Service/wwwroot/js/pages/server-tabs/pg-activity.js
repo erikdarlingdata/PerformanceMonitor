@@ -63,32 +63,83 @@ export const PG_DATABASE_STATS = [
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
 ];
 
-export const PG_QUERY_DURATION_TREND_COLUMNS = [
-  { key: "collection_time", label: "When", format: "time" },
-  { key: "mean_exec_ms", label: "Mean ms/exec", format: "num2" },
-  /* #3960: a row is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
-  { key: "peak_mean_exec_ms", label: "Peak ms/exec", format: "num2", small: true },
-  { key: "calls", label: "Calls", format: "int" },
-  { key: "calls_per_second", label: "Calls/sec", format: "num2" },
-  { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },
-];
+/* #7394: the Query Duration Trend as charts, the series groups of the desktop viewer's PgQueryDurationTrendHost: duration (mean beside the
+   bucket's peak) and the call rate are two units, so two charts over the one read. A point with no calls has a null mean, which stays a gap. */
+/* The bucket's single worst interval is drawn in the ramp's light grey: beside its pooled twin in the ramp's second blue, two lines of one hue cannot be told apart in the legend. */
+const PEAK_COLOR = "#e0e0e0";
+export function pgQueryDurationTrendSpecs(ctx) {
+  const common = { viz: "line", rowsKey: "points", xKey: "collection_time", span: 2, hideEmptySeries: true };
+  const empty = "No statement recorded execution time in this window, so there is nothing to follow.";
+  return [
+    {
+      ...common,
+      title: "Query Duration Trend",
+      subtitle: ctx.label + ", the statement with the most execution time in this window; a step that persists is a plan or index change",
+      series: [
+        { key: "mean_exec_ms", label: "Mean ms/exec" },
+        /* #3960: a point is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
+        { key: "peak_mean_exec_ms", label: "Peak ms/exec", color: PEAK_COLOR },
+      ],
+      format: "num2",
+      unit: "ms",
+      emptyText: empty,
+    },
+    {
+      ...common,
+      hideWhenNoRows: true,
+      title: "Statement Calls per Second",
+      subtitle: ctx.label + ", the same statement",
+      series: [{ key: "calls_per_second", label: "Calls/sec" }],
+      format: "num2",
+      unit: "calls/s",
+      emptyText: empty,
+    },
+  ];
+}
 
 /* Temp FILES beside temp BYTES, because the split is the finding: many small spill files is a work_mem
    slightly under what a constant plan needs, a few enormous ones is a plan or index problem no work_mem
    makes acceptable. Deadlocks stay a count - they are discrete events, and a per-second rate would render
    every real one as four leading zeros. */
-export const PG_DATABASE_TREND_COLUMNS = [
-  { key: "collection_time", label: "When", format: "time" },
-  { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
-  /* #3897: a row is a bucket of intervals; the cliff this table exists to show is its worst one. */
-  { key: "worst_cache_hit_pct", label: "Worst Hit %", format: "num2", small: true },
-  { key: "temp_files", label: "Temp Files", format: "int" },
-  { key: "temp_bytes", label: "Temp Bytes", format: "int" },
-  { key: "deadlocks", label: "Deadlocks", format: "int" },
-  { key: "transactions_per_second", label: "Xact/sec", format: "num2" },
-  { key: "rollback_pct", label: "Rollback %", format: "num2", small: true },
-  { key: "counter_reset", label: "Stats Reset", format: "bool", small: true },
-];
+/* #7394: the Database Trend as charts, the four groups of the desktop viewer's PgDatabaseTrendHost. The percentages share one 0 to 100 axis, the
+   rates and the byte counts each get their own because their magnitudes differ by orders. Temp FILES stay beside Deadlocks as counts, as before:
+   discrete events, where a per-second rate would render every real one as four leading zeros. `counter_reset` marks an interval across a
+   statistics reset (a vertical marker on each chart), since the step it leaves is the counters starting over, not the workload. */
+export function pgDatabaseTrendSpecs(ctx) {
+  const common = { viz: "line", rowsKey: "points", xKey: "collection_time", span: 2, hideEmptySeries: true, resetKey: "counter_reset", resetLabel: "Stats reset" };
+  const empty = "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here.";
+  return [
+    {
+      ...common,
+      title: "Database Trend",
+      subtitle: ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+      series: [
+        { key: "cache_hit_pct", label: "Cache Hit %" },
+        /* #3897: a point is a bucket of intervals; the cliff this chart exists to show is its worst one. */
+        { key: "worst_cache_hit_pct", label: "Worst Hit %", color: PEAK_COLOR },
+        { key: "rollback_pct", label: "Rollback %" },
+      ],
+      format: "pct",
+      unit: "%",
+      emptyText: empty,
+    },
+    { ...common, hideWhenNoRows: true, title: "Database Transactions per Second", subtitle: ctx.label, series: [{ key: "transactions_per_second", label: "Xact/sec" }], format: "num2", unit: "xact/s", emptyText: empty },
+    { ...common, hideWhenNoRows: true, title: "Database Temp Bytes", subtitle: ctx.label, series: [{ key: "temp_bytes", label: "Temp Bytes" }], format: "bytes", emptyText: empty },
+    {
+      ...common,
+      hideWhenNoRows: true,
+      title: "Database Temp Files and Deadlocks",
+      subtitle: ctx.label,
+      series: [
+        { key: "temp_files", label: "Temp Files" },
+        { key: "deadlocks", label: "Deadlocks" },
+      ],
+      format: "int",
+      unit: "count",
+      emptyText: empty,
+    },
+  ];
+}
 
 export const PG_DEADLOCK_GRAPH_COLUMNS = [
   { key: "occurred_at", label: "When", format: "time" },

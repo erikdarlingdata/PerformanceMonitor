@@ -1436,9 +1436,17 @@ function vizStat(data, desc) {
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
    series are COUNTS, so the chart also puts its gridlines on whole numbers (see integerTicks in charts.js). */
 function vizLine(data, desc) {
-  const seriesCfg = Array.isArray(desc.series) ? desc.series : [];
-  if (!seriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
+  const allSeriesCfg = Array.isArray(desc.series) ? desc.series : [];
+  if (!allSeriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
   const points = getPath(data, desc.rowsKey) || [];
+  /* #7394: `hideEmptySeries` drops a series with no measured value at any point, as the desktop's PostgreSQL trend charts do: a
+     latency that is null on every point (avg read ms with track_io_timing off, the default) is a fact about the configuration, and
+     a legend entry with no line would read as a flat zero. A chart left with no series says `noSeriesText` (or its emptyText). */
+  const measured = (s) => points.some((p) => p && p[s.key] != null && p[s.key] !== "" && !Number.isNaN(Number(p[s.key])));
+  const seriesCfg = desc.hideEmptySeries && points.length ? allSeriesCfg.filter(measured) : allSeriesCfg;
+  /* `noSeriesText` may be a function of the payload, for a sentence whose cause the payload itself can name. */
+  const noSeries = typeof desc.noSeriesText === "function" ? desc.noSeriesText(data) : desc.noSeriesText;
+  if (!seriesCfg.length) return emptyStrip(noSeries || desc.emptyText || NO_FIELDS_MSG);
   /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
      A read whose empty array means the thing simply did not happen must say so, not inherit a warming-up
      message about a condition it never had: get_blocking_trend and get_deadlock_trend used to return
@@ -1468,10 +1476,16 @@ function vizLine(data, desc) {
      identity (title, read and series) and the page's scope (server + tab + preset range), so the poll's rebuild
      draws it again and a different server, tab or range does not. */
   const zoomId = [desc.title || "", desc.read || desc.path || "", desc.xKey, seriesCfg.map((s) => s.key).join(",")].join("|");
+  /* #7394: `resetKey` names a boolean on each point (counter_reset) that marks an interval across a statistics reset. Each one is drawn as
+     a vertical marker with a key entry ("Stats reset 2") under the chart, because the step a reset leaves in a differenced series is the
+     instrument re-baselining, not the workload, and the old table's Stats Reset column was the only place that said one happened. */
+  const resetTimes = desc.resetKey ? points.filter((p) => p && p[desc.resetKey] === true).map((p) => p[desc.xKey]) : [];
+  const annotations = resetTimes.length ? [{ source: "stats_reset", displayName: desc.resetLabel || "Stats reset", events: resetTimes.map((ts) => ({ ts, label: "" })) }] : null;
   return zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
+    annotations,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the

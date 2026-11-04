@@ -30,18 +30,72 @@ export const PG_IO_SUMMARY_STATS = [
    are not comparable and the per-second figures are. Avg read ms renders blank rather than 0.00 wherever
    track_io_timing is off - which is the DEFAULT - because a zero there is a fact about the configuration
    and, printed as a latency, the most reassuring wrong number on the page. */
-export const PG_IO_TREND_COLUMNS = [
-  { key: "collection_time", label: "When", format: "time" },
-  { key: "reads_per_second", label: "Reads/sec", format: "num2" },
-  /* #3897: a row is a bucket of intervals, so its busiest single interval rides beside the pooled rate. */
-  { key: "peak_reads_per_second", label: "Peak Reads/sec", format: "num2", small: true },
-  { key: "writes_per_second", label: "Writes/sec", format: "num2" },
-  { key: "cache_hit_pct", label: "Hit %", format: "num2" },
-  { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
-  { key: "read_bytes_per_second", label: "Read Bytes/sec", format: "num1", small: true },
-  { key: "evictions_per_second", label: "Evictions/sec", format: "num2", small: true },
-  { key: "counter_reset", label: "Stats Reset", format: "bool", small: true },
-];
+/* The bucket's single worst interval is drawn in the ramp's light grey: beside its pooled twin in the ramp's second blue, two lines of one hue cannot be told apart in the legend. */
+const PEAK_COLOR = "#e0e0e0";
+/* #7394: avg_read_ms is null on every point for two different reasons, and the page says only the one the payload proves. The server's
+   track_io_timing setting is stated only when get_pg_io_trend reports it as the target's own collected setting (io_timing_tracked false and an
+   io_timing_source that is not "inferred"). With timing on, null means the pair did no reads. Otherwise the page cannot tell which, so it says so. */
+function noReadLatencyText(data) {
+  const prefix = "No read latency in this window: ";
+  if (data && data.io_timing_tracked === true) return prefix + "this backend and context did no reads here, so there is no read time to average.";
+  if (data && data.io_timing_tracked === false && !String(data.io_timing_source || "inferred").startsWith("inferred")) {
+    return prefix + "the server has track_io_timing off (the default), so PostgreSQL does not time reads and there is no latency to chart.";
+  }
+  return prefix + "either this backend and context did no reads here, or the server is not timing reads (track_io_timing off, the default), and this page cannot tell which.";
+}
+/* read_bytes_per_second is null when the pair has no byte counters and no block size to estimate from (bytes_source "unavailable"),
+   and also when the pair did no reads. */
+function noReadBytesText(data) {
+  const prefix = "No read bytes in this window: ";
+  const source = data && data.bytes_source;
+  if (source === "unavailable") return prefix + "this pair has no byte counters and no operation size to estimate them from.";
+  if (source === "measured" || source === "estimated_from_block_size") return prefix + "this backend and context did no reads here.";
+  return prefix + "this pair did no reads here, or has no byte counters and no operation size to estimate them from.";
+}
+export function pgIoTrendSpecs(ctx) {
+  const common = { viz: "line", rowsKey: "points", xKey: "collection_time", span: 2, hideEmptySeries: true, resetKey: "counter_reset", resetLabel: "Stats reset" };
+  const empty = "No I/O samples for this combination in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the combination is being collected.";
+  return [
+    {
+      ...common,
+      title: "I/O Trend",
+      subtitle: ctx.label + ", the busiest backend and context in this window, per second; Writes/sec is left out on a server with no write counters (Amazon Aurora)",
+      series: [
+        { key: "reads_per_second", label: "Reads/sec" },
+        /* #3897: a point is a bucket of intervals, so its busiest single interval rides beside the pooled rate. */
+        { key: "peak_reads_per_second", label: "Peak Reads/sec", color: PEAK_COLOR },
+        { key: "writes_per_second", label: "Writes/sec" },
+        { key: "evictions_per_second", label: "Evictions/sec" },
+      ],
+      format: "num2",
+      unit: "ops/s",
+      emptyText: empty,
+    },
+    { ...common, hideWhenNoRows: true, title: "I/O Hit %", subtitle: ctx.label + ", the pair's buffer pool hit ratio per point", series: [{ key: "cache_hit_pct", label: "Hit %" }], format: "pct", unit: "%", emptyText: empty },
+    {
+      ...common,
+      hideWhenNoRows: true,
+      title: "I/O Avg Read (ms)",
+      subtitle: ctx.label + ", drawn only when the server has track_io_timing on, which is off by default",
+      series: [{ key: "avg_read_ms", label: "Avg Read (ms)" }],
+      format: "num2",
+      unit: "ms",
+      emptyText: empty,
+      noSeriesText: noReadLatencyText,
+    },
+    {
+      ...common,
+      hideWhenNoRows: true,
+      title: "I/O Read Bytes per Second",
+      subtitle: ctx.label,
+      series: [{ key: "read_bytes_per_second", label: "Read Bytes/sec" }],
+      format: "bytes",
+      unit: "bytes/s",
+      emptyText: empty,
+      noSeriesText: noReadBytesText,
+    },
+  ];
+}
 
 export const PG_WRITE_STATS = [
   { key: "checkpoints_timed", label: "Timed", format: "int" },
