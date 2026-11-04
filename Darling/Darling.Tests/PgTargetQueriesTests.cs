@@ -243,6 +243,37 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("against its own routine of 0% ± 25.4% for this hour-of-week", legacy.Investigation, StringComparison.Ordinal);
     }
 
+    /// <summary>The detector loop itself (#7396), past its two reads: the candidate rows and the keyed baselines are handed in, so the
+    /// order of the window and peak shares at the <c>EvaluateCandidate</c> call and the <c>baseline_robust_sigma</c> stamp are driven
+    /// without a database. A bucket whose robust sigma (0.1) differs from its classical one (0.15) tells the two stamps apart.</summary>
+    [Fact]
+    public void BuildBadActorShareAnomaly_GradesThePeakAndTheWindowShareEachAsItself_AndStampsTheRobustSigmaTheGateUsed()
+    {
+        var bucket = new BaselineBucket { HourOfDay = 12, DayOfWeek = 2, Mean = 0.2, StdDev = 0.15, Median = 0.2, Mad = 0.06745, SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full };
+        Assert.True(bucket.IsTrustworthy);
+        Assert.Equal(0.1, bucket.EffectiveRobustSigma, 3);
+        Assert.NotEqual(bucket.EffectiveRobustSigma, bucket.EffectiveStdDev);
+
+        var context = new AnalysisContext { ServerId = 1, TimeRangeStart = new DateTime(2026, 11, 1, 8, 0, 0, DateTimeKind.Utc), TimeRangeEnd = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc) };
+        var candidates = new List<(long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples)> { (42L, 0.4, 0.7, 0.6, 48L) };
+        var baselines = new Dictionary<string, BaselineBucket> { ["42"] = bucket };
+
+        /* The peak (0.7) is five robust sigmas over the median 0.2. Were the call to hand the window share (0.4) in as the peak, that is
+           two sigmas, under the cutoff, and nothing would fire. */
+        var anomaly = PgTargetAnomalyDetector.BuildBadActorShareAnomaly(context, candidates, baselines);
+
+        Assert.NotNull(anomaly);
+        Assert.Equal(PgTargetFactKeys.AnomalyBadActorShare, anomaly.Key);
+        Assert.Equal("42", anomaly.ObjectName);
+        Assert.Equal(0.4, anomaly.Value, 6);
+        Assert.Equal(0.4, anomaly.Metadata["window_share"], 6);
+        Assert.Equal(0.7, anomaly.Metadata["peak_share"], 6);
+        Assert.Equal(0.6, anomaly.Metadata["mean_share"], 6);
+        Assert.Equal(5.0, anomaly.Metadata["deviation_sigma"], 3);
+        Assert.Equal(bucket.EffectiveRobustSigma, anomaly.Metadata["baseline_robust_sigma"], 6);
+        Assert.Equal(2, anomaly.Metadata[PgTargetAnomalyDetector.OwnNormalMetadataPrefix + "42"]);
+    }
+
     private static Dictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
 
     /* ── the scorer ── */

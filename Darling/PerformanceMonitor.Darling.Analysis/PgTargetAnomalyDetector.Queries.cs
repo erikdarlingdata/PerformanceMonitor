@@ -182,76 +182,89 @@ ORDER BY w.stmt_ms DESC";
             var baselines = await _baselineProvider.GetBaselinesAsync(
                 context.ServerId, MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken);
 
-            var verdicts = new Dictionary<string, double>(StringComparer.Ordinal);
-            var withoutBaseline = 0;
-            var fired = 0;
-            (long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples, BaselineBucket Baseline, AnomalyGate.ZDecision Decision)? worst = null;
-
-            foreach (var candidate in candidates)
-            {
-                var key = candidate.QueryId.ToString(CultureInfo.InvariantCulture);
-                var baseline = baselines[key];
-
-                /* No trustworthy own-normal: recorded, never graded — the ruling's "first seen; no own-normal yet". */
-                if (baseline.SampleCount == 0 || !baseline.IsTrustworthy || candidate.Samples == 0)
-                {
-                    verdicts[OwnNormalMetadataPrefix + key] = 0;
-                    withoutBaseline++;
-                    continue;
-                }
-
-                var decision = EvaluateCandidate(
-                    baseline, candidate.WindowShare, candidate.PeakShare, candidate.MeanShare,
-                    context.TimeRangeEnd - context.TimeRangeStart);
-
-                if (!decision.Fire)
-                {
-                    verdicts[OwnNormalMetadataPrefix + key] = 1;
-                    continue;
-                }
-
-                verdicts[OwnNormalMetadataPrefix + key] = 2;
-                fired++;
-                if (worst is null || decision.Sigma > worst.Value.Decision.Sigma
-                    || (decision.Sigma == worst.Value.Decision.Sigma && candidate.WindowShare > worst.Value.WindowShare))
-                {
-                    worst = (candidate.QueryId, candidate.WindowShare, candidate.PeakShare, candidate.MeanShare, candidate.Samples, baseline, decision);
-                }
-            }
-
-            if (worst is null) return;
-            var (queryId, windowShare, peakShare, meanShare, samples, bucket, verdict) = worst.Value;
-
-            /* unmeasured: the cutoffs above — the helper's default stamp, threshold_lineage = 0. */
-            var metadata = ZScoreMetadata(bucket, verdict, samples);
-            metadata["window_share"] = windowShare;
-            metadata["peak_share"] = peakShare;
-            metadata["mean_share"] = meanShare;
-            metadata["mean_sigma"] = verdict.MeanSigma ?? 0.0;
-            /* #7396: the robust dispersion the sigma was measured in when the bucket had one (0 when it fell back to the
-               classical frame), so the card's routine clause names the SAME frame as its "times its usual variation". */
-            metadata["baseline_robust_sigma"] = bucket.EffectiveRobustSigma;
-            metadata["ratio"] = bucket.Mean > 0 ? windowShare / bucket.Mean : 0.0;
-            metadata["candidates_evaluated"] = candidates.Count;
-            metadata["candidates_fired"] = fired;
-            metadata["candidates_without_baseline"] = withoutBaseline;
-            foreach (var (name, value) in verdicts)
-                metadata[name] = value;
-
-            anomalies.Add(new Fact
-            {
-                Source = AnomalySource,
-                Key = PgTargetFactKeys.AnomalyBadActorShare,
-                Value = windowShare,
-                ServerId = context.ServerId,
-                ObjectName = queryId.ToString(CultureInfo.InvariantCulture),
-                Metadata = metadata,
-            });
+            var anomaly = BuildBadActorShareAnomaly(context, candidates, baselines);
+            if (anomaly is not null) anomalies.Add(anomaly);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Bad-actor share anomaly detection failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>The loop of <see cref="DetectBadActorShareAnomalies"/> after its two reads (#7396): each candidate against its own
+    /// normal through <see cref="EvaluateCandidate"/>, the worst one that fires stamped into the fact. Static and fed the candidate
+    /// rows and the keyed baselines, so a test drives the argument order of the <see cref="EvaluateCandidate"/> call and the
+    /// <c>baseline_robust_sigma</c> stamp without a database. Null when no candidate fires.</summary>
+    internal static Fact? BuildBadActorShareAnomaly(
+        AnalysisContext context,
+        List<(long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples)> candidates,
+        IReadOnlyDictionary<string, BaselineBucket> baselines)
+    {
+        var verdicts = new Dictionary<string, double>(StringComparer.Ordinal);
+        var withoutBaseline = 0;
+        var fired = 0;
+        (long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples, BaselineBucket Baseline, AnomalyGate.ZDecision Decision)? worst = null;
+
+        foreach (var candidate in candidates)
+        {
+            var key = candidate.QueryId.ToString(CultureInfo.InvariantCulture);
+            var baseline = baselines[key];
+
+            /* No trustworthy own-normal: recorded, never graded — the ruling's "first seen; no own-normal yet". */
+            if (baseline.SampleCount == 0 || !baseline.IsTrustworthy || candidate.Samples == 0)
+            {
+                verdicts[OwnNormalMetadataPrefix + key] = 0;
+                withoutBaseline++;
+                continue;
+            }
+
+            var decision = EvaluateCandidate(
+                baseline, candidate.WindowShare, candidate.PeakShare, candidate.MeanShare,
+                context.TimeRangeEnd - context.TimeRangeStart);
+
+            if (!decision.Fire)
+            {
+                verdicts[OwnNormalMetadataPrefix + key] = 1;
+                continue;
+            }
+
+            verdicts[OwnNormalMetadataPrefix + key] = 2;
+            fired++;
+            if (worst is null || decision.Sigma > worst.Value.Decision.Sigma
+                || (decision.Sigma == worst.Value.Decision.Sigma && candidate.WindowShare > worst.Value.WindowShare))
+            {
+                worst = (candidate.QueryId, candidate.WindowShare, candidate.PeakShare, candidate.MeanShare, candidate.Samples, baseline, decision);
+            }
+        }
+
+        if (worst is null) return null;
+        var (queryId, windowShare, peakShare, meanShare, samples, bucket, verdict) = worst.Value;
+
+        /* unmeasured: the cutoffs above — the helper's default stamp, threshold_lineage = 0. */
+        var metadata = ZScoreMetadata(bucket, verdict, samples);
+        metadata["window_share"] = windowShare;
+        metadata["peak_share"] = peakShare;
+        metadata["mean_share"] = meanShare;
+        metadata["mean_sigma"] = verdict.MeanSigma ?? 0.0;
+        /* #7396: the robust dispersion the sigma was measured in when the bucket had one (0 when it fell back to the
+           classical frame), so the card's routine clause names the SAME frame as its "times its usual variation". */
+        metadata["baseline_robust_sigma"] = bucket.EffectiveRobustSigma;
+        metadata["ratio"] = bucket.Mean > 0 ? windowShare / bucket.Mean : 0.0;
+        metadata["candidates_evaluated"] = candidates.Count;
+        metadata["candidates_fired"] = fired;
+        metadata["candidates_without_baseline"] = withoutBaseline;
+        foreach (var (name, value) in verdicts)
+            metadata[name] = value;
+
+        return new Fact
+        {
+            Source = AnomalySource,
+            Key = PgTargetFactKeys.AnomalyBadActorShare,
+            Value = windowShare,
+            ServerId = context.ServerId,
+            ObjectName = queryId.ToString(CultureInfo.InvariantCulture),
+            Metadata = metadata,
+        };
     }
 
     /// <summary>One candidate's verdict against its own normal (#7396): the pair gate on the peak and mean per-collection
