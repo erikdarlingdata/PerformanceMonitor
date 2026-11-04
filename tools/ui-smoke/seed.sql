@@ -7,7 +7,8 @@
 --   * Every time is relative to ONE anchor: the store's own clock in UTC, cut to the minute, or the psql variable `anchor` when the
 --     caller sets it (-v anchor=...; run-ui-smoke.ps1 does, so the screenshot step knows it, #5744). Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
---   * The targets are the two servers the config registers: "ui-sql" (SQL Server) and "ui-pg" (PostgreSQL), both at an
+--   * The targets are the servers the config registers: "ui-sql" (SQL Server), "ui-pg" (PostgreSQL) and a long-name SQL
+--     Server (#7479), all at an
 --     address nothing listens on, so the service never collects and never overwrites what is seeded here.
 --   * To cover another table, add one more section below, in the same shape, and name what it feeds. Keep the
 --     collection_id / log_id ranges apart (the ranges are listed in each section) so rows never collide.
@@ -22,6 +23,8 @@
 -- Seeded (PostgreSQL target "ui-pg"):
 --   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
 --   pg_statement_text 6 | collection_log 3 collectors x 72
+-- Seeded (the long-name SQL Server): collection_log 1 (cpu_utilization_stats at the anchor, #7569), so its card reads stale
+--   like the other two and not Offline
 
 \set ON_ERROR_STOP on
 -- The anchor, as UTC text. Set by the caller (-v anchor='2026-01-01 12:00:00'), else taken once here, from the store's clock.
@@ -48,7 +51,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
 
 -- A third SQL Server with a 70-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
--- has an observed-registry row and nothing else: like the other two it is at an address nothing listens on.
+-- has an observed-registry row and one collection_log row (below, #7569): like the other two it is at an address nothing listens on.
 SELECT server_id AS lsid, host AS lname
 FROM config.config_monitored_servers
 WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary'

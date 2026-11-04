@@ -109,7 +109,7 @@ How the page is kept the same on every run:
   browser is moved instead. Every `/api` answer has its timestamps shifted to a fixed date. Every windowed read gets an
   `as_of` of anchor plus one minute. The page clock is pinned to the same fixed date plus one minute.
 - A screenshot is taken again until two in a row are identical. If that does not happen in 8 tries, the page fails.
-- The service marks the two unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
+- The service marks the three unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
   after 30. The shots wait until `/api/fleet` shows every card stale. They give up after 4 minutes with one message if the
   cards never got there, and with another if a card is already Offline. A card is Offline after 30 minutes, or at once if seed.sql
   gave its server no `collection_log` row (the long-name server has one, #7569).
