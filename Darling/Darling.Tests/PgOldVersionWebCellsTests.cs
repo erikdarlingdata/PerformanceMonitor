@@ -74,13 +74,13 @@ public sealed class PgOldVersionWebCellsTests
     }
 
     [Fact]
-    public void TheSampledWaitsGrid_DrawsADashForAnUnreportedQueryId_AndKeepsZeroForNoStatement()
+    public void TheSampledWaitsGrid_DrawsADashForAnUnreportedQueryId_AndShowsNoStatementForQueryIdZero()
     {
         var grid = RunHarness().GetProperty("sampledWaits");
 
         Assert.True(grid.GetProperty("present").GetBoolean());
         Assert.Equal("—", Cell(grid, 0, "Query ID"));
-        Assert.Equal("0", Cell(grid, 1, "Query ID"));
+        Assert.Equal("no statement", Cell(grid, 1, "Query ID"));
         Assert.Equal("555", Cell(grid, 2, "Query ID"));
     }
 }
