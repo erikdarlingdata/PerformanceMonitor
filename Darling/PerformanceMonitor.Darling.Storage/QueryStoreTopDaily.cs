@@ -157,12 +157,33 @@ SET pass = EXCLUDED.pass,
     /// can be trusted for the execution-weighted average (#7169): it was written by a V240-or-newer builder. Only that builder fills
     /// the <c>*_wsum</c> columns, so a build written before V240, or by an older instance that still shares the store, has NULL
     /// weighted sums beside a non-NULL <c>execution_count_sum</c> (and a non-zero count behind the average). Such a day is NOT built:
-    /// <c>get_query_store_top</c> reads it from the wide table, and <see cref="PlanSql"/> rebuilds it. A day with no summary rows
-    /// has nothing to be wrong and is trusted. The first <c>EXISTS</c> is the cheap path (a built day stops at its first filled
-    /// row); the second runs only for a day without one. A row whose <c>execution_count</c> was NULL in every interval has a NULL
-    /// <c>execution_count_sum</c> and a NULL weighted sum on any format, so it is not treated as old.
+    /// <c>get_query_store_top</c> reads it from the wide table, and <see cref="PlanSql"/> rebuilds it.
+    ///
+    /// <para><b>One probe row per day</b> (#7379). The text used to start with an <c>EXISTS</c> for any filled weighted sum, which
+    /// for a day built before V240 had to read every summary row of the day before it could answer false, and that read ran past
+    /// the plan's command timeout on a large store. It now reads one row. All the rows of a day come from one
+    /// <see cref="BuildDayAsync"/> transaction, so one builder wrote them all. For a row with a non-NULL <c>execution_count_sum</c>
+    /// and some <c>avg_x_n = interval_rows</c> (a non-NULL average in every interval), the V240 builder always writes that metric's
+    /// weighted sum, because at least one interval has both a non-NULL average and a non-NULL execution count, and an older builder
+    /// writes none. So the probe row's own weighted sums say which builder wrote the day. A day with no such row (no row has a
+    /// count, or none has an average in every interval) falls back to the earlier text, which reads the day: any filled weighted
+    /// sum means weighted, and so does a day with no row that has a count behind an average but a NULL weighted sum. A day with no
+    /// summary rows has nothing to be wrong and is trusted. A row whose <c>execution_count</c> was NULL in every interval has a
+    /// NULL <c>execution_count_sum</c> and a NULL weighted sum on any format, so it is never taken as old.</para>
     /// </summary>
     public const string DayIsWeightedSql = @"(
+COALESCE(
+    (SELECT p.avg_duration_us_wsum IS NOT NULL OR p.avg_cpu_time_us_wsum IS NOT NULL OR p.avg_logical_io_reads_wsum IS NOT NULL
+         OR p.avg_logical_io_writes_wsum IS NOT NULL OR p.avg_physical_io_reads_wsum IS NOT NULL OR p.avg_rowcount_wsum IS NOT NULL
+     FROM (SELECT f.avg_duration_us_wsum, f.avg_cpu_time_us_wsum, f.avg_logical_io_reads_wsum,
+                  f.avg_logical_io_writes_wsum, f.avg_physical_io_reads_wsum, f.avg_rowcount_wsum
+           FROM collect.query_store_top_daily AS f
+           WHERE f.server_id = b.server_id AND f.day = b.day
+             AND f.execution_count_sum IS NOT NULL AND f.interval_rows > 0
+             AND (f.avg_duration_us_n = f.interval_rows OR f.avg_cpu_time_us_n = f.interval_rows OR f.avg_logical_io_reads_n = f.interval_rows
+               OR f.avg_logical_io_writes_n = f.interval_rows OR f.avg_physical_io_reads_n = f.interval_rows OR f.avg_rowcount_n = f.interval_rows)
+           LIMIT 1) AS p),
+    (
     EXISTS (SELECT 1 FROM collect.query_store_top_daily AS w
             WHERE w.server_id = b.server_id AND w.day = b.day
               AND (w.avg_duration_us_wsum IS NOT NULL OR w.avg_cpu_time_us_wsum IS NOT NULL OR w.avg_logical_io_reads_wsum IS NOT NULL
@@ -171,7 +192,7 @@ SET pass = EXCLUDED.pass,
             WHERE o.server_id = b.server_id AND o.day = b.day AND o.execution_count_sum IS NOT NULL
               AND ((o.avg_duration_us_n > 0 AND o.avg_duration_us_wsum IS NULL) OR (o.avg_cpu_time_us_n > 0 AND o.avg_cpu_time_us_wsum IS NULL)
                 OR (o.avg_logical_io_reads_n > 0 AND o.avg_logical_io_reads_wsum IS NULL) OR (o.avg_logical_io_writes_n > 0 AND o.avg_logical_io_writes_wsum IS NULL)
-                OR (o.avg_physical_io_reads_n > 0 AND o.avg_physical_io_reads_wsum IS NULL) OR (o.avg_rowcount_n > 0 AND o.avg_rowcount_wsum IS NULL))))";
+                OR (o.avg_physical_io_reads_n > 0 AND o.avg_physical_io_reads_wsum IS NULL) OR (o.avg_rowcount_n > 0 AND o.avg_rowcount_wsum IS NULL))))))";
 
     /// <summary>
     /// The builds due now, NEWEST day first. $1 now, $2 retention days, $3 <see cref="BuildAfter"/>,
@@ -185,7 +206,9 @@ SET pass = EXCLUDED.pass,
     /// wide table. That is the same rows the reader's own wide-table read sees for them.) A day with no built row is due once its end plus $3 has
     /// passed, at pass 1, or straight at pass 2 when its end plus $4 has passed too (nothing more could change it); a day
     /// built at pass 1 is due for pass 2 once its end plus $4 has passed. A built day that is not
-    /// <see cref="DayIsWeightedSql"/> is due again at once, at the pass its time allows. Newest day first, so that after
+    /// <see cref="DayIsWeightedSql"/> is due again at once, at the pass its time allows. That test reads one probe row for each
+    /// built day, so planning a store with many days built before V240 costs a row per day, not every row of every such day (#7379).
+    /// Newest day first, so that after
     /// an upgrade (V240 leaves every old day to rebuild, <see cref="MaxBuildsPerTick"/> a tick) the short windows are back on the
     /// summary within the first ticks and the older days follow; a backlog after an outage works the same way.
     /// </summary>
