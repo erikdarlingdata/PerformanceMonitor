@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -285,5 +287,59 @@ public sealed class ArchiveSpanReadTests : IDisposable
             table => { reads.Add(table); return Task.FromResult(table); }, TestContext.Current.CancellationToken);
 
         Assert.Equal(["query_store_stats"], reads);
+    }
+
+    [Fact]
+    public async Task ASlowReadsLogLine_SeparatesTheLockWaitFromTheQueryTime()
+    {
+        var logDirectory = Path.Combine(_tempDir, "logs");
+        var oldThreshold = QueryLogger.ThresholdSeconds;
+        var oldEnabled = QueryLogger.IsEnabled;
+        QueryLogger.Initialize(logDirectory);
+        QueryLogger.SetEnabled(true);
+        QueryLogger.SetThreshold(0);
+        try
+        {
+            /* A writer holds the lock for 400 ms with the read queued behind it. The read's own work is a few milliseconds. */
+            var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            var holder = Task.Factory.StartNew(() =>
+            {
+                using var writeLock = _duckDb.AcquireWriteLock(TimeSpan.FromMinutes(2));
+                signal.SetResult();
+                release.Wait(TimeSpan.FromMinutes(2));
+            }, TaskCreationOptions.LongRunning);
+            await signal.Task.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+            var read = Task.Run(() => _service.GetQueryWindowFloorAsync(
+                QueryWindowRelation.QueryStoreStats, ServerId, NowUtc.AddHours(-1), NowUtc), TestContext.Current.CancellationToken);
+            await Task.Delay(400, TestContext.Current.CancellationToken);
+            Assert.False(read.IsCompleted, "the read waits behind the writer");
+            release.Set();
+            await holder;
+            await read.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            QueryLogger.SetThreshold(oldThreshold);
+            QueryLogger.SetEnabled(oldEnabled);
+        }
+
+        var log = File.ReadAllText(QueryLogger.GetCurrentLogFile());
+        // Other classes' reads log to this file too while the threshold is 0, so the first line can belong to
+        // another class. The queued read is the line that waited longest.
+        var match = Match.Empty;
+        foreach (Match candidate in Regex.Matches(log, @"Context:\s+GetQueryWindowFloorAsync \(lock wait (\d+) ms, open (\d+) ms, query and row read (\d+) ms\)"))
+        {
+            if (!match.Success || int.Parse(candidate.Groups[1].Value, CultureInfo.InvariantCulture) > int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture))
+            {
+                match = candidate;
+            }
+        }
+        Assert.True(match.Success, "the slow-read line carries the three phases: " + log[..Math.Min(log.Length, 600)]);
+        var lockWait = int.Parse(match.Groups[1].Value);
+        var queryAndRows = int.Parse(match.Groups[3].Value);
+        Assert.True(lockWait >= 300, $"the queued read's wait is reported as lock wait ({lockWait} ms)");
+        Assert.True(queryAndRows < lockWait, $"the wait is not counted as query time ({queryAndRows} ms query, {lockWait} ms lock wait)");
     }
 }

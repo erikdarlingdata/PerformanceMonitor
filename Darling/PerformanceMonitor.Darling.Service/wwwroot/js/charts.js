@@ -260,6 +260,12 @@ export function renderLineChart(spec) {
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
   const usesStack = stacked || stackedBar;
+  /* #7401: a repeated color is drawn dashed on a line. The stacked bands and bars have no stroke to dash, so they take none. */
+  const dashes = usesStack ? new Map() : seriesDashes(allSeries);
+  /* The keys whose dashed polyline the plot actually drew: a series that is only dots (one bucket, or runs of one) draws no dash,
+     so its legend and tooltip swatches show none either. A hidden series draws nothing, so its entry keeps its assigned look. */
+  const dashDrawn = new Set();
+  const swatchDash = (key) => (dashDrawn.has(key) || hiddenSet.has(key) ? dashes.get(key) : undefined);
   const filled = mode === "area" || stacked;
 
   /* Parse + sort the x axis (naive UTC -> real Date via parseUtc). */
@@ -581,7 +587,8 @@ export function renderLineChart(spec) {
               })
             );
           }
-          root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
+          if (dashes.has(s.key)) dashDrawn.add(s.key);
+          root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color), ...(dashes.has(s.key) ? { "stroke-dasharray": dashes.get(s.key).svg } : {}) }));
         }
       }
     }
@@ -759,7 +766,7 @@ export function renderLineChart(spec) {
         const v = r[s.key];
         tooltip.appendChild(
           el("div", { class: "t-row" }, [
-            el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
+            el("span", { class: "swatch", style: swatchStyle(s.color, swatchDash(s.key)) }),
             el("span", { text: s.label }),
             el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
           ])
@@ -797,7 +804,7 @@ export function renderLineChart(spec) {
   const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
   const chart = el("div", { class: "chart" }, [plotHost]);
   chart.appendChild(tooltip);
-  chart.appendChild(buildLegend(series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries, onSelect, legendHidden, onLegend));
+  chart.appendChild(buildLegend((series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries).map((s) => (swatchDash(s.key) ? { ...s, dash: swatchDash(s.key) } : s)), onSelect, legendHidden, onLegend));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
   watchPlotWidth(plotHost, (width) => {
     tooltip.style.display = "none";
@@ -1165,7 +1172,7 @@ function buildLegend(series, onSelect, hidden, onLegend) {
     const switchable = !!(onLegend && s.key != null);
     const off = switchable && hiddenSet.has(s.key);
     const props = { class: "item" + (drillable ? " drillable" : "") + (switchable ? " switchable" : "") + (off ? " legend-off" : "") };
-    const swatch = el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) });
+    const swatch = el("span", { class: "swatch", style: swatchStyle(s.color, s.dash) });
     /* A drillable entry drills from its label, and the label is a real control: Enter or Space on it drills, as a click
        does. When the entry is also a switch the swatch is the switch and the label stays the drill, so the two gestures
        never overlap; with no switch (no onLegend) the whole entry drills, as it did before the legend could hide a
@@ -1233,27 +1240,63 @@ function buildAnnotationLegend(entries) {
 }
 
 /**
- * A NEUTRAL categorical ramp for chart series — deliberately NOT the ok/warn/err severity colors, so a chart's
- * lines never imply a health state (the alert/band palette stays severity-only). Distinct, colorblind-tolerant.
+ * The one chart-series palette (#7401): line, bar, pie and composed charts all draw from it. Cool blues, violets and
+ * neutrals plus one magenta, deliberately NOT the ok/warn/err severity colors, so a chart's lines never imply a health
+ * state (the alert/band palette stays severity-only). Ordered so neighbors differ in hue AND lightness: the first two
+ * (the accent blue, then a near-white) stay apart at the 2 px line width, and a six-series chart gets six different
+ * colors. The page is dark-only (theme.css), so one value per color serves. All #rrggbb literals (air-gap safe). A line
+ * chart with more series than colors draws the repeats dashed (seriesDashes).
  */
-export const SERIES_COLORS = ["#2eaef1", "#4dd0e1", "#b39ddb", "#7f8fa6", "#e0e0e0"];
-
-/**
- * The wider categorical palette for composed multi-series / bar / pie charts (#1563) — the five SERIES_COLORS
- * (so the family reads the same) plus five more cool/neutral hues, staying clear of the ok/warn/err severity
- * colors for the same reason. All #rrggbb literals (air-gap safe); cycled when a chart has more categories.
- */
-export const CATEGORICAL_COLORS = [
-  "#2eaef1", "#4dd0e1", "#b39ddb", "#7f8fa6", "#e0e0e0",
-  "#64b5f6", "#9575cd", "#4fc3f7", "#ba68c8", "#90a4ae",
+export const SERIES_COLORS = [
+  "#2eaef1", "#e8eaf0", "#e75fe7", "#3fd5e4", "#a577d9",
+  "#3a97a6", "#d9a3d9", "#5985ff", "#8f9fbf", "#8cc9ff",
 ];
+
+/** The palette for composed multi-series / bar / pie charts (#1563): the same list as SERIES_COLORS, so a series reads
+ *  the same on every kind of chart. */
+export const CATEGORICAL_COLORS = SERIES_COLORS;
+
+/* Dash look for a series whose color an earlier series in the same chart already uses (#7401). `svg` is the line's
+   stroke-dasharray, `swatch` the same pattern as segment lengths in px for the 12 px legend swatch. */
+const SERIES_DASHES = [
+  { svg: "6 3", swatch: [4, 2] },
+  { svg: "2 2", swatch: [2, 2] },
+  { svg: "10 3 2 3", swatch: [5, 2, 1, 2] },
+];
+
+/** Per series key, the dash look of a repeated color: its first use is solid, its n-th repeat takes the n-th pattern
+ *  (cycling). Keyed by series key so hiding a series in the legend never changes how the others look. */
+function seriesDashes(series) {
+  const seen = new Map();
+  const out = new Map();
+  for (const s of series) {
+    const c = normalizeColor(s.color).toLowerCase();
+    const n = seen.get(c) || 0;
+    seen.set(c, n + 1);
+    if (n > 0) out.set(s.key, SERIES_DASHES[(n - 1) % SERIES_DASHES.length]);
+  }
+  return out;
+}
+
+/** The legend / tooltip swatch background for a series color and its dash look (a solid bar when it has none). */
+function swatchStyle(color, dash) {
+  const c = normalizeColor(color);
+  if (!dash) return "background:" + c;
+  let x = 0;
+  const stops = dash.swatch.map((len, i) => {
+    const stop = (i % 2 === 0 ? c : "transparent") + " " + x + "px " + (x + len) + "px";
+    x += len;
+    return stop;
+  });
+  return "background:repeating-linear-gradient(90deg," + stops.join(",") + ")";
+}
 
 /** The muted color for a pie's pooled "Other" wedge — a neutral gray that recedes behind the real categories. */
 const NEUTRAL_SLICE = "#5b626e";
 
 /**
  * The event-annotation marker palette (#1563 D5) — deliberately DISJOINT from both CATEGORICAL_COLORS (the cool
- * blues/purples/grays the data series use) and the ok/warn/err severity colors, so an annotation marker never
+ * blues/purples/grays and the one magenta the data series use) and the ok/warn/err severity colors, so an annotation marker never
  * reads as a data series OR as a health state. Warm/distinct hues (pink, orange, brown, indigo), one per source,
  * cycled at the D5 cap of four. All #rrggbb literals (air-gap safe); pass through normalizeColor like every color.
  */

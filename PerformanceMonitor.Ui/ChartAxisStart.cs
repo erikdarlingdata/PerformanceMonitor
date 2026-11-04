@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using ScottPlot;
+using ScottPlot.Plottables;
 
 namespace PerformanceMonitor.Ui
 {
@@ -70,13 +72,23 @@ namespace PerformanceMonitor.Ui
         /// The earliest X a chart actually drew, as an instant, or null when it drew nothing with a usable time. Read from the
         /// plot's own plottables, so a series from a relation that reaches back further than the server's data start (an hourly tier,
         /// a collector with its own longer retention) is seen no matter which reader fed it.
+        ///
+        /// <para>Only real data counts. A hidden plottable, a line or span (the Overview lanes' hidden crosshair line sits at X = 0
+        /// and their baseline band reads as X limits), a text label, and a synthetic baseline (<see cref="Baseline"/>,
+        /// <see cref="PaddedFrom"/>) each report an X that is not a collected point, and would otherwise stand in for "the earliest
+        /// point" and cancel the trim.</para>
         /// </summary>
         public static DateTime? EarliestPlotted(Plot plot)
         {
             double earliest = double.NaN;
             foreach (var plottable in plot.PlottableList)
             {
-                var left = plottable.GetAxisLimits().Left;
+                if (!plottable.IsVisible || plottable is AxisLine or AxisSpan or Text)
+                {
+                    continue;
+                }
+
+                var left = Claims.TryGetValue(plottable, out var claim) ? claim.Value : plottable.GetAxisLimits().Left;
                 if (double.IsFinite(left) && (double.IsNaN(earliest) || left < earliest))
                 {
                     earliest = left;
@@ -85,6 +97,22 @@ namespace PerformanceMonitor.Ui
 
             /* Outside the OLE date range it is not a time (a placeholder, a categorical axis), so it claims nothing. */
             return double.IsFinite(earliest) && earliest > MinOaDate && earliest < MaxOaDate ? DateTime.FromOADate(earliest) : null;
+        }
+
+        /// <summary>What a series says about its own earliest real point, for a series that carries points which are not data.</summary>
+        private static readonly ConditionalWeakTable<IPlottable, StrongBox<double>> Claims = new();
+
+        /// <summary>Marks a series that draws only a baseline, the flat zero line a chart with no rows in the window shows across
+        /// [start, end]. It has no collected point, so it never decides where the axis starts (#7386).</summary>
+        public static T Baseline<T>(T series) where T : IPlottable => PaddedFrom(series, double.NaN);
+
+        /// <summary>Marks a series whose first and last points are padding at the window edges (a zero at the picked start so the line
+        /// reaches the left edge) and whose first collected point is at <paramref name="firstRealOa"/>. The padding never decides where
+        /// the axis starts (#7386). NaN means the series has no collected point at all.</summary>
+        public static T PaddedFrom<T>(T series, double firstRealOa) where T : IPlottable
+        {
+            Claims.AddOrUpdate(series, new StrongBox<double>(firstRealOa));
+            return series;
         }
 
         private const double MinOaDate = -657434;
