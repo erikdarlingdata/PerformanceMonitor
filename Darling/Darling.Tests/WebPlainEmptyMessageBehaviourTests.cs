@@ -275,6 +275,17 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void TheAdminSettingsTab_WithNoSavedSettings_SaysSoInWords_AndAnyOtherReplyIsLeftToTheCaller()
+    {
+        var r = Run();
+        var shown = r.GetProperty("settingsUnavailable");
+        Assert.StartsWith("No alert settings have been saved yet, so the service is running on its defaults.", shown.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, shown.GetProperty("hasDetails").GetInt32());
+        Assert.Equal(r.GetProperty("settingsToolSaid").GetString(), shown.GetProperty("detailBody").GetString());
+        Assert.True(r.GetProperty("settingsOtherReply").GetBoolean());
+    }
+
+    [Fact]
     public void ASmallSizeInMegabytes_IsWrittenInTheUnitThatFitsIt()
     {
         var fit = Run().GetProperty("fit");

@@ -191,4 +191,13 @@ out.durationTrendUnavailable = await runFanout(pgQueryDurationTrendSpecs({ label
   out.alertsToolSaid = toolSaid;
 }
 
+/* #7410 pass 4b: the Admin Settings tab, when the store holds no alert settings yet. */
+{
+  const { settingsUnavailableStrip } = await import(pathToFileURL(root + "/pages/admin.js").href);
+  const toolSaid = "No alert-settings row is present in the store yet. The service seeds it on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.";
+  out.settingsUnavailable = describe(settingsUnavailableStrip({ kind: "empty", status: "unavailable", message: toolSaid, hints: null }));
+  out.settingsToolSaid = toolSaid;
+  out.settingsOtherReply = settingsUnavailableStrip({ kind: "empty", status: "empty", message: "x", hints: null }) === null;
+}
+
 console.log(JSON.stringify(out));
