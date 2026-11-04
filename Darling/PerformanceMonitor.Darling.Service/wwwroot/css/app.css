@@ -1690,7 +1690,7 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
    instead of stretching to fill the row. */
 .stat-block { display: flex; flex-direction: column; gap: 0.6rem; }
 .stat-sentence { margin: 0; line-height: 1.4; overflow-wrap: anywhere; }
-.stats.natural { grid-template-columns: repeat(auto-fill, minmax(150px, 14rem)); }
+.stats.natural { grid-template-columns: repeat(auto-fit, minmax(150px, 14rem)); }
 .metric-chip.clickable { cursor: pointer; }
 .metric-chip.clickable:hover { filter: brightness(1.15); }
 .metric-chip.clickable:focus-visible { outline: 2px solid var(--accent, #4fc3f7); outline-offset: 1px; }

@@ -308,8 +308,8 @@ const PERFMON_COLUMNS = [
   { key: "instance_name", label: "Instance" },
   { key: "per_second", label: "Per second", format: "rate" },
   { key: "running_total", label: "Total since counter start", format: "int" },
-  { key: "value", label: "Value", display: (r) => wholeOrTwoPlaces(r.value) },
-  { key: "delta_value", label: "Delta", display: (r) => wholeOrTwoPlaces(r.delta_value) },
+  { key: "value", label: "Value", align: "right", display: (r) => wholeOrTwoPlaces(r.value) },
+  { key: "delta_value", label: "Delta", align: "right", display: (r) => wholeOrTwoPlaces(r.delta_value) },
 ];
 
 /* #7416: the same counter and instance can come from two objects (Transaction Delay with instance _Total is in both the database replica

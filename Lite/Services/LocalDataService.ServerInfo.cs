@@ -224,6 +224,27 @@ ORDER BY connection_count DESC";
 
         return items;
     }
+
+    /// <summary>
+    /// The host platform the newest <c>server_properties</c> row that carries one recorded (#7416 item 1): the one stored
+    /// fact that says whether this is SQL Server on Linux. Null when none was ever stored. It lives here, not in
+    /// <c>LocalDataService.SystemEvents.cs</c>, because that file's grid reads carry no row cap and a data-start
+    /// test keeps it free of <c>LIMIT</c>. Darling twin: <c>DarlingSystemHealthReader.GetHostOsVersionAsync</c>.
+    /// </summary>
+    public async Task<string?> GetHostOsVersionAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT host_os_version
+FROM v_server_properties
+WHERE server_id = $1
+AND   host_os_version IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
+    }
 }
 
 public class ServerPropertiesRow
