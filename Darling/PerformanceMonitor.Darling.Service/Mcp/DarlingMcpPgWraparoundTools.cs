@@ -77,7 +77,38 @@ public sealed class DarlingMcpPgWraparoundTools
         _ => 0,
     };
 
-    [McpServerTool(Name = "get_pg_wraparound_risk"), Description("Gets PostgreSQL transaction ID and MultiXact ID freeze headroom per database - how close the server is to a write outage. This is the highest-consequence PostgreSQL signal and has no SQL Server equivalent. PostgreSQL transaction IDs are 32-bit and wrap; if the oldest unfrozen ID gets too old the server stops accepting new write transactions entirely, and no failover helps because every replica shares the condition. Reports two independent counters, because MultiXact IDs exhaust separately and are burned much faster by SELECT FOR UPDATE and foreign-key-heavy workloads - a server can look fine on transaction IDs and be in trouble on MultiXacts. Also reports whether autovacuum is winning: compare the current age against the window peak. Works on any PostgreSQL target, not only Aurora.")]
+    /// <summary>
+    /// Whether freezing is keeping up, in three honest states plus one for a missing setting (#7432).
+    /// <para>The age of a database climbs steadily between freezes, so on a healthy server the current age is nearly always
+    /// the window peak. "At the peak" only means something once a freeze is due, and PostgreSQL does not force one until the
+    /// age reaches <c>autovacuum_freeze_max_age</c> (the same line <c>pct_toward_emergency_vacuum</c> reaches 100 at, and the
+    /// line the alert's relative Warning arm starts at). So that setting is the threshold, taken from the same row as the age
+    /// so an <c>as_of</c> read judges the window it asked for, not today's setting.</para>
+    /// <para>Below it: <c>freeze_not_due</c>, keeping-up null. At or above it: an age under the window peak means the age fell
+    /// inside the window, <c>freezing_keeping_up</c> (true). An age equal to the peak means no fall was seen, <c>freeze_due_age_not_falling</c>
+    /// (false). The peak is a maximum over the same rows as the age, so it is never below the age, and one sample in the window
+    /// always has peak equal to age: with a freeze due that reads as not falling, which is all one sample can say. A setting
+    /// of 0 (the collector stored none) cannot be judged and returns <c>setting_not_collected</c>, keeping-up null. Per row: two databases
+    /// with the same age are judged by their own peaks.</para>
+    /// </summary>
+    internal static (string State, string Text, bool? KeepingUp) FreezeState(long age, long windowPeak, long freezeMaxAge)
+    {
+        if (freezeMaxAge <= 0)
+        {
+            return ("setting_not_collected", "No autovacuum_freeze_max_age was collected, so a freeze cannot be judged", null);
+        }
+
+        if (age < freezeMaxAge)
+        {
+            return ("freeze_not_due", "No freeze due yet", null);
+        }
+
+        return age < windowPeak
+            ? ("freezing_keeping_up", "Freezing is keeping up: the age fell in this window", true)
+            : ("freeze_due_age_not_falling", "Freeze due and the age has not fallen in this window", false);
+    }
+
+    [McpServerTool(Name = "get_pg_wraparound_risk"), Description("Gets PostgreSQL transaction ID and MultiXact ID freeze headroom per database - how close the server is to a write outage. This is the highest-consequence PostgreSQL signal and has no SQL Server equivalent. PostgreSQL transaction IDs are 32-bit and wrap; if the oldest unfrozen ID gets too old the server stops accepting new write transactions entirely, and no failover helps because every replica shares the condition. Reports two independent counters, because MultiXact IDs exhaust separately and are burned much faster by SELECT FOR UPDATE and foreign-key-heavy workloads - a server can look fine on transaction IDs and be in trouble on MultiXacts. Also says whether freezing is keeping up, in freeze_state (freezing_is_keeping_up is its true/false/null form): freeze_not_due while the age is under autovacuum_freeze_max_age, which is healthy because the age climbs by design until then and sitting at the window peak means nothing; freezing_keeping_up when a freeze is due and the age fell inside the window; freeze_due_age_not_falling when a freeze is due and the age is still at its window peak, the only state that is a problem; setting_not_collected when no autovacuum_freeze_max_age was collected. One sample in the window with a freeze due reads as not falling. Judged per database on that window (as_of included). The MultiXact counter is not judged this way. Works on any PostgreSQL target, not only Aurora.")]
     public static async Task<string> GetPgWraparoundRisk(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -126,32 +157,38 @@ public sealed class DarlingMcpPgWraparoundTools
             }
 
             var databases = rows
-                .Select(r => new
+                .Select(r =>
                 {
-                    database_name = r.DatabaseName,
-                    severity = Classify(
-                        r.PctTowardWraparound,
-                        r.PctTowardEmergencyVacuum,
-                        r.PctTowardMultixactWraparound,
-                        r.PctTowardMultixactEmergency),
-                    measured_at = r.MeasuredAt,
-                    /* Transaction IDs. */
-                    frozen_xid_age = r.FrozenXidAge,
-                    xids_remaining = r.XidsRemaining,
-                    pct_toward_wraparound = Math.Round(r.PctTowardWraparound, 2),
-                    pct_toward_emergency_vacuum = Math.Round(r.PctTowardEmergencyVacuum, 1),
-                    autovacuum_freeze_max_age = r.AutovacuumFreezeMaxAge,
-                    /* MultiXacts - the independently fatal second counter. */
-                    min_multixid_age = r.MinMultiXidAge,
-                    multixids_remaining = r.MultiXidsRemaining,
-                    pct_toward_multixact_wraparound = Math.Round(r.PctTowardMultixactWraparound, 2),
-                    pct_toward_multixact_emergency = Math.Round(r.PctTowardMultixactEmergency, 1),
-                    /* Is autovacuum winning? A current age below the window peak means freezing has
-                       clawed age back at least once — the healthy sawtooth. Equal to the peak means it
-                       has only ever climbed within this window, which is the shape that ends badly. */
-                    window_peak_frozen_xid_age = r.WindowPeakFrozenXidAge,
-                    freezing_is_keeping_up = r.FrozenXidAge < r.WindowPeakFrozenXidAge,
-                    allows_connections = r.AllowsConnections,
+                    var freeze = FreezeState(r.FrozenXidAge, r.WindowPeakFrozenXidAge, r.AutovacuumFreezeMaxAge);
+                    return new
+                    {
+                        database_name = r.DatabaseName,
+                        severity = Classify(
+                            r.PctTowardWraparound,
+                            r.PctTowardEmergencyVacuum,
+                            r.PctTowardMultixactWraparound,
+                            r.PctTowardMultixactEmergency),
+                        measured_at = r.MeasuredAt,
+                        /* Transaction IDs. */
+                        frozen_xid_age = r.FrozenXidAge,
+                        xids_remaining = r.XidsRemaining,
+                        pct_toward_wraparound = Math.Round(r.PctTowardWraparound, 2),
+                        pct_toward_emergency_vacuum = Math.Round(r.PctTowardEmergencyVacuum, 1),
+                        autovacuum_freeze_max_age = r.AutovacuumFreezeMaxAge,
+                        /* MultiXacts - the independently fatal second counter. */
+                        min_multixid_age = r.MinMultiXidAge,
+                        multixids_remaining = r.MultiXidsRemaining,
+                        pct_toward_multixact_wraparound = Math.Round(r.PctTowardMultixactWraparound, 2),
+                        pct_toward_multixact_emergency = Math.Round(r.PctTowardMultixactEmergency, 1),
+                        /* Is autovacuum winning? Only a question once a freeze is due (#7432): see FreezeState. Below
+                           autovacuum_freeze_max_age the age climbs by design, so "at its window peak" is the normal shape of a
+                           healthy database and says nothing about autovacuum. */
+                        window_peak_frozen_xid_age = r.WindowPeakFrozenXidAge,
+                        freeze_state = freeze.State,
+                        freeze_state_text = freeze.Text,
+                        freezing_is_keeping_up = freeze.KeepingUp,
+                        allows_connections = r.AllowsConnections,
+                    };
                 })
                 .OrderByDescending(d => Math.Max(d.pct_toward_wraparound, d.pct_toward_multixact_wraparound))
                 .ToList();
