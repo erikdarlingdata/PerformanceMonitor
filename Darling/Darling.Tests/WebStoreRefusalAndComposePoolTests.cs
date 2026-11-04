@@ -72,7 +72,10 @@ public sealed class WebStoreRefusalAndComposePoolTests
         Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore, webLoginWrite: true), error);
         if (managedStore)
         {
-            Assert.Contains("read-only access to the bundled store", error, StringComparison.Ordinal);
+            // The switch is not what refused it here (no admin pool is not the case under test), so the sentence must not claim one.
+            Assert.DoesNotContain("turned off", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("web.allowAdminWrites", error, StringComparison.Ordinal);
+            Assert.Contains("store login has no write access", error, StringComparison.Ordinal);
         }
         else
         {
@@ -89,7 +92,7 @@ public sealed class WebStoreRefusalAndComposePoolTests
         var (status, body) = await SendAsync("GET", "/api/store-refusal", managedStore: true);
 
         Assert.Equal(StatusCodes.Status500InternalServerError, status);
-        Assert.DoesNotContain("read-only access to the bundled store", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("Changes from this page are turned off", body, StringComparison.Ordinal);
     }
 
     private sealed class CountingListener : IDisposable

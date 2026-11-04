@@ -720,10 +720,7 @@ public sealed class McpAnalysisTools
                 if (maxdop == 0)
                 {
                     recommendations.Add(new("max degree of parallelism", maxdop, recommended, "warning",
-                        $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
-                        $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
-                        $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-                        $"Start with {recommended} ({(maxdopBasis.FromVcores ? "this database's vCores" : "this server's cores-per-socket")}, capped at 8) and adjust to the workload."));
+                        ConfigAuditGuidance.MaxdopUnlimitedMessage(recommended, maxdopBasis)));
                 }
                 else if (maxdop == 1 && recommended > 1)
                 {
@@ -734,9 +731,7 @@ public sealed class McpAnalysisTools
                 else if (maxdop > recommended)
                 {
                     recommendations.Add(new("max degree of parallelism", maxdop, recommended, "review",
-                        $"MAXDOP {maxdop} is above the topology-based guidance of {recommended} " +
-                        $"(logical processors in a single NUMA node, capped at 8). Review whether queries here genuinely " +
-                        $"benefit from the higher degree, or lower it to {recommended}."));
+                        ConfigAuditGuidance.MaxdopAboveMessage(maxdop, recommended, maxdopBasis)));
                 }
                 else
                 {
@@ -750,54 +745,10 @@ public sealed class McpAnalysisTools
             {
                 var maxMemory = (int)maxMemFact.Value;
 
-                if (maxMemory == 2147483647) // Default — unlimited
-                {
-                    if (totalMemoryMb > 0)
-                    {
-                        var osReserve = Math.Max(4096, totalMemoryMb * 0.10);
-                        var suggested = (int)(totalMemoryMb - osReserve);
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "warning",
-                            $"Max server memory is at the default (unlimited). SQL Server will consume all available RAM, " +
-                            $"starving the OS and other processes. With {totalMemoryMb:N0} MB physical RAM, set max server memory to " +
-                            $"~{suggested:N0} MB (leaving {osReserve:N0} MB for the OS)."));
-                    }
-                    else
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "warning",
-                            "Max server memory is at the default (unlimited). SQL Server will consume all available RAM. " +
-                            "Set this to total physical memory minus 4 GB (or 10%, whichever is larger) to leave room for the OS."));
-                    }
-                }
-                else if (totalMemoryMb > 0)
-                {
-                    var ratio = maxMemory / totalMemoryMb;
-                    var osReserve = Math.Max(4096, totalMemoryMb * 0.10);
-                    var suggested = (int)(totalMemoryMb - osReserve);
-
-                    if (ratio > 0.95)
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "review",
-                            $"Max server memory ({maxMemory:N0} MB) is {ratio:P0} of physical RAM ({totalMemoryMb:N0} MB). " +
-                            $"Consider reducing to ~{suggested:N0} MB to leave room for the OS."));
-                    }
-                    else if (ratio < 0.50 && totalMemoryMb > 8192)
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "review",
-                            $"Max server memory ({maxMemory:N0} MB) is only {ratio:P0} of physical RAM ({totalMemoryMb:N0} MB). " +
-                            $"SQL Server may be under-utilizing available memory. Consider raising to ~{suggested:N0} MB unless other " +
-                            "applications need the remaining RAM."));
-                    }
-                    else
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "ok",
-                            $"Max server memory ({maxMemory:N0} MB) looks reasonable for {totalMemoryMb:N0} MB physical RAM."));
-                    }
-                }
-                else
-                {
-                    recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "ok",
-                        $"Max server memory is set to {maxMemory:N0} MB."));
-                }
+                /* #7400: one shared reserve (never more than half of RAM), so a server under 4 GB no longer gets a negative
+                   suggestion, and the text states the reserve it used. */
+                var memAudit = ConfigAuditGuidance.AuditMaxMemory(maxMemory, totalMemoryMb);
+                recommendations.Add(new("max server memory (MB)", maxMemory, memAudit.Suggested, memAudit.Status, memAudit.Message));
             }
 
             // Max worker threads audit

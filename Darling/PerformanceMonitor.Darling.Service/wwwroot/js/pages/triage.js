@@ -20,7 +20,7 @@
  * every cell go through the shared builders; nothing touches innerHTML.
  */
 
-import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, localTime, fmtNum,
+import { el, mount, apiGet, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, captionStrip, localTime, fmtNum,
          alertDeliveryState, localizeAlertDetail } from "../util.js";
 import { VIZ } from "../panels.js";
 import { suggestViz, deriveVizConfig } from "../derive.js";
@@ -235,7 +235,7 @@ export async function renderTriage(main, queryString) {
   }
 
   if (dedup) {
-    out.push(noticeStrip("Incident fingerprint: " + dedup));
+    out.push(captionStrip("Incident fingerprint: " + dedup));
   }
 
   mount(box, el("div", { class: "grid" }, out));
