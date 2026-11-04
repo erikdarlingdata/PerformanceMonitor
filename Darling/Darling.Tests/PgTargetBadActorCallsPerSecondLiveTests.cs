@@ -33,6 +33,7 @@ public sealed class PgTargetBadActorCallsPerSecondLiveTests
     private const string ServerName = "pg-bad-actor-calls-per-second";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const long QueryId = 75660;
+    private const long SecondQueryId = 75661;
     private static readonly DateTime T0 = new(2026, 3, 6, 10, 0, 0);
     private static readonly DateTime WindowStart = new(2026, 3, 6, 9, 0, 0);
     private static readonly DateTime WindowEnd = new(2026, 3, 6, 12, 0, 0);
@@ -124,6 +125,51 @@ public sealed class PgTargetBadActorCallsPerSecondLiveTests
         });
     }
 
+    /// <summary>
+    /// Two statements share the same runs, and each reads its own rate (the review of #7612). Runs every minute for an
+    /// hour from 10:00. The steady statement has 10 calls in every run but 10:30, where only the batch statement has a
+    /// row. The batch statement has 29 calls every 5 minutes. The fact takes its run points from every statement's
+    /// snapshot times, the trend from one statement's, so the 10:30 run sits at a different second in each. The gaps
+    /// telescope, so both statements read the runs' 3,600 s: the steady 590 / 3,600 and the batch 348 / 3,600, each
+    /// the number its own trend reads.
+    /// </summary>
+    [Fact]
+    public async Task TwoStatementsSharingRuns_EachReadTheirOwnTrendRate_InTheFact()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            for (var t = T0; t < T0.AddMinutes(60); t = t.AddMinutes(1))
+            {
+                await SeedRunAsync(connection, ct, t);
+                if (t != T0.AddMinutes(30))
+                {
+                    await SeedStatementAsync(connection, ct, t, deltaCalls: 10, deltaMs: 100.0);
+                }
+            }
+
+            for (var t = T0; t < T0.AddMinutes(60); t = t.AddMinutes(5))
+            {
+                await SeedStatementAsync(connection, ct, t, deltaCalls: 29, deltaMs: 290.0, queryId: SecondQueryId);
+            }
+
+            var steady = await ReadFactAsync(postgres, ct);
+            var batch = await ReadFactAsync(postgres, ct, SecondQueryId);
+
+            Assert.Equal(590, steady.Metadata["calls"]);
+            Assert.Equal(590.0 / 3600.0, steady.Metadata["calls_per_sec"], 9);
+            Assert.Equal(348, batch.Metadata["calls"]);
+            Assert.Equal(348.0 / 3600.0, batch.Metadata["calls_per_sec"], 9);
+
+            foreach (var (fact, queryId) in new[] { (steady, QueryId), (batch, SecondQueryId) })
+            {
+                var bucket = Assert.Single(
+                    await DarlingPgTrendReader.GetQueryDurationBucketsAsync(postgres, ServerId, queryId, WindowStart, WindowEnd, 60, ct),
+                    p => p.Calls > 0);
+                Assert.Equal(bucket.CallsPerSecond, fact.Metadata["calls_per_sec"], 9);
+            }
+        });
+    }
+
     /// <summary>A store with no run log rates a snapshot on its own stored interval, the rule before #7566.</summary>
     [Fact]
     public async Task WithNoRunLog_TheFactKeepsTheStoredIntervalRule()
@@ -140,7 +186,7 @@ public sealed class PgTargetBadActorCallsPerSecondLiveTests
         });
     }
 
-    private static async Task<Fact> ReadFactAsync(NpgsqlDataSource postgres, CancellationToken ct)
+    private static async Task<Fact> ReadFactAsync(NpgsqlDataSource postgres, CancellationToken ct, long queryId = QueryId)
     {
         var context = new AnalysisContext
         {
@@ -151,7 +197,7 @@ public sealed class PgTargetBadActorCallsPerSecondLiveTests
             ServerUtcOffset = TimeSpan.Zero,
         };
         var facts = await new PgTargetFactCollector(postgres).CollectFactsAsync(context);
-        return Assert.Single(facts, f => f.Key == PgTargetFactKeys.BadActorKey(QueryId));
+        return Assert.Single(facts, f => f.Key == PgTargetFactKeys.BadActorKey(queryId));
     }
 
     private static async Task SeedRunAsync(NpgsqlConnection connection, CancellationToken ct, DateTime start) =>
@@ -160,10 +206,10 @@ public sealed class PgTargetBadActorCallsPerSecondLiveTests
             CollectionIdGenerator.Next(), ServerId, ServerName, start.AddSeconds(2));
 
     private static async Task SeedStatementAsync(
-        NpgsqlConnection connection, CancellationToken ct, DateTime t, long deltaCalls, double deltaMs, int intervalSeconds = 60) =>
+        NpgsqlConnection connection, CancellationToken ct, DateTime t, long deltaCalls, double deltaMs, int intervalSeconds = 60, long queryId = QueryId) =>
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO pg_statement_stats (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls, total_exec_time_ms, min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, temp_blks_read, temp_blks_written, blk_read_time_ms, blk_write_time_ms, wal_records, wal_fpi, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, 1, 1, TRUE, 10, 100.0, 1.0, 20.0, 10.0, 100, 100, 10, 0, 0, 0, 0, 1.0, 0.0, 0, 0, 0, $6, $7, 50, $8)",
-            CollectionIdGenerator.Next(), t, ServerId, ServerName, QueryId, deltaCalls, deltaMs, intervalSeconds);
+            CollectionIdGenerator.Next(), t, ServerId, ServerName, queryId, deltaCalls, deltaMs, intervalSeconds);
 
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
