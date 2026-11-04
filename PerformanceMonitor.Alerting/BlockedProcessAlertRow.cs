@@ -50,10 +50,11 @@ public class BlockedProcessAlertRow
     public bool HasReportXml => !string.IsNullOrEmpty(BlockedProcessReportXml);
 
     /// <summary>
-    /// The head blocker's session facts (login time, last request end, open transaction count, transaction log bytes
-    /// used) exist only on a DMV-snapshot row: the report XML carries none of them. When the merge drops a DMV row because a
-    /// report row covers the same pair in the same minute, it calls this on the report row so the facts are not lost with
-    /// the dropped row. A field the report row already has is kept. The base row type has none of the fields, so it does
+    /// The head blocker's session facts (login time, last request end, open transaction count, last transaction start,
+    /// transaction log bytes used) come from a DMV-snapshot row. The report XML carries only one of them: the blocking
+    /// process's trancount, the open transaction count (#7497). When the merge drops a DMV row because a report row covers
+    /// the same pair in the same minute, it calls this on the report row so the facts are not lost with the dropped row.
+    /// A field the report row already has is kept. The base row type has none of the fields, so it does
     /// nothing; each row type that stores them overrides.
     /// </summary>
     public virtual void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow) { }
