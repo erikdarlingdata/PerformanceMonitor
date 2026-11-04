@@ -68,7 +68,6 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
            job card last Thursday 02:xx local (06:xx UTC) twice -> one row carrying its frozen text, plus one
            pass at 03:xx local -> a second bucket; neither is in the slot, both return because they are
            RUNNING_JOBS-rooted. Another chain in the job's slot, not job-rooted: excluded. */
-        await store.InsertFindingsAsync(BackgroundRows(ReferenceUtc, ServerId, ServerName), context); // watched hours for the spread rule (#7450)
         await store.InsertFindingsAsync(new List<AnalysisFinding>
         {
             Finding(ChainA, "SOS_SCHEDULER_YIELD", Utc(2026, 9, 8, 14, 5)),
@@ -120,7 +119,7 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
     }
 
     [Fact]
-    public async Task TheReadCountsFiredAndWatchedHours_AndAnAlwaysFiringChainIsNotLabelled_WhileAWeeklyOneIs()
+    public async Task TheReadCountsFiredAndSpanHours_AndAnAlwaysFiringChainIsNotLabelled_WhileAWeeklyOneIs()
     {
         var store = new FindingStore(_duckDb);
         var context = new AnalysisContext { ServerId = ServerId, ServerName = ServerName, TimeRangeStart = ReferenceUtc.AddHours(-4), TimeRangeEnd = ReferenceUtc };
@@ -130,20 +129,43 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
 
         var read = await store.GetPriorOccurrencesAsync(context, ReferenceUtc);
 
-        /* 504 hours in the window, minus the six days (144 hours) the server had no saved row at all. */
-        Assert.Equal(360, read.WatchedHours);
-        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == ChainA), o => Assert.Equal(360, o.ChainFiredHours));
-        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == ChainC), o => Assert.Equal(193, o.ChainFiredHours));
-        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == JobChain), o => Assert.Equal(3, o.ChainFiredHours));
+        /* ChainA: 504 hours from its first row (10:00 local Aug 25) to its last (09:00 local Sep 15), minus the six
+           days (144 hours) the server was off. ChainC: Aug 25 plus Sep 1 to Sep 8, 193 hours in a span of 346. */
+        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == ChainA), o => { Assert.Equal(360, o.ChainFiredHours); Assert.Equal(504, o.ChainSpanHours); });
+        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == ChainC), o => { Assert.Equal(193, o.ChainFiredHours); Assert.Equal(346, o.ChainSpanHours); });
+        Assert.All(read.Occurrences.Where(o => o.StoryPathHash == JobChain), o => { Assert.Equal(3, o.ChainFiredHours); Assert.Equal(337, o.ChainSpanHours); });
 
         var always = Story("SOS_SCHEDULER_YIELD", ChainA);
         var busy = Story("CPU_SQL_PERCENT", ChainC);
         var weekly = Story("RUNNING_JOBS", JobChain, severity: 0.5);
         RecurrenceLabeler.Label(new[] { always, busy, weekly }, null, read);
 
-        Assert.Null(RecurrenceLabeler.TryReadLabel(always.StoryText)); // 360 of 360 watched hours
-        Assert.Null(RecurrenceLabeler.TryReadLabel(busy.StoryText));   // 193 of 360: more than half of the hours watched, under half of 504
+        Assert.Null(RecurrenceLabeler.TryReadLabel(always.StoryText)); // 360 of 504
+        Assert.Null(RecurrenceLabeler.TryReadLabel(busy.StoryText));   // 193 of 346
         Assert.Equal(4, RecurrenceLabeler.TryReadLabel(weekly.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Fact]
+    public async Task AStoreHoldingOnlyAThreeWeekWeeklyChain_StillGetsTheLabel()
+    {
+        /* A healthy server whose only saved row each week is one chain in the Tuesday slot: every other pass found
+           nothing, and the store keeps no row for a pass that found nothing. */
+        var store = new FindingStore(_duckDb);
+        var context = new AnalysisContext { ServerId = ServerId, ServerName = ServerName, TimeRangeStart = ReferenceUtc.AddHours(-4), TimeRangeEnd = ReferenceUtc };
+        await SeedServerPropertiesAsync(ServerId, ServerName, OffsetMinutes);
+        await store.InsertFindingsAsync(new List<AnalysisFinding>
+        {
+            Finding(ChainA, "SOS_SCHEDULER_YIELD", Utc(2026, 9, 8, 14, 5)),
+            Finding(ChainA, "SOS_SCHEDULER_YIELD", Utc(2026, 9, 1, 14, 5)),
+            Finding(ChainA, "SOS_SCHEDULER_YIELD", Utc(2026, 8, 25, 14, 5)),
+        }, context);
+
+        var read = await store.GetPriorOccurrencesAsync(context, ReferenceUtc);
+
+        var story = Story("SOS_SCHEDULER_YIELD", ChainA);
+        RecurrenceLabeler.Label(new[] { story }, null, read);
+
+        Assert.Equal(4, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
     }
 
     /// <summary>
@@ -177,7 +199,6 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         var store = new FindingStore(_duckDb);
         var context = new AnalysisContext { ServerId = UtcServerId, ServerName = UtcServerName, TimeRangeStart = ReferenceUtc.AddHours(-4), TimeRangeEnd = ReferenceUtc };
 
-        await store.InsertFindingsAsync(BackgroundRows(ReferenceUtc, UtcServerId, UtcServerName), context); // watched hours for the spread rule (#7450)
         await store.InsertFindingsAsync(new List<AnalysisFinding>
         {
             Finding(ChainA, "SOS_SCHEDULER_YIELD", Utc(2026, 9, 8, 14, 5), serverId: UtcServerId, serverName: UtcServerName),
@@ -253,7 +274,6 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         var store = new FindingStore(_duckDb);
         var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
         await SeedServerPropertiesAsync(DstServerId, DstServerName, -240, EasternWindowsId, referenceUtc.AddDays(-1));
-        await store.InsertFindingsAsync(BackgroundRows(referenceUtc, DstServerId, DstServerName), context); // watched hours for the spread rule (#7450)
         await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
 
         var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
@@ -281,7 +301,6 @@ public sealed class FindingStoreRecurrenceReadTests : IClassFixture<SharedDuckDb
         var store = new FindingStore(_duckDb);
         var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
         await SeedServerPropertiesAsync(DstServerId, DstServerName, -240, timeZoneId: null, collectionTime: referenceUtc.AddDays(-1));
-        await store.InsertFindingsAsync(BackgroundRows(referenceUtc, DstServerId, DstServerName), context); // watched hours for the spread rule (#7450)
         await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
 
         var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
@@ -312,25 +331,6 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)";
         cmd.Parameters.Add(new DuckDBParameter { Value = offsetMinutes });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)timeZoneId ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
-    }
-
-    /// <summary>
-    /// One row of an unrelated chain in each hour of the 21 days before <paramref name="referenceUtc"/> except the
-    /// reference's weekday and the days either side of it, so these tests' own chains, which fire in a handful of
-    /// hours, sit in a store with a few hundred watched hours (#7450) and the slot is not touched.
-    /// </summary>
-    private static List<AnalysisFinding> BackgroundRows(DateTime referenceUtc, int serverId, string serverName)
-    {
-        var rows = new List<AnalysisFinding>();
-        for (var t = new DateTime(referenceUtc.Year, referenceUtc.Month, referenceUtc.Day, referenceUtc.Hour, 5, 0, DateTimeKind.Utc).AddDays(-21); t < referenceUtc.AddHours(-1); t = t.AddHours(1))
-        {
-            var daysFromReferenceWeekday = ((int)t.DayOfWeek - (int)referenceUtc.DayOfWeek + 7) % 7;
-            if (daysFromReferenceWeekday is 0 or 1 or 6)
-                continue;
-            rows.Add(Finding("rl-background", "BACKGROUND_WAIT", t, serverId: serverId, serverName: serverName));
-        }
-
-        return rows;
     }
 
     private static DateTime Utc(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Utc);
