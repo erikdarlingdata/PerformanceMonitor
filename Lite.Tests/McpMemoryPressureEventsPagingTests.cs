@@ -158,4 +158,15 @@ FROM generate_series(1, " + Samples + ") AS s(g)",
         Assert.Contains("limit", await CallAsync(0), StringComparison.Ordinal);
         Assert.Contains("exceeds maximum", await CallAsync(1001), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task ABadLimit_IsRefusedBeforeTheServerIsResolved_AsOnDarling()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+
+        /* Darling checks limit first, so a bad server name with a bad limit gets the limit refusal on both products. */
+        var reply = await McpMemoryTools.GetMemoryPressureEvents(new LocalDataService(_duckDb), _serverManager, "NoSuchServer", 24, 0, AsOf);
+
+        Assert.Contains("Invalid limit value '0'", reply, StringComparison.Ordinal);
+    }
 }
