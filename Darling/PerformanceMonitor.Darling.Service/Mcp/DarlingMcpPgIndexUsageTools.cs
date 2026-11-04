@@ -381,6 +381,10 @@ public sealed class DarlingMcpPgIndexUsageTools
                 status = "index_usage",
                 /* The page's count under the page's name (#3594). */
                 indexes_returned = indexes.Count,
+                /* Every index the window held (#7551), so a cut page can say how much of the server it shows. Read only when the page was cut. */
+                indexes_in_window = truncated
+                    ? await DarlingPgIndexUsageReader.CountPgIndexesInWindowAsync(postgres, resolved.ServerId, start, end, cancellationToken)
+                    : indexes.Count,
                 /* Deliberately NOT called "droppable". These are the indexes with no scans in the window
                    and no structural blocker - which is a shortlist to investigate, not a work queue. The
                    field name has to survive being read by something that will act on it. */
