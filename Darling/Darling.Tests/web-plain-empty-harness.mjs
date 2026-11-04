@@ -139,4 +139,15 @@ out.fanoutEmptyWinsBetween = await runFanout([table("A"), table("B", { emptyWins
 /* A reply that is not a true negative keeps the read's message even on an emptyWins panel, so that panel is the one that says it. */
 out.fanoutNotEmptyStatus = await runFanout([table("A", { emptyWins: true }), table("B")], { status: "unavailable", message: fanoutMessage, hints: null });
 out.fanoutMessage = fanoutMessage;
+
+/* #7410: the real PostgreSQL trend specs. A true negative says the panel's plain sentence with the tool's text behind "More detail"; an
+   answer that is not a true negative keeps the tool's text. */
+const { pgWaitTrendSpecs } = await import(pathToFileURL(root + "/pages/server-tabs/pg-waits.js").href);
+const { pgQueryDurationTrendSpecs } = await import(pathToFileURL(root + "/pages/server-tabs/pg-activity.js").href);
+const trendMessage = "Nothing gained samples on this server in the window, so there is nothing to follow. A single collection cannot be differenced.";
+out.trendMessage = trendMessage;
+out.waitTrendEmpty = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { status: "empty", message: trendMessage, hints: null });
+out.waitTrendUnavailable = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
+out.durationTrendEmpty = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "empty", message: trendMessage, hints: null });
+out.durationTrendUnavailable = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
 console.log(JSON.stringify(out));
