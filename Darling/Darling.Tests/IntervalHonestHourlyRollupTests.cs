@@ -477,24 +477,14 @@ public sealed class IntervalHonestHourlyRollupTests
         Assert.Contains($"FROM {successor}", DarlingTrendReader.QueryHistoryHourlySqlFor(successor), StringComparison.Ordinal);
         Assert.Throws<ArgumentException>(() => DarlingTrendReader.QueryHistoryHourlySqlFor(" "));
 
-        /* The daily summary: the one-argument form is the legacy; the two-argument form swaps the queries CTE's
-           relation — and, since #3653 A6, carries the successor's own WHERE into the not-carried member's
-           source probe (the hole scan's rule: a day holding only restart rows is not a hole for an aggregate
-           that rejects them) — and nothing else; the daily tier ignores the argument. The expected text is
-           built from the legacy's by exactly those two edits, so a third difference reds here. */
+        /* The daily summary: the one-argument form is the legacy, and the two-argument form reads the successor. The
+           successor's own WHERE also goes into the not-carried member's source probe (#3653 A6) and onto the raw half's
+           partial ceiling day (#7505). DailySummaryNotCarriedLiveTests reads both by what the query returns, with restart
+           rows, so this no longer compares the SQL's text (#5833). The daily tier ignores the argument. */
         Assert.Equal(DailySummarySql.RangeSqlFor(RetentionTier.Hourly), DailySummarySql.RangeSqlFor(RetentionTier.Hourly, legacy));
         var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(TimescaleSupport.CreateQueryStatsIntervalHourlySql);
         Assert.Equal("sample_interval_seconds IS DISTINCT FROM 0", successorFilter);
         Assert.Equal(string.Empty, TimescaleSupport.MaterializationHoleSourceFilterFor(TimescaleSupport.CreateQueryStatsHourlySql));
-        const string SourceProbeTail = "AND s.collection_time < b.d + INTERVAL '1 day'";
-        var legacyRouted = DailySummarySql.RangeSqlFor(RetentionTier.Hourly);
-        Assert.Equal(1, legacyRouted.Split(SourceProbeTail).Length - 1);
-        /* #3905: the probe now ends in its OFFSET 0 fence on the next line, so the filter is inserted after
-           the tail itself — which the count above proves appears exactly once. */
-        var expectedSuccessorRouted = legacyRouted
-            .Replace($"FROM collect.{legacy}", $"FROM collect.{successor}", StringComparison.Ordinal)
-            .Replace(SourceProbeTail, SourceProbeTail + "\n          AND " + successorFilter, StringComparison.Ordinal);
-        Assert.Equal(expectedSuccessorRouted, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor));
         Assert.Contains(successor, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.DoesNotContain(legacy, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.Equal(DailySummarySql.RangeSqlFor(RetentionTier.Daily), DailySummarySql.RangeSqlFor(RetentionTier.Daily, successor));
