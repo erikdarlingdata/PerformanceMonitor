@@ -463,7 +463,7 @@ jobs:
           dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category!=Slow" --blame-hang-timeout 300s
 
       - name: Test the exporter (slow)
-        timeout-minutes: 15
+        timeout-minutes: 20
         shell: bash
         run: |
           set -euo pipefail

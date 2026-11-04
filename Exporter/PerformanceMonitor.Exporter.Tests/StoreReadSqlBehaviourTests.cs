@@ -273,14 +273,16 @@ public sealed class StoreReadSqlBehaviourTests : IClassFixture<StoreReadSqlBehav
     public async Task Raw_select_with_a_sub_hour_window_returns_only_that_window_with_no_hour_bucketing()
     {
         if (Builder is null) { return; }
-        var from = new DateTime(2026, 10, 22, 11, 10, 0, DateTimeKind.Utc);
+        // 13:10 to 13:20, an hour no other test reads: these rows must not land in the 11:00 window the other
+        // perfmon_stats tests read, because the class's tests run in any order on one store.
+        var from = new DateTime(2026, 10, 22, 13, 10, 0, DateTimeKind.Utc);
         var to = from.AddMinutes(10);
         await using var setup = new NpgsqlConnection(Builder.ConnectionString);
         await setup.OpenAsync();
         await using (var insert = new NpgsqlCommand(
             "INSERT INTO collect.perfmon_stats (server_name, collection_time, server_id) VALUES " +
-            "('sub_before', '2026-10-22 11:09:59.999999', 1), ('sub_at_from', '2026-10-22 11:10:00', 1), " +
-            "('sub_last', '2026-10-22 11:19:59.999999', 1), ('sub_at_to', '2026-10-22 11:20:00', 1)", setup))
+            "('sub_before', '2026-10-22 13:09:59.999999', 1), ('sub_at_from', '2026-10-22 13:10:00', 1), " +
+            "('sub_last', '2026-10-22 13:19:59.999999', 1), ('sub_at_to', '2026-10-22 13:20:00', 1)", setup))
         {
             await insert.ExecuteNonQueryAsync();
         }
