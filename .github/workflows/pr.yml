@@ -468,7 +468,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 300s
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 300s --blame-hang-dump-type full
+
+      # A hang leaves its dumps and the blame sequence file in TestResults/. Without this upload they die with the runner.
+      - name: Upload the exporter test results
+        if: failure()
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: exporter-test-results
+          path: Exporter/PerformanceMonitor.Exporter.Tests/TestResults/
+          retention-days: 3
+          if-no-files-found: ignore
 
   # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17, so a NULL an old server sends or a
   # column a supported version lacks (#6206, #6836) turns the pull request red. Runs only when the plan says a file it covers
