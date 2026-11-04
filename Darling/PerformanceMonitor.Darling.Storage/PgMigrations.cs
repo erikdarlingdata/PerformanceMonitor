@@ -2535,6 +2535,20 @@ ALTER TABLE collect.query_store_top_daily
     ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;";
 
     /// <summary>
+    /// V241 (#7497): <c>collect.blocked_process_reports.blocking_open_transaction_count</c>, the blocking process's own <c>trancount</c> from the
+    /// report XML (the head blocker's open transaction count). One nullable <c>integer</c>, no DEFAULT, no backfill (V199's shape): a row stored
+    /// before this rung never read the attribute, and a report with no <c>trancount</c> has nothing to read, so NULL is the honest value. A
+    /// nullable, default-less <c>ADD COLUMN</c> is catalog-only and TimescaleDB accepts it on a compressed hypertable. <b>Appended LAST</b>, after
+    /// <c>blocking_query_plan_xml</c>, because the writer is a positional binary COPY with an explicit column list: a fresh store (the generated V1
+    /// table carries the column from the collector's payload, and this ALTER no-ops there) and an upgraded one share one physical column order. The
+    /// trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_blocked_process_reports</c>' pinned <c>SELECT *</c> (V199's, unqualified). An older
+    /// build writes its own column list, so the new column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V241Sql = @"
+ALTER TABLE collect.blocked_process_reports ADD COLUMN IF NOT EXISTS blocking_open_transaction_count integer;
+CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_process_reports;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3032,6 +3046,7 @@ $rung$;";
         new Migration(238, "action-approval-proposals", V238Sql),
         new Migration(239, "compose-fleet-rollup", V239Sql),
         new Migration(240, "query-store-top-daily-weighted", V240Sql),
+        new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
     };
 
     /// <summary>

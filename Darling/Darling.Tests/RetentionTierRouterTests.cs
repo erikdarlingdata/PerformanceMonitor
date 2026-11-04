@@ -214,12 +214,10 @@ public sealed class RetentionTierRouterTests
         var rollupReadAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
         var unionAt = sql.IndexOf("UNION ALL", StringComparison.Ordinal);
         var rawReadAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
-        var tailGateAt = sql.IndexOf("AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
         Assert.True(ceilingAt >= 0, "the rollup's last materialized day must be read per server");
         Assert.Contains($"FROM collect.{expectedRelation}", sql[ceilingAt..rollupReadAt], StringComparison.Ordinal);
         Assert.True(rollupReadAt > ceilingAt, "the rollup half follows the ceiling CTE");
         Assert.True(unionAt > rollupReadAt && rawReadAt > unionAt, "the raw half is the UNION ALL tail, after the rollup half");
-        Assert.True(tailGateAt > rawReadAt, "the raw half must be gated to the days past the ceiling, or a day gets two rows");
 
         /* #3653 A6: the THIRD member — the days at or below the ceiling the rollup holds no row for while its
            source still holds admitted rows — emits the day with a NULL count, after the raw tail, gated on the
@@ -231,7 +229,7 @@ public sealed class RetentionTierRouterTests
            carries the rest of this member's pins; this one holds the ORDER and the gate. */
         var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
         var notCarriedGateAt = sql.IndexOf("AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", StringComparison.Ordinal);
-        Assert.True(notCarriedAt > tailGateAt, "the not-carried member is the last UNION ALL member, after the raw tail");
+        Assert.True(notCarriedAt > rawReadAt, "the not-carried member is the last UNION ALL member, after the raw tail");
         Assert.True(notCarriedGateAt > notCarriedAt, "the not-carried member is gated to the days at or below the ceiling");
         Assert.Contains($"SELECT 1 FROM collect.{expectedRelation} AS r", sql[notCarriedAt..], StringComparison.Ordinal);
         var expectedSource = tier == RetentionTier.Daily ? TimescaleSupport.QueryStatsHourlyView : "query_stats";

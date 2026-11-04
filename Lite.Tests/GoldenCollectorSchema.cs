@@ -790,7 +790,8 @@ internal static class GoldenCollectorSchema
     contentious_object VARCHAR,
     monitor_loop INTEGER,
     blocked_query_plan_xml VARCHAR,
-    blocking_query_plan_xml VARCHAR
+    blocking_query_plan_xml VARCHAR,
+    blocking_open_transaction_count INTEGER
 )",
         ["long_query_completions"] = @"CREATE TABLE IF NOT EXISTS long_query_completions (
     long_query_completion_id BIGINT PRIMARY KEY,
