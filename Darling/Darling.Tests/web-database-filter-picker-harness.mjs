@@ -39,7 +39,7 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { querySelectorAll: () => [], createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/server/SRV1/cpu" };
 
 const jsDir = process.argv[2];

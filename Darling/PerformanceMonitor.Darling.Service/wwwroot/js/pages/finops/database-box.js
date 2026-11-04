@@ -50,7 +50,7 @@ export function storedSpelling(typed, names) {
 
 /** What a page keeps per server for its box: { db, draft, caret, focused, names, cut, answer, ... } (this module owns those fields). */
 export function newBoxChoice() {
-  return { db: "", draft: undefined, caret: undefined, focused: false, names: [], cut: false, answer: null, searchSeq: 0, loadFailed: "" };
+  return { db: "", draft: undefined, caret: undefined, focused: false, names: [], cut: false, answer: null, searchSeq: 0, loadFailed: "", paints: new Set() };
 }
 
 /**
@@ -78,7 +78,15 @@ export function databaseBox(choice, { onCommit, server = null, signal = undefine
     else if (choice.cut && !choice.answer) text = "The list stops at " + choice.names.length + " databases, so more are not shown. Type part of a name to find it.";
     hint.textContent = text; // text, never markup
   }
-  choice.paint = paint;
+  /* #7393: a poll builds the next box while the one the reader uses is still on screen, and the reader's search answer must draw into
+     the box on screen. So a build adds its paint to the choice's set instead of taking the choice's one slot, and drops it when its
+     page is aborted (the page left the screen, or its build was dropped). A build with no signal cannot say when it ends: it is the
+     only one, as before. */
+  const ends = signal && typeof signal.addEventListener === "function";
+  if (!ends) choice.paints.clear();
+  choice.paints.add(paint);
+  if (ends) signal.addEventListener("abort", () => choice.paints.delete(paint), { once: true });
+  choice.paint = () => choice.paints.forEach((p) => p());
 
   function dropSearch() {
     clearTimeout(choice.searchTimer);

@@ -134,6 +134,19 @@ public sealed class AlertNotebookTemplateAnalysisFindingsTests
         Assert.Contains("**Category:** query-regression", outside, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void FoundFinding_SummaryCell_NamesTheCategoryInPlainWords()
+    {
+        var finding = SampleFinding();
+        finding.Category = "bad_actor";
+        var cells = InvokeAnalysisFindingTemplate(ContextFor(finding, missing: false));
+
+        var text = (string)cells.OfType<JsonObject>().Single(c => (string?)c["type"] == "markdown")["text"]!;
+
+        Assert.Contains("**Category:** Expensive query", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", text, StringComparison.Ordinal);
+    }
+
     /// <summary>The markdown a cell leaves once fenced blocks and code spans are removed, as the notebook's renderer reads them.</summary>
     private static string OutsideCode(string markdown)
     {

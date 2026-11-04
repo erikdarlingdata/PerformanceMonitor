@@ -778,7 +778,7 @@ export const READ_FIELDS = {
       emptyText: "No findings in this window.",
       columns: [
         { key: "last_seen", label: "Last seen", format: "time" },
-        { key: "category", label: "Category" },
+        { key: "category_name", label: "Category" },
         { key: "story_path", label: "Story", wrap: true },
         { key: "severity", label: "Severity", format: "num2" },
         { key: "confidence", label: "Confidence", format: "num2" },

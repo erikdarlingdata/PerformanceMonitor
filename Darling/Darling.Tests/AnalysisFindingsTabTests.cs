@@ -178,7 +178,16 @@ public sealed class AnalysisFindingsTabTests
         var text = Run("scoreWording").GetProperty("text").GetString()!;
         Assert.Contains("(score 0.80)", text, StringComparison.Ordinal);
         Assert.DoesNotContain("0.80 waits", text, StringComparison.Ordinal);
-        Assert.Contains("waits", text, StringComparison.Ordinal);
+        Assert.Contains("Waits", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCard_ShowsThePlainCategoryName_AndAnUnknownCategoryAsItIs()
+    {
+        var text = Run("categoryNames").GetProperty("text").GetString()!;
+        Assert.Contains("Expensive query", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", text, StringComparison.Ordinal);
+        Assert.Contains("weird_new_source", text, StringComparison.Ordinal);
     }
 
     [Fact]

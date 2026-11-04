@@ -19,12 +19,16 @@ class FakeNode {
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
   get firstChild() { return this.children[0] || null; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn); }
   every(pred, acc = []) { for (const c of this.children) { if (pred(c)) acc.push(c); c.every(pred, acc); } return acc; }
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t), querySelectorAll: () => [] /* keepScroll lists the page's grids; this fake page draws none */ };
 globalThis.location = { hash: "#/proposals" };
+/* The poll's page waits for its reads on a MutationObserver (whenSettled); the stand-in runs the callbacks when the scenario says to. */
+const observers = [];
+globalThis.MutationObserver = class { constructor(cb) { this.cb = cb; this.off = false; observers.push(this); } observe() {} disconnect() { this.off = true; } };
 
 const jsDir = process.argv[2];
 const scenario = process.argv[3];
@@ -180,6 +184,23 @@ try {
       const table = body.every((n) => n.tag === "table")[0];
       out.tableClass = table.className;
       out.tableWrapClass = table.parent.className;
+    },
+    /* #7393: the 60 s poll of the list leaves the list on screen while its reads run, then swaps the new one in. */
+    async pollKeepsTheListOnScreen() {
+      await draw("");
+      const row = role("proposal-row");
+      const polled = mod.renderProposals(body, "", { poll: true });
+      out.keptWhileReading = role("proposal-row") === row;
+      await polled; await settle();
+      observers.filter((o) => !o.off).forEach((o) => o.cb());
+      const now = role("proposal-row");
+      out.replaced = !!now && now !== row;
+      out.loadingLeft = body.every((n) => n.className.includes("loading")).length;
+      out.rows = body.every((n) => n.getAttribute("data-role") === "proposal-row").length;
+      /* The same call without the poll flag (a hashchange) draws at once. */
+      const again = mod.renderProposals(body, "");
+      out.firstPaintShowsLoading = body.every((n) => n.className.includes("loading")).length;
+      await again; await settle();
     },
     /* The route page: one strip for each route the check names, and none for a failed read. */
     async routeSentence() {
