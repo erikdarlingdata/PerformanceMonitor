@@ -175,6 +175,21 @@ public sealed class WebTileTruthsTests
         Assert.Equal("Sev 20, Sev 19", ViewerAgentAlertsText.GapWhich(new AgentAlertGap("alert_disabled", "An alert is disabled, so it cannot fire.", ["Sev 20", "Sev 19"], [])));
     }
 
+    // #7560: PostgreSQL has no memory-grant reading and no blocking count behind the fleet card, so those two tiles
+    // say n/a (as CPU and Threads do) instead of an OK and a 0 that read as measured. A SQL Server card keeps both.
+    [Fact]
+    public void ThePostgresCard_PrintsNotAvailableForMemoryAndBlocking_AndASqlServerCardKeepsItsReadings()
+    {
+        var engines = Run().GetProperty("engineChips");
+        var pg = engines.GetProperty("postgres");
+        Assert.Equal("Memoryn/a", pg.GetProperty("Memory").GetString());
+        Assert.Equal("Blockingn/a", pg.GetProperty("Blocking").GetString());
+
+        var sql = engines.GetProperty("sqlServer");
+        Assert.StartsWith("MemoryOK", sql.GetProperty("Memory").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("Blocking0", sql.GetProperty("Blocking").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheAlertSetupTile_CountsTheGaps_AndAStatusWordHasOneCasing()
     {
