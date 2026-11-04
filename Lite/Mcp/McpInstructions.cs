@@ -95,9 +95,10 @@ internal static class McpInstructions
 
         ### Asking about a past window
 
-        Every tool below that takes `hours_back` also takes `as_of`: an optional ISO-8601 UTC instant that moves the end of the window off "now"; `hours_back` stays the length. Use it for any past-time question, and do not substitute a wider `hours_back`: for an aggregate read a wider window is a different answer, not the same answer with more rows.
+        Every tool below that takes `hours_back` also takes `as_of`: an optional ISO-8601 UTC instant that moves the end of the window off "now"; `hours_back` stays the length. Use it for any past-time question, not a wider `hours_back` (for an aggregate read, a different answer).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
+        - A stamp with no offset is UTC unless the tool's note puts it on the server's clock.
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats` never takes it.
         - The analysis family does take it: `get_analysis_facts` and `analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
