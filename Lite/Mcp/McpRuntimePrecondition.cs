@@ -69,7 +69,7 @@ internal static class McpRuntimePrecondition
         var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
             serverName, collectorName, status, errorMessage, observedUtc);
 
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message, CollectorRuntimePrecondition.StructuredReason(collectorName, status));
     }
 
     /// <summary>

@@ -544,7 +544,7 @@ public sealed class PgIndexBloatGridReachTests
         var fanout = tabs[composite..(fanoutEnd > 0 ? fanoutEnd : tabs.Length)];
 
         Assert.Contains("getPath(res.data, spec.noteKey)", fanout, StringComparison.Ordinal);
-        Assert.Contains("noticeStrip(note)", fanout, StringComparison.Ordinal);
+        Assert.Contains("noteStrip(spec, note, res.data)", fanout, StringComparison.Ordinal);
     }
 
     /// <summary>

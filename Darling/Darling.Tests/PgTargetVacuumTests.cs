@@ -419,7 +419,7 @@ public sealed class PgTargetVacuumTests
 
     /// <summary>#3691 lane 43 (M3): the backlog read returns three rows now, so the card NAMES the next two
     /// backlogged tables (with each one's own ratio, run span and slope) where it used only to count them. The
-    /// population sentence keeps its own count and its own pointer to <c>get_pg_autovacuum</c>, because the gate's
+    /// population sentence keeps its own count and its own pointer to <c>get_pg_autovacuum_health</c>, because the gate's
     /// population can exceed the three rows the read returns.</summary>
     [Fact]
     public void TheBacklogAdvice_StatesTheTablesOwnNumbers_TheSlope_TheRunCount_AndNamesTheNextTwoTables_AndNeverSuggestsSwitchingAutovacuumOff()
