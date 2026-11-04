@@ -366,6 +366,14 @@ public sealed class ViewerServerSummaryDisplayTests
         Assert.Equal("Never", new ServerSummaryItem().LastCollectionDisplay);
     }
 
+    // #7560: a PostgreSQL server has no blocking count behind the tile, so it reads -- and not a 0 that looks measured.
+    [Fact]
+    public void BlockingDisplay_OnPostgres_IsNotAZero()
+    {
+        Assert.Equal("--", new ServerSummaryItem { IsPostgres = true, BlockingCount = 0 }.BlockingDisplay);
+        Assert.Equal("0", new ServerSummaryItem { IsPostgres = false, BlockingCount = 0 }.BlockingDisplay);
+    }
+
     [Fact]
     public void CountDisplays_MirrorLite()
     {
