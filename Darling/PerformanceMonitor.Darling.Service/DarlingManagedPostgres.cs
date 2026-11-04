@@ -2650,9 +2650,10 @@ public sealed class DarlingManagedPostgres
     /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
     /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
     /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
-    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
-    /// store the value is in force from the following start; every store already on the managed file has the line
-    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
+    /// next start finds the file unchanged. That migration runs after the start and reloads the server only once it
+    /// has verified (<c>EnsureRunningAsync</c>, #7446), so on such a store the value is in force on that start when the
+    /// migration verifies, and from the following start when it does not; every store already on the managed file has
+    /// the line written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
     /// key became managed may hold the operator's own <c>random_page_cost</c> above the include, where the include would override it:
     /// <see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/> finds such a line and the render leaves the key out.
     ///
@@ -2681,6 +2682,146 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
         return builder.ToString();
+    }
+
+    /* ===================== TimescaleDB telemetry (#7446) ===================== */
+
+    /// <summary>TimescaleDB's usage-report setting. <c>basic</c> (the extension's default) sends a report to
+    /// Timescale's server about once a day and checks for a newer version; <c>off</c> sends nothing.</summary>
+    internal const string TelemetryLevelSetting = "timescaledb.telemetry_level";
+
+    /// <summary>The value <see cref="BuildTelemetryLevelConfAppend"/> writes: <c>off</c>.</summary>
+    internal const string TelemetryLevelValue = "off";
+
+    /// <summary>
+    /// The telemetry block (#7446): <c>timescaledb.telemetry_level = off</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and not appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker, like the planner page cost line
+    /// above, and it reaches an existing store the same way (<see cref="ManagedConfFile.ManagedOnlyKeys"/>).
+    ///
+    /// <para><b>Why.</b> The bundled TimescaleDB defaults the level to <c>basic</c> (measured on 2.30.1), so an
+    /// unmodified store phones home daily. A monitoring product on a restricted network should make no
+    /// outbound call its operator did not choose.</para>
+    ///
+    /// <para><b>Context and precedence.</b> The setting is <c>user</c>-context (measured: <c>pg_settings.context</c>
+    /// is <c>user</c>), so a reload applies it. A value set with <c>ALTER SYSTEM</c> lives in
+    /// <c>postgresql.auto.conf</c>, which is read after this file and wins, so an operator can turn the report
+    /// back on. Nothing here reads or writes that file.</para>
+    /// </summary>
+    public static string BuildTelemetryLevelConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(TelemetryLevelSetting).Append(" = ").Append(TelemetryLevelValue).Append('\n');
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// <c>pg_reload_conf()</c>, then waits up to five seconds for <c>pg_conf_load_time()</c> to move, so a read right
+    /// after sees the reloaded values (the reload signal is handled asynchronously). A failure is logged and never
+    /// fails the start.
+    /// </summary>
+    internal async Task ReloadConfAndWaitAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+            await connection.OpenAsync(cancellationToken);
+            await using var before = new NpgsqlCommand("SELECT pg_catalog.pg_conf_load_time()", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            var loadedBefore = (DateTime)(await before.ExecuteScalarAsync(cancellationToken))!;
+
+            await using var reload = new NpgsqlCommand("SELECT pg_catalog.pg_reload_conf()", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            await reload.ExecuteScalarAsync(cancellationToken);
+
+            for (var attempt = 0; attempt < 50; attempt++)
+            {
+                await Task.Delay(100, cancellationToken);
+                var loadedNow = (DateTime)(await before.ExecuteScalarAsync(cancellationToken))!;
+                if (loadedNow != loadedBefore)
+                {
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not reload the store's settings after writing {File}; they take effect at the next start", ManagedConfFile.FileName);
+        }
+    }
+
+    /// <summary>
+    /// Sets the extension's <c>policy_telemetry</c> job to run only while the level is not <c>off</c> (#7446).
+    /// Measured on 2.30.1: with the level off the job still runs, returns false, and TimescaleDB records every run
+    /// as Failed with no error text, a daily false failure at the top of the job list. The job is found by
+    /// <c>proc_name</c> (never by id), so no row is a no-op, and only a row whose <c>scheduled</c> differs is
+    /// altered, so a start that finds it settled writes nothing. An operator who sets the level back to
+    /// <c>basic</c> with <c>ALTER SYSTEM</c> gets the job back at the next start. Reads the level in force, so it
+    /// follows whichever file won. A store without the extension yet (a new store, when the start reaches this pass)
+    /// has no job and is left alone here; the worker runs the pass again right after it creates the extension.
+    /// </summary>
+    internal const string TelemetryJobReconcileSql = @"
+SELECT count(*)::int
+FROM (
+    SELECT alter_job(j.job_id, scheduled => (COALESCE(current_setting('timescaledb.telemetry_level', true), 'basic') <> 'off'))
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name = 'policy_telemetry'
+      AND j.scheduled IS DISTINCT FROM (COALESCE(current_setting('timescaledb.telemetry_level', true), 'basic') <> 'off')
+) AS altered";
+
+    /// <summary>
+    /// Runs <see cref="TelemetryJobReconcileSql"/> against the store database. A failure is logged and never
+    /// fails the start. Returns the number of jobs changed, or -1 when the step did not run.
+    /// </summary>
+    internal async Task<int> ReconcileTelemetryJobAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+            await connection.OpenAsync(cancellationToken);
+
+            await using (var probe = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            })
+            {
+                if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken) ?? false))
+                {
+                    return 0;
+                }
+            }
+
+            await using var command = new NpgsqlCommand(TelemetryJobReconcileSql, connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            var changed = (int)(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+            if (changed > 0)
+            {
+                _logger.LogInformation(
+                    "Set the TimescaleDB telemetry job to follow {Setting} ({Changed} job changed)", TelemetryLevelSetting, changed);
+            }
+
+            return changed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not set the TimescaleDB telemetry job to follow {Setting}; the store start continues", TelemetryLevelSetting);
+            return -1;
+        }
     }
 
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
@@ -3497,7 +3638,25 @@ public sealed class DarlingManagedPostgres
             {
                 LastManagedConfVerification = migrationOutcome;
             }
+
+            /* #7446: a store whose conf was still the legacy blocks (every new store, and each one upgrading from a
+               build before the managed file) was started on those blocks, and the migration above has just written
+               darling-managed.conf, which carries the telemetry level. Have the server read it now so the level is
+               off on this first start, not only on the next. Only on a Legacy start whose migration verified: a Verified
+               outcome means the file equals the one in force apart from added keys (ManagedOnlyKeys), so the reload
+               changes nothing else. A Failed or Unknown outcome leaves the files unverified, and before this change
+               such a start could not alter the running server, so it still does not. Every other confState started
+               on the migrated files already (PendingVerify, MigratedUnstamped) or on a file Step B owns (Verified),
+               so a reload would add nothing and could apply a hand edit. */
+            if (confState == ManagedConfMigrationState.Kind.Legacy
+                && migrationOutcome is { Status: ManagedConfVerificationStatus.Verified })
+            {
+                await ReloadConfAndWaitAsync(connectionString, cancellationToken);
+            }
         }
+
+        /* #7446: the extension's telemetry job follows the telemetry level in force. Never fails the start. */
+        await ReconcileTelemetryJobAsync(connectionString, cancellationToken);
 
         return connectionString;
     }

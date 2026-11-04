@@ -652,7 +652,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. A row with status ok only states the setting and its value, and advice appears on the rows that fired plus the context settings (checkpoint_timeout, wal_compression, work_mem). get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -737,30 +737,30 @@ public sealed class DarlingMcpTools
                         var notApplicable = fact.Metadata.GetValueOrDefault("not_applicable") > 0
                             || (isAurora && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout);
 
+                        var settingName = PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key;
+                        var currentValue = FormatConfigPgValue(fact);
+
                         return new PgConfigRecommendation(
-                            Setting: PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key,
+                            Setting: settingName,
                             FactKey: fact.Key,
-                            CurrentValue: FormatConfigPgValue(fact),
+                            CurrentValue: currentValue,
                             Status: notApplicable ? "not_applicable"
                                 : fact.Severity >= 0.5 ? "warning"
                                 : fact.Severity > 0 ? "review"
                                 : "ok",
-                            /* Headline + remediation. max_wal_size needs no special case: lane 15 composed the
-                               not-applicable sentence INTO its advice block, so the same two fields carry it.
-                               checkpoint_timeout's block is the base-0 context one ("tune it with
-                               max_wal_size"), which has no Aurora arm — so the sentence is appended here, where
-                               the headline still states the value the parameter group holds and the rider says
-                               who actually decides it. The discriminator is the KEY, not the stamp: #3868
-                               stamped the fact, so "unstamped" would have silently stopped appending the one
-                               sentence rider 1 exists to guarantee. A key with no composed block (none today;
-                               a future key added without an advice arm) says so rather than rendering an empty
-                               sentence. */
-                            Recommendation: advice is null
-                                ? $"No composed advice for {fact.Key} in this build — get_analysis_facts carries the fact and its metadata."
-                                : advice.Headline + " " + advice.Remediation
-                                    + (notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout
-                                        ? " Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead."
-                                        : string.Empty),
+                            /* #7447: a row at severity 0 states the setting and its value in plain words, because most
+                               advice blocks are written for the fired case and would say something false beside a healthy
+                               value. The three context-by-design blocks, the not_applicable rows and every fired row keep
+                               their advice, joined with a full stop. max_wal_size needs no special case: lane 15 composed
+                               the not-applicable sentence INTO its advice block. checkpoint_timeout's block is the base-0
+                               context one ("tune it with max_wal_size"), which has no Aurora arm, so the sentence is
+                               appended here, where the headline still states the value the parameter group holds and the
+                               rider says who actually decides it. The discriminator is the KEY, not the stamp: #3868
+                               stamped the fact, so "unstamped" would have silently stopped appending the one sentence
+                               rider 1 exists to guarantee. */
+                            Recommendation: PgConfigAuditText.Compose(
+                                fact, settingName, currentValue, advice, notApplicable,
+                                isAuroraCheckpointTimeout: notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout),
                             /* The fact's own lineage stamp, passed through: 0 = the bar was chosen, not
                                measured; 1 = measured against the dogfood PostgreSQL fleet. ABSENT (null) is
                                the config family's normal case and means neither — the bar IS PostgreSQL's own
@@ -1935,6 +1935,154 @@ internal static class ToolRecommendations
             new("get_top_queries_by_cpu", "Find which queries account for the new batch volume"),
             new("get_active_queries", "See what's actually running at the elevated rate")
         ],
+        /* #7449: every root key whose advice the engine composes now has a next_tools row. Before, these arrived
+           with "next_tools":[] and the card named a tab or a read the agent could not reach from the reply. */
+        ["MEMORY_PRESSURE_EVENTS"] =
+        [
+            new("get_memory_pressure_events", "Pull the RING_BUFFER_RESOURCE_MONITOR notifications behind the finding: event times and the process and system indicators"),
+            new("get_memory_stats", "Compare target and total server memory and available physical memory around the event times"),
+            new("get_memory_clerks", "Find which clerks are holding the memory SQL Server is being asked to give back")
+        ],
+        ["MEMORY_CLERKS"] =
+        [
+            new("get_memory_clerks", "See the clerk sizes the finding is built from"),
+            new("get_memory_trend", "Track memory growth over time"),
+            new("get_memory_stats", "Check target vs total server memory")
+        ],
+        ["BLOCKING_CHAIN"] =
+        [
+            new("get_blocking", "Get the blocking chains with lead blocker, victims and query text"),
+            new("get_blocking_trend", "Track blocking frequency over time"),
+            new("get_lock_wait_trend", "Track lock wait time over the window")
+        ],
+        ["LCK_RANGE"] =
+        [
+            new("get_blocking", "Get the blocking reports that carry the range locks"),
+            new("get_object_locking", "See which objects the range locks sit on"),
+            new("get_lock_wait_trend", "Track range-lock wait time over the window")
+        ],
+        ["THREADPOOL_BLOCKING"] =
+        [
+            new("get_blocking", "Find the lead blocker holding worker threads"),
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_blocking_trend", "Track blocking frequency over time")
+        ],
+        ["THREADPOOL_PARALLEL"] =
+        [
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("audit_config", "Check CTFP and MAXDOP settings"),
+            new("get_wait_trend", "Track the THREADPOOL wait over time", new() { ["wait_type"] = "THREADPOOL" })
+        ],
+        ["THREADPOOL_MIXED"] =
+        [
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("get_blocking", "Check whether blocking is holding worker threads")
+        ],
+        ["RESOURCE_SEMAPHORE_QUERY_COMPILE"] =
+        [
+            new("get_memory_grants", "Check active and pending memory grants"),
+            new("get_resource_semaphore", "See the compile-gateway and grant semaphore state"),
+            new("get_wait_trend", "Track the compile wait over time", new() { ["wait_type"] = "RESOURCE_SEMAPHORE_QUERY_COMPILE" })
+        ],
+        ["RUNNABLE_TASKS"] =
+        [
+            new("get_cpu_scheduler_pressure", "See runnable-queue depth per scheduler"),
+            new("get_cpu_utilization", "See CPU trend over time"),
+            new("get_top_queries_by_cpu", "Find the queries consuming the CPU")
+        ],
+        ["PAGELATCH_EX"] =
+        [
+            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
+            new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
+        ],
+        ["PAGELATCH_UP"] =
+        [
+            new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
+            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
+        ],
+        ["MISSING_INDEX"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries the missing index would help"),
+            new("get_index_usage", "Check how the existing indexes on the table are used before adding another"),
+            new("get_table_index_sizes", "See the table and index sizes the new index would join")
+        ],
+        ["PLAN_WARNING"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries whose cached plans carry the warnings"),
+            new("analyze_plan_xml", "Pass the plan XML of a query that carries these warnings to see them statement by statement: spills, implicit conversions, missing statistics")
+        ],
+        ["PLAN_CACHE_BLOAT"] =
+        [
+            new("get_plan_cache_bloat", "See single-use plan counts and size by database"),
+            new("get_memory_clerks", "See how much memory the plan cache clerks hold"),
+            new("audit_config", "Check the optimize for ad hoc workloads setting")
+        ],
+        ["CONFIG_MAXDOP"] =
+        [
+            new("audit_config", "Grade MAXDOP against the core count"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_CTFP"] =
+        [
+            new("audit_config", "Grade cost threshold for parallelism"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_MAX_MEMORY_MB"] =
+        [
+            new("audit_config", "Grade max server memory against physical RAM"),
+            new("get_memory_stats", "Check target vs total server memory and available physical memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_MIN_MAX_MEMORY_NARROW"] =
+        [
+            new("audit_config", "Grade min and max server memory"),
+            new("get_memory_stats", "Check target vs total server memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_LIGHTWEIGHT_POOLING"] =
+        [
+            new("audit_config", "Check the lightweight pooling setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_PRIORITY_BOOST"] =
+        [
+            new("audit_config", "Check the priority boost setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_IFI_DISABLED"] =
+        [
+            new("audit_config", "Check instant file initialization and the service account"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["CONFIG_LPIM_DISABLED"] =
+        [
+            new("audit_config", "Check lock pages in memory and the service account"),
+            new("get_memory_stats", "Check whether the OS is taking memory back from SQL Server"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["SERVER_MEMORY_DUMPS"] =
+        [
+            new("get_health_parser_severe_errors", "Look for severe errors logged near the dump times"),
+            new("get_default_trace_events", "Look for events recorded around the dump times")
+        ],
+        ["ANOMALY_OBJECT_GROWTH"] =
+        [
+            new("get_table_index_sizes", "See per-table and per-index sizes and which grew"),
+            new("get_database_sizes", "See per-file sizes and autogrowth settings")
+        ],
+        ["ANOMALY_OBJECT_CONTENTION"] =
+        [
+            new("get_object_locking", "See which objects the contention sits on"),
+            new("get_lock_wait_trend", "Track lock wait time over the window"),
+            new("get_blocking", "Check whether the contention shows up as blocking")
+        ],
         ["BAD_ACTOR"] =
         [
             new("get_top_queries_by_cpu", "See full query stats for this query"),
@@ -1976,6 +2124,12 @@ internal static class ToolRecommendations
                 // Handle dynamic keys by checking prefix
                 else if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("BAD_ACTOR", out recommendations);
+                /* #7449: the range-lock waits (LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_*) are each their own fact key
+                   (FactCollectorHelpers keeps them out of the grouped LCK), and none is named LCK_RANGE. FactAdvice
+                   routes the same prefix to one card; this routes it to that card's reads. No other key starts with
+                   LCK_M_R. */
+                else if (key.StartsWith("LCK_M_R", StringComparison.Ordinal))
+                    ByFactKey.TryGetValue("LCK_RANGE", out recommendations);
                 else if (key.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("ANOMALY_CPU", out recommendations);
                 else if (key.StartsWith("ANOMALY_WAIT_", StringComparison.OrdinalIgnoreCase))
