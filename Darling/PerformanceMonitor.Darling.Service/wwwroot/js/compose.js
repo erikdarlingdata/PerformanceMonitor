@@ -833,7 +833,7 @@ function annotationMetaMap() {
  * spec, and — when a pinned dimension is `server` — a jump to that server's existing detail page. Every value is
  * textContent (R4/XSS); the chip is view-state only (the stored definition is never touched).
  */
-/** The dual-axis overlay's FIXED series color (#1606) — the tail of CATEGORICAL_COLORS, so it can never
+/** The dual-axis overlay's FIXED series color (#1606) — a purple outside CATEGORICAL_COLORS (#7401), so it can never
  *  collide with the primary series' CATEGORICAL_COLORS[0] on an ungrouped chart. */
 const OVERLAY_COLOR = "#ba68c8";
 
