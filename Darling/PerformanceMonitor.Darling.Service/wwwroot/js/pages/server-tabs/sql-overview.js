@@ -32,7 +32,10 @@ export function overviewStripsPanel(server, ctx) {
  * figure can change, and the change makes the two panels agree: the tile's unique_queries for today is now
  * the range's own count, which comes from the rollup tier's materialized hours when the month routes to a
  * rollup (#3653 A6), where the single-day read counted raw. Before, the tile and the grid's last row could
- * print different numbers for the same day on the same page. The row is matched on the server's `to_date`
+ * print different numbers for the same day on the same page. A day the hourly rollup holds only part of
+ * (today, while the rollup runs behind the clock) is counted from raw instead, or from the rollup if that is
+ * larger (#7505), so today's count is not low while a burst of new queries waits to be rolled up. A closed
+ * day can still differ slightly from the single-day read: the rollup leaves restart rows out. The row is matched on the server's `to_date`
  * rather than on a date the page computes (R1). A day with nothing collected yet has no row, and the tile
  * says so rather than rendering dashes.
  *

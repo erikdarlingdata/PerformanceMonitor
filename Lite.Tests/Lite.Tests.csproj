@@ -72,6 +72,8 @@
     <Compile Include="..\Darling\Darling.Tests\ClippedTextProbe.cs" Link="ClippedTextProbe.cs" />
     <!-- #6138: finds the Settings inputs a screen reader cannot name, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\InputNamesProbe.cs" Link="InputNamesProbe.cs" />
+    <!-- #7478: finds every chart of a laid-out tab and measures its plot, legend, tick labels, axis start and group, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\ChartLayoutProbe.cs" Link="ChartLayoutProbe.cs" />
     <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
     <!-- #5943: TestWait (WaitUntil, Elapse) and AnchorClock, the replacements for Thread.Sleep and for reading the clock twice. Its own tests stay in Darling.Tests. -->

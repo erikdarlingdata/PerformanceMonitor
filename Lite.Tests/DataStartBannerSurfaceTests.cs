@@ -453,6 +453,43 @@ FROM generate_series({Literal(firstEventUtc)}, {Literal(lastEventUtc)}, INTERVAL
         _nextId += await insert.ExecuteNonQueryAsync() + 1;
     }
 
+    /// <summary>
+    /// #7497: the Blocked Process Reports read hands back the report's own blocking-process open transaction count. The
+    /// column sits last in the read's projection (ordinal 37), so a mapper that reads a neighbouring column, or a projection
+    /// that drops it, shows another column's value. Both rows also carry a monitor_loop (ordinal 36, 99) so a read that is one
+    /// ordinal off returns 99, not null. A report row stored without the count stays null: not 0.
+    /// </summary>
+    [Fact]
+    public async Task BlockedProcessReportsRead_ReturnsTheReportRowsBlockingOpenTransactionCount_AndKeepsNullNull()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var now = DateTime.UtcNow;
+        var end = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+        var withCount = end.AddMinutes(-20);
+        var withoutCount = end.AddMinutes(-10);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, withCount);
+        await SeedRowAsync(QueryWindowRelation.BlockedProcessReports, withoutCount);
+
+        var timeColumn = LocalDataService.QueryWindowRelationTimeColumn(QueryWindowRelation.BlockedProcessReports);
+        var connection = await _seed.ConnectionAsync();
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            using var update = connection.CreateCommand();
+            update.CommandText = $"UPDATE blocked_process_reports SET monitor_loop = 99, " +
+                $"blocking_open_transaction_count = CASE WHEN {timeColumn} = {Literal(withCount)} THEN 3 ELSE NULL END";
+            Assert.Equal(2, await update.ExecuteNonQueryAsync());
+        }
+
+        var read = await Service().ReadRecentBlockedProcessReportsAsync(ServerId, fromDate: end.AddHours(-1), toDate: end);
+
+        Assert.Equal(2, read.Rows.Count);
+        var counted = Assert.Single(read.Rows, r => r.EventTime == withCount);
+        var uncounted = Assert.Single(read.Rows, r => r.EventTime == withoutCount);
+        Assert.Equal(3, counted.BlockingOpenTransactionCount);
+        Assert.Null(uncounted.BlockingOpenTransactionCount);
+        Assert.Equal(99, counted.MonitorLoop);
+    }
+
     private static int GridCapOf(QueryWindowRelation relation) =>
         relation == QueryWindowRelation.BlockedProcessReports ? LocalDataService.BlockedProcessReportGridCap : LocalDataService.DeadlockGridCap;
 

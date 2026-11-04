@@ -56,8 +56,30 @@ public sealed class ViewerBlockedProcessReportsCoverageLiveTests : IDisposable
     private const int ThresholdDmvServerId = -499815;
     private const int ThresholdNoZeroSeenServerId = -499816;
     private const int ThresholdTurnedOffServerId = -499817;
+    private const int OpenTranCountServerId = -499818;
     private const string XeCollector = "blocked_process_report";
     private const string DmvCollector = "dmv_blocking_snapshot";
+
+    /* #7497: the viewer's report read returns the report row's own blocking_open_transaction_count (the read's last column, ordinal
+       39). A read of the wrong ordinal returns another column's value or throws on the cast; a report stored without the count
+       stays null, not 0. */
+    [Fact]
+    public async Task TheReportRead_ReturnsTheReportRowsBlockingOpenTransactionCount_AndKeepsNullNull_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await Store.CreateAsync(rangeEndsDaysAgo: 0, ct);
+
+        await store.AddServerAsync(OpenTranCountServerId, store.End.AddDays(-40), ct);
+        /* Two reports, six hours apart; the older one gets a count of 3. */
+        await store.InsertXeReportsAsync(OpenTranCountServerId, store.End.AddHours(-30), store.End.AddHours(-24), store.End.AddHours(-12), ct);
+        await store.SetOldestReportOpenTransactionCountAsync(OpenTranCountServerId, 3, ct);
+
+        var read = await store.Viewer.ReadRecentBlockedProcessReportsAsync(OpenTranCountServerId, store.Start, store.End, cancellationToken: ct);
+
+        Assert.Equal(2, read.Rows.Count);
+        Assert.Single(read.Rows, r => r.BlockingOpenTransactionCount == 3);
+        Assert.Single(read.Rows, r => r.BlockingOpenTransactionCount is null);
+    }
 
     /* The range ends before the server's first collection, which stored the events of the days before it: the probe finds no
        coverage in the range, yet the grid lists events from a day into it. The notice names the first of them. */
@@ -535,6 +557,18 @@ FROM generate_series($3::timestamp, $4::timestamp, interval '6 hours') AS t", co
             insert.Parameters.AddWithValue(Naive(collectedAtUtc));
             insert.Parameters.AddWithValue(-(long)serverId * 1000L);
             await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* Sets the blocking process's open transaction count on the server's oldest report; the others keep NULL. */
+        public async Task SetOldestReportOpenTransactionCountAsync(int serverId, int count, CancellationToken ct)
+        {
+            await using var connection = await OpenAsync(ct);
+            await using var update = new NpgsqlCommand(@"
+UPDATE collect.blocked_process_reports SET blocking_open_transaction_count = $2
+WHERE server_id = $1 AND event_time = (SELECT min(event_time) FROM collect.blocked_process_reports WHERE server_id = $1)", connection);
+            update.Parameters.AddWithValue(serverId);
+            update.Parameters.AddWithValue(count);
+            Assert.Equal(1, await update.ExecuteNonQueryAsync(ct));
         }
 
         /* One daily server_config snapshot of the blocked process threshold from firstUtc to lastUtc, all reading the given value. */
