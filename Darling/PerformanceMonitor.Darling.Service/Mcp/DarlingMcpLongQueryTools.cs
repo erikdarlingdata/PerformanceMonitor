@@ -48,7 +48,7 @@ public sealed class DarlingMcpLongQueryTools
         => GetLongQueryCompletions(postgres, server_name, hours_back, limit, as_of, DatabaseFilter.One(database_name), logger, cancellationToken, tag, include_monitor);
 
     /// <summary>The <c>include_monitor</c> parameter text, shared with the web grid's toggle (#7416 item 11).</summary>
-    public const string IncludeMonitorDescription = "Include the monitor's own statements (program name starting PerformanceMonitor, the collectors' reads). Default false: they are left out, because on an idle server every long completion can be the monitor's. Set true to see a slow collector run.";
+    public const string IncludeMonitorDescription = "Include the monitor's own statements (program name starts PerformanceMonitor). Default false: left out. Set true to see a slow collector run.";
 
     /// <summary>
     /// #5244: the get_long_query_completions read over a LIST of databases. The MCP tool passes
@@ -92,7 +92,7 @@ public sealed class DarlingMcpLongQueryTools
                The reader's own LIMIT 200 was invisible to the caller, and `total_completions` published it as
                the window's count. */
             var rows = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, tagFilter, cancellationToken, include_monitor);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databaseFilter, tagFilter, include_monitor, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -123,8 +123,8 @@ public sealed class DarlingMcpLongQueryTools
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
                         + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
-                        + (include_monitor ? "" : " (the monitor's own statements are left out. Pass include_monitor=true to include them)")
-                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : ".")
+                        + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     databaseFilter.Describe(), /* #5244 review L2: the echo rides on an empty answer too */
                     emptyNotice.AsHints()), cancellationToken);
             }

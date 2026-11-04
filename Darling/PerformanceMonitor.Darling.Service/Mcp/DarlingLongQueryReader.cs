@@ -108,15 +108,15 @@ internal static class DarlingLongQueryReader
     /// page is the slowest N of those databases. <see cref="DatabaseFilter.All"/> (the default) is every database.</para>
     /// </summary>
     public static Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default, bool includeMonitor = false) =>
-        GetRecentLongQueryCompletionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, tags: null, cancellationToken, includeMonitor);
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, bool includeMonitor = false, CancellationToken cancellationToken = default) =>
+        GetRecentLongQueryCompletionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, tags: null, includeMonitor, cancellationToken);
 
     /// <summary>
     /// The same read narrowed to a query tag (#5984): <paramref name="tags"/> keeps only completions whose <c>query_hash</c> carries the tag
     /// (or a tag beneath it), or none, in the statement and ahead of the cap. Null is no tag filter.
     /// </summary>
     public static async Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken, bool includeMonitor = false)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, QueryTagFilter? tags, bool includeMonitor, CancellationToken cancellationToken)
     {
         var rows = new List<LongQueryReadRow>();
 

@@ -63,6 +63,28 @@ public partial class ViewerServerTab
     }
 
     /// <summary>
+    /// #7416 item 11: the grid leaves the monitor's own statements out until this box is ticked (on an idle server every
+    /// long completion is the monitor's). A change reads the grid again; before the tab has loaded there is nothing to redo.
+    /// </summary>
+    private async void LongQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            await LoadLongQueriesAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LongQueriesDisabledWarning.Text = "Could not read long queries: " + ex.Message;
+            LongQueriesDisabledWarning.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>
     /// Long Queries inner tab (#1496): completed long-running queries (rpc/batch over the duration
     /// threshold) plus attentions (cancels/timeouts) from the opt-in XE session, windowed on the toolbar's
     /// range and bound through the filter manager. Because the collector is default OFF, an explicit
@@ -80,7 +102,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var tagFilter = await CurrentQueryTagFilterAsync();
         var dataStartTask = Timed(timer, "data start", _dataService.GetLongQueriesDataStartAsync(_server.ServerId, startUtc, endUtc));
-        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
+        var dataReadTask = Timed(timer, "grid read", _dataService.GetRecentLongQueryCompletionsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter, includeMonitor: LongQueriesIncludeMonitorCheckBox.IsChecked == true));
         try
         {
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Long Queries");

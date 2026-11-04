@@ -4223,6 +4223,11 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
+                <CheckBox Grid.Row="0" x:Name="LongQueriesIncludeMonitorCheckBox" Content="Include the monitor's own statements"
+                          HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,0,8"
+                          Foreground="{DynamicResource ForegroundBrush}"
+                          ToolTip="Off by default: on an idle server every long completion can be the monitor's own. Turn on to see a slow collector run."
+                          Checked="LongQueriesIncludeMonitorCheckBox_Changed" Unchecked="LongQueriesIncludeMonitorCheckBox_Changed"/>
                 <TextBlock Grid.Row="0" Text="Long-Running Query Completions (RPC / batch completions over the duration threshold, plus attentions / cancels)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8" TextWrapping="Wrap"/>
                 <TextBlock Grid.Row="1" x:Name="LongQueriesDisabledWarning" Visibility="Collapsed"
                            Foreground="{DynamicResource WarningTextBrush}" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
