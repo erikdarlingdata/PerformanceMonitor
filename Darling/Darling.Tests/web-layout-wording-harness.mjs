@@ -98,6 +98,13 @@ try {
   const card = usage.sectionCard({ name: "plan_cache", title: "Plan cache" }, block, () => {}, "this time range", names);
   out.serverHeadings = findAll(card, (n) => n.tag === "h4").map((n) => n.textContent);
 
+  /* One favourite (the server whose display name is Charlie) goes first, as in the sidebar; the rest keep the display-name order. */
+  const local = await load("viewer-local.js");
+  local.toggleFavorite(1);
+  const favNames = names.map((n, i) => ({ ...n, server_id: [1, 2, 3][i] }));
+  const favCard = usage.sectionCard({ name: "plan_cache", title: "Plan cache" }, block, () => {}, "this time range", favNames);
+  out.serverHeadingsWithFavourite = findAll(favCard, (n) => n.tag === "h4").map((n) => n.textContent);
+
   /* Optimization: the cost line starts with a capital whatever cost_reason says. */
   const optimization = await load("pages", "finops", "optimization.js");
   out.costLines = [undefined, null, "monthly cost not set", "no monthly cost is set for this server"].map((reason) =>

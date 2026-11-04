@@ -74,6 +74,8 @@ public sealed class AdminReportFeedbackBehaviourTests
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         Assert.Contains(Strings(page.GetProperty("strips")),
             t => t.Contains("this page is list-only", System.StringComparison.Ordinal) && t.Contains("To record feedback, use the Viewer app", System.StringComparison.Ordinal));
+        // #7402: nothing was turned off here (the switch is on or unknown), so the note must not say so or name a switch.
+        Assert.DoesNotContain(Strings(page.GetProperty("strips")), t => t.Contains("turned off", System.StringComparison.Ordinal) || t.Contains("web.allowAdminWrites", System.StringComparison.Ordinal));
     }
 
     [Fact]

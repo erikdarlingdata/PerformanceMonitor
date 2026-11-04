@@ -76,6 +76,13 @@ public sealed class WebLayoutWordingBehaviourTests
     }
 
     [Fact]
+    public void QueryTagUsage_SectionsPutAFavouriteFirst_ThenFollowTheDisplayName()
+    {
+        // The sidebar's order is the one order for every server list: Charlie is the favourite, so it leads, then Alpha and Bravo by display name.
+        Assert.Equal(new[] { "Charlie", "Alpha", "Bravo" }, Strings(Run().GetProperty("serverHeadingsWithFavourite")));
+    }
+
+    [Fact]
     public void TheOptimizationCostLine_StartsWithACapital_ForEveryCostReason()
     {
         var lines = Strings(Run().GetProperty("costLines"));

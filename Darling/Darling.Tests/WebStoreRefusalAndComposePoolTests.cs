@@ -72,7 +72,10 @@ public sealed class WebStoreRefusalAndComposePoolTests
         Assert.Equal(DarlingWebStoreWrites.Refused("make this change", managedStore, webLoginWrite: true), error);
         if (managedStore)
         {
-            Assert.Contains("Changes from this page are turned off", error, StringComparison.Ordinal);
+            // The switch is not what refused it here (no admin pool is not the case under test), so the sentence must not claim one.
+            Assert.DoesNotContain("turned off", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("web.allowAdminWrites", error, StringComparison.Ordinal);
+            Assert.Contains("store login has no write access", error, StringComparison.Ordinal);
         }
         else
         {

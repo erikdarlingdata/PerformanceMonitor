@@ -14,7 +14,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// store that setting is a validation error, so naming it (or "the admin login") sends the user to an option the store refuses. The sentence
 /// therefore depends on <see cref="PostgresConfig.Managed"/>: a managed store says the dashboard lists only and the Viewer app makes the change,
 /// a store the operator brought keeps the advice to give the web an admin store login. On the managed store with <c>web.allowAdminWrites</c>
-/// off (#6600) the sentence also names that switch.
+/// off (#6600) the sentence says changes are turned off and names that switch, and with it on the refusal is about the store login's privilege and names no switch (#7402).
 /// </summary>
 internal static class DarlingWebStoreWrites
 {
@@ -30,8 +30,11 @@ internal static class DarlingWebStoreWrites
     internal static string Refused(string cannot, bool managedStore, string instead = "Use the Viewer app to make the change",
         string? bringYourOwnExtra = null, bool adminWritesOff = false, bool webLoginWrite = false) =>
         managedStore
-            ? $"Changes from this page are turned off, so this dashboard cannot {cannot}. {instead}."
-              + (adminWritesOff ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
+            ? (adminWritesOff
+                  ? $"Changes from this page are turned off, so this dashboard cannot {cannot}. {instead}."
+                    + " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service."
+                  // #7402: with the switch on the refusal is about privilege (the admin login's credential is not stored yet, or the store refused the web login), so no switch is named.
+                  : $"This dashboard's store login has no write access, so it cannot {cannot}. {instead}.")
             : webLoginWrite
                 ? $"This dashboard's store login cannot {cannot}. Point postgres.webConnectionString at the web role "
                   + DarlingManagedRoles.ProvisionRolesScriptPath + " creates." + bringYourOwnExtra
