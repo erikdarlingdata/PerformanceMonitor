@@ -178,7 +178,7 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
         Assert.Contains("if (!request) {", util, StringComparison.Ordinal);
         Assert.Contains("request = fetchBody(\"/api/fleet\", undefined, frontDoorOn ? key : undefined).finally(() => {", util, StringComparison.Ordinal);
         Assert.Contains("if (fleetRequests.get(key) === request) fleetRequests.delete(key);", util, StringComparison.Ordinal);
-        Assert.Contains("return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });", util, StringComparison.Ordinal);
+        Assert.Contains("const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });", util, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the rule ─────────────────────────── */

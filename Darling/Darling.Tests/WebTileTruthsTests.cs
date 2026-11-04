@@ -230,6 +230,31 @@ public sealed class WebTileTruthsTests
     }
 
     [Fact]
+    public void TheBlockingAndDeadlocksTiles_NameTheWindowTheReplyCovered_EvenWithNoEvents()
+    {
+        var w = Run().GetProperty("windowChips");
+        foreach (var tile in new[] { "Blocking", "Deadlocks" })
+        {
+            var hourQuiet = w.GetProperty("hour").GetProperty("quiet").GetProperty(tile).GetString();
+            var dayQuiet = w.GetProperty("day").GetProperty("quiet").GetProperty(tile).GetString();
+            Assert.False(string.IsNullOrWhiteSpace(hourQuiet), tile + " with no events carries no detail, so nothing says what window it counts");
+            Assert.NotEqual(hourQuiet, dayQuiet);
+
+            // The window is read from the reply, and the figures the tile already showed stay after it.
+            foreach (var span in new[] { "hour", "day" })
+            {
+                var quiet = w.GetProperty(span).GetProperty("quiet").GetProperty(tile).GetString()!;
+                var busy = w.GetProperty(span).GetProperty("busy").GetProperty(tile).GetString()!;
+                Assert.StartsWith(quiet, busy, StringComparison.Ordinal);
+                Assert.True(busy.Length > quiet.Length, tile + " lost its figures when it named the window");
+            }
+
+            // A reply that carries no window leaves the tile as it was: no detail on a quiet card.
+            Assert.Equal(JsonValueKind.Null, w.GetProperty("noWindow").GetProperty(tile).ValueKind);
+        }
+    }
+
+    [Fact]
     public void TheUnrateableRowsColumn_IsDroppedWhenEveryRowIsZero_AndKeptWhenOneSampleIsLeftOut()
     {
         var u = Run().GetProperty("unrateable");

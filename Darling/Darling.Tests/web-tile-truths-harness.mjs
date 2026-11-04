@@ -65,9 +65,12 @@ const COUNTERS = [
   { counter_name: "Transaction Delay", instance_name: "_Total", object_name: "SQLServer:Database Mirroring", value: 4, delta_value: 2, counter_kind: "gauge", cntr_type: 65792 },
 ];
 let counters = COUNTERS;
+let fleetReply = {};
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
-  const body = u.pathname.endsWith("/get_memory_pressure_events")
+  const body = u.pathname === "/api/fleet"
+    ? fleetReply
+    : u.pathname.endsWith("/get_memory_pressure_events")
     ? { events: EVENTS }
     : u.pathname.endsWith("/get_perfmon_stats")
     ? { server: "srv", captured_at: "2026-11-01T10:00:00", counters }
@@ -175,6 +178,26 @@ try {
   };
   const quietCard = fleet.metricBands({ server_name: "srv-q", display_name: "srv-q", is_online: true, has_memory_pressure: false, available_threads: null }, null);
   const quietChips = Object.fromEntries(findAll(quietCard, (n) => hasClass(n, "metric-chip")).map((n) => [n.textContent, true]));
+  /* #7507: the Blocking and Deadlocks tiles name the window the reply covered. The reply is read through the shipped apiGetFleet, so the
+     window each tile names is the one the server sent, and a quiet card (no events) still names it. */
+  const util = await imp("util.js");
+  const detailsOf = (bands) => Object.fromEntries(
+    findAll(bands, (n) => hasClass(n, "metric-chip"))
+      .filter((x) => /^(Blocking|Deadlocks)/.test(x.textContent))
+      .map((x) => [findAll(x, (n) => hasClass(n, "label"))[0].textContent.replace(/\W.*$/, ""), (findAll(x, (n) => hasClass(n, "detail"))[0] || { textContent: null }).textContent]),
+  );
+  const windowTiles = async (hours) => {
+    const end = Date.parse("2026-11-01T12:00:00Z");
+    const quiet = { server_name: "q", display_name: "q", is_online: true, blocking_count: 0, deadlock_count: 0, deadlock_rate_per_hour: null };
+    const busy = { server_name: "b", display_name: "b", is_online: true, blocking_count: 302, max_blocking_wait_ms: 24500, deadlock_count: 50, deadlock_rate_per_hour: 50, deadlock_last_seen: "2026-11-01T11:50:00" };
+    fleetReply = { window_start: new Date(end - hours * 3600000).toISOString().replace("Z", ""), window_end: new Date(end).toISOString().replace("Z", ""), cards: [quiet, busy] };
+    const res = await util.apiGetFleet();
+    const [q, b] = res.data.cards;
+    return { quiet: detailsOf(fleet.metricBands(q, null)), busy: detailsOf(fleet.metricBands(b, null)) };
+  };
+  const windowChips = { hour: await windowTiles(1), day: await windowTiles(24) };
+  fleetReply = { cards: [{ server_name: "n", display_name: "n", is_online: true, blocking_count: 0, deadlock_count: 0, deadlock_rate_per_hour: null }] };
+  windowChips.noWindow = detailsOf(fleet.metricBands((await util.apiGetFleet()).data.cards[0], null));
   const sweepTiles = tiles(panels.VIZ.stat({ sweep_pressure: { verdict: "ok" }, skipped_cycles: { status: "unavailable" } }, { stats: [...shared.SWEEP_STATS, ...shared.SKIPPED_CYCLES_STATS] }));
 
   /* Item 30: a sentence is text across the panel, never a stat tile. */
@@ -215,7 +238,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, sweepTiles, recommendations, pools, platform, unrateable,
+    alertSetup, quietChips, windowChips, sweepTiles, recommendations, pools, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,
