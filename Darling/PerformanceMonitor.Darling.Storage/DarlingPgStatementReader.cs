@@ -101,7 +101,7 @@ public static class DarlingPgStatementReader
     /// </summary>
     private const string IsServiceStatementSql =
         "coalesce(bool_and(coalesce(jsonb_contains(t.own_entries, "
-        + "jsonb_build_array(jsonb_build_array(differenced.user_id, differenced.database_id))), false)) "
+        + "jsonb_build_array(jsonb_build_object('u', differenced.user_id, 'd', differenced.database_id))), false)) "
         + "FILTER (WHERE delta_total_exec_time_ms > 0), false)";
 
     /// <summary>

@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Collectors;
 /// application's <c>SELECT pg_sleep($1)</c> under its own login is a different entry from the sampler's, with its own
 /// text and no marker, even though both share a <c>queryid</c> (the comment never changes it). The hourly text fetch
 /// (<c>PgStatementText</c>) reads which entries' text ends with <see cref="Marker"/> and the store keeps their
-/// <c>[user_id, database_id]</c> pairs per queryid (<c>pg_statement_text.own_entries</c>). A statistics row is the
+/// <c>{"u": user_id, "d": database_id}</c> pairs per queryid (<c>pg_statement_text.own_entries</c>; an object, not a
+/// two-element array, because JSON containment ignores order inside an array and would match a swapped pair). A statistics row is the
 /// service's only when its own <c>(user_id, database_id)</c> is in that list, so the application's rows under another
 /// login stay in Analysis and the top-queries reads.</para>
 ///
@@ -52,7 +53,7 @@ public static class PgOwnStatement
     public const string NotOwnOnStats =
         "NOT EXISTS (SELECT 1 FROM pg_statement_text AS own WHERE own.server_id = pg_statement_stats.server_id "
         + "AND own.queryid = pg_statement_stats.queryid AND jsonb_contains(own.own_entries, "
-        + "jsonb_build_array(jsonb_build_array(pg_statement_stats.user_id, pg_statement_stats.database_id))))";
+        + "jsonb_build_array(jsonb_build_object('u', pg_statement_stats.user_id, 'd', pg_statement_stats.database_id))))";
 
     /// <summary>
     /// A SQL boolean expression, true when the statement text <paramref name="textExpression"/> carries the marker.

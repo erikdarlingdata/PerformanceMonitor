@@ -107,7 +107,7 @@ public static class PgStatementText
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
-    /// V242 (#7567): the column holding which <c>[user_id, database_id]</c> entries of the queryid are the service's own
+    /// V242 (#7567): the column holding which <c>{"u": user_id, "d": database_id}</c> entries of the queryid are the service's own
     /// (<see cref="PgOwnStatement"/>). Not in <see cref="CreateTableSql"/>, which is V73's rung; the migration adds it.
     /// </summary>
     public const string AddOwnEntriesColumnSql =
@@ -115,11 +115,11 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
 
     /// <summary>
     /// The window aggregate both fetches use to collect the service's own entries of a queryid (#7567): a JSON array of
-    /// <c>[userid, dbid]</c> pairs over the entries whose text ends with <see cref="PgOwnStatement.Marker"/>, NULL when
+    /// <c>{"u": userid, "d": dbid}</c> pairs over the entries whose text ends with <see cref="PgOwnStatement.Marker"/>, NULL when
     /// none does. A window, not a GROUP BY, so the DISTINCT ON below still picks the costliest entry's text.
     /// </summary>
     private static readonly string OwnEntriesWindow =
-        "jsonb_agg(jsonb_build_array(s.userid::bigint, s.dbid::bigint)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
+        "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
         + ") OVER (PARTITION BY s.queryid) AS own_entries";
 
     /// <summary>

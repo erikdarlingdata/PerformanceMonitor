@@ -68,6 +68,97 @@ public sealed class PgOwnStatementLiveTests
         }
     }
 
+    /// <summary>
+    /// The connect-time read of the extension schemas and the per-pass read are ONE <c>pg_stat_statements</c> entry (same
+    /// text, same login and database, the parameter value is not part of the key), and the entry keeps the text of
+    /// whichever call created it. After a service start or a <c>pg_stat_statements_reset()</c> the connector runs first, so
+    /// an unmarked connector copy would leave the standing per-pass read counted as the application's (#7567 round 6).
+    /// </summary>
+    [Fact]
+    public async Task TheConnectorsSchemaRead_RunningBeforeThePerPassRead_StillLeavesTheSharedEntryMarked_AndTheFetchLearnsItAsTheServices()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* #1776 own-store: CREATE EXTENSION would leave residue in the shared store; a scratch database of its own goes with it. */
+        var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            try
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements");
+                await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT pg_stat_statements_reset()");
+            }
+            catch (PostgresException ex) when (ex.SqlState is "55000" or "58P01" or "0A000" or "42501")
+            {
+                Assert.Skip("pg_stat_statements is not available on this server: " + ex.Message);
+            }
+
+            /* The connector first, the way a service start runs it, then the per-pass read of a collector that reads Aurora functions. */
+            await DarlingServerConnector.ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", ct);
+            var context = new CollectorContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                CollectionTime = DateTime.UtcNow,
+                Deltas = new CollectorDeltaCalculator(),
+                Target = new CollectorTargetInfo
+                {
+                    Engine = CollectorTargetEngine.PostgreSql,
+                    PostgresMajorVersion = connection.PostgreSqlVersion.Major,
+                    IsAurora = true,
+                },
+            };
+            Assert.True(await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
+                context, PgWaitStatsCollector.Instance, connection, null, ct));
+
+            var texts = new List<string>();
+            await using (var read = new NpgsqlCommand(
+                "SELECT query FROM pg_stat_statements WHERE query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    texts.Add(reader.GetString(0));
+                }
+            }
+
+            var stored = Assert.Single(texts);
+            Assert.True(PgOwnStatement.IsOwn(stored), stored);
+
+            /* And the hourly fetch learns it as the service's: a non-NULL own_entries for the shared queryid. */
+            context.PgExtensionSchemas = new Dictionary<string, string>(StringComparer.Ordinal) { ["pg_stat_statements"] = "public" };
+            await using var fetch = new NpgsqlCommand(
+                PgOwnStatement.Mark(PgStatementText.FetchSqlFor(false, connection.PostgreSqlVersion.Major, context)), connection);
+            fetch.Parameters.AddWithValue(10_000);
+            await using var fetched = await fetch.ExecuteReaderAsync(ct);
+            string? ownEntries = null;
+            var found = false;
+            while (await fetched.ReadAsync(ct))
+            {
+                if (!fetched.IsDBNull(1) && fetched.GetString(1).Contains("pg_catalog.pg_extension AS e", StringComparison.Ordinal))
+                {
+                    found = true;
+                    ownEntries = fetched.IsDBNull(2) ? null : fetched.GetString(2);
+                    break;
+                }
+            }
+
+            Assert.True(found);
+            Assert.NotNull(ownEntries);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     private static async Task RunMarkerChecksAsync(string connectionString, CancellationToken ct)
     {
         await using var connection = new NpgsqlConnection(connectionString);
@@ -292,6 +383,9 @@ VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
                 var at = DateTime.UtcNow.AddMinutes(-i);
                 await SeedStatsAsync(connection, ct, at, SharedQueryId, ServiceUserId, deltaCalls: 30, deltaTimeMs: 30_000);
                 await SeedStatsAsync(connection, ct, at, SharedQueryId, AppUserId, deltaCalls: 10, deltaTimeMs: 200);
+                /* The service's pair reversed: login = the service's database id, database = the service's login id. An application
+                   entry, so it stays in; matching on the two numbers in any order would drop it (round 6). */
+                await SeedStatsAsync(connection, ct, at, SharedQueryId, DatabaseId, deltaCalls: 5, deltaTimeMs: 100, databaseId: ServiceUserId);
             }
 
             var from = DateTime.UtcNow.AddHours(-1);
@@ -299,7 +393,7 @@ VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
             var naiveFrom = DateTime.SpecifyKind(from, DateTimeKind.Unspecified);
             var naiveTo = DateTime.SpecifyKind(to, DateTimeKind.Unspecified);
 
-            /* The bad-actor candidates: the shared queryid is there, with the application's time only (6 x 200 ms), never the service's. */
+            /* The bad-actor candidates: the shared queryid is there, with the application's time only (6 x 200 ms and the reversed pair's 6 x 100 ms), never the service's. */
             await using (var top = new NpgsqlCommand(PgTargetFactCollector.PgTargetTopStatementsSql, connection))
             {
                 top.Parameters.AddWithValue(ServerId);
@@ -309,8 +403,8 @@ VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
                 await using var reader = await top.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.Equal(SharedQueryId, reader.GetInt64(reader.GetOrdinal("queryid")));
-                Assert.Equal(1200, reader.GetInt64(reader.GetOrdinal("total_exec_ms")));
-                Assert.Equal(1200, reader.GetInt64(reader.GetOrdinal("window_total_exec_ms")));
+                Assert.Equal(1800, reader.GetInt64(reader.GetOrdinal("total_exec_ms")));
+                Assert.Equal(1800, reader.GetInt64(reader.GetOrdinal("window_total_exec_ms")));
                 Assert.False(await reader.ReadAsync(ct));
             }
 
@@ -330,7 +424,10 @@ VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
 
             /* The top-queries read groups the two logins into one row, so it is NOT flagged as the service's (not every entry is). */
             var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, from, to, 10, ct);
-            Assert.False(Assert.Single(page.Rows, r => r.QueryId == SharedQueryId).IsServiceStatement);
+            /* One row per (queryid, database): the main database's group holds the service's entry and the application's, and the reversed pair is a group of its own. */
+            var sharedRows = page.Rows.Where(r => r.QueryId == SharedQueryId).ToArray();
+            Assert.Equal(2, sharedRows.Length);
+            Assert.All(sharedRows, r => Assert.False(r.IsServiceStatement));
             bodySucceeded = true;
         }
         finally
@@ -602,9 +699,9 @@ VALUES ($1, $2, $3, $4, $5, $9, $8, TRUE,
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
             queryId, deltaCalls, deltaTimeMs, userId, databaseId);
 
-    /// <summary>The JSON the text fetch stores for the service's own entries: [[user_id, database_id]].</summary>
+    /// <summary>The JSON the text fetch stores for the service's own entries: [{"u": user_id, "d": database_id}].</summary>
     private static string OwnEntries(long userId) =>
-        string.Create(CultureInfo.InvariantCulture, $"[[{userId},{DatabaseId}]]");
+        string.Create(CultureInfo.InvariantCulture, $"[{{\"u\":{userId},\"d\":{DatabaseId}}}]");
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
