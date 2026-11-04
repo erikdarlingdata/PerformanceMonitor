@@ -132,17 +132,52 @@ public sealed class ComparisonBandingTests
     }
 
     /// <summary>
-    /// DISK_SPACE is the free fraction and the scorer inverts it. With both sides saturated (under 5% free
-    /// scores 1.0 on either side) the value has to decide, and less free space must still read worse.
+    /// DISK_SPACE is the free fraction and the scorer inverts it. With both sides on the flat 1.0 rung (under
+    /// 5% free and above the 3% critical cut, #7583) the value has to decide, and less free space must still
+    /// read worse.
     /// </summary>
     [Fact]
     public void FreeSpaceFalling_OnASaturatedLadder_IsWorse()
     {
         var (baseline, comparison) = Scored(
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.049 }],
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.031 }]);
+        Assert.Equal(1.0, baseline[0].BaseSeverity, precision: 6);
+        Assert.Equal(1.0, comparison[0].BaseSeverity, precision: 6);
+
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
+    }
+
+    /// <summary>
+    /// The same fall once both sides are at or under the alert's critical cut (#7583): both score the 1.5
+    /// critical band, the base-severity delta is zero, and the value must still read the fall as worse.
+    /// </summary>
+    [Fact]
+    public void FreeSpaceFalling_OnTheCriticalRung_IsWorse()
+    {
+        var (baseline, comparison) = Scored(
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.025 }],
+            [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.01 }]);
+        Assert.Equal(1.5, baseline[0].BaseSeverity, precision: 6);
+        Assert.Equal(1.5, comparison[0].BaseSeverity, precision: 6);
+
+        var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
+        Assert.Equal(ComparisonBanding.StatusWorse, row.Status);
+    }
+
+    /// <summary>
+    /// Crossing into the critical band (4% free to 2% free) moves the base severity from 1.0 to 1.5 and reads
+    /// worse through the severity delta. This is the pair the old test pinned at 1.0 on both sides.
+    /// </summary>
+    [Fact]
+    public void FreeSpaceFalling_IntoTheCriticalBand_IsWorse()
+    {
+        var (baseline, comparison) = Scored(
             [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.04 }],
             [new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.02 }]);
         Assert.Equal(1.0, baseline[0].BaseSeverity, precision: 6);
-        Assert.Equal(1.0, comparison[0].BaseSeverity, precision: 6);
+        Assert.Equal(1.5, comparison[0].BaseSeverity, precision: 6);
 
         var row = Assert.Single(ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false).Rows);
         Assert.Equal(ComparisonBanding.StatusWorse, row.Status);

@@ -318,11 +318,14 @@ flagged AS (
 qualified AS (
     SELECT
         f.*,
-        /* A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW). A failure row is
+        /* A cost row keeps the duration bands (CRITICAL over 100%, HIGH over 50%, MEDIUM over 25%, else LOW),
+           except that a cost row which added under a minute of duration over the window and under a second per run is LOW
+           whatever its percent (#7592). A failure row is
            HIGH when its rate is at least FailureHighMultiple times the baseline's or the baseline had none, else MEDIUM; a row with
            both takes the higher band. A failure never reads CRITICAL. */
         CASE
             WHEN NOT f.is_cost THEN 0
+            WHEN " + QueryStoreRegressionRules.GradeFloorSql("f") + @" THEN 1
             WHEN f.duration_regression_percent > 100 THEN 4
             WHEN f.duration_regression_percent > 50 THEN 3
             WHEN f.duration_regression_percent > 25 THEN 2

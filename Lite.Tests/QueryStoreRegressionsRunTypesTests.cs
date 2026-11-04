@@ -126,7 +126,7 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
 
     /// <summary>The cost comparison is Regular runs only and WEIGHTED by execution count, with no logical reads anywhere in the row. Query 7's baseline is
     /// 100 executions at 1 ms CPU and 300 at 3 ms: 2.5 ms weighted (the average of the two intervals' averages would be 2 ms and show
-    /// +100%), and a huge Aborted run beside it must not leak into the Regular figure. 4 ms against 2.5 ms is +60%, reason cost, HIGH.
+    /// +100%), and a huge Aborted run beside it must not leak into the Regular figure. 4 ms against 2.5 ms is +60%, reason cost (LOW under the #7592 grade floor).
     /// #6781: 1,000 recent runs, so the 1.5 ms rise adds 1.5 s of CPU, over the 1 s floor.</summary>
     [Fact]
     public async Task TheCostFigureIsRegularOnlyAndWeighted_AndNoReadsAreReported()
@@ -142,7 +142,8 @@ public sealed class QueryStoreRegressionsRunTypesTests : IClassFixture<SharedDuc
         var row = Assert.Single(rows);
         Assert.Equal(7, row.GetProperty("query_id").GetInt64());
         Assert.Equal("cost", row.GetProperty("regression_reason").GetString());
-        Assert.Equal("HIGH", row.GetProperty("severity").GetString());
+        /* +60% is the HIGH band by percent, but 1,000 runs at 1.5 ms add 1.5 s, under the #7592 grade floor, so LOW. */
+        Assert.Equal("LOW", row.GetProperty("severity").GetString());
         Assert.Equal(2.5, row.GetProperty("baseline_cpu_ms").GetDouble(), 6);
         Assert.Equal(4.0, row.GetProperty("recent_cpu_ms").GetDouble(), 6);
         Assert.Equal(60.0, row.GetProperty("cpu_regression_percent").GetDouble(), 6);
