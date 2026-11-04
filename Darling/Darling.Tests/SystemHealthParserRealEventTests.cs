@@ -150,8 +150,7 @@ public class SystemHealthParserRealEventTests
     [Fact]
     public void MemoryConditions_RealEvent_ShredsResourceAndMemoryReportEntries()
     {
-        // *_gb entries integer-divide the raw byte/KB attribute exactly as sp_HealthParser's bigint
-        // arithmetic does: 25444978688 / 1024^3 = 23, 450451664 KB / 1024^2 = 429, etc.
+        // *_gb entries keep 2 decimals (#7465): 25444978688 / 1024^3 = 23.70, 450451664 KB / 1024^2 = 429.58, etc.
         var r = SystemHealthParser.ParseMemoryConditions(LoadRealFixture("sp_server_diagnostics_resource.xml"));
 
         Assert.NotNull(r);
@@ -161,23 +160,41 @@ public class SystemHealthParserRealEventTests
         Assert.False(r.IsAnyPoolOutOfMemory);
         Assert.Equal(0L, r.ProcessOutOfMemoryPeriod);
         Assert.Equal("Process/System Counts", r.Name);
-        Assert.Equal(23L, r.AvailablePhysicalMemoryGb);     // 25444978688 / 1024^3
-        Assert.Equal(130637L, r.AvailableVirtualMemoryGb);  // 140271047065600 / 1024^3
-        Assert.Equal(28L, r.AvailablePagingFileGb);         // 30975954944 / 1024^3
-        Assert.Equal(1L, r.WorkingSetGb);                   // 1233104896 / 1024^3
+        Assert.Equal(23.70m, r.AvailablePhysicalMemoryGb);     // 25444978688 / 1024^3
+        Assert.Equal(130637.59m, r.AvailableVirtualMemoryGb);  // 140271047065600 / 1024^3
+        Assert.Equal(28.85m, r.AvailablePagingFileGb);         // 30975954944 / 1024^3
+        Assert.Equal(1.15m, r.WorkingSetGb);                   // 1233104896 / 1024^3
         Assert.Equal(100L, r.PercentOfCommittedMemoryInWs);
         Assert.Equal(455480798L, r.PageFaults);
         Assert.Equal(1L, r.SystemPhysicalMemoryHigh);
         Assert.Equal(0L, r.SystemPhysicalMemoryLow);
         Assert.Equal(0L, r.ProcessPhysicalMemoryLow);
         Assert.Equal(0L, r.ProcessVirtualMemoryLow);
-        Assert.Equal(429L, r.VmReservedGb);                 // 450451664 KB / 1024^2
-        Assert.Equal(2L, r.VmCommittedGb);                  // 2630184 KB / 1024^2
+        Assert.Equal(429.58m, r.VmReservedGb);                 // 450451664 KB / 1024^2
+        Assert.Equal(2.51m, r.VmCommittedGb);                  // 2630184 KB / 1024^2
         Assert.Equal(229901500L, r.LockedPagesAllocated);
         Assert.Equal(1617920L, r.LargePagesAllocated);
         Assert.Equal(224327792L, r.PagesAllocated);
         Assert.Equal(0L, r.LastOomFactor);
         Assert.Equal(0L, r.LastOsError);
+    }
+
+    [Fact]
+    public void MemoryConditions_RealEvent_UnderOneGbAvailable_IsNotZero()
+    {
+        // #7465: a low-memory snapshot is the case this row exists for, and whole-GB division read 0 for it.
+        // Real capture with Available Physical Memory set to 900 MB and Working Set to 512 MB.
+        var xml = LoadRealFixture("sp_server_diagnostics_resource.xml")
+            .Replace("Available Physical Memory\" value=\"25444978688\"", "Available Physical Memory\" value=\"943718400\"")
+            .Replace("Working Set\" value=\"1233104896\"", "Working Set\" value=\"536870912\"");
+        Assert.Contains("943718400", xml);
+        Assert.Contains("536870912", xml);
+
+        var r = SystemHealthParser.ParseMemoryConditions(xml);
+
+        Assert.NotNull(r);
+        Assert.Equal(0.88m, r!.AvailablePhysicalMemoryGb);   // 943718400 / 1024^3 = 0.8789
+        Assert.Equal(0.5m, r.WorkingSetGb);                  // 536870912 / 1024^3
     }
 
     // ── sp_server_diagnostics_component_result / QUERY_PROCESSING: match, field-for-field ──
