@@ -569,6 +569,36 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
         });
     }
 
+    [Fact]
+    public async Task OperatorRulesWithNoReason_AllShowInTheBrief_NotJustTheNewestThree()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var current = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
+            var requestId = (await current.OpenOrJoinAsync(Alert(Now.AddMinutes(-10)), ct)).RequestId!.Value;
+            var mutes = new PgMuteRuleStore(dataSource);
+
+            /* #7414: a rule with no reason has a NULL agent_written flag. It must count as an operator rule, not fall into a partition of its own. */
+            for (var i = 0; i < 4; i++)
+            {
+                await mutes.InsertAsync(new MuteRule
+                {
+                    Id = "bare-op-" + i, ServerName = ServerName, MetricName = "Metric" + i, Reason = null,
+                    CreatedAtUtc = Now.AddDays(-1).AddMinutes(i),
+                });
+            }
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+            var sources = await reader.ReadAsync(requestId, ct);
+            Assert.NotNull(sources);
+
+            var rules = sources!.RecentChanges.Where(c => c.Kind == "mute_rule").ToList();
+            Assert.Equal(4, rules.Count);
+            for (var i = 0; i < 4; i++)
+                Assert.Contains(rules, r => r.Text.Contains("Metric" + i, StringComparison.Ordinal));
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

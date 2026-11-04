@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -525,7 +526,8 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
                 (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, old, Changes(Iso(DateTime.UtcNow.AddDays(2))), agentSeat: Named))["reason"]);
 
             /* An agent's own new rule: it can renew inside creation + 7 days, and not past it. */
-            var made = (string)Parse(await Create(c, Named, metric: "High CPU", serverId: 7, action: "mute", expires: Iso(DateTime.UtcNow.AddDays(1))))["mute_rule"]!["id"]!;
+            /* A different metric and server from the rules above: the agent edits of those are in the journal, and the same-match check would refuse a repeat. */
+            var made = (string)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 9, action: "mute", expires: Iso(DateTime.UtcNow.AddDays(1))))["mute_rule"]!["id"]!;
             Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, made, Changes(Iso(DateTime.UtcNow.AddDays(3))), agentSeat: Named))["status"]);
             await ExecAsync(c.Connection, $"UPDATE config_mute_rules SET created_at_utc = now() AT TIME ZONE 'utc' - interval '6 days' WHERE id = '{made}'", c.Ct);
             Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode,
@@ -705,6 +707,23 @@ VALUES ('{id}', FALSE, now() AT TIME ZONE 'utc', 'operator rule', '{Iso(DateTime
             /* The claim path is not this setting's: a call that carries agent_action still reaches the gate. */
             var claim = Parse(await DarlingMcpAlertTools.CreateMuteRule(c.Source, metric_name: "High CPU", server_id: 7, reason: "storm", agent_action: "{}", agentSeat: SwitchedOff));
             Assert.Equal("agent_action_invalid", (string?)claim["reason"]);
+        });
+    }
+
+    [Fact]
+    public async Task ATooLongChangeReason_IsRefusedWithTheReasonLimitInTheMessage_NotTheFieldLimit()
+    {
+        await RunAsync(async c =>
+        {
+            var rule = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1));
+            /* #7414: the padding passes the trimmed 1 to 2000 check and fails the raw-length check, which is the reason's limit, not the 256 of other fields. */
+            var padded = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule,
+                "{\"reason\":\"x" + new string(' ', InvestigationToolCore.MaxActionReasonChars) + "\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddHours(5)) + "\"}", agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.SizeCode, (string?)padded["reason"]);
+            var message = (string?)padded["message"] ?? "";
+            Assert.Contains(InvestigationToolCore.MaxActionReasonChars.ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("256", message, StringComparison.Ordinal);
+            Assert.Equal("0", await JournalCountAsync(c));
         });
     }
 

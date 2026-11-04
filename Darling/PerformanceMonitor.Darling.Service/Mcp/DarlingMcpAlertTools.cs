@@ -1671,7 +1671,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "create_mute_rule"), Description(
-        "Agent arm: with agent_action (a live claim) it mutes the request's server only. Without agent_action an agent token may create any mute or digest rule, one server or all and any metric, but reason and expires_at are required and expires_at must be in the future and at most 7 days ahead. The repeat schedule and starts_at are refused either way. Each write adds one agent change journal row. Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
+        "Agent arm: agent_action = request's server only; else direct (guide). Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
         "<<GUIDE>>" +
         "Creates an alert mute rule that suppresses matching alerts (they are still logged, just not delivered) — " +
         "the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes. Provide any " +
@@ -1720,7 +1720,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
         [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
         [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
-        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only: send agent_action (request_id, claim_id, agent_id, reason, evidence) to act under a claim, or omit it to act directly with a reason (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Optional ISO-8601 UTC start (e.g. 2027-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null,
@@ -2092,7 +2092,7 @@ public sealed partial class DarlingMcpAlertTools
     public static Task<string> DeleteMuteRule(
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id,
-        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only: send agent_action (request_id, claim_id, agent_id, reason, evidence) to act under a claim, or omit it to act directly with a reason (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Agent token without agent_action (#7414): required, 1 to 2000 characters saying why the rule is deleted. It is kept in the agent change journal. Ignored otherwise.")] string? reason = null) =>
@@ -2197,7 +2197,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
-        "Agent arm: with agent_action (a live claim) it changes a rule on the request's server only. Without agent_action an agent token may enable or disable any mute or digest rule if it sends reason: disabling always works, enabling needs the rule's expires_at to be in the future and at most 7 days ahead. Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
+        "Agent arm: agent_action = request's server only; else direct (guide). Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
         "<<GUIDE>>" +
         "Enables or disables an existing alert mute rule by its id (from get_mute_rules or create_mute_rule) " +
         "WITHOUT deleting it. A disabled rule suppresses nothing while keeping its id, its scope, its reason " +
@@ -2219,7 +2219,7 @@ public sealed partial class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to enable or disable (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("true to put the rule back in force, false to stop it suppressing while keeping the rule.")] bool enabled,
-        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only: send agent_action (request_id, claim_id, agent_id, reason, evidence) to act under a claim, or omit it to act directly with a reason (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Agent token without agent_action (#7414): required, 1 to 2000 characters saying why the rule is turned on or off. It is kept in the agent change journal. Ignored otherwise.")] string? reason = null) =>
@@ -2310,7 +2310,7 @@ public sealed partial class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_mute_rule"), Description(
-        "Agent arm: with agent_action (a live claim) it edits a rule on the request's server only. Without agent_action an agent token may edit any mute or digest rule if the changes carry reason and an expires_at_utc in the future and at most 7 days ahead (the repeat schedule and starts_at are refused). Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
+        "Agent arm: agent_action = request's server only; else direct (guide). Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
         "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
         "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
         "here — use set_mute_rule_enabled instead. created_at_utc never moves. Clearing " +
@@ -2353,7 +2353,7 @@ public sealed partial class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json,
-        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only: send agent_action (request_id, claim_id, agent_id, reason, evidence) to act under a claim, or omit it to act directly with a reason (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null) =>
         DarlingMcpAgentMuteDirect.Applies(agentSeat, agent_action)

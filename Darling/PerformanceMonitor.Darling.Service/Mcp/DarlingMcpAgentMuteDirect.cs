@@ -186,7 +186,7 @@ internal static class DarlingMcpAgentMuteDirect
                 $"An agent token may not write mute or digest rules without a claim on this service: {SettingName} is false in darling.json. Nothing was written."));
         try
         {
-            await using var connection = await (seat.Owner?.Read() ?? postgres).OpenConnectionAsync(ct);
+            await using var connection = seat.Owner?.Read() is { } ownerRead ? await ownerRead.OpenConnectionAsync(ct) : await postgres.OpenConnectionAsync(ct);
             await using var transaction = await connection.BeginTransactionAsync(ct);
             /* The switch read takes the service row FOR NO KEY UPDATE, so every direct write waits its turn here: the hourly count and the
                same-match check below read the journal as the write before them left it, and two calls cannot both see room. */
@@ -212,11 +212,25 @@ internal static class DarlingMcpAgentMuteDirect
         }
     }
 
+    private const string WriteCountSql = "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called' AND request_id IS NULL AND actor LIKE 'agent:%' AND event_time > $1 - interval '1 hour'";
+
+    private const string ServerIdentitySql = "SELECT server_id, lower(COALESCE(display_name, server_name)) FROM collect.servers WHERE server_id = $1 OR lower(COALESCE(display_name, server_name)) = lower($2)";
+
+    private const string RepeatSql = @"
+SELECT EXISTS (
+  SELECT 1 FROM config.investigation_journal c
+  JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
+  CROSS JOIN LATERAL (SELECT COALESCE(d.detail->'after'->'mute_rule', d.detail->'after') AS r) x
+  WHERE c.event = 'action_called' AND c.actor LIKE 'agent:%' AND c.detail->>'tool' IN ('create_mute_rule', 'update_mute_rule')
+    AND c.event_time > $1 - make_interval(days => $2)
+    AND lower(x.r->>'metric_name') IS NOT DISTINCT FROM lower($4)
+    AND COALESCE(x.r->>'action', 'mute') = $5
+    AND CASE WHEN $6 THEN (x.r->>'server_id') IS NULL AND nullif(btrim(x.r->>'server_name'), '') IS NULL
+             ELSE (x.r->>'server_id') = ANY($3) OR ((x.r->>'server_id') IS NULL AND lower(x.r->>'server_name') = ANY($7)) END)";
+
     private static async Task<long> WriteCountInLastHourAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(
-            "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called' AND request_id IS NULL AND actor LIKE 'agent:%' AND event_time > $1 - interval '1 hour'",
-            connection, transaction);
+        await using var command = new NpgsqlCommand(WriteCountSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
@@ -253,9 +267,7 @@ internal static class DarlingMcpAgentMuteDirect
         else
             return ([], []);
 
-        await using var command = new NpgsqlCommand(
-            "SELECT server_id, lower(COALESCE(display_name, server_name)) FROM collect.servers WHERE server_id = $1 OR lower(COALESCE(display_name, server_name)) = lower($2)",
-            connection, transaction);
+        await using var command = new NpgsqlCommand(ServerIdentitySql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = rule.ServerId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.ServerId is null ? rule.ServerName!.Trim() : null, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -280,17 +292,7 @@ internal static class DarlingMcpAgentMuteDirect
     {
         var (ids, names) = await ServerIdentityAsync(connection, transaction, rule, ct);
         var allServers = rule.ServerId is null && string.IsNullOrWhiteSpace(rule.ServerName);
-        await using var command = new NpgsqlCommand(@"
-SELECT EXISTS (
-  SELECT 1 FROM config.investigation_journal c
-  JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
-  CROSS JOIN LATERAL (SELECT COALESCE(d.detail->'after'->'mute_rule', d.detail->'after') AS r) x
-  WHERE c.event = 'action_called' AND c.actor LIKE 'agent:%' AND c.detail->>'tool' IN ('create_mute_rule', 'update_mute_rule')
-    AND c.event_time > $1 - make_interval(days => $2)
-    AND lower(x.r->>'metric_name') IS NOT DISTINCT FROM lower($4)
-    AND COALESCE(x.r->>'action', 'mute') = $5
-    AND CASE WHEN $6 THEN (x.r->>'server_id') IS NULL AND nullif(btrim(x.r->>'server_name'), '') IS NULL
-             ELSE (x.r->>'server_id') = ANY($3) OR ((x.r->>'server_id') IS NULL AND lower(x.r->>'server_name') = ANY($7)) END)", connection, transaction);
+        await using var command = new NpgsqlCommand(RepeatSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = RepeatLookbackDays });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = ids, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
@@ -395,8 +397,11 @@ SELECT EXISTS (
         if (ReasonRefusal(reason) is { } noReason)
             return Refusal(noReason);
         foreach (var (key, value) in body)
-            if (value is JsonValue jv && jv.TryGetValue(out string? text) && text.Length > (key == "reason" ? InvestigationToolCore.MaxActionReasonChars : MaxFieldChars))
-                return Refusal(SizeRefusal(key, MaxFieldChars));
+        {
+            var limit = key == "reason" ? InvestigationToolCore.MaxActionReasonChars : MaxFieldChars;
+            if (value is JsonValue jv && jv.TryGetValue(out string? text) && text.Length > limit)
+                return Refusal(SizeRefusal(key, limit));
+        }
 
         /* The write must carry the expiry itself, not lean on whatever the rule holds: an update that leaves it out or clears it is refused here,
            and the rule it would leave is judged below as well, so a value that parses to nothing (or the other spelling) cannot slip past. */

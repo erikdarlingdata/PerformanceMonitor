@@ -233,8 +233,8 @@ FROM (
                                || CASE WHEN length(" + AgentReasonOneLineSql + @") > " + AgentReasonChars + @" THEN '...' ELSE '' END
                           ELSE 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
-    FROM (SELECT r.*, (r.reason ~ '" + AgentReasonSuffixPattern + @"') AS agent_written,
-                 row_number() OVER (PARTITION BY (r.reason ~ '" + AgentReasonSuffixPattern + @"') ORDER BY r.created_at_utc DESC) AS recency
+    FROM (SELECT r.*, COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) AS agent_written,
+                 row_number() OVER (PARTITION BY COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) ORDER BY r.created_at_utc DESC) AS recency
           FROM config_mute_rules AS r
           WHERE (r.server_name IS NULL OR r.server_name = $2)
             AND r.created_at_utc >= $3) AS m
