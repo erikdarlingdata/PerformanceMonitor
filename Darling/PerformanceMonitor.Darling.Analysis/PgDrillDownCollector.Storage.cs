@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -17,17 +18,25 @@ namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgDrillDownCollector
 {
+    /* #7449: a file's latency is its stall divided by its operations over the window, not the mean of per-interval ratios.
+       The mean counted each collection interval once, so one 500 ms write in a quiet minute outweighed 1,000 1 ms writes in a
+       busy one, and a row's latency times its count was not its stall. With stall over count a row's latency times its count
+       is its stall, so the rows add up to the figure the finding states. $4 is the fact the drill-down serves: true for
+       IO_WRITE_LATENCY_MS, whose figure covers log files and tempdb only (#6959), so the rows are those files too and are
+       ordered by write stall; false for IO_READ_LATENCY_MS, every file ordered by read stall. The LIMIT 10 cut kept the
+       highest read-latency rows even on a write finding, so the file with the worst writes could fall off the page. */
     public const string FileLatencyBreakdownSql = @"
 SELECT database_name, file_type,
-       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_ms,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_ms,
+       SUM(delta_stall_read_ms) * 1.0 / NULLIF(SUM(delta_reads), 0) AS avg_read_ms,
+       SUM(delta_stall_write_ms) * 1.0 / NULLIF(SUM(delta_writes), 0) AS avg_write_ms,
        SUM(delta_reads)::BIGINT AS total_reads,
        SUM(delta_writes)::BIGINT AS total_writes
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   (delta_reads > 0 OR delta_writes > 0)
+AND   (NOT $4 OR (delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')))
 GROUP BY database_name, file_type
-ORDER BY avg_read_ms DESC NULLS LAST
+ORDER BY CASE WHEN $4 THEN SUM(delta_stall_write_ms) ELSE SUM(delta_stall_read_ms) END DESC NULLS LAST
 LIMIT 10";
 
     private async Task CollectFileLatencyBreakdown(AnalysisFinding finding, AnalysisContext context)
@@ -38,6 +47,7 @@ LIMIT 10";
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+        cmd.Parameters.AddWithValue(ServesWriteLatencyOnly(finding));
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -57,6 +67,15 @@ LIMIT 10";
         if (items.Count > 0)
             finding.DrillDown!["file_latency_breakdown"] = items;
     }
+
+    /// <summary>
+    /// True when the finding is about the write figure alone (#7449): that figure covers log files and tempdb only, so the
+    /// drill-down lists those files by write stall. A finding that also carries the read fact, or neither, gets every file
+    /// ordered by read stall, the read figure's own scope.
+    /// </summary>
+    private static bool ServesWriteLatencyOnly(AnalysisFinding finding) =>
+        finding.PathKeys.Contains("IO_WRITE_LATENCY_MS", StringComparer.Ordinal)
+        && !finding.PathKeys.Contains("IO_READ_LATENCY_MS", StringComparer.Ordinal);
 
     /* #3896: the SAME bounds as the fact that fires this drill-down (PgFactCollector.FileAutogrowthSql) —
        $2 the lookback start, $3 the window end — so the list names exactly the files the count counted. It
