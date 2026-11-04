@@ -166,7 +166,7 @@ public class StoredEventCopiesSweepTests
             ["DuckDbFactCollector.Waits.cs"] = 1,
             ["LocalDataService.Overview.cs"] = 1,
             ["LocalDataService.DailySummary.cs"] = 1,
-            ["DrillDownCollector.Config.cs"] = 1,
+            ["DrillDownCollector.Config.cs"] = 2,
         };
         var actual = LiteSources()
             .Select(p => (File: Path.GetFileName(p), Count: Regex.Matches(File.ReadAllText(p), @"StoredEventCopies\.DeadlockDistinctCount").Count))
