@@ -141,10 +141,11 @@ internal static class DarlingSessionReader
             AND   collection_time <= $3
         ),
         heads AS (
-            /* (capture, session) pairs some victim in the SAME capture points at. */
+            /* (capture, session) pairs some OTHER session in the SAME capture points at. A session naming itself is not its own victim. */
             SELECT DISTINCT collection_time, blocking_session_id AS session_id
             FROM window_rows
             WHERE blocking_session_id > 0
+            AND   blocking_session_id <> session_id
         ),
         population AS (
             SELECT

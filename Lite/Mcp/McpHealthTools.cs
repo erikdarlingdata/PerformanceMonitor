@@ -201,8 +201,9 @@ public sealed class McpHealthTools
             var fromDate = lastDay.AddDays(-(days_back - 1));
             var toDate = lastDay.AddDays(1);
 
-            /* The anchor is also the clock the still-forming day's window clamps against (#3525 review). */
-            var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate, asOfUtc: windowEnd);
+            /* The anchor is also the clock the still-forming day's window clamps against (#3525 review). Only its
+               date counts, so that means the end of its date (#7504). */
+            var rows = await dataService.GetDailySummaryRangeAsync(resolved.ServerId, fromDate, toDate, asOfUtc: McpHelpers.DayAnchorClock(as_of, windowEnd));
 
             /* #4966: NO data-start notice, deliberately. Every row below carries its own data state and the store's retention
                horizon (data_state, data_note, retention_horizon, days_before_horizon): a day before the horizon says purged or
