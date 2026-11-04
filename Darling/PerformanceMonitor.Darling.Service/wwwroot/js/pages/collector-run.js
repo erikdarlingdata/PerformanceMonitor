@@ -211,7 +211,7 @@ export function collectorRunBar(server) {
       " Runs every enabled collector once. This puts extra load on the monitored server; pick one collector in the table below to run just that one.",
     ]);
     track(server, button);
-    mount(slot, [el("div", {}, [button, note]), status, output]);
+    mount(slot, [el("div", { class: "run-row" }, [button, note]), status, output]);
     markOffline(server, button, note);
     slot.dataset.status = "ready";
     slot.__status = status;

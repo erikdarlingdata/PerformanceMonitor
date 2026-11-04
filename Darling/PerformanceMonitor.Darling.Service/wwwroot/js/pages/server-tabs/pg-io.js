@@ -12,7 +12,6 @@
    every other paged tool uses, so a bare "Combinations" tile beside two window totals cannot be read as the
    window's third. */
 export const PG_IO_SUMMARY_STATS = [
-  { key: "combinations_returned", label: "Combinations returned", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "total_read_time_ms", label: "Read time", format: "ms" },
   { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true, appendKey: "busiest_rank_note" },
