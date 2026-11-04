@@ -678,14 +678,25 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Scores disk space facts. Low free space is critical.
+    /// Scores disk space facts (Value = the tightest volume's free fraction, <c>min_free_mb</c> = that volume's
+    /// free MB). Free space is a measurement, so unlike a signal that can be noise it needs no corroboration to
+    /// reach Critical (#7583): once the tightest volume is under the low disk alert's critical cut
+    /// (<see cref="DiskCriticalCut"/>, percent or GB) the score is 1.5, the Critical band every finding surface
+    /// cuts at, so the alert and the finding agree about the same disk. Above that cut the base stays under
+    /// Critical: a flat 1.0 (Warning) under 5% free, easing down to 0 at 20% free.
+    /// The cut is the alert's shipped default (3 percent, 2 GB), not the operator's setting: the scorer is a
+    /// settings-free instance and the fact carries no alert settings, so a changed critical_free_percent does
+    /// not move it.
     /// </summary>
     private static double ScoreDiskFact(Fact fact)
     {
         if (fact.Key != "DISK_SPACE") return 0.0;
 
         var freePct = fact.Value;
-        // Invert: lower free space is worse. Critical < 5%, concerning < 10%
+        /* min_free_mb is the scoring volume's own free MB (#7179); a fact without it skips the GB side. */
+        var freeGb = fact.Metadata.TryGetValue("min_free_mb", out var freeMb) ? freeMb / 1024.0 : double.PositiveInfinity;
+        if (DiskCriticalCut.IsCriticallyLow(freePct * 100.0, freeGb, DiskCriticalCut.FreePercent, DiskCriticalCut.FreeGb)) return 1.5;
+        // Invert: lower free space is worse. Under 5% is a flat Warning, concerning < 10%
         if (freePct < 0.05) return 1.0;
         if (freePct < 0.10) return 0.5 + 0.5 * (0.10 - freePct) / 0.05;
         if (freePct < 0.20) return 0.5 * (0.20 - freePct) / 0.10;

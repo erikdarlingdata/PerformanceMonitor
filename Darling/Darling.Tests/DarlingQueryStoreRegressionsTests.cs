@@ -323,8 +323,9 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Equal(7, row.GetProperty("query_id").GetInt64());
             Assert.Equal(Db, row.GetProperty("database_name").GetString());
 
-            /* 1 ms -> 4 ms is +300%, which is the CRITICAL band (> 100%). */
-            Assert.Equal("CRITICAL", row.GetProperty("severity").GetString());
+            /* 1 ms -> 4 ms is +300%, the CRITICAL band (> 100%) by percent, but 500 runs add only 1.5 s and 3 ms a run, under the
+               #7592 grade floor (a minute in total and a second a run), so it reads LOW. The CRITICAL side is in QueryStoreRegressionsGradeFloorLiveTests. */
+            Assert.Equal("LOW", row.GetProperty("severity").GetString());
             Assert.Equal(1.0, row.GetProperty("baseline_duration_ms").GetDouble(), 6);
             Assert.Equal(4.0, row.GetProperty("recent_duration_ms").GetDouble(), 6);
             Assert.Equal(300.0, row.GetProperty("duration_regression_percent").GetDouble(), 6);
