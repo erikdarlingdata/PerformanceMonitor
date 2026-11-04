@@ -369,6 +369,7 @@ public static class ComparisonBanding
         var rows = new List<ComparisonRow>(allKeys.Count);
         var appeared = new List<ChurnEntry>();
         var disappeared = new List<ChurnEntry>();
+        var churnSuppressed = 0;
 
         foreach (var key in allKeys)
         {
@@ -416,6 +417,9 @@ public static class ComparisonBanding
         if (notCompared)
         {
             rows = rows.Select(r => r.AsNotCompared()).ToList();
+            /* The churn is not reported, but it WAS collected: the reply must not become "no facts in either
+               window" because the only facts were plan-cache identities (ComparisonResult.IsEmpty). */
+            churnSuppressed = appeared.Count + disappeared.Count;
             appeared.Clear();
             disappeared.Clear();
         }
@@ -455,7 +459,8 @@ public static class ComparisonBanding
             families,
             new PlanCacheChurn(appeared, disappeared, presentInBoth, IsPostgresTargetFactSet(baselineFacts, comparisonFacts)),
             coverageCaveat,
-            notCompared);
+            notCompared,
+            churnSuppressed);
     }
 
     /// <summary>
@@ -778,7 +783,8 @@ public sealed record ComparisonResult(
     IReadOnlyList<ComparisonFamily> Families,
     PlanCacheChurn Churn,
     bool CoverageCaveat,
-    bool NotCompared = false)
+    bool NotCompared = false,
+    int ChurnSuppressed = 0)
 {
     public int Worse => Rows.Count(r => r.Status == ComparisonBanding.StatusWorse);
     public int Better => Rows.Count(r => r.Status == ComparisonBanding.StatusBetter);
@@ -790,8 +796,16 @@ public sealed record ComparisonResult(
     public int FamiliesBetter => Families.Count(f => f.Status == ComparisonBanding.StatusBetter);
     public int FamiliesStable => Families.Count(f => f.Status == ComparisonBanding.StatusStable);
 
-    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.</summary>
-    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0;
+    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.
+    /// Churn that a not-compared reply withheld (#7458) still counts: those facts were collected.</summary>
+    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0 && ChurnSuppressed == 0;
+
+    /// <summary>The parenthesis of the tools' <c>size_note</c> naming what a cut-short fact list left off. Rows are
+    /// ranked worse, better, stable, so the stable tail goes first; a not-compared reply ranks every row 2 with
+    /// no move, so rows are in key order and the tail is alphabetical (#7458).</summary>
+    public string LeftOffNote => NotCompared
+        ? "no row has a direction in this reply, so rows are in key order and the last keys come off first"
+        : "the lowest-ranked: stable rows come last";
 
     public object SummaryPayload() => new
     {

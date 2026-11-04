@@ -179,7 +179,9 @@ public sealed class AnalysisCoverageLivePostgresTests
                 var cxRow = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
                 Assert.Equal("comparison_only", cxRow.GetProperty("presence").GetString());
                 Assert.Equal("not_compared", cxRow.GetProperty("status").GetString());
-                Assert.Equal(0.25, cxRow.GetProperty("comparison_value").GetDouble(), precision: 1);
+                /* The tool's window ends at "now", a minute past windowEnd, so the value is a hair over 0.25
+                   (0.2549 measured); a precision-1 compare rounds it to 0.3 against 0.2. */
+                Assert.InRange(cxRow.GetProperty("comparison_value").GetDouble(), 0.24, 0.27);
                 Assert.Equal("parallelism", cxRow.GetProperty("family").GetString());
                 Assert.Contains("N=1 vs N=1", root.GetProperty("reading").GetString()!, StringComparison.Ordinal);
                 Assert.Contains("robust-sigma", root.GetProperty("band_rules").GetProperty("baseline").GetString()!, StringComparison.Ordinal);

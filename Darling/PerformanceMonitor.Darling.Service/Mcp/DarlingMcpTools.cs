@@ -660,7 +660,7 @@ public sealed class DarlingMcpTools
                 facts_returned = factCount,
                 facts_total = factRows.Count,
                 size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end (the lowest-ranked: stable rows come last) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
                     : null,
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;

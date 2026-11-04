@@ -485,6 +485,37 @@ public sealed class ComparisonBandingTests
         Assert.Single(churnOnly.Churn.Appeared);
     }
 
+    /// <summary>#7458: one side unobserved and the other side's only facts plan-cache identities. The churn is
+    /// withheld from the reply, but the facts were collected, so both tools must give the not-compared reply and
+    /// not the "no analysis facts in EITHER window" one.</summary>
+    [Fact]
+    public void NotCompared_WithOnlyPlanCacheFacts_IsNotEmpty_ButNothingAtAllStillIs()
+    {
+        var (baseline, comparison) = Scored([], [BadActor("0xB", avgCpuMs: 500)]);
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+
+        Assert.Empty(result.Rows);
+        Assert.Empty(result.Churn.Appeared);
+        Assert.False(result.IsEmpty);
+
+        Assert.True(ComparisonBanding.Compare([], [], NoDispersion, coverageCaveat: true, notCompared: true).IsEmpty);
+    }
+
+    /// <summary>#7458: a not-compared reply ranks every row 2 with no move, so a cut-short list loses its
+    /// alphabetical tail. The size note must not claim the stable rows come last.</summary>
+    [Fact]
+    public void LeftOffNote_DescribesTheOrderTheRowsAreActuallyIn()
+    {
+        var (baseline, comparison) = Scored([Cpu(50)], [Cpu(55)]);
+
+        var compared = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        Assert.Contains("stable rows come last", compared.LeftOffNote, StringComparison.Ordinal);
+
+        var notCompared = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+        Assert.DoesNotContain("stable rows come last", notCompared.LeftOffNote, StringComparison.Ordinal);
+        Assert.Contains("key order", notCompared.LeftOffNote, StringComparison.Ordinal);
+    }
+
     /// <summary>The rules the payload states name the constants they rest on, so a change to one moves the other.</summary>
     [Fact]
     public void TheStatedRules_NameTheConstants()
