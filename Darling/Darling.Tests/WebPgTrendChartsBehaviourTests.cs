@@ -183,8 +183,12 @@ public sealed class WebPgTrendChartsBehaviourTests
         var r = Run("empty");
 
         Assert.Equal(0, r.GetProperty("charts").GetInt32());
-        Assert.Equal(new[] { "No database trend.", "No query trend." }, Strings(r.GetProperty("activity")));
-        Assert.Equal(new[] { "No wait trend." }, Strings(r.GetProperty("waits")));
+        /* The Query Duration and Wait trends lead with their own plain sentence and keep the tool's text behind "More detail" (#7410). */
+        Assert.Collection(
+            Strings(r.GetProperty("activity")),
+            e => Assert.Equal("No database trend.", e),
+            e => Assert.Contains("No query trend.", e, StringComparison.Ordinal));
+        Assert.Contains("No wait trend.", Assert.Single(Strings(r.GetProperty("waits"))), StringComparison.Ordinal);
         Assert.Equal(new[] { "No io trend." }, Strings(r.GetProperty("io")));
     }
 }
