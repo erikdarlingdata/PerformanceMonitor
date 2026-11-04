@@ -194,10 +194,10 @@ public sealed partial class DarlingCollectorRunner
             /* #7419: a read that advanced baselines for rows it then failed to store hands them back, so the next run's
                delta covers both intervals. Before the read advanced them, a batch that never started its COPY left every
                baseline alone, and a COPY that failed under its row loop advanced only the rows it reached. A COPY that fails
-               stores nothing, so putting them all back loses nothing. The one cost: a fault while the commit's
-               acknowledgment is in flight can leave the server committed, and then the next delta counts that interval
-               twice, where before it lost it. A fault after the COPY (the dimension flush or the commit, phase Unknown)
-               keeps the advanced baselines, as it always did. */
+               stores nothing, so putting them all back loses nothing: query_stats diverts its text and plans, so its COPY
+               always runs inside the write's transaction, and a fault there never leaves the server committed. A fault
+               after the COPY (the dimension flush or the commit, phase Unknown) keeps the advanced baselines, as it always
+               did. */
             (rows as IBaselineRollback)?.RollBackBaselines();
             throw;
         }

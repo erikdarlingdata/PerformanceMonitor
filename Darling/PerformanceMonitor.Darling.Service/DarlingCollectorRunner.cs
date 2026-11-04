@@ -1098,12 +1098,6 @@ public sealed partial class DarlingCollectorRunner
     internal bool CapturePlansFor(bool? serverCapturePlans) => serverCapturePlans ?? _capturePlans();
 
     /// <summary>
-    /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
-    /// second target query for only the plans the host has not committed. True for query_stats on a server-scoped
-    /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
-    /// second query, so it keeps the inline capture.
-    /// </summary>
-    /// <summary>
     /// #7419: whether query_stats reads its statement text in a second query. Every on-prem and RDS run does. Azure SQL Database
     /// keeps the text in its main query, as it keeps its inline plan: the per-database path of that platform is not covered
     /// by the cache of statements the store already holds.
@@ -1112,6 +1106,12 @@ public sealed partial class DarlingCollectorRunner
         string.Equals(collectorName, QueryStatsCollector.Instance.Name, StringComparison.Ordinal)
         && !target.IsAzureSqlDb;
 
+    /// <summary>
+    /// #5158: whether this run of this collector leaves plan XML out of its main query and fetches it in a
+    /// second target query for only the plans the host has not committed. True for query_stats on a server-scoped
+    /// target that captures plans, with the knob on. Azure SQL Database reads per database through a path with no
+    /// second query, so it keeps the inline capture.
+    /// </summary>
     internal bool ShouldDeferPlanFetchFor(
         string collectorName, bool capturePlanXml, CollectorTargetInfo target, bool? serverCapturePlans) =>
         ShouldDeferPlanFetchFor(
