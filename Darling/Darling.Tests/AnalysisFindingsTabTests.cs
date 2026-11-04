@@ -187,6 +187,36 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoCards_EachWithItsOwnRemediation_AndNoHash()
+    {
+        var r = Run("pileupTwoStatements");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Fix statement A", text, StringComparison.Ordinal);
+        Assert.Contains("Fix statement B", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupOfOneStatement_OnTwoIncidents_IsOneCard()
+    {
+        var r = Run("pileupSameStatement");
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.DoesNotContain("0x", r.GetProperty("text").GetString()!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupsAlsoSeenLine_NamesTheChainInWords_WithNoHash()
+    {
+        var r = Run("pileupAlsoSeen");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.Contains("also seen as: Same statement pileup (", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ARowWhosePeakWasWarning_ButWhoseNewestOccurrenceWasInfo_ReadsWarning()
     {
         Assert.Equal(new[] { "Wait profile shifted · WARNING" }, Strings(Run("peakSeverity").GetProperty("headers")));

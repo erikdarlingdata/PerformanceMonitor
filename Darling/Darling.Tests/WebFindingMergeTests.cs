@@ -99,4 +99,26 @@ public sealed class WebFindingMergeTests
         Assert.Equal("21", S(row, "occurrences"));
         Assert.Empty(row.GetProperty("chains").EnumerateArray());
     }
+
+    [Fact]
+    public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoRows_AndNoCellPrintsAHash()
+    {
+        var rows = Run("pileupTwoStatements").GetProperty("rows").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "3", "5" }, rows.Select(x => S(x, "occurrences")).OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        Assert.Equal(2, rows.Length);
+        foreach (var row in rows)
+        {
+            var text = S(row, "text");
+            Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ThePileupOfOneStatement_OnTwoIncidents_IsOneRow_WithTheOccurrencesAddedUp()
+    {
+        var row = Run("pileupSameStatement").GetProperty("rows").EnumerateArray().Single();
+        Assert.Equal("8", S(row, "occurrences"));
+        Assert.DoesNotContain("0x", S(row, "text"), StringComparison.OrdinalIgnoreCase);
+    }
 }

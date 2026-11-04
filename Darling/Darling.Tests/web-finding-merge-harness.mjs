@@ -37,6 +37,7 @@ const finding = (over) => ({
   first_seen: "2026-11-01T00:00:00Z", last_seen: "2026-11-01T01:00:00Z", time_range: { start: "2026-11-01T00:00:00Z", end: "2026-11-01T01:00:00Z" },
   advice: { headline: "Head" }, ...over,
 });
+const PILEUP = "4 sessions ran the same statement in Sales for 30 s against a baseline of 200 ms";
 const LATCH = "Exclusive latch contention on a non-buffer resource";
 const scenarios = {
   /* The three rows of the issue: one sentence, Info / Info / Warning, three chains from one root. */
@@ -53,6 +54,16 @@ const scenarios = {
   sameChain: () => [
     finding({ story_path: "ANOMALY_WRITE_LATENCY", severity: 1, peak_severity: 1, occurrences: 17, incident_id: "a", advice: { headline: "Write latency spiked to 93.3 ms" } }),
     finding({ story_path: "ANOMALY_WRITE_LATENCY", severity: 1.7, peak_severity: 1.7, occurrences: 4, incident_id: "b", advice: { headline: "Write latency spiked to 93.3 ms" } }),
+  ],
+  /* Two pileups on different statements print the same headline and differ only in the hash at the end of the path: two rows. */
+  pileupTwoStatements: () => [
+    finding({ story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", occurrences: 3, incident_id: "a", advice: { headline: PILEUP } }),
+    finding({ story_path: "SAME_STATEMENT_PILEUP → 0x99887766AABBCCDD", occurrences: 5, incident_id: "b", advice: { headline: PILEUP } }),
+  ],
+  /* The same statement on two incidents is still one row, occurrences added up. */
+  pileupSameStatement: () => [
+    finding({ story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", occurrences: 3, incident_id: "a", advice: { headline: PILEUP } }),
+    finding({ story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", occurrences: 5, incident_id: "b", advice: { headline: PILEUP } }),
   ],
 };
 
@@ -71,6 +82,7 @@ const rows = bodyRows.map((r) => {
     finding: details.length ? details[0].children[0].textContent : finding.textContent,
     severity: cell("Severity").textContent,
     occurrences: cell("Occurrences").textContent,
+    text: r.textContent,
     firstSeen: cell("First seen").textContent,
     lastSeen: cell("Last seen").textContent,
     chains: details.length ? details[0].children[1].children.map((c) => c.textContent) : [],

@@ -150,6 +150,29 @@ try {
       const root = await run("srv-a", { findings: [newest, older] });
       return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
     },
+    pileupTwoStatements: async () => {
+      /* #7582: two pileups on different statements print one headline, but each is its own card with its own remediation. */
+      const head = "4 sessions ran one statement for 30 s";
+      const pile = (over) => finding({ root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, ...over });
+      const a = pile({ finding_id: 1, incident_id: "inc-a", story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", occurrences: 3, advice: { headline: head, investigation: "i", remediation: "Fix statement A" } });
+      const b = pile({ finding_id: 2, incident_id: "inc-b", story_path: "SAME_STATEMENT_PILEUP → 0x99887766AABBCCDD", occurrences: 5, advice: { headline: head, investigation: "i", remediation: "Fix statement B" } });
+      const root = await run("srv-a", { findings: [a, b] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupSameStatement: async () => {
+      /* #7582: one statement's pileup on two incidents is still one card. */
+      const pile = (over) => finding({ root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" }, ...over });
+      const root = await run("srv-a", { findings: [pile({ finding_id: 1, incident_id: "inc-a", occurrences: 3 }), pile({ finding_id: 2, incident_id: "inc-b", occurrences: 5 })] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupAlsoSeen: async () => {
+      /* #7582: one incident's pileup read back under two headlines: the other is named under the card as "also seen as", with no hash. */
+      const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", ...over });
+      const newer = pile({ finding_id: 1, last_seen: "2026-01-01T10:00:00Z", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" } });
+      const older = pile({ finding_id: 2, last_seen: "2026-01-01T08:00:00Z", advice: { headline: "3 sessions ran one statement for 20 s", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newer, older] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
     sameSentence: async () => {
       /* #7582: one sentence on rows of two incidents is one card, Critical, with the occurrences added up, and the chains it covers named in words. */
       const read = (over) => finding({ advice: { headline: "Read latency spiked to 155 ms", investigation: "i", remediation: "r" }, ...over });

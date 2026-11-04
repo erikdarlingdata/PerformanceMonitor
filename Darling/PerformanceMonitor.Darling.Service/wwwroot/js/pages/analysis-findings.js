@@ -108,9 +108,25 @@ function worstScore(f) {
   return a == null ? b : b == null ? a : Math.max(a, b);
 }
 
+/**
+ * A fact key: upper case with underscores, starting with a letter (LATCH_EX, PG_WAIT_LOCK, BAD_ACTOR_0x1A2B). A story path can also carry
+ * a segment that is not a fact: a same-statement pileup's path is "SAME_STATEMENT_PILEUP → <statement hash>" (#7582), and the hash starts
+ * with a digit (a surrogate identity starts with "text:"). The stored row has no typed keys (#3859), so the shape is the test.
+ */
+const FACT_KEY = /^[A-Z][A-Za-z0-9_]*$/;
+
+function pathSegments(f) {
+  return String(f.story_path || "").split("→").map((s) => s.trim()).filter(Boolean);
+}
+
+/** The path segments that name something other than a fact (a statement's hash), joined: "" for an ordinary chain. */
+function identityOf(f) {
+  return pathSegments(f).filter((s) => !FACT_KEY.test(s)).join("|");
+}
+
 /** A chain's facts in the order they happened, in words: "Latch ex, then Cxpacket". Never the raw arrows or the hash. */
 export function plainChain(f) {
-  const steps = String(f.story_path || "").split("→").map((s) => readableStory(s)).filter(Boolean);
+  const steps = pathSegments(f).filter((s) => FACT_KEY.test(s)).map((s) => readableStory(s)).filter(Boolean);
   return steps.length ? steps.join(", then ") : readableStory(rootKeyOf(f)) || findingTitle(f);
 }
 
@@ -127,20 +143,24 @@ export function chainLine(c) {
  * Warning reads Warning), the earliest first seen, the latest last seen and the occurrences added up. The newest row speaks for the
  * rest (its advice, its incident, its figures). `chains` lists what the row covers, one entry per distinct chain, worst first, for the
  * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
+ * One exception: a path that names a statement (a same-statement pileup's hash) keeps the statement in the merge key, so two pileups
+ * on different statements with the same headline stay two rows, each with its own advice and remediation. The same statement on two
+ * incidents still merges.
  */
 export function mergeBySentence(findings) {
   const order = [];
   const buckets = new Map();
   for (const f of findings || []) {
     const title = findingTitle(f);
-    if (!buckets.has(title)) {
-      buckets.set(title, []);
-      order.push(title);
+    const key = title + "\u0000" + identityOf(f);
+    if (!buckets.has(key)) {
+      buckets.set(key, { title, rows: [] });
+      order.push(key);
     }
-    buckets.get(title).push(f);
+    buckets.get(key).rows.push(f);
   }
-  return order.map((title) => {
-    const rows = buckets.get(title);
+  return order.map((key) => {
+    const { title, rows } = buckets.get(key);
     let newest = rows[0];
     let first = null;
     let last = null;
