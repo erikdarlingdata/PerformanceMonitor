@@ -371,7 +371,10 @@ public static class DailySummarySql
     /// <summary>
     /// The same CTE against a rollup. <c>COUNT(DISTINCT query_hash)</c> is exact over a CAGG because query_hash is
     /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
-    /// gives the identical answer raw would. The time column becomes <c>bucket</c>; parameter positions are
+    /// gives the count of distinct hashes the rollup's source rows produced. That is raw's answer except for the
+    /// rows the rollup's own <c>WHERE</c> leaves out: the interval-honest successor skips restart rows
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>), so a closed day can read a few hashes lower from the
+    /// rollup than from raw (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
     /// unchanged, so the caller binds the same three values either way.
     ///
     /// <para><b>The days the rollup has not reached yet come from raw (#3653 A6, the <c>unique_queries = 0</c>
@@ -386,10 +389,24 @@ public static class DailySummarySql
     /// materialized yet" is. The CTE now takes the rollup for every day up to and including the rollup's last
     /// materialized DAY for this server and raw <c>query_stats</c> for the days after it — raw keeps four days
     /// and the lag is at most two, so those days are answered exactly, from the rows the rollup will
-    /// materialize tomorrow. The two halves are partitioned on the ceiling DAY, never on the hour, so no day
-    /// has two rows in <c>queries</c> (a <c>COUNT(DISTINCT)</c> cannot be summed across halves) and the
-    /// hourly tier's ceiling day reads its own partial rollup rather than a mix. Bounded by shape: the ceiling
-    /// is one indexed <c>max(bucket)</c> per server and the raw half is at most two days of one server.</para>
+    /// materialize tomorrow. No day has two rows in <c>queries</c> (a <c>COUNT(DISTINCT)</c> cannot be summed
+    /// across halves). Bounded by shape: the ceiling is one indexed <c>max(bucket)</c> per server and the raw
+    /// half is a day or two of one server.</para>
+    ///
+    /// <para><b>A day the rollup holds only part of reads raw too, and the larger count wins (#7505).</b> An
+    /// hourly rollup runs behind the clock: its refresh runs once an hour and its <c>end_offset</c> is an hour,
+    /// so its newest bucket can be two hours old. Split on the ceiling DAY alone, today read that partial
+    /// rollup: after a burst of new queries the month read showed 1 where the three-day read, which answers
+    /// from raw, showed 2,445. The ceiling now also carries <c>raw_from</c>, the day in which the newest bucket
+    /// ENDS. It is the day after the ceiling day when the newest bucket is the day's last (a daily rollup always,
+    /// an hourly one at 23:00), so a whole-bucket tier is read exactly as before. It is the ceiling day itself
+    /// when the newest bucket ends inside the day, and raw is then read from that day too. The two halves meet
+    /// on that one day, and <c>MAX</c> per day keeps one row: each half counts hashes that did appear, so the
+    /// larger is the closer. Raw's wins when the rollup has not caught up. The rollup's wins when raw has lost
+    /// the day, either all of it (a rollup that stopped refreshing for longer than raw's four days keeps its
+    /// partial count and never prints 0) or part of it (a chunk dropped by retention). A quiet server whose
+    /// last closed hour has no bucket reads raw for that day while raw holds it, and keeps the rollup's count
+    /// after.</para>
     ///
     /// <para><b>The days the rollup skipped BELOW its ceiling are NULL, not 0 (#3653 A6, the last clause).</b>
     /// A day at or below this server's ceiling for which the rollup holds no row was, until this, a day the
@@ -478,13 +495,35 @@ public static class DailySummarySql
         var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
         var sourceFilter = filter.Length == 0 ? string.Empty : $"\n          AND {filter}";
 
+        var width = (long)target.BucketWidth.TotalSeconds;
+
+        /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
+           is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
+           raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
+           always did. The filter is a no-op for a rollup with none. */
+        var partialDayFilter = filter.Length == 0
+            ? string.Empty
+            : $"\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR ({filter}))";
+
         return $"""
+        /* #7505: last_day is the newest day the rollup holds a bucket for. raw_from is the first day the rollup
+           does NOT hold whole: the day in which the newest bucket ENDS. For a daily rollup, or an hourly one whose
+           newest bucket is 23:00, that is the day after last_day. For an hourly rollup that is still behind the
+           clock (its refresh runs an hour apart and stops an hour short of now, so it can lag two hours), the newest
+           bucket ends inside last_day, so raw_from = last_day and that day is partial. */
         queries_ceiling AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{width} seconds') AS raw_from
             FROM collect.{relation}
             WHERE server_id = $1
         ),
         queries AS (
+            /* One row per day. The rollup half and the raw half overlap on exactly one day, the partial one, and
+               a COUNT(DISTINCT) of two halves cannot be added. Each half is a count of hashes that really
+               appeared that day, so the larger is the closer: the rollup's when raw has lost part of the day
+               (retention), raw's when the rollup has not caught up (#7505). */
+            SELECT u.d, MAX(u.c) AS c
+            FROM (
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
@@ -498,7 +537,7 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -527,6 +566,8 @@ public static class DailySummarySql
                 SELECT 1 FROM collect.{target.Source} AS s
                 WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'{sourceFilter}
                 OFFSET 0)
+            ) AS u
+            GROUP BY u.d
         ),
         """;
     }
@@ -583,19 +624,32 @@ public static class DailySummarySql
         var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
         var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
+        var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
+        var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
+        var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
+        var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
 
         return $"""
+        /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
+           hold whole. See QueriesCteForCagg. */
         queries_ceiling_legacy AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{legacyWidth} seconds') AS raw_from
             FROM collect.{legacy}
             WHERE server_id = $1 AND bucket < {boundary}
         ),
         queries_ceiling_successor AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{successorWidth} seconds') AS raw_from
             FROM collect.{successor}
             WHERE server_id = $1 AND bucket >= {boundary}
         ),
         queries AS (
+            /* One row per day: the larger of the rollup's and raw's count on the one day both can hold. See
+               QueriesCteForCagg. */
+            SELECT u.d, MAX(u.c) AS c
+            FROM (
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
@@ -617,7 +671,10 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
+                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy}))
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -656,6 +713,8 @@ public static class DailySummarySql
                 SELECT 1 FROM collect.{successorTarget.Source} AS s
                 WHERE s.server_id = $1 AND s.{successorTarget.SourceTimeColumn} >= b.d AND s.{successorTarget.SourceTimeColumn} < b.d + INTERVAL '1 day'{successorSourceFilter}
                 OFFSET 0)
+            ) AS u
+            GROUP BY u.d
         ),
         """;
     }

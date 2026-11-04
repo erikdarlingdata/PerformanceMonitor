@@ -459,6 +459,138 @@ public sealed class DailySummaryNotCarriedLiveTests
         Assert.Equal(new[] { O(2) }, oldAfter.DaysMissing);
     }
 
+    private const int PartialServerId = -936540;
+    private const string PartialServerName = "partial-rollup";
+
+    /// <summary>
+    /// #7505: the hourly rollup runs behind the clock, so the newest day it holds is only part of that day.
+    /// The month read used to count that day from the partial rollup (a burst of new queries read as 1 where
+    /// the three-day read, which answers from raw, read thousands). A day the rollup holds whole still reads
+    /// the rollup, a day raw has lost keeps the rollup's count, and every day is one row on every route.
+    /// </summary>
+    [Fact]
+    public async Task ADayTheHourlyRollupHoldsOnlyPartOf_ReadsTheLargerOfRollupAndRaw_OneRowPerDay_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live partial-rollup calendar test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled,
+            "The live partial-rollup calendar test needs TimescaleDB: a rollup tier exists only as a continuous aggregate.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        await RegisterServerAsync(connection, PartialServerId, PartialServerName, ct);
+
+        var hourly = TimescaleSupport.QueryStatsHourlyView;
+        var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var daily = TimescaleSupport.QueryStatsDailyView;
+        var b = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-6), DateTimeKind.Unspecified);
+        DateTime D(int n) => b.AddDays(n);
+        var id = 0L;
+
+        async Task Plant(DateTime at, string hash, int interval = 1200)
+        {
+            await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
+            insert.Parameters.AddWithValue(7_505_000L + ++id);
+            insert.Parameters.AddWithValue(at);
+            insert.Parameters.AddWithValue(PartialServerId);
+            insert.Parameters.AddWithValue(PartialServerName);
+            insert.Parameters.AddWithValue(hash);
+            insert.Parameters.AddWithValue(interval);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* D0 is closed and whole: three hashes at 01:00 and 23:30, so its newest bucket is the day's last (23:00).
+           A restart row (interval 0) that only raw counts makes raw read 4 against the successor rollup's 3, so
+           a 3 proves the day was read from the rollup. */
+        foreach (var h in new[] { "0xH0", "0xH1", "0xH2" })
+        {
+            await Plant(D(0).AddHours(1), h);
+            await Plant(D(0).AddHours(23.5), h);
+        }
+
+        await Plant(D(0).AddHours(5), "0xRESTART", interval: 0);
+        await RefreshAsync(connection, successor, D(0), D(1), ct);
+
+        /* D1 is the rollup's newest day and is partial: two hashes were rolled up at 01:00, then three more
+           arrived at 10:00 that the rollup has not reached. D2 is past the rollup altogether (raw only). */
+        await Plant(D(1).AddHours(1), "0xH0");
+        await Plant(D(1).AddHours(1), "0xH1");
+        await RefreshAsync(connection, successor, D(1), D(2), ct);
+        foreach (var h in new[] { "0xH2", "0xH3", "0xH4" })
+        {
+            await Plant(D(1).AddHours(10), h);
+        }
+
+        await Plant(D(2).AddHours(3), "0xH0");
+        await Plant(D(2).AddHours(3), "0xH1");
+
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor);
+        var read = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2) }, read.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 3L, 5L, 2L }, read.Select(r => r.UniqueQueries).ToArray());
+
+        /* The stitched read (legacy rollup below the successor's first whole day, successor from it) answers the
+           same for the successor's days. D0 comes from the legacy rollup, which admits the restart row. */
+        await RefreshAsync(connection, hourly, D(0), D(3), ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, await TimescaleSupport.DetectRollupsAsync(postgres, ct), ct);
+        Assert.True(coverage.StitchFloor(hourly, RollupCoverage.StitchTier.Hourly, D(0)).HasValue, "the stitch must apply for the stitched assertions to mean anything");
+        var stitched = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, D(0)), PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2) }, stitched.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 4L, 5L, 2L }, stitched.Select(r => r.UniqueQueries).ToArray());
+
+        /* THE DAILY TIER IS UNCHANGED: its buckets are whole days, so its ceiling day (D0) reads the rollup,
+           including the restart row the legacy admits, and only the days after it read raw. */
+        await RefreshAsync(connection, daily, D(0), D(1), ct);
+        var dailyTier = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new long?[] { 4L, 5L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
+
+        /* RAW HAS LOST THE DAY (retention, or a rollup that stopped refreshing): the rollup's partial count
+           stays, never 0 and never fewer than it holds. */
+        await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
+        {
+            purge.Parameters.AddWithValue(PartialServerId);
+            purge.Parameters.AddWithValue(D(1));
+            purge.Parameters.AddWithValue(D(2));
+            await purge.ExecuteNonQueryAsync(ct);
+        }
+
+        var purged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(3), ct);
+        Assert.Equal(new long?[] { 3L, 2L, 2L }, purged.Select(r => r.UniqueQueries).ToArray());
+
+        /* A QUIET SERVER: D3 is closed but its newest bucket (02:00) is not the day's last. Raw holds it and
+           agrees with the rollup, so the day reads 2 as one row; once raw has lost it the rollup's 2 stays. */
+        await Plant(D(3).AddHours(2), "0xH0");
+        await Plant(D(3).AddHours(2), "0xH1");
+        await RefreshAsync(connection, successor, D(2), D(4), ct);
+        var quiet = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
+        Assert.Equal(new[] { D(0), D(1), D(2), D(3) }, quiet.Select(r => r.Day).ToArray());
+        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quiet.Select(r => r.UniqueQueries).ToArray());
+
+        await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2", connection))
+        {
+            purge.Parameters.AddWithValue(PartialServerId);
+            purge.Parameters.AddWithValue(D(3));
+            await purge.ExecuteNonQueryAsync(ct);
+        }
+
+        var quietPurged = await ReadCalendarAsync(connection, sql, PartialServerId, D(0), D(4), ct);
+        Assert.Equal(new long?[] { 3L, 2L, 2L, 2L }, quietPurged.Select(r => r.UniqueQueries).ToArray());
+    }
+
     private sealed record CalendarRow(DateTime Day, long? UniqueQueries, int SignalSourcesPresent);
 
     private static async Task<List<CalendarRow>> ReadCalendarAsync(NpgsqlConnection connection, string sql, int serverId, DateTime from, DateTime to, CancellationToken ct)
