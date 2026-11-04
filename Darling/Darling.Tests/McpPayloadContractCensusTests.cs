@@ -2050,8 +2050,6 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string Spelling, string File, string WhatItIs)[] SeverityHomonyms =
     [
-        ("CRITICAL", "DarlingPlanCacheSchedulerReader.cs",
-            "bloat_level's top rung of the Dashboard's NORMAL / MEDIUM / HIGH / CRITICAL level scale, reproduced verbatim on both SKUs (Lite: LocalDataService.ClassifyPlanCacheBloat) and coloured by both viewers' BloatLevelBrush — a level scale whose other three rungs are not severity words"),
         ("HEALTHY", "DarlingAgReader.cs",
             "SQL Server's own synchronization_health_desc token, PARSED on the way in and banded to HealthSeverity — input vocabulary, never emitted"),
         ("HEALTHY", "DarlingFleetReader.cs",
@@ -2157,28 +2155,19 @@ public sealed class McpPayloadContractCensusTests
     }
 
     /// <summary>
-    /// <c>CRITICAL</c> in the plan-cache reader is a rung of a LEVEL scale, not a band: the same helper on Lite
-    /// spells all four rungs identically (read from source, because this project does not reference the
-    /// desktop app), and the Darling one is executed at each boundary. Moving one rung to <c>Critical</c>
-    /// would leave <c>Critical / HIGH / MEDIUM / NORMAL</c> — a scale in two cases, which is the defect this
-    /// file exists to prevent.
+    /// <c>CRITICAL</c> in the plan-cache rule is a rung of a LEVEL scale, not a band. Both SKUs and the Viewer share
+    /// the one rule (#7445), so the four rungs are executed at each boundary rather than read from two sources.
+    /// Moving one rung to <c>Critical</c> would leave <c>Critical / HIGH / MEDIUM / NORMAL</c>, a scale in two cases,
+    /// which is the defect this file exists to prevent.
     /// </summary>
     [Fact]
     public void ThePlanCacheBloatLevel_IsOneScaleOnBothSkus_AndNotABand()
     {
-        Assert.Equal("CRITICAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(100, 51).Level);
-        Assert.Equal("HIGH", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(100, 31).Level);
-        Assert.Equal("MEDIUM", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(100, 21).Level);
-        Assert.Equal("NORMAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(100, 20).Level);
-        Assert.Equal("NORMAL", DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(0, 0).Level);
-
-        var lite = File.ReadAllText(RepoFile.PathTo("Lite/Services/LocalDataService.PlanCache.cs"));
-        var liteHelper = lite[lite.IndexOf("ClassifyPlanCacheBloat(long totalPlans", StringComparison.Ordinal)..];
-        liteHelper = liteHelper[..liteHelper.IndexOf("\n    }", StringComparison.Ordinal)];
-        foreach (var rung in new[] { "\"CRITICAL\"", "\"HIGH\"", "\"MEDIUM\"", "\"NORMAL\"" })
-        {
-            Assert.Contains(rung, liteHelper, StringComparison.Ordinal);
-        }
+        Assert.Equal("CRITICAL", PlanCacheBloatRule.Classify(100, 900, 100, 51, 200).Level);
+        Assert.Equal("HIGH", PlanCacheBloatRule.Classify(100, 900, 100, 31, 200).Level);
+        Assert.Equal("MEDIUM", PlanCacheBloatRule.Classify(100, 900, 100, 21, 200).Level);
+        Assert.Equal("NORMAL", PlanCacheBloatRule.Classify(100, 900, 100, 20, 200).Level);
+        Assert.Equal("NORMAL", PlanCacheBloatRule.Classify(0, 0, 0, 0, 0).Level);
     }
 
     /// <summary>

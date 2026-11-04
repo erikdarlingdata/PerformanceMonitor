@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -450,28 +451,32 @@ public class FactScorer
 
     /// <summary>
     /// Scores plan-cache single-use bloat off the PLAN_CACHE_BLOAT fact (Value = single_use_percent =
-    /// single_use_plans * 100 / total_plans over the LATEST plan_cache_stats snapshot). Tiers mirror the
-    /// Dashboard's report.plan_cache_bloat bloat_level CASE
-    /// (install/47_create_reporting_views.sql lines 1485-1487): &gt; 50 CRITICAL, &gt; 30 HIGH, &gt; 20
+    /// single-use COMPILED plans * 100 / COMPILED plans over the LATEST plan_cache_stats snapshot; the fact's
+    /// single_use_plans, total_plans and single_use_size_mb are the compiled figures too, #7445). Bands and floor
+    /// are <see cref="PlanCacheBloatRule"/>'s, the rule the live badges use, so the card and the badge read one
+    /// population (the bands mirror the Dashboard's report.plan_cache_bloat bloat_level CASE,
+    /// install/47_create_reporting_views.sql lines 1485-1487): &gt; 50 CRITICAL, &gt; 30 HIGH, &gt; 20
     /// MEDIUM, else NORMAL. Base maxes at 1.0 (WARNING) like every base fact — the &gt; 50 "CRITICAL"
     /// tier caps at 1.0 here; the CRITICAL band is earned only via corroboration.
     ///
     /// <para>NOISE-CONTROL GUARD (not in the Dashboard's raw report view, appropriate for a SCORED
     /// recommendation): only score when the single-use footprint is materially large
-    /// (single_use_size_mb &gt;= 100). A tiny or idle cache can show a high single-use % on a handful of
-    /// MB — that is not memory bloat worth a card, so it stays context-only (score 0) below the size
-    /// floor. The percentage still rides in Value for the AI surface either way.</para>
+    /// (single_use_size_mb &gt;= <see cref="PlanCacheBloatRule.SingleUseFloorMb"/>). A tiny or idle cache can show a
+    /// high single-use % on a handful of MB — that is not memory bloat worth a card, so it stays context-only
+    /// (score 0) below the size floor. The percentage still rides in Value for the AI surface either way.</para>
     /// </summary>
     private static double ScorePlanCacheBloat(Fact fact)
     {
         // Real memory bloat only — a high % on a trivially small single-use footprint is noise.
-        if (fact.Metadata.GetValueOrDefault("single_use_size_mb") < 100.0) return 0.0;
+        if (fact.Metadata.GetValueOrDefault("single_use_size_mb") < PlanCacheBloatRule.SingleUseFloorMb) return 0.0;
 
-        var singleUsePercent = fact.Value; // single_use_plans * 100 / total_plans (latest snapshot)
-        if (singleUsePercent > 50) return 1.0;   // CRITICAL - single-use plans > 50% (install/47:1485)
-        if (singleUsePercent > 30) return 0.75;  // HIGH     - single-use plans > 30% (install/47:1486)
-        if (singleUsePercent > 20) return 0.5;   // MEDIUM   - single-use plans > 20% (install/47:1487)
-        return 0.0;
+        return PlanCacheBloatRule.LevelFor(fact.Value) switch
+        {
+            "CRITICAL" => 1.0,   // single-use plans > 50% (install/47:1485)
+            "HIGH" => 0.75,      // single-use plans > 30% (install/47:1486)
+            "MEDIUM" => 0.5,     // single-use plans > 20% (install/47:1487)
+            _ => 0.0
+        };
     }
 
     /// <summary>

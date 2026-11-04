@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -466,7 +467,9 @@ FROM latest WHERE rn = 1";
     /// of the window's end (#3896 — the lookback start binds as $2; it was &lt;= TimeRangeEnd alone, which
     /// read the whole parquet archive); DENSE_RANK() picks every
     /// row of the newest collection (avoiding QUALIFY, which is DuckDB-only and banned in the shared PG
-    /// dialect). The fact is emitted whenever a real cache exists (total_plans &gt; 0); the FactScorer
+    /// dialect). The plan and single-use figures are over COMPILED plans only (#7445, <see cref="PlanCacheBloatRule"/>):
+    /// parse trees and extended procedures are not ad-hoc plans, and the live badges leave them out too. The fact is
+    /// emitted whenever a compiled plan exists (compiled plans &gt; 0); the FactScorer
     /// applies the &gt; 50/30/20% bloat tiers AND the single_use_size_mb &gt;= 100 noise guard, so a
     /// healthy or tiny cache stays context-only. Absent on an empty/uncollected cache.
     /// </summary>
@@ -480,9 +483,9 @@ FROM latest WHERE rn = 1";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 WITH ranked AS (
-    SELECT total_plans, single_use_plans, total_size_mb, single_use_size_mb,
+    SELECT cacheobjtype, total_plans, single_use_plans, total_size_mb, single_use_size_mb,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
     FROM v_plan_cache_stats
     WHERE server_id = $1
@@ -490,10 +493,10 @@ WITH ranked AS (
     AND   collection_time <= $3
 )
 SELECT
-    COALESCE(SUM(total_plans), 0) AS total_plans,
-    COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
     COALESCE(SUM(total_size_mb), 0) AS total_size_mb,
-    COALESCE(SUM(single_use_size_mb), 0) AS single_use_size_mb
+    COALESCE(SUM(total_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_plans,
+    COALESCE(SUM(single_use_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_plans,
+    COALESCE(SUM(single_use_size_mb) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_size_mb
 FROM ranked
 WHERE rnk = 1";
 
@@ -508,12 +511,14 @@ WHERE rnk = 1";
             // SUM(INTEGER) widens to HUGEINT — DuckDB hands it back boxed as BigInteger, which
             // Convert.ToDouble cannot take (no IConvertible); read every aggregate through the
             // BigInteger-tolerant ToInt64, then widen the MB sizes to double for the metadata.
-            var totalPlans = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-            var singleUsePlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-            var totalSizeMb = reader.IsDBNull(2) ? 0.0 : (double)ToInt64(reader.GetValue(2));
+            var totalSizeMb = reader.IsDBNull(0) ? 0.0 : (double)ToInt64(reader.GetValue(0));
+            var totalPlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+            var singleUsePlans = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var singleUseSizeMb = reader.IsDBNull(3) ? 0.0 : (double)ToInt64(reader.GetValue(3));
 
-            // No cache collected (or an empty cache) — nothing to classify.
+            /* #7445: every figure but total_size_mb is over COMPILED plans only (PlanCacheBloatRule), so this card
+               and the live badge read one population. A parse tree is not an ad-hoc plan, and thousands of
+               single-use ones must not score as bloat. No compiled plan collected means nothing to classify. */
             if (totalPlans <= 0) return;
 
             var singleUsePercent = singleUsePlans * 100.0 / totalPlans;

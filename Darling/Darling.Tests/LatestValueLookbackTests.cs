@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -240,7 +241,9 @@ public sealed class LatestValueLookbackSqlTests
     public void TheLiteTwin_CarriesTheSameStatement(string name, string liteFile)
     {
         var darling = Normalize(SqlFor(name)).Trim();
-        var lite = Normalize(File.ReadAllText(Path.Combine(RepoRoot(), liteFile)));
+        /* Lite's source interpolates the shared compiled-plan predicate (#7445); Darling's const already holds its value. */
+        var lite = Normalize(File.ReadAllText(Path.Combine(RepoRoot(), liteFile)))
+            .Replace("{PlanCacheBloatRule.CompiledPredicateSql}", PlanCacheBloatRule.CompiledPredicateSql, StringComparison.Ordinal);
 
         /* Map Darling's base-table references onto the v_ views Lite reads; a v_ reference is left alone. */
         var asLite = Regex.Replace(darling, @"\bFROM (?!v_)(\w+)", m =>
