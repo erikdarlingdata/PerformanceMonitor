@@ -190,7 +190,9 @@ VALUES ($1,$2,$3,'running_jobs',$4,0,'SUCCESS',NULL,0,0,0)",
                 CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(t));
             var looked = await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(looked));
-            Assert.Contains("as of the running_jobs collector's latest successful run", looked, StringComparison.Ordinal);
+            /* The JSON writer escapes the apostrophe, so the assertion stops before it. */
+            Assert.Contains("found as of the running_jobs collector", looked, StringComparison.Ordinal);
+            Assert.Contains("latest successful run (", looked, StringComparison.Ordinal);
             Assert.DoesNotContain("has not run yet", looked, StringComparison.Ordinal);
 
             bodySucceeded = true;
