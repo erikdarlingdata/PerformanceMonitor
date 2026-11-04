@@ -87,6 +87,9 @@ public sealed class PgCallsPerSecondLiveTests
                 ("11:40", 0, 0.0),
             };
 
+            /* The rate itself, first: 58 calls over a 600 s bucket is 0.0967 per second. The old read divided by only the
+               runs the statement had a row in (120 s) and drew 0.4833. */
+            Assert.Equal(58.0 / 600.0, points.First(p => p.Calls > 0).CallsPerSecond, 9);
             Assert.Equal(expected.Length, points.Count);
             Assert.Equal(expected.Length, tool.Length);
             for (var i = 0; i < expected.Length; i++)
