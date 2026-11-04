@@ -53,14 +53,45 @@ public static class DarlingPgBufferUsageReader
         long PoolBuffersUsed,
         double PctOfPool,
         double PctDirty,
-        DateTime CaptureTime);
+        DateTime CaptureTime,
+        long RelationsInSnapshot = 0,
+        long SnapshotBuffers = 0)
+    {
+        /// <summary>
+        /// A word for a row that has no relation name, null when it has one (#7455). The name is missing by
+        /// design and not by fault, and a blank cell reads as a fault: the largest row on a quiet server is
+        /// often one of these.
+        /// </summary>
+        public string? NameLabel => RelationLabel(DatabaseName, RelationName);
+    }
+
+    /// <summary>Shown for a buffer in a database other than the one the collector connected to.</summary>
+    public const string OtherDatabaseLabel = "(another database)";
+
+    /// <summary>Shown for a buffer whose database matches no row in <c>pg_database</c>.</summary>
+    public const string SharedOrDroppedLabel = "(shared catalogs or a dropped database)";
+
+    /// <summary>
+    /// Why a name is missing, for a row without one (#7455). The pool is cluster-wide and <c>pg_class</c> is
+    /// per-database, so the collector names a relation only in the database it is connected to. A row with a
+    /// database name and no relation is therefore another database's buffers. A row with neither name is a
+    /// buffer whose database id is in no <c>pg_database</c> row, which on a stock server is the shared
+    /// catalogs (database id 0) and otherwise a database that has since been dropped. Neither is an error.
+    /// </summary>
+    public static string? RelationLabel(string? databaseName, string? relationName) =>
+        !string.IsNullOrEmpty(relationName) ? null
+        : string.IsNullOrEmpty(databaseName) ? SharedOrDroppedLabel
+        : OtherDatabaseLabel;
 
     /* Only the newest collection_time in the window, taken as a whole: the pool totals are consistent within
        one snapshot and not across snapshots, so mixing rows from two of them would produce shares that do
        not add up.
 
        NULLIF guards both denominators. A pool total of zero cannot happen on a live server, but a division
-       that produces a divide-by-zero error instead of a NULL turns an odd sample into a failed read. */
+       that produces a divide-by-zero error instead of a NULL turns an odd sample into a failed read.
+
+       relations_in_snapshot and snapshot_buffers are windows over the whole snapshot, evaluated before LIMIT
+       cuts the page (#7455), so a caller learns the real size of what the page is cut from. */
     public const string PgBufferUsageSql = """
         WITH newest AS (
             SELECT max(collection_time) AS at
@@ -80,7 +111,9 @@ public static class DarlingPgBufferUsageReader
             b.pool_buffers_used,
             (100.0 * b.buffers / NULLIF(b.pool_buffers_total, 0))::double precision AS pct_of_pool,
             (100.0 * b.dirty_buffers / NULLIF(b.buffers, 0))::double precision       AS pct_dirty,
-            b.collection_time
+            b.collection_time,
+            count(*) OVER ()                                                          AS relations_in_snapshot,
+            sum(b.buffers) OVER ()::bigint                                            AS snapshot_buffers
         FROM pg_buffer_usage AS b
         JOIN newest AS n ON b.collection_time = n.at
         WHERE b.server_id = $1
@@ -122,7 +155,9 @@ public static class DarlingPgBufferUsageReader
                 PctDirty: reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 CaptureTime: reader.IsDBNull(10)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(10), DateTimeKind.Utc),
+                RelationsInSnapshot: reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+                SnapshotBuffers: reader.IsDBNull(12) ? 0 : reader.GetInt64(12)));
         }
 
         return rows;

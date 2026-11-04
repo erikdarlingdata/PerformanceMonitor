@@ -1168,11 +1168,14 @@ public partial class ViewerServerTab
             ? "Nothing recorded. This panel needs the pg_buffercache extension — without it the collector "
               + "reports the object as missing rather than failing, and the Overview tab's extension panel "
               + "says whether it is available on this server and one CREATE EXTENSION away."
-            : $"Latest snapshot: {used:N0} of {total:N0} buffers in use "
+            : (rows[0].RelationsInSnapshot > rows.Count
+                  ? $"Showing the largest {rows.Count:N0} of {rows[0].RelationsInSnapshot:N0} relations in the snapshot. "
+                  : string.Empty)
+              + $"Latest snapshot: {used:N0} of {total:N0} buffers in use "
               + $"({(total == 0 ? 0 : 100.0 * used / total):N1}% of the pool). Residency is a LEVEL, so this "
               + "is the newest sample rather than a window average — averaging what was resident over a day "
-              + "answers nothing. A blank Relation is another database's table or a shared catalog, not a "
-              + "missing name: the pool is cluster-wide while pg_class is per-database. Avg Usage near 0 "
+              + "answers nothing. A Relation shown as (another database) or (shared catalogs or a dropped "
+              + "database) is not a missing name: the pool is cluster-wide while pg_class is per-database. Avg Usage near 0 "
               + "means a relation is holding memory it is not earning.";
     }
 

@@ -395,7 +395,7 @@ public sealed class DarlingMcpPgIndexTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether more columns were collected than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -411,8 +411,12 @@ public sealed class DarlingMcpPgIndexTools
         {
             var windowStart = windowEnd.AddHours(-hours_back);
 
-            var rows = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
+            /* #7455: limit + 1 as the fetch, the same dialect as get_pg_index_bloat above, so the reply can say
+               whether the census held more columns than the page. It reported column_count = rows.Count and
+               nothing else, and a page of 3 columns under a FULL COVERAGE sentence read as the whole ranking. */
+            var fetched = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Asked on BOTH paths, not just the empty one (#3154). A returned row set that covers a
                fraction of the tables above the floor is the same defect as an unexplained empty, one
@@ -479,6 +483,7 @@ public sealed class DarlingMcpPgIndexTools
                 server = resolved.DisplayName,
                 hours_back,
                 column_count = rows.Count,
+                truncated,
                 /* The arm as its own field, beside the sentence. Automation keys on names rather than
                    parsing prose, and a caller deciding whether this ranking is safe to act on needs the
                    partial-coverage answer in a form it can branch on. */
@@ -487,6 +492,10 @@ public sealed class DarlingMcpPgIndexTools
                      + "positive — check the sign before comparing two columns. correlation near ±1 is "
                      + "what makes an index range scan cheap. A null common_value_count means the column "
                      + "has no most-common-value list at all, not that the list is empty. "
+                     + (truncated
+                         ? $"This page is cut at limit ({limit}): more columns were collected than it shows, so " 
+                           + "the coverage sentence below describes the whole census and not this page. Raise limit to see more. "
+                         : string.Empty)
                      + coverage.Message,
                 columns,
             }, McpHelpers.JsonOptions);

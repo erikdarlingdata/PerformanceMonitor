@@ -1931,7 +1931,8 @@ internal static class PgDisplay
     internal static BufferUsageRow BufferUsage(DarlingPgBufferUsageReader.PgBufferUsageRow row) => new()
     {
         DatabaseName = row.DatabaseName,
-        RelationName = row.RelationName,
+        /* #7455: a word for the rows that have no name (another database, the shared catalogs), never a blank. */
+        RelationName = row.RelationName ?? row.NameLabel,
         Buffers = row.Buffers,
         PctOfPool = Math.Round(row.PctOfPool, 1),
         DirtyBuffers = row.DirtyBuffers,
