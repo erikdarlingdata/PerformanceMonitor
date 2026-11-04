@@ -671,6 +671,10 @@ ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXI
             @"ALTER TABLE IF EXISTS collect.query_store_top_daily
     DROP COLUMN IF EXISTS avg_duration_us_wsum, DROP COLUMN IF EXISTS avg_cpu_time_us_wsum, DROP COLUMN IF EXISTS avg_logical_io_reads_wsum,
     DROP COLUMN IF EXISTS avg_logical_io_writes_wsum, DROP COLUMN IF EXISTS avg_physical_io_reads_wsum, DROP COLUMN IF EXISTS avg_rowcount_wsum;"),
+        // V241 (#7497): the blocking process's open transaction count on the blocked process reports. The last column is the probe's newest
+        // sentinel. The rewind drops it, so a re-run of V241 adds it again. Safe on a store that never had it. The rung re-expands the view.
+        new(241, "hasBlockingOpenTranCount",
+            @"ALTER TABLE IF EXISTS collect.blocked_process_reports DROP COLUMN IF EXISTS blocking_open_transaction_count;"),
     ];
 
     /// <summary>

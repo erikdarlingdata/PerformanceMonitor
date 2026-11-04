@@ -44,6 +44,35 @@ public sealed class BlockingHeadColumnsRowTests : IDisposable
     }
 
     [Fact]
+    public void AFoldedDmvRow_FillsTheOpenTransactionCountAndLastTranStartOnlyWhereTheReportRowHasNone()
+    {
+        var t = new DateTime(2026, 7, 1, 12, 0, 0);
+        var own = new BlockedProcessReportRow
+        {
+            Source = PerformanceMonitor.Alerting.BlockedProcessAlertRow.XeReportSource, EventTime = t, BlockedSpid = 51, BlockingSpid = 60,
+            BlockingOpenTransactionCount = 1, BlockingLastTranStarted = t.AddHours(-1),
+        };
+        var bare = new BlockedProcessReportRow
+        {
+            Source = PerformanceMonitor.Alerting.BlockedProcessAlertRow.XeReportSource, EventTime = t, BlockedSpid = 52, BlockingSpid = 61,
+        };
+        BlockedProcessReportRow Dmv(int blocked, int blocking, int count) => new()
+        {
+            Source = PerformanceMonitor.Alerting.BlockedProcessAlertRow.DmvSnapshotSource, EventTime = t.AddSeconds(20), BlockedSpid = blocked, BlockingSpid = blocking,
+            BlockingOpenTransactionCount = count, BlockingLastTranStarted = t.AddHours(-3),
+        };
+        var items = new System.Collections.Generic.List<BlockedProcessReportRow> { own, bare };
+
+        PerformanceMonitor.Alerting.BlockedProcessReportMerge.AppendDmvFallbackRows(items,
+            new System.Collections.Generic.List<BlockedProcessReportRow> { Dmv(51, 60, 5), Dmv(52, 61, 3) });
+
+        Assert.Equal(1, own.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-1), own.BlockingLastTranStarted);
+        Assert.Equal(3, bare.BlockingOpenTransactionCount);
+        Assert.Equal(t.AddHours(-3), bare.BlockingLastTranStarted);
+    }
+
+    [Fact]
     public void ANullIsAnEmptyCell_AndARealZeroIsZero()
     {
         var empty = new BlockedProcessReportRow();

@@ -73,8 +73,9 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
-    /* #5632 part 4, DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for the pair was folded into it, and on a row captured before the columns existed): the head
-       blocker's session. The two times are the monitored server's own clock, stored raw. */
+    /* #5632 part 4: the head blocker's session. The login and last-request-end times and the log bytes are DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for
+       the pair was folded into it, and on a row captured before the columns existed). The open transaction count (#7497) is also on a report row, from the report's trancount for the
+       blocking process, and a folded DMV value fills it only when it is null. The two times are the monitored server's own clock, stored raw. */
     public DateTime? BlockingLoginTime { get; set; }
     public DateTime? BlockingLastRequestEndTime { get; set; }
     public int? BlockingOpenTransactionCount { get; set; }
@@ -84,6 +85,7 @@ public sealed class ViewerBlockedProcessRow : BlockedProcessAlertRow
     public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
     {
         if (dmvRow is not ViewerBlockedProcessRow dmv) return;
+        BlockingLastTranStarted ??= dmv.BlockingLastTranStarted;
         BlockingLoginTime ??= dmv.BlockingLoginTime;
         BlockingLastRequestEndTime ??= dmv.BlockingLastRequestEndTime;
         BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;
@@ -194,7 +196,8 @@ public sealed partial class ViewerDataService
             contentious_object,
             monitor_loop,
             blocked_query_plan_xml,
-            blocking_query_plan_xml
+            blocking_query_plan_xml,
+            blocking_open_transaction_count
         FROM blocked_process_reports
         WHERE server_id = $1
         AND   event_time >= $2
@@ -532,6 +535,8 @@ public sealed partial class ViewerDataService
                 MonitorLoop = reader.IsDBNull(36) ? null : reader.GetInt32(36),
                 BlockedQueryPlanXml = reader.IsDBNull(37) ? null : reader.GetString(37),
                 BlockingQueryPlanXml = reader.IsDBNull(38) ? null : reader.GetString(38),
+                /* #7497: the report's own trancount for the blocking process; NULL on a row stored before V241 and on a report without the attribute. */
+                BlockingOpenTransactionCount = reader.IsDBNull(39) ? null : reader.GetInt32(39),
                 Source = BlockedProcessAlertRow.XeReportSource,
             });
         }

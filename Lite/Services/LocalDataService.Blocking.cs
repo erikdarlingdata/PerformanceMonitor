@@ -780,7 +780,8 @@ SELECT
     blocked_priority,
     blocking_priority,
     contentious_object,
-    monitor_loop
+    monitor_loop,
+    blocking_open_transaction_count
 FROM " + xeRows + @" AS ev
 ORDER BY event_time DESC
 LIMIT $4";
@@ -835,7 +836,9 @@ LIMIT $4";
                     BlockedPriority = reader.IsDBNull(33) ? 0 : reader.GetInt32(33),
                     BlockingPriority = reader.IsDBNull(34) ? 0 : reader.GetInt32(34),
                     ContentiousObject = reader.IsDBNull(35) ? "" : reader.GetString(35),
-                    MonitorLoop = reader.IsDBNull(36) ? (int?)null : reader.GetInt32(36)
+                    MonitorLoop = reader.IsDBNull(36) ? (int?)null : reader.GetInt32(36),
+                    /* #7497: the report's own trancount for the blocking process; NULL on a row stored before v79 and on a report without the attribute. */
+                    BlockingOpenTransactionCount = reader.IsDBNull(37) ? (int?)null : reader.GetInt32(37)
                 });
             }
         }
@@ -1670,8 +1673,9 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public int BlockedPriority { get; set; }
     public int BlockingPriority { get; set; }
 
-    /* #5632, DMV-snapshot rows only (null on an XE report row unless a same-minute DMV row for the pair was folded into it by
-       BlockedProcessReportMerge): the head blocker's evidence. The two stamps are the monitored server's local clock, stored raw. */
+    /* #5632: the head blocker's evidence. The login time, last request end time and log bytes are DMV-snapshot rows only (null on an XE report row unless a
+       same-minute DMV row for the pair was folded into it by BlockedProcessReportMerge). The open transaction count (#7497) is also on a report row, from
+       the report's trancount for the blocking process, and a folded DMV value fills it only when it is null. The two stamps are the monitored server's local clock, stored raw. */
     public DateTime? BlockingLoginTime { get; set; }
     public DateTime? BlockingLastRequestEndTime { get; set; }
     public int? BlockingOpenTransactionCount { get; set; }
@@ -1681,6 +1685,7 @@ public class BlockedProcessReportRow : BlockedProcessAlertRow
     public override void FillHeadEvidenceFrom(BlockedProcessAlertRow dmvRow)
     {
         if (dmvRow is not BlockedProcessReportRow dmv) return;
+        BlockingLastTranStarted ??= dmv.BlockingLastTranStarted;
         BlockingLoginTime ??= dmv.BlockingLoginTime;
         BlockingLastRequestEndTime ??= dmv.BlockingLastRequestEndTime;
         BlockingOpenTransactionCount ??= dmv.BlockingOpenTransactionCount;

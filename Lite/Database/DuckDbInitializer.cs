@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 78;
+    internal const int CurrentSchemaVersion = 79;
 
     private readonly string _archivePath;
 
@@ -3095,6 +3095,15 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v78: adding collection_log.read_source");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(78));
         }
+
+        if (fromVersion < 79)
+        {
+            /* v79 (#7497, twinning Darling's V241): blocked_process_reports.blocking_open_transaction_count, the blocking process's own trancount from
+               the report XML. INTEGER, nullable, the LAST column (the shared added-columns list). NULL on a row stored before v79 and on a report with no
+               trancount; the archive views union parquet by name, so a parquet file written before v79 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v79: adding blocked_process_reports.blocking_open_transaction_count");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(79));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3175,6 +3184,8 @@ public partial class DuckDbInitializer : IDisposable
         (77, "ag_replica_states", "primary_replica", "VARCHAR"),
         /* #6254: which server a collector run read its Query Store rows from (the Query Store replica or the primary). NULL on a row stored before v78. */
         (78, "collection_log", "read_source", "VARCHAR"),
+        /* #7497: the blocking process's own trancount from the blocked process report (Darling's V241 column). NULL on a row stored before v79 and on a report that has none. */
+        (79, "blocked_process_reports", "blocking_open_transaction_count", "INTEGER"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>

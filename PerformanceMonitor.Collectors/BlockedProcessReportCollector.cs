@@ -84,6 +84,10 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
         public DateTime? BlockingLastBatchCompleted { get; set; }
         public int BlockedPriority { get; set; }
         public int BlockingPriority { get; set; }
+
+        /// <summary>#7497: the blocking process's own <c>trancount</c> from the report, its open transaction count. Null when the
+        /// report has no blocking process or no <c>trancount</c> attribute: an unknown count is never stored as 0.</summary>
+        public int? BlockingOpenTransactionCount { get; set; }
         public string? ReportXml { get; set; }
         public int? ObjectId { get; set; }
         public int? DatabaseId { get; set; }
@@ -892,6 +896,8 @@ OUTER APPLY
            up to shape; NULL on Lite and whenever the statement's plan aged out of cache). */
         new CollectorColumn("blocked_query_plan_xml", CollectorColumnType.Varchar),
         new CollectorColumn("blocking_query_plan_xml", CollectorColumnType.Varchar),
+        /* #7497: the blocking process's trancount from the report; NULL when the report carries none. */
+        new CollectorColumn("blocking_open_transaction_count", CollectorColumnType.Integer),
     };
 
     /* ── #3161: what this collector measured, for its own collection_log row ───────────────────────────
@@ -1091,7 +1097,8 @@ OUTER APPLY
             .Value(row.ContentiousObject)
             .Value(row.MonitorLoop)
             .Value(row.BlockedQueryPlanXml)    /* null unless CapturePlanXml resolved it (Darling) */
-            .Value(row.BlockingQueryPlanXml);
+            .Value(row.BlockingQueryPlanXml)
+            .Value(row.BlockingOpenTransactionCount);    /* #7497: appended last so a pre-V241 store comes up to shape with one ADD COLUMN */
     }
 
     /// <summary>
@@ -1150,7 +1157,9 @@ OUTER APPLY
                 BlockingLastTranStarted = DateTime.TryParse(blockingProcess?.Attribute("lasttranstarted")?.Value, out var bklts) ? bklts : null,
                 BlockingLastBatchStarted = DateTime.TryParse(blockingProcess?.Attribute("lastbatchstarted")?.Value, out var bklbs) ? bklbs : null,
                 BlockingLastBatchCompleted = DateTime.TryParse(blockingProcess?.Attribute("lastbatchcompleted")?.Value, out var bklbc) ? bklbc : null,
-                BlockingPriority = int.TryParse(blockingProcess?.Attribute("priority")?.Value, out var bkp) ? bkp : 0
+                BlockingPriority = int.TryParse(blockingProcess?.Attribute("priority")?.Value, out var bkp) ? bkp : 0,
+                /* #7497: the real blocking element carries trancount (and no transactionname or lasttranstarted, read above in case an older engine sends them). */
+                BlockingOpenTransactionCount = int.TryParse(blockingProcess?.Attribute("trancount")?.Value, out var bktc) ? bktc : null
             };
         }
         catch

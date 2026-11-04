@@ -21,7 +21,7 @@ namespace Lite.Tests;
 /// Pins the parity contract of the extracted blocked_process_report definition: the server- vs
 /// database-scoped ring-buffer reads, the sp_HumanEventsBlockViewer-mirroring wait_resource →
 /// contentious-object resolution batch, the event_time watermark with its 10-minute fallback,
-/// the 40-column payload, the report-XML parse (blocked + blocking process attributes,
+/// the 41-column payload, the report-XML parse (blocked + blocking process attributes,
 /// monitorLoop root attribute, null on garbage/missing blocked-process), and the #1262 gated
 /// best-effort plan resolution (off = byte-identical; on = frame → dm_exec_query_stats →
 /// dm_exec_text_query_plan for both contending sides). Third Name≠TargetTable case
@@ -119,11 +119,11 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
     }
 
     [Fact]
-    public void PayloadColumns_MatchSchemaOrder_40Columns()
+    public void PayloadColumns_MatchSchemaOrder_41Columns()
     {
         var names = BlockedProcessReportCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray();
 
-        Assert.Equal(40, names.Length);
+        Assert.Equal(41, names.Length);
         Assert.Equal("event_time", names[0]);
         Assert.Equal("blocked_spid", names[2]);
         Assert.Equal("wait_time_ms", names[6]);
@@ -136,6 +136,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         Assert.Equal("monitor_loop", names[37]);
         Assert.Equal("blocked_query_plan_xml", names[38]);    /* trailing best-effort plans (#1262) */
         Assert.Equal("blocking_query_plan_xml", names[39]);
+        Assert.Equal("blocking_open_transaction_count", names[40]);    /* #7497, appended last */
     }
 
     [Fact]
@@ -225,6 +226,57 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         Assert.Equal("user_transaction", row.BlockingTransactionName);
         Assert.Equal(new DateTime(2026, 7, 2, 11, 59, 0), row.BlockedLastTranStarted);
         Assert.Equal(new DateTime(2026, 7, 2, 11, 58, 2), row.BlockingLastBatchCompleted);
+    }
+
+    /* #7497: a report shaped like the ones a current engine writes. The blocking process has trancount but no transactionname and no lasttranstarted. */
+    private static string EngineShapedReport(string blockingTranCountAttribute) => @"<blocked-process-report monitorLoop=""41"">
+ <blocked-process>
+  <process id=""processaaa111"" taskpriority=""0"" logused=""0"" waitresource=""KEY: 5:1 (aa)"" waittime=""9000"" status=""suspended"" spid=""71"" sbid=""0"" ecid=""0"" priority=""0"" trancount=""2"" lockMode=""S"" currentdb=""5"" currentdbname=""SampleDb"" clientapp=""SampleApp"" hostname=""HOSTA"" loginname=""sample_login"" isolationlevel=""read committed (2)"">
+   <inputbuf>SELECT 1;</inputbuf>
+  </process>
+ </blocked-process>
+ <blocking-process>
+  <process status=""sleeping"" spid=""58"" sbid=""0"" ecid=""0"" priority=""0"" " + blockingTranCountAttribute + @" lastbatchstarted=""2026-07-02T11:50:00"" lastbatchcompleted=""2026-07-02T11:50:01"" clientapp=""SampleApp"" hostname=""HOSTB"" hostpid=""1"" loginname=""sample_login"" isolationlevel=""read committed (2)"" xactid=""1"" currentdb=""5"" currentdbname=""SampleDb"" lockTimeout=""4294967295"">
+   <inputbuf>BEGIN TRAN;</inputbuf>
+  </process>
+ </blocking-process>
+</blocked-process-report>";
+
+    [Theory]
+    [InlineData(@"trancount=""1""", 1)]
+    [InlineData(@"trancount=""0""", 0)]
+    [InlineData(@"trancount=""3""", 3)]
+    public void ParseReportXml_ReadsTheBlockingProcessTranCount_AndTheBlockedSideKeepsItsOwn(string attribute, int expected)
+    {
+        var row = BlockedProcessReportCollector.ParseReportXml(EngineShapedReport(attribute), null);
+
+        Assert.NotNull(row);
+        Assert.Equal(expected, row!.BlockingOpenTransactionCount);
+        Assert.Equal(2, row.BlockedTransactionCount);
+        Assert.Null(row.BlockingTransactionName);
+        Assert.Null(row.BlockingLastTranStarted);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(@"trancount=""abc""")]
+    public void ParseReportXml_ABlockingProcessWithNoUsableTranCount_IsNullNotZero(string attribute)
+    {
+        var row = BlockedProcessReportCollector.ParseReportXml(EngineShapedReport(attribute), null);
+
+        Assert.NotNull(row);
+        Assert.Null(row!.BlockingOpenTransactionCount);
+    }
+
+    [Fact]
+    public void ParseReportXml_AReportWithNoBlockingProcess_HasNoBlockingTranCount()
+    {
+        const string xml = @"<blocked-process-report><blocked-process><process spid=""71"" trancount=""2""><inputbuf>SELECT 1;</inputbuf></process></blocked-process></blocked-process-report>";
+
+        var row = BlockedProcessReportCollector.ParseReportXml(xml, null);
+
+        Assert.NotNull(row);
+        Assert.Null(row!.BlockingOpenTransactionCount);
     }
 
     [Fact]
