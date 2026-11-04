@@ -82,7 +82,10 @@ public sealed class DarlingCurrentWaitsTrendTests
 
             /* ── both series, in one payload ── */
             var t10 = MinutesAgo(10);
-            await SeedWaitAsync(connection, ct, t10, "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+            for (var thread = 0; thread < 3; thread++)
+            {
+                await SeedWaitAsync(connection, ct, t10, "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
+            }
             await SeedWaitAsync(connection, ct, t10, "PAGEIOLATCH_SH", 250, blockingSessionId: 0, database: "AppDb");
 
             /* #7577: a parallel query's exchange threads wait on their OWN session (blocking_session_id = session_id). Four of them
