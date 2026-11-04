@@ -142,6 +142,10 @@ internal sealed class ScratchPostgres : IAsyncDisposable
                 await using var connection = new NpgsqlConnection(clone.ConnectionString);
                 await connection.OpenAsync(cancellationToken);
                 await using var start = new NpgsqlCommand("SELECT _timescaledb_functions.start_background_workers()", connection);
+                /* The call waits on TimescaleDB's launcher, which starts schedulers one at a time. With a parallel suite
+                   cloning databases on one cluster, a wait past Npgsql's default 30 seconds failed a test that had nothing
+                   to do with the scheduler (#7430). A slow start is not this fixture's question. */
+                start.CommandTimeout = 120;
                 await start.ExecuteNonQueryAsync(cancellationToken);
             }
             catch
