@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -174,6 +175,45 @@ public sealed class StaTestThreadTests
 
             Assert.Contains("tab 3, waiting for the release", timedOut.Message);
             Assert.Contains("it is waiting, and the dispatcher has nothing to run", timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// #7600: two CI hangs showed a body waiting with no CPU and nothing on the dispatcher, and the step names could not say what it waited on
+    /// (the bodies returned after 126 s and 68 s). The message now carries the runtime's state for the thread, its native stack (the leaf names
+    /// the wait call) and the process counters around it, so the next hang names its wait.
+    /// </summary>
+    [Fact]
+    public void TheHangGuardsMessage_NamesTheNativeWaitCall_TheRuntimeState_AndTheProcessCounters()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("waiting on an event");
+                release.Wait();
+            }));
+
+            Assert.Contains("The runtime's state for the thread is", timedOut.Message);
+            Assert.Contains("WaitSleepJoin", timedOut.Message);
+            /* A sub-second guard reads in ms: "within 0 s" named nothing. */
+            Assert.Contains("did not return within 300 ms:", timedOut.Message);
+
+            /* A frame of the stack is a wait call, in whatever module holds it: an STA thread's wait pumps messages, so the leaf can be
+               ntdll!NtWaitFor... on one machine and win32u!NtUserMsgWaitFor... on another. The whole message is the failure text: xunit cuts a long value. */
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"Its native stack, leaf first, was [^\r\n]*?[\w.]+!\w*Wait\w*\+0x"),
+                timedOut.Message);
+            Assert.Contains("file reads", timedOut.Message);
+            Assert.Contains("page faults", timedOut.Message);
+            Assert.Contains("MB of memory free", timedOut.Message);
         }
         finally
         {

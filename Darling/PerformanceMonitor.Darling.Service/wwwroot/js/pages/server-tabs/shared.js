@@ -12,7 +12,7 @@ import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
-import { findingTitle, severityLabel } from "../analysis-findings.js";
+import { findingTitle, severityLabel, mergeBySentence, chainLine } from "../analysis-findings.js";
 import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
 
@@ -1286,16 +1286,35 @@ export function seriesTrendPanel(server, ctx, kind) {
   return panel;
 }
 
+/** #7582: the Finding cell. The sentence; and when the row stands for several chains, a click lists each in plain words with its own severity and occurrences. */
+function findingCell(r) {
+  const title = findingTitle(r);
+  const chains = Array.isArray(r.chains) ? r.chains : [];
+  if (chains.length < 2) return document.createTextNode(title);
+  return disclosure(
+    title,
+    [el("div", { class: "muted", text: "Seen as " + chains.length + " chains:" }), ...chains.map((c) => el("div", { text: chainLine(c) }))],
+    { cell: true, max: 240 }
+  );
+}
+
 export const FINDING_COLUMNS = [
   { key: "last_seen", label: "Last seen", format: "time" },
   /* #7486: the plain name, not the internal word (bad_actor). Sort and the column filter follow what is shown, and the CSV keeps the raw value. */
   { key: "category", label: "Category", display: (r) => r.category_name || r.category, sortValue: (r) => r.category_name || r.category },
-  /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same). */
-  { key: "story_path", label: "Finding", display: (r) => findingTitle(r), sortValue: (r) => findingTitle(r), wrap: true },
+  /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same).
+     #7582: rows arrive merged to one per sentence (findingsPanel), so `finding_title` is the sentence and the sort, the column filter
+     and the CSV follow it. A row that covers several chains opens to list them. */
+  { key: "finding_title", label: "Finding", render: (r) => findingCell(r), sortValue: (r) => findingTitle(r), wrap: true },
   { key: "severity", label: "Severity", display: (r) => severityLabel(r.severity), sortValue: (r) => Number(r.severity), cellClass: (r) => { const w = severityLabel(r.severity); return w === "Info" ? null : "sev-" + w; } },
   { key: "occurrences", label: "Occurrences", format: "int" },
   { key: "first_seen", label: "First seen", format: "time" },
 ];
+
+/** The Analysis Findings grid of the Overview, its rows merged to one per sentence (#7582; the Recommendations tab merges the same way). */
+export function findingsPanel(server, ctx, emptyText) {
+  return tablePanel("Analysis Findings", "get_analysis_findings", { server, hours: ctx.hours }, "findings", FINDING_COLUMNS, ctx.label, emptyText, 2, null, null, null, null, null, null, false, null, false, { orderRows: mergeBySentence });
+}
 
 /* #2484: the raw log's columns. The duration SPLIT is the reason this table earns its place beside the
    rollup -- total time cannot separate a collector that is slow because the monitored server is slow from
