@@ -129,6 +129,37 @@ public sealed class GridScrollKeepTests
     }
 
     [Fact]
+    public void A_click_on_the_page_on_screen_drops_the_swap_a_poll_has_waiting()
+    {
+        var r = Run("readerClickDropsTheWaitingSwap");
+        Assert.True(r.GetProperty("liveStays").GetBoolean());
+        Assert.True(r.GetProperty("firstStays").GetBoolean());
+    }
+
+    [Fact]
+    public void Enter_on_a_row_of_the_page_on_screen_drops_the_swap_a_poll_has_waiting()
+    {
+        Assert.True(Run("readerEnterOnARowDropsTheWaitingSwap").GetProperty("firstStays").GetBoolean());
+    }
+
+    [Fact]
+    public void A_key_that_changes_nothing_leaves_the_waiting_swap_and_the_swap_leaves_no_listener_behind()
+    {
+        var r = Run("aKeyThatChangesNothingLeavesTheWaitingSwap");
+        Assert.True(r.GetProperty("swapped").GetBoolean());
+        Assert.Equal(0, Int(r, "listenersLeft"));
+    }
+
+    [Fact]
+    public void Fleet_Sweeps_keeps_the_sweep_the_reader_picked_when_a_poll_was_already_reading_the_old_one()
+    {
+        var r = Run("sweepsClickDuringPoll");
+        Assert.True(r.GetProperty("firstIsLatest").GetBoolean());
+        Assert.True(r.GetProperty("activeIsB").GetBoolean());
+        Assert.True(r.GetProperty("detailIsB").GetBoolean(), "the detail shows a different sweep from the highlighted row");
+    }
+
+    [Fact]
     public void A_grid_is_not_given_the_position_of_a_same_name_grid_that_lost_its_box()
     {
         var r = Run("wrapRemovedAheadOfSameName");

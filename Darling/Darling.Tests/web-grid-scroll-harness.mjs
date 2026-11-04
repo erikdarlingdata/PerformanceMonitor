@@ -24,7 +24,26 @@ class FakeNode {
   appendChild(c) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; this.children.push(c); return c; }
   insertBefore(c, ref) { if (c.parent) c.parent.children = c.parent.children.filter((x) => x !== c); c.parent = this; const i = ref ? this.children.indexOf(ref) : -1; if (i < 0) this.children.push(c); else this.children.splice(i, 0, c); return c; }
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
-  addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  addEventListener(t, fn, capture) { (this.listeners[t] ||= []).push({ fn, capture: capture === true }); }
+  removeEventListener(t, fn, capture) { this.listeners[t] = (this.listeners[t] || []).filter((l) => !(l.fn === fn && l.capture === (capture === true))); }
+  /* A DOM event: the capture listeners from the root down, the target's own, then the bubbling ones back up. */
+  fire(type, init = {}) {
+    const ev = { type, target: this, preventDefault() {}, ...init };
+    const path = []; for (let n = this; n; n = n.parent) path.unshift(n);
+    const run = (n, capture) => (n.listeners[type] || []).filter((l) => l.capture === capture).forEach((l) => l.fn(ev));
+    path.slice(0, -1).forEach((n) => run(n, true));
+    (this.listeners[type] || []).slice().forEach((l) => l.fn(ev));
+    path.slice(0, -1).reverse().forEach((n) => run(n, false));
+  }
+  get classList() {
+    const self = this;
+    return {
+      add(c) { if (!(" " + self.className + " ").includes(" " + c + " ")) self.className = (self.className + " " + c).trim(); },
+      remove(c) { self.className = self.className.split(" ").filter((x) => x && x !== c).join(" "); },
+    };
+  }
+  /* Only the class selectors the pages use here (".name"). */
+  querySelectorAll(sel, acc = []) { for (const c of this.children) { if ((" " + c.className + " ").includes(" " + sel.slice(1) + " ")) acc.push(c); c.querySelectorAll(sel, acc); } return acc; }
   closest(sel) { for (let n = this; n; n = n.parent) if (sel === "[data-grid]" && n.getAttribute && n.getAttribute("data-grid") !== null) return n; return null; }
   find(tag) { for (const c of this.children) { if (c.tag === tag) return c; const f = c.find && c.find(tag); if (f) return f; } return null; }
   wraps(acc = []) { for (const c of this.children) { if (c.isWrap) acc.push(c); c.wraps && c.wraps(acc); } return acc; }
@@ -36,6 +55,7 @@ globalThis.document = {
   createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t),
   querySelectorAll: (sel) => (sel === ".table-wrap" ? page.wraps() : []),
   documentElement: { offsetHeight: 0 },
+  getElementById: () => page,
 };
 /* A poll's staged page waits on MutationObserver (whenSettled): the stand-in runs its callback when the scenario says the reads returned. */
 const observers = [];
@@ -130,6 +150,80 @@ const scenarios = {
     showPageWhenSettled(page, "k", [staged], false); // a sub-tab click or span change, not the poll
     out.shown = page.children[0] === staged; out.wraps = page.wraps().length;
   },
+  /* #7393: the reader acts on the page on screen while a poll's page is staged. What they did is newer than the state the staged page was
+     built from, so the waiting swap is dropped and the page they acted on stays. */
+  readerClickDropsTheWaitingSwap() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const live = page.wraps()[0];
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], true);
+    first.fire("click"); // a click on the live page
+    staged.removeChild(strip); staged.appendChild(grid("waits", 100));
+    readsReturned();
+    out.liveStays = page.wraps()[0] === live; out.firstStays = page.children[0] === first;
+  },
+  readerEnterOnARowDropsTheWaitingSwap() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], true);
+    first.fire("keydown", { key: "Enter" });
+    staged.removeChild(strip); staged.appendChild(grid("waits", 100));
+    readsReturned();
+    out.firstStays = page.children[0] === first;
+  },
+  aKeyThatChangesNothingLeavesTheWaitingSwap() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], true);
+    first.fire("keydown", { key: "Tab" });
+    staged.removeChild(strip); staged.appendChild(grid("waits", 100));
+    readsReturned();
+    out.swapped = page.children[0] === staged;
+    out.listenersLeft = Object.values(page.listeners).reduce((n, l) => n + l.length, 0); // none waiting once the swap is done
+  },
+  /* The shipped Fleet Sweeps page (pages/sweeps.js) over stubbed reads: a poll starts while sweep A shows, the reader clicks timeline row B on
+     the page on screen before the poll's reads return, then the reads return. The detail and the highlighted row must agree. */
+  async sweepsClickDuringPoll() {
+    const { localTime } = await import(pathToFileURL(root + "/util.js").href);
+    const { renderSweeps } = await import(pathToFileURL(root + "/pages/sweeps.js").href);
+    const sweeps = [
+      { sweep_id: "1", swept_at: new Date(Date.now() - 10 * 60000).toISOString() },
+      { sweep_id: "2", swept_at: new Date(Date.now() - 40 * 60000).toISOString() },
+    ].map((x) => ({ ...x, instruments_alive: true, alerts_enabled: true, servers_reported: 1, servers_expected: 1, report: {} }));
+    const held = []; let hold = false;
+    globalThis.fetch = (path) => {
+      const body = path === "/api/sweeps/latest" ? sweeps[0]
+        : path.startsWith("/api/sweeps/") ? sweeps.find((x) => path.endsWith("/" + x.sweep_id))
+        : path.startsWith("/api/sweeps?") ? { sweeps }
+        : { status: "empty", message: "none" };
+      const reply = { ok: true, status: 200, text: async () => JSON.stringify(body) };
+      return hold ? new Promise((resolve) => held.push(() => resolve(reply))) : Promise.resolve(reply);
+    };
+    const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
+    const detailText = () => {
+      const found = [];
+      const walk = (n) => n.children.forEach((c) => { if (c.tag === "h3" && c.textContent.startsWith("Sweep at")) found.push(c.textContent); walk(c); });
+      walk(page);
+      return found[0] || "";
+    };
+
+    await renderSweeps(page, { poll: false }); await flush();
+    out.firstIsLatest = detailText() === "Sweep at " + localTime(sweeps[0].swept_at);
+
+    hold = true;
+    renderSweeps(page, { poll: true }); // the poll: its detail read is built for "latest" at once
+    hold = false;
+    const rowB = page.querySelectorAll(".sweep-row")[1];
+    rowB.fire("click"); // the reader picks sweep B on the page on screen
+    held.forEach((release) => release());
+    await flush(); readsReturned(); await flush();
+    const rows = page.querySelectorAll(".sweep-row");
+    out.detailIsB = detailText() === "Sweep at " + localTime(sweeps[1].swept_at);
+    out.activeIsB = rows.length === 2 && !rows[0].className.includes("active") && rows[1].className.includes("active");
+  },
   topGridStaysTop() {
     const g = grid("waits", 100); page.appendChild(g);
     const fresh = keepScrollSwap(g, 100, "waits");
@@ -149,5 +243,5 @@ function keepScrollSwap(oldNode, count, id) {
 }
 
 if (!scenarios[process.argv[3]]) { console.error("unknown scenario " + process.argv[3]); process.exit(2); }
-scenarios[process.argv[3]]();
+await scenarios[process.argv[3]]();
 console.log(JSON.stringify(out));

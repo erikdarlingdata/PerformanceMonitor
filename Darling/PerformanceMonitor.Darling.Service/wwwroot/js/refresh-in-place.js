@@ -39,12 +39,19 @@ function cancelPending(container) {
   pending.delete(container);
 }
 
+/* The reader acting on the page on screen while a swap waits: a click, a change, text typed, or Enter or Space (a key that activates a
+   row, as util.js makeActivatable does). Scrolling, Tab and the mouse moving are not. */
+const READER_ACTS = ["click", "change", "input", "keydown"];
+const isReaderAct = (e) => e.type !== "keydown" || e.key === "Enter" || e.key === " ";
+
 /**
  * showPage for a page that fills `nodes` from reads of its own (the loading strips it draws first). The first paint, a sub-tab click
  * and a span change put `nodes` on the page at once. A poll over the same page (`holdsPage`) leaves the page on screen, so a grid the
  * reader has scrolled down stays where it is, and swaps `nodes` in one step once none of them has a loading strip left, with the
  * page's and every grid's scroll position put back (keepScroll). A newer render of `container` drops the waiting swap, and so does
- * the reader going to another page. Returns a cancel function.
+ * the reader going to another page. So does the reader acting on the page on screen (a click, a change, typing): `nodes` were built from
+ * the page's state as it stood when the poll began, and what the reader did since is newer than that, so it must not be swapped out for
+ * a page that shows the old state (#7393). The next poll draws from the new state. Returns a cancel function.
  */
 export function showPageWhenSettled(container, key, nodes, isPoll) {
   cancelPending(container);
@@ -52,10 +59,21 @@ export function showPageWhenSettled(container, key, nodes, isPoll) {
     showPage(container, key, nodes);
     return () => {};
   }
-  const cancel = whenSettled(nodes, () => {
+  const drop = (e) => {
+    if (isReaderAct(e)) cancelPending(container);
+  };
+  const release = () => READER_ACTS.forEach((t) => container.removeEventListener(t, drop, true));
+  /* Capture, so the drop runs before the control's own handler redraws the page on screen. */
+  READER_ACTS.forEach((t) => container.addEventListener(t, drop, true));
+  const stop = whenSettled(nodes, () => {
+    release();
     pending.delete(container);
     if (holdsPage(container, key, true)) showPage(container, key, nodes);
   });
+  const cancel = () => {
+    release();
+    stop();
+  };
   pending.set(container, cancel);
   return cancel;
 }
