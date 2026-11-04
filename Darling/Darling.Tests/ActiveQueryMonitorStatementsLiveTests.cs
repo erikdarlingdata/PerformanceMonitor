@@ -113,6 +113,62 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /* The reads OUTSIDE Active Queries (the long-running query alert, the who-drove-it reads, the same-statement pile-up reader and the Viewer's
+       wait drill-down) are not behind the switch: with the monitor's rows stored again they have to leave them out themselves, as they did while
+       the collector dropped them (#7416). Six rows share one hash, wait and long elapsed time; three are the monitor's. Each read must see three. */
+    [Fact]
+    public async Task TheReadsOutsideActiveQueries_LeaveTheMonitorOut()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var end = await SeedAsync(cs!, new string?[]
+            {
+                "PerformanceMonitorDarling", "PerformanceMonitorLite", "PerformanceMonitorDarling-Remediation",
+                "MyPerformanceMonitorTool", "Orders.Api", null,
+            }, ct);
+            using (var connection = new NpgsqlConnection(cs))
+            {
+                await connection.OpenAsync(ct);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    $"UPDATE collect.query_snapshots SET query_hash = '0xABC', wait_type = 'LCK_M_X', total_elapsed_time_ms = 600000, session_id = session_id + 60, collection_time = (SELECT MAX(collection_time) FROM collect.query_snapshots WHERE server_id = {ServerId}) WHERE server_id = {ServerId}");
+            }
+
+            var start = end.AddHours(-1);
+
+            var groups = await DarlingWhoDroveItReader.ReadLoadByCallerAsync(postgres, ServerId, start, end, 20, 3, ct);
+            Assert.Equal(3, groups.Count);
+            Assert.DoesNotContain(groups, g => g.ProgramName.StartsWith("PerformanceMonitor", StringComparison.Ordinal));
+
+            var pileups = await DarlingWhoDroveItReader.ReadPileupsAsync(postgres, ServerId, start, end, 2, 10, ct);
+            Assert.Equal(3, Assert.Single(pileups).Sessions);
+
+            var window = await new PerformanceMonitor.Darling.Analysis.PgPileupSnapshotReader(postgres).ReadWindowAsync(ServerId, start, ct);
+            Assert.Equal(3, window.Count);
+
+            var longRunning = await new PerformanceMonitor.Darling.Service.DarlingAlertReadAdapter(postgres).GetLongRunningQueriesAsync(
+                ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture), thresholdMinutes: 5, maxResults: 50,
+                excludeSpServerDiagnostics: true, excludeWaitFor: true, excludeBackups: true, excludeMiscWaits: true, excludeCdc: true,
+                excludedDatabases: new System.Collections.Generic.List<string>(), PerformanceMonitor.Alerting.LongRunningQueryExclusions.None, cancellationToken: ct);
+            Assert.Equal(3, longRunning.Sessions.Count);
+            Assert.DoesNotContain(longRunning.Sessions, s => s.ProgramName.StartsWith("PerformanceMonitor", StringComparison.Ordinal));
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(cs!);
+            var waiters = await viewer.GetQuerySnapshotsByWaitTypeAsync(ServerId, "LCK_M_X", start, end, cancellationToken: ct);
+            Assert.Equal(3, waiters.Count);
+            Assert.DoesNotContain(waiters, w => (w.ProgramName ?? "").StartsWith("PerformanceMonitor", StringComparison.Ordinal));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* A quiet server whose only sessions are the monitor's answers empty, and the empty text says they were left out. */
     [Fact]
     public async Task OnlyMonitorRows_AnswerEmpty_AndTheTextSaysTheyAreLeftOut()
