@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -184,9 +185,12 @@ public static partial class PgTargetAdvice
         var fired = anomaly.Metadata.GetValueOrDefault("candidates_fired");
         var withoutBaseline = anomaly.Metadata.GetValueOrDefault("candidates_without_baseline");
 
+        /* #7567: a zero-history bucket's deviation is the display cap, not a measurement, so no sentence on this card may say
+           "N times its usual variation" for it: the routine clause says no spread was measured, and that phrase would contradict it. */
+        var zeroHistory = IsZeroHistory(anomaly);
         var inv = new StringBuilder();
         inv.Append(CultureInfo.InvariantCulture,
-            $"Statement queryid {queryId} held {windowShare * 100:0.#}% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against {RoutineClause(anomaly)}, it sat {Sigma(sigma)} times its usual variation above normal on the window's peak per-collection share ({peakShare * 100:0.#}%) and {Sigma(meanSigma)} times on its mean ({meanShare * 100:0.#}%)");
+            $"Statement queryid {queryId} held {windowShare * 100:0.#}% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against {RoutineClause(anomaly)}, it {(zeroHistory ? $"was scored at the display cap ({AnomalyThresholds.SigmaDisplayCap:0.#}) on" : $"sat {Sigma(sigma)} times its usual variation above normal on")} the window's peak per-collection share ({peakShare * 100:0.#}%) and {(zeroHistory ? "on" : $"{Sigma(meanSigma)} times on")} its mean ({meanShare * 100:0.#}%)");
         if (samples > 0)
             inv.Append(CultureInfo.InvariantCulture, $", over {samples:N0} baseline samples");
         inv.Append('.');
@@ -216,10 +220,11 @@ public static partial class PgTargetAdvice
 
         return fallback with
         {
-            Headline = string.Format(CultureInfo.InvariantCulture,
-                /* #7567: the headline's share is the one the deviation was measured on (the peak per-collection share), never the
-                   window's, so the number and the "times" beside it describe the same thing. */
-                "One statement reached {0:0}% of a single collection's execution time — {1} times its usual variation above its own normal for this hour", peakShare * 100, Sigma(sigma)),
+            /* #7567: the headline's share is the one the deviation was measured on (the peak per-collection share), never the
+               window's, so the number and the "times" beside it describe the same thing. A zero-history bucket has no "times". */
+            Headline = zeroHistory
+                ? string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time — against a history in which it held none of this hour", peakShare * 100)
+                : string.Format(CultureInfo.InvariantCulture, "One statement reached {0:0}% of a single collection's execution time — {1} times its usual variation above its own normal for this hour", peakShare * 100, Sigma(sigma)),
             Investigation = inv.ToString(),
             Remediation = rem.ToString(),
         };
@@ -242,6 +247,10 @@ public static partial class PgTargetAdvice
     {
         switch (ownNormal)
         {
+            case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal) && IsZeroHistory(anomaly):
+                return string.Format(CultureInfo.InvariantCulture,
+                    "This was scored at the display cap ({0:0.#}) against the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
+                    AnomalyThresholds.SigmaDisplayCap, RoutineClause(anomaly));
             case 2 when anomaly is not null && string.Equals(anomaly.ObjectName, queryId, StringComparison.Ordinal):
                 return string.Format(CultureInfo.InvariantCulture,
                     "This is {0} times its usual variation above the statement's OWN hour-of-week normal ({1}) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card): the statement holds far more of the window than it usually holds of this hour.",
@@ -258,6 +267,9 @@ public static partial class PgTargetAdvice
                 return "No statement in this pass was beyond its own hour-of-week normal, so this card is context: either this statement is within the share it usually takes at this hour, or it has no trustworthy own-normal yet (first seen; a young store) — the two read the same until its history exists.";
         }
     }
+
+    /// <summary>Whether the anomaly's bucket was a measured zero (#7567): scored at the display cap with no spread.</summary>
+    private static bool IsZeroHistory(Fact anomaly) => anomaly.Metadata.GetValueOrDefault("baseline_zero_history") > 0;
 
     /// <summary>The routine the anomaly judged against, in the SAME frame as the "times its usual variation" beside it
     /// (#7396). When the gate scored in the robust frame (<c>baseline_robust_sigma</c> above zero) that is the median ±
@@ -283,7 +295,7 @@ public static partial class PgTargetAdvice
         /* #7567: a zero-history bucket (never above zero at this hour-of-week) is scored at the display cap WITHOUT a spread
            (AnomalyGate's zero-history arm), so printing the bucket's classical stddev beside it named a spread the deviation
            never used. Say what happened instead. */
-        if (anomaly.Metadata.GetValueOrDefault("baseline_zero_history") > 0)
+        if (IsZeroHistory(anomaly))
             return string.Format(CultureInfo.InvariantCulture,
                 "its own routine of {0:0.#}% (it was never above zero at this hour-of-week, so no spread was measured)", centre * 100);
         return string.Format(CultureInfo.InvariantCulture, "its own routine of {0:0.#}% ± {1:0.#}% for this hour-of-week", centre * 100, spread * 100);
@@ -311,6 +323,7 @@ public static partial class PgTargetAdvice
 
     private static string HeadlineSuffix(int? ownNormal, Fact? anomaly) => ownNormal switch
     {
+        2 when anomaly is not null && IsZeroHistory(anomaly) => " — and its peak share of a single collection came against a history in which it held none of this hour",
         2 when anomaly is not null => string.Format(CultureInfo.InvariantCulture, " — and its peak share of a single collection ran {0} times its usual variation above its own normal for this hour", Sigma(anomaly.Metadata.GetValueOrDefault("deviation_sigma"))),
         1 => " — within its own normal for this hour",
         0 => " — no own-normal yet",

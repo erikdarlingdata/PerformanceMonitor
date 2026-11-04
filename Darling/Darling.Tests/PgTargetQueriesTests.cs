@@ -683,11 +683,21 @@ public sealed class PgTargetQueriesTests
         var card = BadActor(HeavyQueryId, 0.0006);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
 
-        Assert.Equal("One statement reached 100% of a single collection's execution time — at least 25 times its usual variation above its own normal for this hour", block.Headline);
+        Assert.Equal("One statement reached 100% of a single collection's execution time — against a history in which it held none of this hour", block.Headline);
         Assert.DoesNotContain("30.5", block.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("±", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("never above zero at this hour-of-week", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("it sat at least 25 times its usual variation above normal", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("it was scored at the display cap (25) on the window's peak per-collection share (100%) and on its mean", block.Investigation, StringComparison.Ordinal);
+        /* The routine part says no spread was measured, so no part of the same text may claim a measured variation. */
+        Assert.DoesNotContain("usual variation", block.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", block.Investigation, StringComparison.Ordinal);
+
+        /* The statement's own card walks into the same anomaly: its headline suffix and verdict sentence read the same way. */
+        var walked = PgTargetAdvice.Compose(PgTargetFactKeys.BadActorKey(HeavyQueryId), Lookup(BadActor(HeavyQueryId, 0.0006), named))!;
+        Assert.EndsWith(" — and its peak share of a single collection came against a history in which it held none of this hour", walked.Headline, StringComparison.Ordinal);
+        Assert.Contains("This was scored at the display cap (25) against the statement's OWN hour-of-week normal", walked.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", walked.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", walked.Investigation, StringComparison.Ordinal);
     }
 
     [Fact]
