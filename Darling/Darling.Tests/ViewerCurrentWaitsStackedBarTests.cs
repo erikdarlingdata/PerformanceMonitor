@@ -134,4 +134,26 @@ public sealed class ViewerCurrentWaitsStackedBarTests
         Assert.Equal("4 ms", lines[1]);
         Assert.Equal("03:00:00", lines[2]);
     }
+
+    [Fact]
+    public void HoverInTheLowerPartOfAnUpperSegment_NamesThatSegment_NotTheOneBelow()
+    {
+        var text = StaTestThread.Run(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            var hover = new ChartHoverHelper(chart, "ms", displayZone: () => TimeZoneInfo.Utc);
+            var data = Waits((T0, "LATCH_EX", 100), (T0, "CXCONSUMER", 164), (T0.AddHours(3), "CXCONSUMER", 40));
+            ViewerServerTab.AddWaitingTaskBars(chart.Plot, hover, data, Oa(T0.AddHours(-1)), Oa(T0.AddHours(4)));
+            chart.Plot.Axes.AutoScale();
+            using var render = chart.Plot.GetImage(1000, 400);
+
+            /* 25 ms into LATCH_EX's 164 to 264 segment: nearer the top of CXCONSUMER (164) than its own top (264). */
+            return hover.HoverTextAt(chart.Plot.GetPixel(new ScottPlot.Coordinates(Oa(T0), 189)));
+        });
+
+        Assert.NotNull(text);
+        var lines = text!.Split('\n');
+        Assert.Equal("LATCH_EX", lines[0]);
+        Assert.Equal("100 ms", lines[1]);
+    }
 }
