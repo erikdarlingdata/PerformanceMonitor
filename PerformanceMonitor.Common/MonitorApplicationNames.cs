@@ -49,7 +49,17 @@ public static class MonitorApplicationNames
     /// prefix <see cref="SqlProgramNameLikePattern"/> that Long Query Completions and the session counts use.
     /// </summary>
     public static string StoreNotMonitorProgramPredicate(string column)
-        => $"({column} IS NULL OR {column} NOT ILIKE '{SqlProgramNameLikePattern}')";
+        => StoreNotMonitorProgramNamePredicate.Replace(StoreProgramNameColumn, column);
+
+    /// <summary>The column name <see cref="StoreNotMonitorProgramNamePredicate"/> is spelled over.</summary>
+    private const string StoreProgramNameColumn = "program_name";
+
+    /// <summary>
+    /// <see cref="StoreNotMonitorProgramPredicate"/> over the bare <c>program_name</c> column, as a constant, for a store read whose SQL is itself a
+    /// <c>const</c> string (the Analysis fact and drill-down reads, the pile-up readers). The method above is built from this, so the rule has one copy.
+    /// </summary>
+    public const string StoreNotMonitorProgramNamePredicate =
+        "(" + StoreProgramNameColumn + " IS NULL OR " + StoreProgramNameColumn + " NOT ILIKE '" + SqlProgramNameLikePattern + "')";
 
     /// <summary>The C# twin of the <c>LIKE</c> pattern above: true when the program name begins with
     /// <see cref="SqlProgramNamePrefix"/> (ordinal, ignoring case), so a test can check each name the monitor

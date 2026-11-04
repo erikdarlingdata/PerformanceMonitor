@@ -159,7 +159,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("program_name")})
+        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id
         LIMIT {MaxLatestQuerySnapshotRows}
@@ -178,7 +178,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        AND   ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("program_name")})
+        AND   ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY cpu_time_ms DESC
         """;
@@ -217,6 +217,7 @@ public sealed partial class ViewerDataService
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   wait_type IN ($4, $4 || ' ')
+        AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         AND   query_text NOT LIKE 'WAITFOR%'
         ORDER BY collection_time DESC, cpu_time_ms DESC
         """;
@@ -414,7 +415,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("program_name")})
+        AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
         GROUP BY date_trunc('hour', collection_time)
         ORDER BY bucket
         """;
