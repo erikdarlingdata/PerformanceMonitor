@@ -90,6 +90,101 @@ function foldByRoot(items) {
   return out;
 }
 
+/** A finite number, or null. A missing score is not 0: a row with none keeps showing none. */
+function finiteOrNull(v) {
+  const n = v == null || v === "" ? NaN : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function instantOf(v) {
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** The worst score a row ever reached: its newest occurrence's severity or its peak, whichever is higher. */
+function worstScore(f) {
+  const a = finiteOrNull(f.severity);
+  const b = finiteOrNull(f.peak_severity);
+  return a == null ? b : b == null ? a : Math.max(a, b);
+}
+
+/** A chain's facts in the order they happened, in words: "Latch ex, then Cxpacket". Never the raw arrows or the hash. */
+export function plainChain(f) {
+  const steps = String(f.story_path || "").split("→").map((s) => readableStory(s)).filter(Boolean);
+  return steps.length ? steps.join(", then ") : readableStory(rootKeyOf(f)) || findingTitle(f);
+}
+
+/** One line for a chain of a merged row: its facts in words, its own severity and its own occurrences. */
+export function chainLine(c) {
+  const n = Number(c.occurrences) || 0;
+  return c.path + " · " + c.label + " · " + n + (n === 1 ? " occurrence" : " occurrences");
+}
+
+/**
+ * #7582: one row per sentence. The read keeps one entry per chain and incident, and chains that start at the same fact print the same
+ * headline, so the page showed one sentence on two or three rows with nothing to tell them apart. Rows with the same headline become
+ * one: the worst severity any of them reached (counting each row's peak, so a row whose newest occurrence is Info but whose peak was
+ * Warning reads Warning), the earliest first seen, the latest last seen and the occurrences added up. The newest row speaks for the
+ * rest (its advice, its incident, its figures). `chains` lists what the row covers, one entry per distinct chain, worst first, for the
+ * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
+ */
+export function mergeBySentence(findings) {
+  const order = [];
+  const buckets = new Map();
+  for (const f of findings || []) {
+    const title = findingTitle(f);
+    if (!buckets.has(title)) {
+      buckets.set(title, []);
+      order.push(title);
+    }
+    buckets.get(title).push(f);
+  }
+  return order.map((title) => {
+    const rows = buckets.get(title);
+    let newest = rows[0];
+    let first = null;
+    let last = null;
+    let start = null;
+    let end = null;
+    let worst = null;
+    let occurrences = 0;
+    const byPath = new Map();
+    for (const f of rows) {
+      if ((instantOf(f.last_seen) ?? -Infinity) > (instantOf(newest.last_seen) ?? -Infinity)) newest = f;
+      const fs = instantOf(f.first_seen);
+      const ls = instantOf(f.last_seen);
+      if (fs != null && (first == null || fs < instantOf(first))) first = f.first_seen;
+      if (ls != null && (last == null || ls > instantOf(last))) last = f.last_seen;
+      const range = f.time_range || {};
+      if (instantOf(range.start) != null && (start == null || instantOf(range.start) < instantOf(start))) start = range.start;
+      if (instantOf(range.end) != null && (end == null || instantOf(range.end) > instantOf(end))) end = range.end;
+      const score = worstScore(f);
+      if (score != null && (worst == null || score > worst)) worst = score;
+      const n = Number(f.occurrences) || 0;
+      occurrences += n;
+      const path = plainChain(f);
+      const chain = byPath.get(path) || { path, score: null, occurrences: 0 };
+      chain.occurrences += n;
+      if (score != null && (chain.score == null || score > chain.score)) chain.score = score;
+      byPath.set(path, chain);
+    }
+    const chains = [...byPath.values()]
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.occurrences - a.occurrences)
+      .map((c) => ({ path: c.path, severity: c.score, label: severityLabel(c.score), occurrences: c.occurrences }));
+    return {
+      ...newest,
+      finding_title: title,
+      severity: worst,
+      peak_severity: worst,
+      occurrences,
+      first_seen: first ?? newest.first_seen,
+      last_seen: last ?? newest.last_seen,
+      time_range: newest.time_range ? { ...newest.time_range, start: start ?? newest.time_range.start, end: end ?? newest.time_range.end } : newest.time_range,
+      chains,
+    };
+  });
+}
+
 /**
  * The findings as incident groups, most severe group first. A finding with no incident_id is a group of its own.
  * Within a group the order the read gave (still-firing first, then severity) is kept after a severity sort.
@@ -98,7 +193,7 @@ export function groupFindings(findings) {
   const order = [];
   const buckets = new Map();
   let solo = 0;
-  for (const f of findings || []) {
+  for (const f of mergeBySentence(findings)) {
     const key = f.incident_id ? "i:" + f.incident_id : "s:" + solo++;
     if (!buckets.has(key)) {
       buckets.set(key, []);
@@ -329,6 +424,9 @@ function card(server, f, showTitle) {
     advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
   ];
+  if (f.chains && f.chains.length > 1) {
+    kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
+  }
   if (f.also && f.also.length) {
     kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join("; ") }));
   }

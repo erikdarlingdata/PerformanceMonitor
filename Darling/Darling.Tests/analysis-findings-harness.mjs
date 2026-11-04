@@ -142,6 +142,28 @@ try {
       const groups = groupsOf(root);
       return { headers: groups.map(sum), cards: byTag(root, "h4").map((h) => h.textContent), text: root.textContent };
     },
+    sameRootOtherSentence: async () => {
+      /* #7416 still holds where the headlines differ: two chains on one root with two sentences are one card, the other chain named under it. */
+      const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, ...over });
+      const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5, advice: { headline: "Latch contention", investigation: "i", remediation: "r" } });
+      const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2, advice: { headline: "Tempdb latch contention", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newest, older] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    sameSentence: async () => {
+      /* #7582: one sentence on rows of two incidents is one card, Critical, with the occurrences added up, and the chains it covers named in words. */
+      const read = (over) => finding({ advice: { headline: "Read latency spiked to 155 ms", investigation: "i", remediation: "r" }, ...over });
+      const warn = read({ finding_id: 1, incident_id: "inc-1", severity: 0.9, peak_severity: 0.9, occurrences: 17, story_path: "ANOMALY_READ_LATENCY", last_seen: "2026-01-01T07:00:00Z" });
+      const crit = read({ finding_id: 2, incident_id: "inc-2", severity: 1.7, peak_severity: 1.7, occurrences: 4, story_path: "ANOMALY_READ_LATENCY → LCK_M_S", last_seen: "2026-01-01T04:00:00Z" });
+      const other = finding({ finding_id: 3, incident_id: "inc-3", severity: 0.2, peak_severity: 0.2, advice: { headline: "Something else", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [warn, crit, other] });
+      return { headers: groupsOf(root).map(sum), text: root.textContent };
+    },
+    peakSeverity: async () => {
+      /* #7582: the newest occurrence scored 0.62 but the peak was 1.3, so the card reads Warning. */
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.62, peak_severity: 1.3, incident_id: "inc-1", advice: { headline: "Wait profile shifted", investigation: "i", remediation: "r" } })] });
+      return { headers: groupsOf(root).map(sum) };
+    },
     nullSeverity: async () => {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
       return { text: root.textContent };
@@ -154,8 +176,8 @@ try {
     categoryNames: async () => {
       /* #7486: the card shows the name the reply carries, and a row with no name shows its category as it is. */
       const root = await run("srv-a", { findings: [
-        finding({ finding_id: 1, category: "bad_actor", category_name: "Expensive query", incident_id: "inc-1" }),
-        finding({ finding_id: 2, category: "weird_new_source", incident_id: "inc-2" }),
+        finding({ finding_id: 1, category: "bad_actor", category_name: "Expensive query", incident_id: "inc-1", advice: { headline: "First sentence" } }),
+        finding({ finding_id: 2, category: "weird_new_source", incident_id: "inc-2", advice: { headline: "Second sentence" } }),
       ] });
       return { text: root.textContent };
     },

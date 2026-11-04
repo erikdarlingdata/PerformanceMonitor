@@ -152,15 +152,42 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
-    public void TwoChainsOnOneRoot_AreOneCard_WithTheNewestChainsFigures_AndTheOtherChainNamedUnderIt()
+    public void TwoChainsOnOneRootWithTwoSentences_AreOneCard_WithTheNewestChainsFigures_AndTheOtherChainNamedUnderIt()
+    {
+        var r = Run("sameRootOtherSentence");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
+        Assert.Contains("also seen as: LATCH_EX → TEMPDB_USAGE (INFO", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRootWithOneSentence_AreOneCard_WithTheOccurrencesAddedUp_AndEachChainNamedInWords()
     {
         var r = Run("sameRoot");
         var text = r.GetProperty("text").GetString()!;
         Assert.Equal(2, Strings(r.GetProperty("cards")).Length);
-        Assert.Contains("2 findings", Strings(r.GetProperty("headers")).Single(), StringComparison.Ordinal);
-        Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
-        Assert.Contains("also seen as: LATCH_EX → TEMPDB_USAGE (INFO", text, StringComparison.Ordinal);
+        Assert.Contains("Seen 7×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Latch ex, then Cxpacket · Warning · 5 occurrences; Latch ex, then Tempdb usage · Info · 2 occurrences", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneSentenceOnTwoIncidents_IsOneCard_AtTheWorstSeverity_WithTheOccurrencesAddedUp()
+    {
+        var r = Run("sameSentence");
+        var headers = Strings(r.GetProperty("headers"));
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(new[] { "Read latency spiked to 155 ms · CRITICAL", "Something else · INFO" }, headers);
+        Assert.Contains("Seen 21×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Anomaly read latency, then Lck m s · Critical · 4 occurrences; Anomaly read latency · Warning · 17 occurrences", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowWhosePeakWasWarning_ButWhoseNewestOccurrenceWasInfo_ReadsWarning()
+    {
+        Assert.Equal(new[] { "Wait profile shifted · WARNING" }, Strings(Run("peakSeverity").GetProperty("headers")));
     }
 
     [Fact]
