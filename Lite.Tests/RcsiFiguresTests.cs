@@ -124,21 +124,23 @@ VALUES ($1, $2, $3, 'rcsi', $2, $4, $5)",
         using (var c = _duckDb.CreateConnection())
         {
             await c.OpenAsync(TestContext.Current.CancellationToken);
-            foreach (var db in new[] { "ReadDb", "WriteDb", "QuietDb", "OutDb", "SchemaDb", "DeadlockDb", "tempdb", "master" })
+            foreach (var db in new[] { "ReadDb", "WriteDb", "QuietDb", "OutDb", "SchemaDb", "DeadlockDb", "OneWaitDb", "tempdb", "master" })
                 await LatestValueSeed.InsertDatabaseConfigAsync(c, ServerId, end.AddHours(-1), db, autoShrink: false, rcsiOn: false);
 
-            /* ReadDb: three shared-lock waits and one exclusive wait (75 percent readers), and two deadlocks. */
-            await SeedWaitsAsync(c, end.AddHours(-2), "ReadDb", "S", 3, 100);
-            await SeedWaitsAsync(c, end.AddHours(-2).AddMinutes(30), "readdb", "X", 1, 200);
+            /* ReadDb: nine shared-lock waits and three exclusive waits (75 percent readers), and two deadlocks. */
+            await SeedWaitsAsync(c, end.AddHours(-2), "ReadDb", "S", 9, 100);
+            await SeedWaitsAsync(c, end.AddHours(-2).AddMinutes(30), "readdb", "X", 3, 200);
             await SeedDeadlockAsync(c, end.AddHours(-2), "ReadDb");
             await SeedDeadlockAsync(c, end.AddHours(-1), "ReadDb");
             /* WriteDb: only writer/writer waits, and schema locks that stay out of the reader/writer share. */
-            await SeedWaitsAsync(c, end.AddHours(-2), "WriteDb", "X", 3, 300);
+            await SeedWaitsAsync(c, end.AddHours(-2), "WriteDb", "X", 10, 300);
             await SeedWaitsAsync(c, end.AddHours(-2).AddMinutes(30), "WriteDb", "Sch-M", 2, 400);
             /* OutDb: reader waits a day before the window, which the figures must not count. */
             await SeedWaitsAsync(c, end.AddHours(-30), "OutDb", "S", 4, 500);
             /* SchemaDb: only schema locks, so there are events but no reader or writer wait to take a share of. */
             await SeedWaitsAsync(c, end.AddHours(-2), "SchemaDb", "Sch-M", 2, 700);
+            /* OneWaitDb: a single shared-lock wait, which is too little to judge and must not make a target. */
+            await SeedWaitsAsync(c, end.AddHours(-2), "OneWaitDb", "S", 1, 800);
             /* DeadlockDb: a deadlock and no blocked-process wait at all. */
             await SeedDeadlockAsync(c, end.AddHours(-2), "DeadlockDb");
             /* tempdb carries reader waits too: it still must not appear. */
@@ -160,15 +162,15 @@ VALUES ($1, $2, $3, 'rcsi', $2, $4, $5)",
 
         var names = JsonSerializer.SerializeToElement(finding.DrillDown!["config_issues"]).EnumerateArray()
             .Select(r => r.GetProperty("database").GetString()).Order().ToArray();
-        Assert.Equal(["DeadlockDb", "OutDb", "QuietDb", "ReadDb", "SchemaDb", "WriteDb"], names);
+        Assert.Equal(["DeadlockDb", "OneWaitDb", "OutDb", "QuietDb", "ReadDb", "SchemaDb", "WriteDb"], names);
 
         var read = Row(finding, "ReadDb");
-        Assert.Equal(4, read.GetProperty("rcsi_blocking_events").GetInt32());
+        Assert.Equal(12, read.GetProperty("rcsi_blocking_events").GetInt32());
         Assert.Equal(2, read.GetProperty("rcsi_deadlocks").GetInt32());
         Assert.Equal(75, read.GetProperty("rcsi_reader_writer_pct").GetInt32());
 
         var write = Row(finding, "WriteDb");
-        Assert.Equal(5, write.GetProperty("rcsi_blocking_events").GetInt32());
+        Assert.Equal(12, write.GetProperty("rcsi_blocking_events").GetInt32());
         Assert.Equal(0, write.GetProperty("rcsi_deadlocks").GetInt32());
         Assert.Equal(0, write.GetProperty("rcsi_reader_writer_pct").GetInt32());
 
@@ -185,13 +187,16 @@ VALUES ($1, $2, $3, 'rcsi', $2, $4, $5)",
         Assert.Equal(2, schema.GetProperty("rcsi_blocking_events").GetInt32());
         Assert.Equal(0, schema.GetProperty("rcsi_deadlocks").GetInt32());
         Assert.Equal(JsonValueKind.Null, schema.GetProperty("rcsi_reader_writer_pct").ValueKind);
+        var oneWait = Row(finding, "OneWaitDb");
+        Assert.Equal(1, oneWait.GetProperty("rcsi_blocking_events").GetInt32());
+        Assert.Equal(JsonValueKind.Null, oneWait.GetProperty("rcsi_reader_writer_pct").ValueKind);
         var deadlockOnly = Row(finding, "DeadlockDb");
         Assert.Equal(0, deadlockOnly.GetProperty("rcsi_blocking_events").GetInt32());
         Assert.Equal(1, deadlockOnly.GetProperty("rcsi_deadlocks").GetInt32());
         Assert.Equal(JsonValueKind.Null, deadlockOnly.GetProperty("rcsi_reader_writer_pct").ValueKind);
 
         /* The consent text built from the drill-down row alone (no carried figures) states no percent for either. */
-        foreach (var unknown in new[] { "SchemaDb", "DeadlockDb" })
+        foreach (var unknown in new[] { "SchemaDb", "DeadlockDb", "OneWaitDb" })
         {
             var action = new RemediationAction(
                 "RCSI", "set", Array.Empty<ForcePlanTarget>(),
@@ -204,7 +209,7 @@ VALUES ($1, $2, $3, 'rcsi', $2, $4, $5)",
 
         var target = Assert.Single(FactRemediation.CollectRcsiTargets(finding));
         Assert.Equal("ReadDb", target.Database);
-        Assert.Equal(4, target.Figures.BlockingEvents);
+        Assert.Equal(12, target.Figures.BlockingEvents);
         Assert.Equal(2, target.Figures.Deadlocks);
         Assert.Equal(75, target.Figures.ReaderWriterPct);
         Assert.NotNull(FactRemediation.BuildRcsiAction(finding));

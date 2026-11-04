@@ -21,6 +21,10 @@ namespace PerformanceMonitor.Analysis;
 /// </summary>
 public sealed class RcsiFigureAccumulator
 {
+    /// <summary>The fewest reader and writer waits in the window that a share is worked out from. The share turns on the RCSI
+    /// recommendation, a database-wide change, and one 5-second wait is 100 percent of one.</summary>
+    public const int MinReaderWriterWaits = 10;
+
     private sealed class Counts
     {
         public long Events;
@@ -61,14 +65,16 @@ public sealed class RcsiFigureAccumulator
     /// whole-number reader share of reader plus writer waits. With no reader or writer waits the share is
     /// undefined: it is 0 when the database had no blocking events and no deadlocks (measured, nothing found),
     /// and null when it had events or deadlocks that were not reader or writer waits (schema or bulk-update
-    /// locks, or deadlocks alone), so a share of 0 is never printed beside counts it does not describe.</summary>
+    /// locks, or deadlocks alone), so a share of 0 is never printed beside counts it does not describe. It is also
+    /// null with fewer than <see cref="MinReaderWriterWaits"/> reader and writer waits: too few to say what the
+    /// contention is, and a null share keeps the recommendation off.</summary>
     public RcsiInactionFigures? Get(string database)
     {
         if (!_byDatabase.TryGetValue(database, out var c)) return null;
         var denominator = c.Readers + c.Writers;
-        int? pct = denominator > 0
+        int? pct = denominator >= MinReaderWriterWaits
             ? (int)(100 * c.Readers / denominator)
-            : (c.Events > 0 || c.Deadlocks > 0 ? null : 0);
+            : (denominator > 0 || c.Events > 0 || c.Deadlocks > 0 ? null : 0);
         return new RcsiInactionFigures(Clamp(c.Events), Clamp(c.Deadlocks), pct);
     }
 

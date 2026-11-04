@@ -340,8 +340,8 @@ public static class FactRemediation
             // gate on the reader/writer SHARE (classified from the blocked-process report's lock
             // modes in each store's DB_CONFIG drill-down, #7448, through RcsiFigureAccumulator), using the SAME threshold the consent disclosure
             // uses to say "RCSI eliminates this". An rcsi-off db whose contention is writer/writer-
-            // dominant (pct below the threshold) or where no reader/writer blocking was captured
-            // (pct null) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
+            // dominant (pct below the threshold) or where too little reader/writer blocking was captured
+            // to judge (pct null, under RcsiFigureAccumulator.MinReaderWriterWaits) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
             // builds from this same list). The raw blocking/deadlock counts are still carried for
             // the consent dialog's magnitude context.
             var readerWriterPct = GetNullableInt(row, "rcsi_reader_writer_pct");
