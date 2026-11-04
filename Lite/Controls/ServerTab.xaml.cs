@@ -184,6 +184,16 @@ public partial class ServerTab : UserControl
     public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
     {
         InitializeComponent();
+        // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
+        ChartLayout.KeepWheelOnPlot(
+            QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadChart, FileIoWriteChart,
+            FileIoReadThroughputChart, FileIoWriteThroughputChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();

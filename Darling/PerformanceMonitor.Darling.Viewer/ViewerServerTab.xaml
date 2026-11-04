@@ -658,28 +658,12 @@
                          charts (query / procedure / Query Store duration + execution count). -->
                     <TabItem Header="Performance Trends">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
-                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
-                            </Grid.RowDefinitions>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
-                                <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
-                            </Border>
-                            <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
-                                <scottplot:WpfPlot x:Name="ProcDurationTrendChart"/>
-                            </Border>
-                            <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
-                                <scottplot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
-                            </Border>
-                            <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
-                                <scottplot:WpfPlot x:Name="ExecutionCountTrendChart"/>
-                            </Border>
-                        </Grid>
+                        <ui:ChartGridPanel MaxColumns="2">
+                            <scottplot:WpfPlot x:Name="QueryDurationTrendChart"/>
+                            <scottplot:WpfPlot x:Name="ProcDurationTrendChart"/>
+                            <scottplot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
+                            <scottplot:WpfPlot x:Name="ExecutionCountTrendChart"/>
+                        </ui:ChartGridPanel>
                         </ScrollViewer>
                     </TabItem>
                     <!-- Active Queries (Lite ServerTab.xaml:283-403): the hourly slicer + ~26-column
@@ -2387,14 +2371,15 @@
 
                 <!-- Memory Grants Sub-Tab -->
                 <TabItem Header="Memory Grants">
-                    <Grid Margin="8">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                    <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                            <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         </Grid.RowDefinitions>
                         <scottplot:WpfPlot Grid.Row="0" x:Name="MemoryGrantSizingChart" Margin="0,0,0,4"/>
                         <scottplot:WpfPlot Grid.Row="1" x:Name="MemoryGrantActivityChart" Margin="0,4,0,0"/>
-                    </Grid>
+                    </Grid></ScrollViewer>
                 </TabItem>
 
                 <!-- Resource Semaphore Sub-Tab (#6388, the web's Memory Grants tab panels Resource Semaphore Pressure and
@@ -2537,7 +2522,7 @@
                             SelectionChanged="FileIoSubTabs_SelectionChanged">
                     <TabItem Header="File I/O Latency">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
-                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
@@ -2552,10 +2537,11 @@
                         </ScrollViewer>
                     </TabItem>
                     <TabItem Header="File I/O Throughput">
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <Border Grid.Row="0" Margin="0,0,0,4">
                                 <scottplot:WpfPlot x:Name="FileIoReadThroughputChart"/>
@@ -2563,7 +2549,7 @@
                             <Border Grid.Row="1" Margin="0,4,0,0">
                                 <scottplot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
                             </Border>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
                 </TabControl>
             </Grid>
@@ -2573,7 +2559,7 @@
              latency. -->
         <TabItem Header="tempdb">
             <ScrollViewer Margin="8" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
-            <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="450">
+            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="450">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
@@ -2625,7 +2611,7 @@
                             SelectionChanged="BlockingSubTabs_SelectionChanged">
                     <TabItem Header="Trends">
                         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #6652: scrolls when the charts cannot all keep their minimum height -->
-                        <Grid Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="540">
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="540">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
@@ -2679,12 +2665,13 @@
                              row 0 = blocking Max/Avg | blocking Total, row 1 = deadlock Max/Avg | deadlock Total —
                              so a 2x2 reads better AND keeps each plot area tall enough that the X-axis time labels
                              don't collide on a short (768px) laptop. The summary strip spans both columns below. -->
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="480">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <Grid.ColumnDefinitions>
@@ -2732,14 +2719,15 @@
                                     <TextBlock x:Name="BlockingStatsDeadlockWaitText" Text="--" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </Border>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
                     <TabItem Header="Current Waits">
-                        <Grid>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="460">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <!-- "Showing since <start>" when this server's waiting_tasks rows start after the range
@@ -2758,7 +2746,7 @@
                             <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
                                        Foreground="{DynamicResource ForegroundDimBrush}"
                                        Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
                     <!-- Blocked Process Reports — widened to Lite's full grid (W1e): UTC slicer + ~25 filterable
                          columns (Source badge, per-column filter headers, per-row XML Save gated on HasReportXml,
@@ -3565,8 +3553,9 @@
                             <TextBlock Text="Corruption Events (bad pages, dump requests, access violations)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <Grid Grid.Row="1" Margin="8,0,8,8" x:Name="CorruptionEventsCharts">
-                            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="1" Margin="8,0,8,8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" x:Name="CorruptionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                            <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
                             <!-- Borderless tiles matching every other chart tab; each chart identifies itself
@@ -3583,7 +3572,7 @@
                             <Border Grid.Row="1" Grid.Column="1" Margin="2">
                                 <scottplot:WpfPlot x:Name="WriteAccessViolationsChart"/>
                             </Border>
-                        </Grid>
+                        </Grid></ScrollViewer>
                         <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
@@ -3597,8 +3586,9 @@
                             <TextBlock Text="Contention Events (non-yielding tasks, latches, spinlocks, CPU)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                         </StackPanel>
-                        <Grid Grid.Row="1" Margin="8,0,8,8" x:Name="ContentionEventsCharts">
-                            <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="1" Margin="8,0,8,8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" x:Name="ContentionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                            <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
 
                             <!-- Borderless tiles matching every other chart tab; each chart identifies itself
@@ -3615,7 +3605,7 @@
                             <Border Grid.Row="1" Grid.Column="1" Margin="2">
                                 <scottplot:WpfPlot x:Name="CpuComparisonChart"/>
                             </Border>
-                        </Grid>
+                        </Grid></ScrollViewer>
                         <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Style="{StaticResource EmptyHint}"/>
                     </Grid>
                 </TabItem>
@@ -3935,13 +3925,14 @@
              the diagnostics tail (after System Events, before Collection Health). Loads on parent-tab
              activation (mirrors the Memory tab), so no SelectionChanged handler is needed. -->
         <TabItem Header="Latches &amp; Spinlocks">
-            <Grid Margin="8">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="500">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
@@ -3994,7 +3985,7 @@
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
-            </Grid>
+            </Grid></ScrollViewer>
         </TabItem>
 
         <!-- Collection Health Tab — upgraded from the shell's single latest-run grid to Lite's rich
@@ -4920,10 +4911,10 @@
                             <StackPanel Margin="0,4,0,0">
                                 <TextBlock x:Name="PgDatabaseTrendNote" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                                <UniformGrid x:Name="PgDatabaseTrendHost" Columns="2" Height="500"/>
+                                <ui:ChartGridPanel x:Name="PgDatabaseTrendHost" MaxColumns="2"/>
                                 <TextBlock x:Name="PgQueryDurationTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
                                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                                <UniformGrid x:Name="PgQueryDurationTrendHost" Columns="2" Height="250"/>
+                                <ui:ChartGridPanel x:Name="PgQueryDurationTrendHost" MaxColumns="2" HeightFill="0.5"/>
                             </StackPanel>
                         </ScrollViewer>
                     </TabItem>
@@ -5163,12 +5154,13 @@
         </TabItem>
 
         <TabItem x:Name="PgWaitsTab" Header="Waits" Visibility="Collapsed">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
@@ -5179,7 +5171,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="1" x:Name="PgWaitStatsGrid" Style="{StaticResource DarkGrid}"
+                <ui:ViewportBox Grid.Row="1" Fraction="0.35" MinHeight="180"><DataGrid x:Name="PgWaitStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Wait Type" Binding="{Binding WaitType}" Width="200"/>
@@ -5188,7 +5180,7 @@
                         <DataGridTextColumn Header="Total Wait (ms)" Binding="{Binding TotalWaitTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                         <DataGridTextColumn Header="Avg Wait (ms)" Binding="{Binding AvgWaitTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="*"/>
                     </DataGrid.Columns>
-                </DataGrid>
+                </DataGrid></ui:ViewportBox>
                 <!-- #2603. A SIBLING of the panel above rather than a replacement: that one reads
                      Aurora's aurora_stat_system_waits() and exists only there, this one reads
                      pg_wait_sampling and attributes each wait to the QUERY that waited, on any
@@ -5202,7 +5194,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="3" x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
+                <ui:ViewportBox Grid.Row="3" Fraction="0.35" MinHeight="180"><DataGrid x:Name="PgWaitSamplingGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <!-- CPU/Running is not a wait: it is the backend on processor, which the
@@ -5221,25 +5213,27 @@
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
-                </DataGrid>
+                </DataGrid></ui:ViewportBox>
                 <!-- #6385: the web's Wait Trend, as a chart (ViewerServerTab.PgTrends.cs). -->
                 <StackPanel Grid.Row="4">
                     <TextBlock x:Name="PgWaitTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                    <UniformGrid x:Name="PgWaitTrendHost" Columns="1" Height="230"/>
+                    <ui:ChartGridPanel x:Name="PgWaitTrendHost" MaxColumns="1" HeightFill="0.5"/>
                 </StackPanel>
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <TabItem x:Name="PgIoTab" Header="I/O" Visibility="Collapsed">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <StackPanel Grid.Row="0">
@@ -5250,7 +5244,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="1" x:Name="PgIoStatsGrid" Style="{StaticResource DarkGrid}"
+                <ui:ViewportBox Grid.Row="1" Fraction="0.28" MinHeight="180"><DataGrid x:Name="PgIoStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Backend" Binding="{Binding BackendType}" Width="160"/>
@@ -5282,7 +5276,7 @@
                         <DataGridTextColumn Header="Write Volume" Binding="{Binding WriteVolume}" SortMemberPath="WriteVolumeSort" Width="120"/>
                         <DataGridTextColumn Header="Stats Reset" Binding="{Binding StatsReset}" Width="*" SortMemberPath="StatsResetUtc"/>
                     </DataGrid.Columns>
-                </DataGrid>
+                </DataGrid></ui:ViewportBox>
 
                 <!-- #2544 write side. A metric PER ROW rather than one very wide row: the three source
                      views are cluster-wide singletons, so a snapshot is a single row of 26 counters, and a
@@ -5297,7 +5291,7 @@
                                Foreground="{DynamicResource ForegroundBrush}"
                                Background="#22FFAA00"/>
                 </StackPanel>
-                <DataGrid Grid.Row="3" x:Name="PgWriteStatsGrid" Style="{StaticResource DarkGrid}"
+                <ui:ViewportBox Grid.Row="3" Fraction="0.28" MinHeight="180"><DataGrid x:Name="PgWriteStatsGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Group" Binding="{Binding Group}" Width="130"/>
@@ -5311,14 +5305,14 @@
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
                     </DataGrid.Columns>
-                </DataGrid>
+                </DataGrid></ui:ViewportBox>
 
                 <!-- #2544 buffer pool contents. Third end of the same subject as the two grids above:
                      pg_stat_io says who issued an I/O, the write panel says whether the server kept up, and
                      this says what the memory is actually holding. -->
                 <TextBlock Grid.Row="4" x:Name="PgBufferUsageNote" FontSize="12" Margin="0,10,0,6" TextWrapping="Wrap"
                            Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                <DataGrid Grid.Row="5" x:Name="PgBufferUsageGrid" Style="{StaticResource DarkGrid}"
+                <ui:ViewportBox Grid.Row="5" Fraction="0.28" MinHeight="180"><DataGrid x:Name="PgBufferUsageGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="140"/>
@@ -5338,14 +5332,15 @@
                              where every other snapshot grid has it. -->
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
-                </DataGrid>
+                </DataGrid></ui:ViewportBox>
                 <!-- #6385: the web's I/O Trend, as four charts (ViewerServerTab.PgTrends.cs). -->
                 <StackPanel Grid.Row="6">
                     <TextBlock x:Name="PgIoTrendNote" FontSize="12" Margin="0,12,0,6" TextWrapping="Wrap"
                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
-                    <UniformGrid x:Name="PgIoTrendHost" Columns="4" Height="230"/>
+                    <ui:ChartGridPanel x:Name="PgIoTrendHost" MaxColumns="4" HeightFill="0.6"/>
                 </StackPanel>
             </Grid>
+            </ScrollViewer>
         </TabItem>
 
         <TabItem x:Name="PgReplicationTab" Header="Replication" Visibility="Collapsed">

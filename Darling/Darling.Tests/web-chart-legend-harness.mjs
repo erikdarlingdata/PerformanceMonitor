@@ -318,5 +318,44 @@ const shrunk = specFor();
 shrunk.series = shrunk.series.filter((x) => x.key !== "mid");
 out.shrunk = state(charts.zoomableLineChart(shrunk, "c7", scope));
 
+// 13. more series than the palette has colors (#7401): each series is colored as panels.js does, and no two legend entries may look alike
+const manySpec = (n) => ({
+  ...specFor(),
+  points: points.map((p, i) => ({ t: p.t, ...Object.fromEntries(Array.from({ length: n }, (_, k) => ["s" + k, 10 * (k + 1) + (i % 4)])) })),
+  series: Array.from({ length: n }, (_, k) => ({ key: "s" + k, label: "Series " + k, color: charts.SERIES_COLORS[k % charts.SERIES_COLORS.length] })),
+});
+const looks = (n) => {
+  const host = charts.zoomableLineChart(manySpec(n), "many" + n, scope);
+  return {
+    legend: legendItems(host).map((e) => e.children[0].attrs.style),
+    lines: find(host, (x) => x.tag === "polyline" && cls(x).includes("series-line")).map((x) => x.attrs.stroke + "|" + (x.attrs["stroke-dasharray"] || "")),
+  };
+};
+out.palette = { series: charts.SERIES_COLORS, categorical: charts.CATEGORICAL_COLORS };
+out.six = looks(6);
+out.twelve = looks(12);
+
+// 14. a swatch shows a dash only when the plot draws one (#7401): two series sharing a color on a stacked or stacked-bar chart are drawn solid,
+// and so is a repeated-color series that is only a lone dot. A repeated color on two real lines is still dashed on the line and its entry.
+const sameColor = charts.SERIES_COLORS[0];
+const twoSame = (mode, second) => ({
+  ...specFor(),
+  mode,
+  points: points.map((p, i) => ({ t: p.t, a: 10 + (i % 4), b: second(i) })),
+  series: [{ key: "a", label: "A", color: sameColor }, { key: "b", label: "B", color: sameColor }],
+});
+const sameLook = (mode, second) => {
+  const host = charts.zoomableLineChart(twoSame(mode, second), "same-" + mode + "-" + String(second(0)), scope);
+  return {
+    legend: legendItems(host).map((e) => e.children[0].attrs.style),
+    lines: find(host, (x) => x.tag === "polyline" && cls(x).includes("series-line")).map((x) => x.attrs["stroke-dasharray"] || ""),
+    marks: find(host, (x) => cls(x).includes("series-bar") || cls(x).includes("series-area") || cls(x).includes("series-dot")).length,
+  };
+};
+out.sameStackedBar = sameLook("stacked-bar", (i) => 20 + (i % 3));
+out.sameStacked = sameLook("stacked", (i) => 20 + (i % 3));
+out.sameLines = sameLook("line", (i) => 20 + (i % 3));
+out.sameLoneDot = sameLook("line", (i) => (i === 2 ? 20 : null));
+
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));

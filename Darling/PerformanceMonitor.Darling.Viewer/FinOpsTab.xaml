@@ -748,7 +748,9 @@
                              "what is it now". One line per top-5 database by current PVS size, 7 days,
                              legend labels carry each database's latest %-of-database. Collapsed until the
                              loader has points, so an ADR-less server shows no dead chart. -->
-                        <scottplot:WpfPlot Grid.Row="2" x:Name="FinOpsPvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                        <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
+                            <scottplot:WpfPlot x:Name="FinOpsPvsTrendChart" Visibility="Collapsed"/>
+                        </ui:ChartGridPanel>
                         <Grid Grid.Row="3" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsPvsStatsDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
