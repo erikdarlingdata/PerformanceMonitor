@@ -132,6 +132,47 @@ internal static class McpEngineCapability
     }
 
     /// <summary>
+    /// #7375: whether this server's newest <c>server_properties</c> row says Always On is off, the fact Darling's <c>get_collection_health</c>
+    /// reads the same way. No row, or a failed read, makes no claim (false): the log-driven rows stand. A NULL flag reads as off, as both
+    /// stores map it (#6838).
+    /// </summary>
+    public static async Task<bool> AlwaysOnOffAsync(LocalDataService dataService, int serverId)
+    {
+        try
+        {
+            var properties = await dataService.GetLatestServerPropertiesAsync(serverId);
+            return CollectorHealthClassifier.IsAlwaysOnOff(properties is not null, properties?.IsHadrEnabled ?? false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// #7375: on a server with Always On off, the two Always On collectors run, find nothing and log HEALTHY with zero rows, and the
+    /// zero-output sentence then called that something that "needs a look". Those rows leave the listed rows and come back as
+    /// <c>not_collected</c> rows with Darling's sentence (<see cref="CollectorHealthClassifier.AlwaysOnOffMessage"/>), by the rule
+    /// Darling uses (<see cref="CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff"/>): a FAILING Always On collector keeps its row and
+    /// its Last Error. Only the listing and the detail counts change. The sweep arithmetic keeps every row, as Darling's does.
+    /// </summary>
+    internal static (List<CollectorHealthRow> Shown, List<object> NotCollected) SplitCollectionHealthByAlwaysOn(
+        bool alwaysOnOff, List<CollectorHealthRow> rows)
+    {
+        var shown = rows
+            .Where(r => !CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(r.CollectorName, r.HealthStatus, alwaysOnOff))
+            .ToList();
+        var notCollected = rows
+            .Where(r => CollectorHealthClassifier.IsNotCollectedWhenAlwaysOnOff(r.CollectorName, r.HealthStatus, alwaysOnOff))
+            .Select(r => r.CollectorName)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .Select(n => (object)new { collector = n, status = CollectorRuntimePrecondition.NotCollectedStatusWord, message = CollectorHealthClassifier.AlwaysOnOffMessage })
+            .ToList();
+        return (shown, notCollected);
+    }
+
+    /// <summary>
     /// #6894, #6893: what the connection check found this server to be: an Amazon RDS for SQL Server instance (the <c>rdsadmin</c> database),
     /// and on the Web or Express edition. Lite keeps the facts in memory on the server's connection status, and a tool holds only the storage
     /// id, so the server is found the way the collectors name it. <see cref="AwsRdsKind.None"/> for a server that is not registered, was never

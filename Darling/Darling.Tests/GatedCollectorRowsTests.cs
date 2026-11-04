@@ -504,6 +504,37 @@ public sealed class GatedCollectorRowsLiveTests
     }
 
     [Fact]
+    public async Task OnASqlServerWithoutAlwaysOn_TheCompactNoteCountsOnlyTheRowsListedAsCollected()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* #7375: the two AG collectors log HEALTHY and are then listed as not_collected, so they are not among the
+               collectors the note counts. "N of M" must use M = the rows shown as collected, not every logged collector. */
+            const int id = 524_914;
+            const string server = "alwayson-off-note";
+            await RegisterAsync(connection, id, server, MonitoredEngineKind.SqlServer, null, ct);
+            string[] others = { "wait_stats", "cpu_utilization_stats", "memory_stats", "file_io_stats" };
+            string[] ag = { "ag_database_replica_states", "ag_replica_states" };
+            foreach (var name in others.Concat(ag)) await LogAsync(connection, id, server, name, 5, ct);
+            await PlantHadrAsync(connection, id, server, false, ct);
+
+            var (_, doc) = await HealthAsync(postgres, server, false, ct);
+            using (doc)
+            {
+                var rows = doc.RootElement.GetProperty("collectors").EnumerateArray().ToArray();
+                var shown = rows.Where(r => !ag.Contains(r.GetProperty("collector").GetString()!)).ToArray();
+                Assert.Equal(others.Length, shown.Length);
+                Assert.All(rows.Where(r => ag.Contains(r.GetProperty("collector").GetString()!)),
+                    r => Assert.Equal("not_collected", r.GetProperty("status").GetString()));
+                var compact = shown.Count(r => r.TryGetProperty("compact", out var c) && c.GetBoolean());
+                Assert.True(compact > 0, "the seeded collectors should be compact-eligible");
+                var note = doc.RootElement.GetProperty("collector_detail_note").GetString()!;
+                Assert.StartsWith($"{compact} of {shown.Length} collector(s) below", note);
+            }
+        });
+    }
+
+    [Fact]
     public async Task TheResponseSize_OnAPostgresServerWithEveryCollectorLogged_StaysUnderTheBudgetCeiling()
     {
         await RunAsync(async (connection, postgres, ct) =>
