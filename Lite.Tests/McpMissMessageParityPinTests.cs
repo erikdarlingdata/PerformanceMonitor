@@ -228,7 +228,7 @@ public sealed class McpMissMessageParityPinTests
            a different next step. The negative-span refusal is built by McpHelpers.ValidateUncappedWindow and
            is shared by construction; what lives twice is the call, pinned by McpPageContractTests. */
         "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
-        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking", // #7522: Lite's closing step differs (Lite keeps no plans), so only the shared part is pinned
         ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
 
         /* #3541 A12 — the health-parser family's four-rung empty ladder, now one EmptyAsync per SKU that all

@@ -163,8 +163,8 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
     /// <summary>
     /// A model picking tools reads the whole description, so the three changed tools say there that Lite keeps
     /// no plans and name <c>analyze_plan_xml</c>. The heads of <c>analyze_query_plan</c> and
-    /// <c>analyze_procedure_plan</c> are shared byte for byte with Darling and sit at the tools/list size
-    /// ceiling, so their Lite-only sentence lives in the <c>get_tool_guide</c> tail; <c>get_plan_xml</c> has no
+    /// <c>analyze_procedure_plan</c> state Lite's one answer (#7522: a miss is always not_collected), and the
+    /// longer explanation lives in the <c>get_tool_guide</c> tail; <c>get_plan_xml</c> has no
     /// tail on either product, so it says it in its description. <c>analyze_query_store_plan</c> is not among
     /// them: it reads no stored plan column (it fetches from Query Store on the monitored instance), so what it
     /// says about a missing plan is still true.
@@ -183,7 +183,7 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     /// <summary>The two tools that carry a <c>get_tool_guide</c> tail explain the cause there, where the space is
-    /// free: the head is shared with Darling and stays put, the tail says why an eviction is the wrong guess.</summary>
+    /// free: the head states the status, the tail says why an eviction is the wrong guess.</summary>
     [Theory]
     [InlineData("analyze_query_plan")]
     [InlineData("analyze_procedure_plan")]
@@ -195,6 +195,20 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Contains("Lite never captures plans", tail, StringComparison.Ordinal);
         Assert.Contains("never a sign the plan was evicted", tail, StringComparison.Ordinal);
         Assert.Contains("analyze_plan_xml", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7522: <c>get_top_queries_by_cpu</c> must not send a Lite reader to a tool that always answers
+    /// not_collected there. It names the Query Store plan tool, which fetches from the monitored server.</summary>
+    [Fact]
+    public void TopQueriesByCpu_DoesNotSendTheReaderToTheStoredPlanTool()
+    {
+        var whole = typeof(McpQueryTools)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_top_queries_by_cpu")
+            .GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", whole, StringComparison.Ordinal);
+        Assert.Contains("confirm current parallelism with analyze_query_store_plan", whole, StringComparison.Ordinal);
     }
 
     [Fact]

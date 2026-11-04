@@ -25,7 +25,7 @@ public sealed class McpToolGuideHeadsAnalyzeProcedurePlanTests
     private static readonly string[] HeadFacts =
     [
         "by sql_handle (Darling) or plan_handle (Lite)",
-        "No plan: not_collected if the engine can't collect procedure_stats, else unavailable.",
+        "Lite keeps no plans, so a miss is always not_collected.",
         "labelled impact_basis",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat (regression risk for other plans, write cost)",
@@ -45,6 +45,9 @@ public sealed class McpToolGuideHeadsAnalyzeProcedurePlanTests
         {
             Assert.Contains(fact, served.Served, StringComparison.Ordinal);
         }
+
+        /* #7522: Lite never stores a plan, so the tool can only answer not_collected. */
+        Assert.DoesNotContain("unavailable", served.Served, StringComparison.Ordinal);
     }
 
     /// <summary>D9: nothing dropped. Every sentence of the pre-#3898 description, including Lite's
