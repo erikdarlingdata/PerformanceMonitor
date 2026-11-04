@@ -200,4 +200,46 @@ public sealed class WebChartGapBehaviourTests
         var r = Run();
         Assert.Equal(new[] { "0,1,2", "3,4" }, r.GetProperty("split").EnumerateArray().Select(e => e.GetString()!).ToArray());
     }
+
+    [Fact]
+    public void ASeriesJoiningTwoGrains_DrawsOneLine_WhenTheSeamIsKnown()
+    {
+        var r = Run();
+        Assert.Equal(1, N(r, "seamJoined", "lines"));
+        Assert.Equal(0, N(r, "seamJoined", "dots"));
+        Assert.Equal(1, N(r, "seamArea", "areas"));
+        Assert.Equal(0, N(r, "seamArea", "dots"));
+    }
+
+    [Fact]
+    public void ASeriesJoiningTwoGrains_WithNoSeam_KeepsTheOneRuleItAlwaysHad()
+    {
+        var r = Run();
+        /* the hourly steps (and the step into the minute points) read as gaps: 22 lone dots and the minute stretch as a line */
+        Assert.Equal(1, N(r, "seamAbsent", "lines"));
+        Assert.Equal(22, N(r, "seamAbsent", "dots"));
+        Assert.Equal(2, N(r, "seamAllRawOutage", "lines"));
+        Assert.Equal(2, N(r, "seamBad", "lines"));
+        Assert.Equal(1, N(r, "seamAllRaw", "lines"));
+        var t = r.GetProperty("seamThreshold");
+        Assert.Equal(t.GetProperty("plain").GetDouble(), t.GetProperty("oneSide").GetDouble());
+    }
+
+    [Fact]
+    public void AnOutageInsideEitherSideOfTheSeam_StillBreaksTheLine()
+    {
+        var r = Run();
+        Assert.Equal(2, N(r, "seamHourlyOutage", "lines"));
+        Assert.Equal(0, N(r, "seamHourlyOutage", "dots"));
+        Assert.Equal(2, N(r, "seamRawOutage", "lines"));
+        Assert.Equal(0, N(r, "seamRawOutage", "dots"));
+    }
+
+    [Fact]
+    public void EachSideOfTheSeam_IsJudgedAgainstItsOwnSpacing()
+    {
+        var t = Run().GetProperty("seamThreshold");
+        Assert.Equal(3 * 60 * 60000, t.GetProperty("hourlySide").GetDouble());
+        Assert.Equal(5 * 60000, t.GetProperty("rawSide").GetDouble());
+    }
 }

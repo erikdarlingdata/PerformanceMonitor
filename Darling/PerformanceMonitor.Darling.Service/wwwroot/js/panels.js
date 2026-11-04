@@ -1517,11 +1517,15 @@ function vizLine(data, desc) {
      instrument re-baselining, not the workload, and the old table's Stats Reset column was the only place that said one happened. */
   const resetTimes = desc.resetKey ? points.filter((p) => p && p[desc.resetKey] === true).map((p) => p[desc.xKey]) : [];
   const annotations = resetTimes.length ? [{ source: "stats_reset", displayName: desc.resetLabel || "Stats reset", events: resetTimes.map((ts) => ({ ts, label: "" })) }] : null;
+  /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
+     Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
+  const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
   return zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
     annotations,
+    gapSeamMs: seam ? seam.getTime() : null,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the

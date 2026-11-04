@@ -615,6 +615,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          seamKey: "routing.raw_from",
           emptyText:
             "No Query Store activity in this window. If Query Store is off on this server's databases the " +
             "read says so rather than showing an empty chart.",

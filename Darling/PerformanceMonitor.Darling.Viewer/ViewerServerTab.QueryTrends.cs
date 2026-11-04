@@ -315,7 +315,9 @@ public partial class ViewerServerTab
         var values = data.Select(d => d.Value).ToArray();
 
         _queryStoreDurationTrendHover?.Clear();
-        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values);
+        /* #7508: a rollup+raw series is one point per hour before the raw start and one per interval from it, so the gap rule judges each side by its own spacing. */
+        var seamX = series.Route.UseRollup ? series.Route.RawStartUtc.ToOADate() : (double?)null;
+        var plot = QueryStoreDurationTrendChart.Plot.Add.TimeSeries(times, values, seamX);
         plot.LegendText = "Query Store Duration";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("QueryStoreDuration"));
         ChartStyle.StyleScatter(plot);
