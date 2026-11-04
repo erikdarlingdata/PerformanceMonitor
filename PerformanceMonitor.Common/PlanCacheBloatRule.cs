@@ -29,9 +29,9 @@ namespace PerformanceMonitor.Common
     {
         /// <summary>
         /// Compiled single-use plans smaller than this in total are not bloat, whatever the ratio. The value is a
-        /// judgment, not a measurement: no benchmark says where single-use plans start to cost a server. It is the
-        /// floor the analysis engine already applies before it scores a PLAN_CACHE_BLOAT card, so the live badge
-        /// and the scored recommendation agree on where a cache is too small to judge.
+        /// judgment, not a measurement: no benchmark says where single-use plans start to cost a server. The analysis
+        /// engine's <c>FactScorer</c> reads this constant for its PLAN_CACHE_BLOAT card, so the live badge and the
+        /// scored recommendation share one floor, and one definition of it.
         /// </summary>
         public const long SingleUseFloorMb = 100;
 
