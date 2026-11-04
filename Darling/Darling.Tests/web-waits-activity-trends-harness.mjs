@@ -249,6 +249,25 @@ const scenarios = {
     const root = await build("session");
     return { chart: chartInfo(), empties: texts(root, "strip empty") };
   },
+  /* #7416: a range wider than the reads take (a Custom range of 300 hours) is narrowed ONCE to the widest window they do take, and the
+     panel says so, on all three trend panels. A read that went around readToolWithinKeptHistory would draw the "pick a shorter range"
+     notice and no chart instead. */
+  tooWide: async () => {
+    const inner = answer;
+    answer = (url) =>
+      Number(url.searchParams.get("hours")) > 168
+        ? { status: 400, body: { status: "invalid", message: "hours_back value '" + url.searchParams.get("hours") + "' exceeds maximum of 168 hours (7 days). Use a smaller value." } }
+        : inner(url);
+    ctx.hours = 300;
+    const out = {};
+    for (const kind of ["latch", "spinlock", "session"]) {
+      modules.charts.chartCalls.length = 0;
+      const root = await build(kind);
+      out[kind] = { notices: texts(root, "notice"), errors: texts(root, "strip error"), chart: chartInfo(), hours: trendReads().map((r) => r.hours) };
+      fetches.length = 0;
+    }
+    return out;
+  },
   noOptions: async () => {
     mode = "noOptions";
     const root = await build("latch");

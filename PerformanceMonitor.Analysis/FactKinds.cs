@@ -19,4 +19,33 @@ public static class FactKinds
         source is "config" or "database_config"
         || string.Equals(source, PgTargetSources.ConfigSource, StringComparison.Ordinal)
         || string.Equals(source, PgTargetSources.PostureSource, StringComparison.Ordinal);
+
+    /// <summary>
+    /// True for a source that reads a standing state: every settings source (<see cref="IsSettingsSource"/>) and
+    /// <c>disk</c>, the free-space level of a volume (#7416). A standing state holds at every hour of the week, so
+    /// a story ROOTED in one has no schedule to repeat on. A time series that spikes in the same hour each week
+    /// is not one: it has an hour in it.
+    /// </summary>
+    public static bool IsStandingStateSource(string? source) =>
+        IsSettingsSource(source) || string.Equals(source, "disk", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The same question asked of a persisted finding's root fact KEY, for the readers that hold a row and not
+    /// the pass's facts (#7416). True for free space, the engine's standing-advisory roots (a setting, a missing
+    /// index, plan-cache bloat, see <c>InferenceEngine.IsConfigAdvisoryRoot</c>) and the settings keys the engine
+    /// does not root on their own: the <c>CONFIG_</c> and <c>SERVER_</c> families, trace flags, database size and
+    /// the PostgreSQL posture and version keys. No running query can explain such a card, and none of them keeps a
+    /// schedule.
+    /// </summary>
+    public static bool IsStandingStateKey(string? key)
+    {
+        if (string.IsNullOrEmpty(key))
+            return false;
+
+        return key is "DISK_SPACE" or "TRACE_FLAGS" or "DATABASE_TOTAL_SIZE_MB" or "DB_CONFIG" or "PG_SERVER_MAJOR_VERSION"
+            || key.StartsWith("CONFIG_", StringComparison.Ordinal)
+            || key.StartsWith("SERVER_", StringComparison.Ordinal)
+            || key.StartsWith("PG_POSTURE_", StringComparison.Ordinal)
+            || InferenceEngine.IsConfigAdvisoryRoot(key);
+    }
 }

@@ -161,7 +161,8 @@ public class DarlingPgTableBloatReaderTests
         long modsSinceAnalyze = 0,
         bool estimateUnavailable = false,
         bool pgstattupleAvailable = true,
-        decimal bloatPct = 75.14m) =>
+        decimal bloatPct = 75.14m,
+        bool analyzed = true) =>
         new(
             DatabaseName: "appdb",
             SchemaName: "public",
@@ -174,7 +175,7 @@ public class DarlingPgTableBloatReaderTests
             LiveTuples: liveTuples,
             DeadTuples: deadTuples,
             ModsSinceAnalyze: modsSinceAnalyze,
-            LastAnalyzed: DateTime.UtcNow,
+            LastAnalyzed: analyzed ? DateTime.UtcNow : null,
             EstimatedTupleBytes: 436,
             EstimatedHeapPages: 1_715,
             FillFactor: 100,
@@ -264,6 +265,35 @@ public class DarlingPgTableBloatReaderTests
 
         Assert.NotNull(reason);
         Assert.Contains("never been analyzed", reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7456: PostgreSQL still holds column statistics for the table, but <c>last_analyze</c> and <c>n_mod_since_analyze</c>
+    /// went with the rest of its statistics counters, so the churn test reads 0 and calls months-old widths fresh. The
+    /// estimate is withheld under its own reason, which does not say a crash happened (<c>pg_stat_reset()</c> leaves the
+    /// same trace) and does not claim the table was never analyzed.
+    /// </summary>
+    [Fact]
+    public void SuppressesTheEstimateWhenTheRecordOfTheLastAnalyzeIsGone()
+    {
+        var reason = DarlingMcpPgTableBloatTools.EstimateSuppressionReason(Row(analyzed: false));
+
+        Assert.NotNull(reason);
+        Assert.Contains("no record of when it was last analyzed", reason, StringComparison.Ordinal);
+        Assert.Contains("ANALYZE", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("never been analyzed", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("crashed", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Unknown", DarlingMcpPgTableBloatTools.BloatSeverity(Row(analyzed: false)));
+    }
+
+    /// <summary>The older reasons keep their words when the analyze record is also missing: no statistics at all and the PG14 marker are not "lost record".</summary>
+    [Fact]
+    public void TheOlderReasonsOutrankTheLostRecordReason()
+    {
+        Assert.Contains("never been analyzed",
+            DarlingMcpPgTableBloatTools.EstimateSuppressionReason(Row(liveTuples: -1, analyzed: false))!, StringComparison.Ordinal);
+        Assert.Contains("monitoring login",
+            DarlingMcpPgTableBloatTools.EstimateSuppressionReason(Row(estimateUnavailable: true, analyzed: false))!, StringComparison.Ordinal);
     }
 
     // ── The always-available fallback ────────────────────────────────────────────────────────────
@@ -391,6 +421,8 @@ public class DarlingPgTableBloatReaderTests
             Row(liveTuples: -1),
             Row(liveTuples: 0, modsSinceAnalyze: 5_000),
             Row(liveTuples: -1, modsSinceAnalyze: 999_999, estimateUnavailable: true),
+            Row(analyzed: false),
+            Row(analyzed: false, modsSinceAnalyze: 300_000),
         };
 
         foreach (var row in cases)

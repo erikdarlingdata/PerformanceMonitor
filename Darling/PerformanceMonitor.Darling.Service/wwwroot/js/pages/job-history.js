@@ -198,8 +198,8 @@ export function retainedNote(data) {
   if (!data || data.window_truncated !== true) return null;
   const from = typeof data.effective_start === "string" && data.effective_start ? localTime(data.effective_start) : null;
   return from
-    ? "partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
-    : "partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
+    ? "Partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
+    : "Partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
 }
 
 /** The notice for a list the row limit cut, or null. `server` is the Server pick ("" for All servers): a list already scoped to one server is not told to pick one. */

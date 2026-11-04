@@ -46,7 +46,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the window held more replicas than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
@@ -62,8 +62,12 @@ public sealed class DarlingMcpPgReplicationStatsTools
         try
         {
             var windowStart = windowEnd.AddHours(-hours_back);
-            var rows = await DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch, so the reply can say whether the window held
+               more than the page. It reported only the count of the rows returned, which a reader takes for
+               the size of the window. */
+            var fetched = await DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -122,6 +126,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 replica_count = rows.Count,
+                truncated,
                 note = "Read the worst_* columns, not just the latest: lag is spiky and a sample catches "
                      + "one instant. `samples` against `total_samples` says how much of the window each "
                      + "replica was actually connected for — a replica present in only a few captures "

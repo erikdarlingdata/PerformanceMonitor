@@ -41,9 +41,9 @@ public sealed class PerfmonPerSecondPayloadTests
         Assert.Equal(66, row.GetProperty("delta_value").GetInt64());
         Assert.Equal("rate", row.GetProperty("counter_kind").GetString());
 
-        /* The keys the tool published before stay where they were; per_second is added after them. */
+        /* The keys the tool published before stay where they were; per_second and object_name (#7416) are added after them. */
         Assert.Equal(
-            new[] { "counter_name", "instance_name", "value", "delta_value", "cntr_type", "counter_kind", "per_second" },
+            new[] { "counter_name", "instance_name", "value", "delta_value", "cntr_type", "counter_kind", "per_second", "object_name" },
             row.EnumerateObject().Select(p => p.Name).ToArray());
     }
 

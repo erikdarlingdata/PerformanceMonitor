@@ -435,6 +435,44 @@ public sealed class ComparisonBandingTests
         Assert.All(clean.Rows, r => Assert.False(r.CoverageCaveat));
     }
 
+    /// <summary>
+    /// #7458: a side the collector never observed gives the other side nothing to be compared with. Keys on both
+    /// sides, a key on one side only and a plan-cache identity all come back without a direction, with their
+    /// values kept, and every counter that means "got worse or appeared" is 0.
+    /// </summary>
+    [Fact]
+    public void NotCompared_KeepsTheValues_AndCountsNoDirection()
+    {
+        var (baseline, comparison) = Scored(
+            [Cpu(50)],
+            [Cpu(74), Wait("CXPACKET", 0.4), BadActor("0xB", avgCpuMs: 500)]);
+
+        var banded = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true);
+        Assert.True(banded.Worse > 0);
+        Assert.True(banded.NewIssues > 0);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+        Assert.True(result.NotCompared);
+        Assert.Equal(0, result.Worse);
+        Assert.Equal(0, result.Better);
+        Assert.Equal(0, result.Stable);
+        Assert.Equal(0, result.NewIssues);
+        Assert.Equal(0, result.ResolvedIssues);
+        Assert.Equal(0, result.FamiliesWorse);
+        Assert.Equal(result.Rows.Count, result.NotComparedRows);
+        Assert.All(result.Rows, r => Assert.Equal(ComparisonBanding.StatusNotCompared, r.Status));
+        Assert.All(result.Families, f => Assert.Equal(ComparisonBanding.StatusNotCompared, f.Status));
+        Assert.Empty(result.Churn.Appeared);
+
+        var cx = Assert.Single(result.Rows, r => r.Key == "CXPACKET");
+        Assert.Equal(ComparisonBanding.PresenceComparisonOnly, cx.Presence);
+        Assert.Equal(0.4, cx.ComparisonValue!.Value, precision: 6);
+        var cpu = Assert.Single(result.Rows, r => r.Key == Cpu(50).Key);
+        Assert.Equal(ComparisonBanding.PresenceBoth, cpu.Presence);
+        Assert.NotNull(cpu.BaselineValue);
+        Assert.NotNull(cpu.ComparisonValue);
+    }
+
     [Fact]
     public void NothingOnEitherSide_IsEmpty_ButChurnAloneIsNot()
     {
@@ -445,6 +483,37 @@ public sealed class ComparisonBandingTests
         Assert.False(churnOnly.IsEmpty);
         Assert.Empty(churnOnly.Rows);
         Assert.Single(churnOnly.Churn.Appeared);
+    }
+
+    /// <summary>#7458: one side unobserved and the other side's only facts plan-cache identities. The churn is
+    /// withheld from the reply, but the facts were collected, so both tools must give the not-compared reply and
+    /// not the "no analysis facts in EITHER window" one.</summary>
+    [Fact]
+    public void NotCompared_WithOnlyPlanCacheFacts_IsNotEmpty_ButNothingAtAllStillIs()
+    {
+        var (baseline, comparison) = Scored([], [BadActor("0xB", avgCpuMs: 500)]);
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+
+        Assert.Empty(result.Rows);
+        Assert.Empty(result.Churn.Appeared);
+        Assert.False(result.IsEmpty);
+
+        Assert.True(ComparisonBanding.Compare([], [], NoDispersion, coverageCaveat: true, notCompared: true).IsEmpty);
+    }
+
+    /// <summary>#7458: a not-compared reply ranks every row 2 with no move, so a cut-short list loses its
+    /// alphabetical tail. The size note must not claim the stable rows come last.</summary>
+    [Fact]
+    public void LeftOffNote_DescribesTheOrderTheRowsAreActuallyIn()
+    {
+        var (baseline, comparison) = Scored([Cpu(50)], [Cpu(55)]);
+
+        var compared = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: false);
+        Assert.Contains("stable rows come last", compared.LeftOffNote, StringComparison.Ordinal);
+
+        var notCompared = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+        Assert.DoesNotContain("stable rows come last", notCompared.LeftOffNote, StringComparison.Ordinal);
+        Assert.Contains("key order", notCompared.LeftOffNote, StringComparison.Ordinal);
     }
 
     /// <summary>The rules the payload states name the constants they rest on, so a change to one moves the other.</summary>

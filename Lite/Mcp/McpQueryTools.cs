@@ -1046,6 +1046,7 @@ public sealed class McpQueryTools
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 time_bin_count = cells.Select(c => c.TimeBucket).Distinct().Count(),
                 cell_count = cells.Count,
                 /* Which slice of [window_start, window_end] actually came back. When truncated is true the
@@ -1876,6 +1877,15 @@ public sealed class McpQueryTools
     }
 
     /// <summary>
+    /// #7416 item 21: whether a late first point can be put down to retention. Lite has one store, whose archive keeps
+    /// <see cref="RetentionService.ArchiveRetentionMonths"/> months, so the answer is yes only for a truncated window whose requested
+    /// start is older than that; a query first run later, or a server added mid-window, gives the same late head with nothing aged out.
+    /// Twin of Darling's <c>DurationTrendRouting.DescribeCoverage</c> three-argument form and its <c>tier_keeps_days</c>.
+    /// </summary>
+    internal static (bool StartOlderThanStore, int StoreKeepsDays) DescribeStoreReach(bool windowTruncated, DateTime startUtc, DateTime nowUtc) =>
+        (windowTruncated && startUtc < nowUtc.AddMonths(-RetentionService.ArchiveRetentionMonths), RetentionService.ArchiveRetentionMonths * 30);
+
+    /// <summary>
     /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order
     /// on both SKUs and on both branches. Lite has ONE tier — DuckDB keeps raw rows for the collector's whole
     /// <c>retention_days</c>, nothing rolls them up — so <c>source</c> is always <c>raw</c> and
@@ -1900,7 +1910,13 @@ public sealed class McpQueryTools
         /* #3653 item 17: the window floor under its own key, at the same position Darling's TrendDisclosure.WriteTo
            writes it. Darling.Tests' McpPayloadContractCensusTests sweeps this file too and fails a bare
            `truncated` beside `effective_hours_back`; the literal stays a literal so that sweep can see it. */
-        envelope["window_truncated"] = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
+        var windowTruncated = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
+        envelope["window_truncated"] = windowTruncated;
+        /* #7416 item 21: the one reason a late head can be named, at the position Darling's TrendDisclosure.WriteTo writes it. Measured from the window's own
+           end (the as_of anchor when one is given), never from the clock, so an anchored read answers as of its anchor. */
+        var (startOlderThanStore, storeKeepsDays) = DescribeStoreReach(windowTruncated, startUtc, windowEndUtc);
+        envelope["start_older_than_tier"] = startOlderThanStore;
+        envelope["tier_keeps_days"] = storeKeepsDays;
         envelope["bucket"] = grain.Bucket;
         /* #3897: the width beside its word, at the position Darling's TrendDisclosure.WriteTo writes it; null on the
            Query Store series, which is not time-bucketed. */

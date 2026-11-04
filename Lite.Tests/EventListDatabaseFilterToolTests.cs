@@ -105,6 +105,72 @@ VALUES ($1, $2, $3, $4, $5, 'rpc_completed', $6, 'SELECT 1', $7)",
             _nextId++, when, _serverId, ServerName, when, database, seconds * 1_000_000L);
     }
 
+    private Task SeedLongQueryAppAsync(string? clientApp, int seconds, int minutesAgo)
+    {
+        var when = Naive(DateTime.UtcNow.AddMinutes(-minutesAgo));
+        return ExecuteAsync(@"
+INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, client_app_name, statement_text, duration_microseconds)
+VALUES ($1, $2, $3, $4, $5, 'rpc_completed', 'DbA', $6, 'SELECT 1', $7)",
+            _nextId++, when, _serverId, ServerName, when, clientApp!, seconds * 1_000_000L);
+    }
+
+    /// <summary>The monitor's two connection names, a user application that only contains the words, an ordinary one, and a row with
+    /// no program name (#7416 item 11).</summary>
+    private async Task SeedMonitorAndUserLongQueriesAsync()
+    {
+        await SeedLongQueryAppAsync("PerformanceMonitorDarling", 9, 5);
+        await SeedLongQueryAppAsync("PerformanceMonitorLite", 8, 6);
+        await SeedLongQueryAppAsync("MyPerformanceMonitorTool", 7, 7);
+        await SeedLongQueryAppAsync("Orders.Api", 6, 8);
+        await SeedLongQueryAppAsync(null, 5, 9);
+    }
+
+    [Fact]
+    public async Task LongQueries_MonitorStatementsAreLeftOutByDefault_AndKeptWhenAsked()
+    {
+        await SeedMonitorAndUserLongQueriesAsync();
+
+        var def = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        var apps = def.GetProperty("completions").EnumerateArray()
+            .Select(r => r.TryGetProperty("client_app_name", out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null)
+            .ToList();
+        /* The row with no program name is kept (a NULL is never the monitor's); it reads back blank or null. */
+        Assert.Equal(3, apps.Count);
+        Assert.Equal("MyPerformanceMonitorTool", apps[0]);
+        Assert.Equal("Orders.Api", apps[1]);
+        Assert.True(string.IsNullOrEmpty(apps[2]));
+
+        var all = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, include_monitor: true));
+        Assert.Equal(5, all.GetProperty("completions").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task LongQueries_OnlyMonitorRows_AnswersEmptyAndSaysTheyAreLeftOut()
+    {
+        await SeedLongQueryAppAsync("PerformanceMonitorDarling", 9, 5);
+
+        var def = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30));
+        Assert.Equal("empty", def.GetProperty("status").GetString());
+        Assert.Contains("monitor's own statements are left out", def.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var all = Parse(await McpLongQueryTools.GetLongQueryCompletions(_service, _serverManager, ServerName, 24, 30, include_monitor: true));
+        Assert.Equal(1, all.GetProperty("completions").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task LongQueriesGridRead_MonitorStatementsAreLeftOutByDefault_AndKeptWhenAsked()
+    {
+        await SeedMonitorAndUserLongQueriesAsync();
+        var now = DateTime.UtcNow;
+
+        var def = await _service.GetRecentLongQueryCompletionsAsync(_serverId, 1, now.AddHours(-1), now);
+        Assert.Equal(3, def.Count);
+        Assert.DoesNotContain(def, r => r.ClientAppName is "PerformanceMonitorDarling" or "PerformanceMonitorLite");
+
+        var all = await _service.GetRecentLongQueryCompletionsAsync(_serverId, 1, now.AddHours(-1), now, includeMonitor: true);
+        Assert.Equal(5, all.Count);
+    }
+
     /// <summary>DbA holds the three slowest runs (9, 8 and 7 s), DbB one 1 s run and DbC one 2 s run.</summary>
     private async Task SeedThreeDatabaseLongQueriesAsync()
     {
@@ -289,7 +355,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
         var filtered = Parse(await McpLongQueryTools.GetLongQueryCompletions(
             _service, _serverManager, ServerName, 24, 30, database_name: "NoSuchDb"));
         Assert.Equal("empty", filtered.GetProperty("status").GetString());
-        Assert.Equal("No long-running query completions found in the specified time range for the database NoSuchDb.",
+        Assert.Equal("No long-running query completions found in the specified time range for the database NoSuchDb. The monitor's own statements are left out. Pass include_monitor=true to include them.",
             filtered.GetProperty("message").GetString());
         Assert.Equal("NoSuchDb", filtered.GetProperty("database_name").GetString());
 
@@ -337,7 +403,7 @@ VALUES ($1, $2, $3, $4, $5, 'Enabled', 'Enabled', 'ok', $6, 'Active', $7, $8, 'S
 
         Assert.Equal("empty", filtered.GetProperty("status").GetString());
         Assert.Equal("No long-running query completions found in the specified time range for the database DbA"
-            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data.",
+            + ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data. The monitor's own statements are left out. Pass include_monitor=true to include them.",
             filtered.GetProperty("message").GetString());
         Assert.Equal("DbA", filtered.GetProperty("database_name").GetString());
         Assert.False(filtered.GetProperty("hints").TryGetProperty("effective_start", out var start) && start.ValueKind != JsonValueKind.Null,

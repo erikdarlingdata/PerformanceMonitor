@@ -141,7 +141,7 @@ public static class DarlingPgTableBloatReader
         /* Unusable estimates sort last rather than being filtered out - see the remarks. Within each
            group, biggest estimated waste first.
 
-           ALL THREE suppression reasons are in the sort key, not just estimate_unavailable. A row
+           EVERY suppression reason is in the sort key, not just estimate_unavailable. A row
            suppressed for stale statistics or for never having been analyzed carries an arbitrarily large
            and untrustworthy bloat_bytes_estimate - the 81-percentage-point case measured 94.28% - so
            ordering on the flag alone let exactly those rows take the top of a LIMIT that reads as a work
@@ -153,6 +153,7 @@ public static class DarlingPgTableBloatReader
         ORDER BY
             (   l.estimate_unavailable
              OR l.live_tuples < 0
+             OR l.last_analyzed IS NULL
              OR (l.live_tuples >= 0 AND l.mods_since_analyze > l.live_tuples * 0.2)
             ) ASC,
             l.bloat_bytes_estimate DESC,
@@ -261,7 +262,7 @@ public static class DarlingPgTableBloatReader
     /// how that disagreement arrives — silently, and in the direction that publishes a figure one surface
     /// had already decided was untrustworthy.</para>
     ///
-    /// <para>The three states, each measured rather than supposed:</para>
+    /// <para>The four states, each measured rather than supposed:</para>
     /// <list type="number">
     /// <item><c>estimate_unavailable</c> — no column statistics. Usually PERMISSIONS rather than a missing
     /// <c>ANALYZE</c>: <c>pg_stats</c> is filtered by SELECT privilege and <c>pg_monitor</c> does not confer
@@ -271,6 +272,13 @@ public static class DarlingPgTableBloatReader
     /// reader rather than floored to zero precisely so this check has something to key on.</item>
     /// <item>Stale widths — see <see cref="StaleStatisticsChurnRatio"/>. The 81-percentage-point case, and
     /// the only one of the three the <c>estimate_unavailable</c> flag does NOT catch.</item>
+    /// <item><c>last_analyzed</c> is NULL while PostgreSQL still holds column statistics for the table (#7456).
+    /// The first two states already ruled out "never analyzed" - <c>estimate_unavailable</c> covers a table
+    /// with no <c>pg_stats</c> rows and <c>live_tuples &lt; 0</c> covers the PG14+ marker - so a NULL here means
+    /// the statistics exist and the RECORD of when they were taken is gone. Crash recovery, an immediate
+    /// shutdown and <c>pg_stat_reset()</c> all discard it, and <c>n_mod_since_analyze</c> with it, so the
+    /// churn comparison below reads 0 and calls months-old widths fresh. Whether they are fresh cannot be
+    /// judged, so the estimate is withheld until an <c>ANALYZE</c> writes a new record.</item>
     /// </list>
     ///
     /// <para><b>The churn comparison is <c>&gt;= 0</c>, not <c>&gt; 0</c>, and the difference is a real
@@ -294,6 +302,7 @@ public static class DarlingPgTableBloatReader
 
         return row.EstimateUnavailable
             || row.LiveTuples < 0
+            || row.LastAnalyzed is null
             || (row.LiveTuples >= 0 && row.ModsSinceAnalyze > row.LiveTuples * StaleStatisticsChurnRatio);
     }
 

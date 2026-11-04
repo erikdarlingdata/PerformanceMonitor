@@ -92,6 +92,16 @@ public static class ViewerDatabaseProtectionText
             .ToList();
     }
 
+    /// <summary>
+    /// Whether the Platform column has anything to show (#7416): a boxed server reads "native" on every row, which draws as nothing, so the grid drops the
+    /// column when no row names a platform, as the web page does.
+    /// </summary>
+    public static bool ShowsPlatformColumn(IEnumerable<ViewerDatabaseProtectionRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        return rows.Any(r => !string.IsNullOrEmpty(r.Platform));
+    }
+
     /// <summary>The platform as the reader gives it, read with spaces: a plain SQL Server (native) shows nothing.</summary>
     public static string PlatformLabel(string? platform) =>
         string.IsNullOrEmpty(platform) || platform == "native" ? "" : platform.Replace('_', ' ');

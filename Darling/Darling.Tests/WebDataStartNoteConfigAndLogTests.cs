@@ -521,7 +521,7 @@ public sealed class ComposedPanelNoticeZoneTests
         }
 
         /* 2026-01-02 00:00 UTC is 05:30 in Kolkata, and the window's start 2025-12-26 05:30: the page's own localTime. */
-        Assert.StartsWith("partial window: this panel's data starts at ", shown, StringComparison.Ordinal);
+        Assert.StartsWith("Partial window: this panel's data starts at ", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("UTC", shown, StringComparison.Ordinal);
         Assert.Contains("5:30", shown, StringComparison.Ordinal);
         Assert.EndsWith(" " + RowCapSentence, shown, StringComparison.Ordinal);
@@ -560,6 +560,7 @@ public sealed class ComposedPanelNoticeZoneTests
             return;
         }
 
-        Assert.Equal(Sentence + " " + RowCapSentence, shown);
+        /* #7416: the sentence is drawn as the server sent it, but a notice on a page starts a sentence, so its opening word is capitalised. */
+        Assert.Equal("P" + (Sentence + " " + RowCapSentence)[1..], shown);
     }
 }

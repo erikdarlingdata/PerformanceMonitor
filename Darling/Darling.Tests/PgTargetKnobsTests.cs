@@ -446,10 +446,72 @@ public sealed class PgTargetKnobsTests
     {
         var pressure = Pressure(1.0, 240, requested: 240, timed: 0);
         pressure.Metadata["wal_tracked"] = 0;
+        pressure.Metadata["not_applicable_on_aurora"] = 1;
         var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
         Assert.Contains("pg_stat_wal is not implemented on Aurora", advice.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("0 B of WAL", advice.Investigation, StringComparison.Ordinal);
-        Assert.Contains("not reported on this flavour", advice.Remediation, StringComparison.Ordinal);
+        Assert.Contains("not reported on Aurora", advice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7457: a quiet stock server's tracked zero is "no WAL was written", never "not reported on Aurora".</summary>
+    [Fact]
+    public void CheckpointPressureAdvice_OnAStockServerThatWroteNoWal_SaysNoWalWasWritten_AndNeverNamesAurora()
+    {
+        var pressure = Pressure(0.0, 288, requested: 0, timed: 288);
+        pressure.Metadata["wal_tracked"] = 1;
+        pressure.Metadata["wal_bytes"] = 0;
+        pressure.Metadata["wal_bytes_per_sec"] = 0;
+        pressure.Metadata["wal_bytes_per_checkpoint"] = 0;
+        var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024);
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure, knob))!;
+        Assert.Contains("No WAL was written in this window", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("0 B of WAL", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", advice.Investigation + advice.Remediation, StringComparison.Ordinal);
+
+        var knobAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(Scored(pressure), knob))!;
+        Assert.Contains("No WAL was written in this window", knobAdvice.Investigation + knobAdvice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora", knobAdvice.Investigation + knobAdvice.Remediation, StringComparison.Ordinal);
+        Assert.DoesNotContain("this flavour", knobAdvice.Investigation + knobAdvice.Remediation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7457: zero WAL while something proves writes keeps the "not being populated" sentence, without Aurora; an
+    /// untracked fact with no cause stamped (a stock server) is never blamed on Aurora either; below 14 it says the view
+    /// does not exist.</summary>
+    [Fact]
+    public void CheckpointPressureAdvice_OnAStockServerWithNoWalFigures_NamesTheRealCause_AndNeverAurora()
+    {
+        var knob = Config(PgTargetFactKeys.ConfigMaxWalSize, 1024);
+
+        var unpopulated = Pressure(1.0, 240, requested: 240, timed: 0);
+        unpopulated.Metadata["wal_tracked"] = 0;
+        unpopulated.Metadata["wal_not_populated"] = 1;
+        var first = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(unpopulated, knob))!;
+        Assert.Contains("not being populated", first.Investigation, StringComparison.Ordinal);
+        Assert.Contains("not being populated", PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMaxWalSize, Lookup(Scored(unpopulated), knob))!.Remediation, StringComparison.Ordinal);
+
+        var unknown = Pressure(1.0, 240, requested: 240, timed: 0);
+        unknown.Metadata["wal_tracked"] = 0;
+        var second = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(unknown, knob))!;
+        Assert.Contains("WAL volume is not reported for this server", second.Investigation, StringComparison.Ordinal);
+
+        var old = Pressure(1.0, 240, requested: 240, timed: 0);
+        old.Metadata["wal_tracked"] = 0;
+        old.Metadata["reason_pg_stat_wal_absent"] = 1;
+        var third = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(old, knob))!;
+        Assert.Contains("does not exist below PostgreSQL 14", third.Investigation, StringComparison.Ordinal);
+
+        var causeUnknown = Pressure(1.0, 240, requested: 240, timed: 0);
+        causeUnknown.Metadata["wal_tracked"] = 0;
+        causeUnknown.Metadata["wal_cause_unknown"] = 1;
+        var fourth = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(causeUnknown, knob))!;
+        Assert.Contains("could not be determined", fourth.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoints wrote buffers", fourth.Investigation + fourth.Remediation, StringComparison.Ordinal);
+
+        foreach (var block in new[] { first, second, third, fourth })
+        {
+            Assert.DoesNotContain("Aurora", block.Investigation + block.Remediation, StringComparison.Ordinal);
+            Assert.DoesNotContain("this flavour", block.Investigation + block.Remediation, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

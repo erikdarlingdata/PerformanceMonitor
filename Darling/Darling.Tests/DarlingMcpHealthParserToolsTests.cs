@@ -226,7 +226,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     [Fact]
     public void Significance_MemoryConditionsAndBroker_MatchViewer_LowOnly()
     {
-        foreach (var note in new[] { "RESOURCE_MEMPHYSICAL_LOW", "RESOURCE_MEMPHYSICAL_HIGH", null })
+        foreach (var note in new[] { "RESOURCE_MEMPHYSICAL_LOW", "RESOURCE_MEMPHYSICAL_HIGH", "SHRINK", "GROW", "STABLE", null })
         {
             var mc = new MemoryConditionsRecord { LastNotification = note };
             Assert.Equal(SystemEventSignificance.IsSignificant(mc), SystemHealthSignificance.IsSignificant(mc));
@@ -313,7 +313,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         Assert.True(SystemHealthSignificance.IsSignificant(
             SystemHealthParser.ParseCpuTasks(LoadFixture("sp_server_diagnostics_query_processing_warning.xml"))!)); // WARNING + 15 pending
 
-        // The representative memory-conditions / broker fixtures are RESOURCE_MEMPHYSICAL_HIGH — dropped.
+        // The representative memory-conditions fixture is RESOURCE_MEMPHYSICAL_HIGH and the broker fixture is STABLE — dropped.
         Assert.False(SystemHealthSignificance.IsSignificant(
             SystemHealthParser.ParseMemoryConditions(LoadFixture("sp_server_diagnostics_resource.xml"))!));
         Assert.False(SystemHealthSignificance.IsSignificant(

@@ -139,7 +139,7 @@ public sealed class McpMissMessageParityPinTests
         "The BASELINE window was only partly collected: ",
         "The COMPARISON window was only partly collected: ",
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
-        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
+        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/new_issues/resolved_issues as change.",
 
         /* The analysis family's collection caveats (#3691). The SENTENCE comes from CollectionCaveats.Describe(),
            shared by construction; what lives twice is the label each tool body puts in front of it and the

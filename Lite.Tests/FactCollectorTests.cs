@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -751,6 +752,34 @@ public class FactCollectorTests : IClassFixture<SharedDuckDbFixture>
         Assert.Equal(10_000, bloat.Metadata["total_plans"]);
         Assert.Equal(800, bloat.Metadata["single_use_size_mb"]);
         Assert.Equal(1_300, bloat.Metadata["total_size_mb"]);
+    }
+
+    // #7445: 1,000 compiled plans (100 single use, 150 MB) beside 4,000 single-use parse trees (40 MB). The card
+    // used to sum every cache type: 4,100 of 5,000 = 82% on 190 MB scored a full-severity PLAN_CACHE_BLOAT card
+    // while the badge, which leaves parse trees out, read NORMAL. Both now read the compiled plans only.
+    [Fact]
+    public async Task CollectFacts_PlanCacheBloat_ParseTreesDoNotMakeTheCardDisagreeWithTheBadge()
+    {
+        var facts = await SeedAndCollectAsync(async s =>
+        {
+            await s.SeedPlanCacheStatsAsync(totalPlans: 1_000, singleUsePlans: 100, totalSizeMb: 500, singleUseSizeMb: 150,
+                cacheObjType: "Compiled Plan", objType: "Adhoc");
+            await s.SeedPlanCacheStatsAsync(totalPlans: 4_000, singleUsePlans: 4_000, totalSizeMb: 40, singleUseSizeMb: 40,
+                cacheObjType: "Parse Tree", objType: "View");
+        });
+
+        var bloat = facts["PLAN_CACHE_BLOAT"];
+        Assert.Equal(10, bloat.Value, precision: 6);               // 100 * 100 / 1000, not 4100 * 100 / 5000
+        Assert.Equal(1_000, bloat.Metadata["total_plans"]);
+        Assert.Equal(100, bloat.Metadata["single_use_plans"]);
+        Assert.Equal(150, bloat.Metadata["single_use_size_mb"]);
+        Assert.Equal(540, bloat.Metadata["total_size_mb"]);        // the whole cache's size is unchanged
+
+        new FactScorer().ScoreAll(facts.Values.ToList());
+        Assert.Equal(0.0, bloat.Severity, precision: 4);           // the card stays quiet
+
+        var summary = await new LocalDataService(_duckDb).GetPlanCacheSummaryAsync(TestDataSeeder.TestServerId, hoursBack: 72);
+        Assert.Equal("NORMAL", LocalDataService.ClassifyPlanCacheBloat(summary).Level);   // and the badge agrees
     }
 
     // No plan_cache_stats snapshot -> the fact is not emitted (collector returns before Add).

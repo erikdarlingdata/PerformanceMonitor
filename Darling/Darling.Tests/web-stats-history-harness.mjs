@@ -191,6 +191,24 @@ const scenarios = {
     util.setActiveRange(null);
     out.presetNote = (util.widenedWindowNote?.(1) ?? null);
   },
+  /* #7416 item 21: the History panel names a cause for a late first point only when the read says the start is older than the tier keeps. */
+  async headNote() {
+    const notices = async (kind, row, payload) => {
+      respond(payload);
+      const cell = mod.statsHistoryColumn(kind, "srv-a", 24).render(row);
+      cell.byText("History").click();
+      await flush();
+      return cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    };
+    const proc = { ...procTrend(), window_truncated: true, effective_hours_back: 4.9 };
+    const qry = { hours_back: 24, window_truncated: true, effective_hours_back: 4.9, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] };
+    const old = { start_older_than_tier: true, tier_keeps_days: 4, hours_back: 168, effective_hours_back: 90 };
+    out.lateProcedure = await notices("procedures", procRow, { ...proc, start_older_than_tier: false, tier_keeps_days: 4 });
+    out.oldProcedure = await notices("procedures", { ...procRow, full_name: "dbo.usp_Ship2" }, { ...proc, ...old });
+    out.lateQuery = await notices("queries", queryRow, { ...qry, start_older_than_tier: false, tier_keeps_days: 90 });
+    out.oldQuery = await notices("queries", { ...queryRow, query_hash: "0xDEF" }, { ...qry, ...old, tier_keeps_days: 90 });
+    out.oldQueryNoDays = await notices("queries", { ...queryRow, query_hash: "0x123" }, { ...qry, ...old, tier_keeps_days: null });
+  },
   async points() {
     out.points = mod.procedurePoints(procTrend().trend);
     out.none = mod.procedurePoints(null);

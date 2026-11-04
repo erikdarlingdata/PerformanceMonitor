@@ -125,6 +125,23 @@ try {
       const root = await run("srv-a", { findings: [forcePlan, config] });
       return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").length }));
     },
+    standingLink: async () => {
+      /* #7416: a setting or a volume's free space is a standing state, so no running query explains it and the Queries link is not offered. */
+      const volume = finding({ finding_id: 1, incident_id: "a", standing_state: true, is_config_fix: false, advice: { headline: "VolumeLow", investigation: "i", remediation: "r" } });
+      const wait = finding({ finding_id: 2, incident_id: "b", standing_state: false, is_config_fix: false, advice: { headline: "WaitSpike", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [volume, wait] });
+      return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").map((a) => a.textContent) }));
+    },
+    sameRoot: async () => {
+      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures and the other chain named under it. */
+      const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, advice: { headline: "Latch contention", investigation: "i", remediation: "r" }, ...over });
+      const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5 });
+      const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2 });
+      const other = finding({ finding_id: 3, incident_id: "inc-1", severity: 0.6, root_fact: { key: "CPU_SPIKE", value: 1 }, advice: { headline: "CPU", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newest, older, other] });
+      const groups = groupsOf(root);
+      return { headers: groups.map(sum), cards: byTag(root, "h4").map((h) => h.textContent), text: root.textContent };
+    },
     nullSeverity: async () => {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
       return { text: root.textContent };
