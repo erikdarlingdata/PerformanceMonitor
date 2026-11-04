@@ -64,10 +64,13 @@ public sealed class PgOldVersionWebCellsTests
         var grid = RunHarness().GetProperty("topQueries");
 
         Assert.True(grid.GetProperty("present").GetBoolean());
-        Assert.Equal("—", Cell(grid, 0, "WAL (bytes)"));
-        Assert.Equal("0", Cell(grid, 1, "WAL (bytes)"));
-        /* The digits only: the grouping separator follows the machine's locale. */
-        Assert.Equal("2048", new string(Cell(grid, 2, "WAL (bytes)").Where(char.IsDigit).ToArray()));
+        /* #7410: the column is "WAL" and the cell is written in the unit that fits (2048 bytes is 2.0 KB). */
+        Assert.Equal("—", Cell(grid, 0, "WAL"));
+        Assert.Equal("0 B", Cell(grid, 1, "WAL"));
+        /* The digits only: the decimal separator follows the machine's locale. */
+        var reported = Cell(grid, 2, "WAL");
+        Assert.EndsWith("KB", reported);
+        Assert.Equal("20", new string(reported.Where(char.IsDigit).ToArray()));
     }
 
     [Fact]

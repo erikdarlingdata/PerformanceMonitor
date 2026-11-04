@@ -82,6 +82,29 @@ out.unknownReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty
 /* A panel's agreed sentence (emptyWins) still replaces an empty reply's message. */
 out.emptyWins = describe(panelEmptyStrip({ emptyWins: true, emptyText: "No deadlocks." }, { kind: "empty", status: "empty", message: "Long tool text about deadlocks.", hints: null }));
 
+/* #7410: `emptyLine: true` says the panel's own empty sentence for a true negative and keeps the tool's text behind a click. A reply that is not a true negative keeps the tool's text. */
+out.emptyLineTrue = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "empty", message: longMessage, hints: null }));
+out.emptyLineUnavailable = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "unavailable", message: longMessage, hints: null }));
+
+/* #7410: Top Queries on a window that stored snapshots but no measured delta builds its sentence from the hints (no `reason`). */
+const deltaMessage = "Snapshots exist in this window but none has a measured delta. Pass as_of and hours_back to reach one.";
+out.noDelta = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0, suggested_hours_back: 6 } }));
+out.noDeltaOneHour = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0, suggested_hours_back: 1 } }));
+out.noDeltaNoHours = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0 } }));
+out.deltaMeasured = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 2 } }));
+out.deltaMessage = deltaMessage;
+
+/* #7410: the Query Heatmap's "nothing collected IN the window" reply says a collector that stopped looks exactly like this. The real card must show that, not a sentence that says the server was idle. */
+const heatmapStopped = "example-pg-01 has query stats from outside this window but nothing collected IN the last 6 hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health - a collector that stopped looks exactly like this.";
+{
+  const { queryHeatmapCard } = await import(pathToFileURL(root + "/pages/query-heatmap.js").href);
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ status: "empty", message: heatmapStopped, hints: null }) });
+  const card = queryHeatmapCard({ server: "example-pg-01", hours: 6, label: "last 6 hours", columns: [], emptyText: "No query activity." });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  out.heatmapStopped = card.findAll((n) => String(n.className).includes("panel-body"))[0].textContent;
+  out.heatmapStoppedMessage = heatmapStopped;
+}
+
 /* The page-cut flag is a sentence under the tiles, not a tile. */
 const stats = [
   { key: "database_count", label: "Databases active", format: "int" },

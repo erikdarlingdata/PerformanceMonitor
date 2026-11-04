@@ -23,7 +23,7 @@ public sealed class DarlingRuntimePreconditionReasonTests
 {
     private static JsonElement Reason(string collector, string? status)
     {
-        var json = McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, "The tool's own sentence.", DarlingRuntimePrecondition.StructuredReason(collector, status));
+        var json = McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, "The tool's own sentence.", CollectorRuntimePrecondition.StructuredReason(collector, status));
         return JsonDocument.Parse(json).RootElement.Clone();
     }
 
