@@ -272,6 +272,15 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     }
 
     [Fact]
+    public void CurrentValue_NoRootFactKey_ShowsThePlainCategoryName()
+    {
+        var value = FindingMessageFormatter.CurrentValue(MakeFinding("h", category: "bad_actor", rootValue: null, rootFactKey: ""));
+
+        Assert.Contains("Expensive query", value, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", value, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CurrentValue_NullRootValue_EmitsKeyOnly()
     {
         var value = FindingMessageFormatter.CurrentValue(MakeFinding("h", rootValue: null));
@@ -1161,9 +1170,23 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var (title, message) = FindingMessageFormatter.BalloonText(finding);
 
-        Assert.Contains("blocking", title);
+        Assert.Contains("Blocking", title);
         Assert.Contains("TestServer", title);
         Assert.Contains("BLOCKING_CHAIN", message);
+    }
+
+    [Fact]
+    public void BalloonText_NamesTheCategoryInPlainWords_NotItsInternalName()
+    {
+        var finding = MakeFinding("balloon000000002", severity: 2.0, category: "bad_actor",
+            rootFactKey: "BAD_ACTOR_CPU", rootValue: 5);
+
+        var (title, _) = FindingMessageFormatter.BalloonText(finding);
+
+        Assert.Contains("Expensive query", title);
+        Assert.DoesNotContain("bad_actor", title);
+        // The metric name is a key that routes and mutes match on, so it keeps the raw category.
+        Assert.Contains("Analysis: bad_actor [", FindingMessageFormatter.MetricName(finding));
     }
 
     private async Task<long> CountAlertLogRowsAsync()

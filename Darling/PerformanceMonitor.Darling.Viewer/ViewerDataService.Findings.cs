@@ -262,7 +262,7 @@ WHERE server_id = $1";
                 SeverityBand = SeverityBand(finding.Severity),
                 RawSeverity = finding.Severity,
                 Title = FindingTitle(finding),
-                Category = finding.Category,
+                Category = FindingCategoryNames.DisplayName(finding.Category),
                 DatabaseName = finding.DatabaseName ?? "",
                 Finding = finding,
             });

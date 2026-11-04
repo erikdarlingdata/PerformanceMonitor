@@ -67,7 +67,7 @@ internal static partial class AlertNotebookEndpoint
     {
         var lines = new System.Collections.Generic.List<string>
         {
-            $"**Category:** {finding.Category}",
+            $"**Category:** {FindingCategoryNames.DisplayName(finding.Category)}",
             $"**Severity:** {finding.Severity.ToString("F1", CultureInfo.InvariantCulture)}"
                 + $" (confidence {finding.Confidence.ToString("F2", CultureInfo.InvariantCulture)})",
             $"**Story:** {finding.StoryPath}",

@@ -1269,7 +1269,8 @@ export function seriesTrendPanel(server, ctx, kind) {
 
 export const FINDING_COLUMNS = [
   { key: "last_seen", label: "Last seen", format: "time" },
-  { key: "category", label: "Category" },
+  /* #7486: the plain name, not the internal word (bad_actor). Sort and the column filter follow what is shown, and the CSV keeps the raw value. */
+  { key: "category", label: "Category", display: (r) => r.category_name || r.category, sortValue: (r) => r.category_name || r.category },
   /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same). */
   { key: "story_path", label: "Finding", display: (r) => findingTitle(r), sortValue: (r) => findingTitle(r), wrap: true },
   { key: "severity", label: "Severity", display: (r) => severityLabel(r.severity), sortValue: (r) => Number(r.severity), cellClass: (r) => { const w = severityLabel(r.severity); return w === "Info" ? null : "sev-" + w; } },

@@ -1026,6 +1026,7 @@ public sealed class McpAnalysisTools
                         confidence_basis = full_text ? confidenceBasis : McpHelpers.Truncate(confidenceBasis, FindingTextPreviewLength),
                         confidence_basis_truncated = !full_text && confidenceBasis.Length > FindingTextPreviewLength,
                         category = f.Category,
+                        category_name = FindingCategoryNames.DisplayName(f.Category),
                         root_fact = new { key = f.RootFactKey, value = f.RootFactValue },
                         leaf_fact = f.LeafFactKey != null
                             ? new { key = f.LeafFactKey, value = f.LeafFactValue }
