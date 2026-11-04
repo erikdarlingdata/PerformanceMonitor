@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -123,14 +124,32 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
     }
 
     [Fact]
-    public void RunLiveNow_PutsItsSentenceOnALineUnderTheButton()
+    public void RunLiveNow_PutsItsSentenceBesideTheButton_InTheSharedRunRow()
     {
         var live = Result.Value.GetProperty("live");
-        Assert.Equal("button", Assert.Single(live.GetProperty("first").EnumerateArray()).GetString());
-        Assert.Equal("p", live.GetProperty("second").GetString());
+        Assert.Contains("run-row", live.GetProperty("rowClass").GetString());
+        Assert.Equal(new[] { "button", "p" }, live.GetProperty("kids").EnumerateArray().Select(k => k.GetString()).ToArray());
+        Assert.Contains("muted", live.GetProperty("noteClass").GetString());
         var text = live.GetProperty("noteText").GetString();
         Assert.StartsWith("Reads the running requests from the monitored server once, now.", text);
         Assert.DoesNotContain("a newer request more than an hour later removes it", text);
+    }
+
+    [Fact]
+    public void ACaption_AndATabNote_AreOneQuietStrip_AndACaveatIsTheYellowOne()
+    {
+        var caption = Result.Value.GetProperty("caption");
+        Assert.Contains("source", caption.GetProperty("plain").GetString());
+        Assert.DoesNotContain("notice", caption.GetProperty("plain").GetString());
+        Assert.Contains("notice", caption.GetProperty("caveat").GetString());
+    }
+
+    [Fact]
+    public void TheMemoryClerksTable_UsesTheFullWidth_LikeEveryOtherPanelOnTheMemoryTab()
+    {
+        Assert.Contains("span-2", Result.Value.GetProperty("clerksPanel").GetString());
+        var halves = Result.Value.GetProperty("memoryPanels").EnumerateArray().Select(c => c.GetString()!).Where(c => !c.Contains("span-2")).ToArray();
+        Assert.Empty(halves);
     }
 
     /// <summary>

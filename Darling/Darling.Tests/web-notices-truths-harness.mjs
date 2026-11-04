@@ -169,11 +169,19 @@ out.qs = {
   graded: M.queries.qsReasonsText({ verdict: "Warning", verdict_reasons: ["plan_churn_high", "qs_read_only"] }),
 };
 
-/* 24. Run live now: the button, then its sentence on a line of its own. */
+/* 24. Run live now: the button, then its sentence beside it in the shared run row (wrapping when the panel is narrow). */
 const bar = M.live.activeQueriesLiveBar("a", []);
 await flush();
-const block = bar.children[0];
-out.live = { first: block ? block.children.map((c) => c.tag) : [], second: bar.children[1] ? bar.children[1].tag : null, noteText: bar.children[1] ? bar.children[1].textContent : "" };
+const row = bar.children[0];
+out.live = { rowClass: row ? cls(row) : "", kids: row ? row.children.map((c) => c.tag) : [], noteClass: row && row.children[1] ? cls(row.children[1]) : "", noteText: row && row.children[1] ? row.children[1].textContent : "" };
+
+/* One caption helper: a tab note and a routine caption are the same quiet strip, and a caveat turns it yellow. */
+out.caption = { plain: cls(M.util.captionStrip("a routine line")), caveat: cls(M.util.captionStrip("a cut list", true)) };
+
+/* The Memory tab's Memory Clerks table uses the full width, like every other panel on the tab. */
+const isPanel = (n) => n.attrs && n.attrs["data-title"] && /(^|\s)panel(\s|$)/.test(cls(n));
+out.clerksPanel = cls(all(memory).find((n) => isPanel(n) && n.attrs["data-title"] === "Memory Clerks") || new FakeNode("none"));
+out.memoryPanels = all(memory).filter(isPanel).map((n) => cls(n));
 
 /* #7416 item 21: the per-query trend's coverage note names a cause only when the read says the start is older than the tier keeps. */
 const trendNotes = async (server) => {

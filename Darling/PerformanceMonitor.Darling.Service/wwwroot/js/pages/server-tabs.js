@@ -238,7 +238,8 @@ export const SERVER_TABS = [
         CLERK_COLUMNS,
         SNAPSHOT,
         "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
-        1
+        /* #7416: full width like every other panel on this tab. Half width, alone between full-width panels, left a blank half beside it. */
+        2
       ),
       ...memoryPressurePanels(server, ctx),
       /* #3653: TWO READS UNDER ONE WINDOW (#3637), rendered as the two things they are. The memory-grant
