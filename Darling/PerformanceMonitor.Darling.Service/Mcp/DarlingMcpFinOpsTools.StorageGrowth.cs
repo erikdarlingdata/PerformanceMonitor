@@ -94,7 +94,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static decimal? RoundGrowth(decimal? value, int places) =>
-        value is decimal v ? Math.Round(v, places, MidpointRounding.AwayFromZero) : null;
+        value is decimal v ? FinOpsWireFigures.Clean(Math.Round(v, places, MidpointRounding.AwayFromZero)) : null;
 
     /// <summary>One database's row; the note is the desktop's text.</summary>
     internal static object StorageGrowthDatabaseRow(StorageGrowthDto r) => new
