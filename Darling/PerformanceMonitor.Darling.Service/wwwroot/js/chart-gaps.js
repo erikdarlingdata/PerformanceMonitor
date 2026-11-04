@@ -31,9 +31,11 @@ const GAP_FLOOR_MS = 5 * 60 * 1000;
    cannot judge both: once the interval points outnumber the hourly ones the median drops to minutes and every hourly step reads
    as a gap, so the older part drew as lone dots. With a seam (seamMs, epoch ms) that has points on both sides, each side
    gets its own threshold, so the hourly side is judged against an hour and the raw side against its interval, and a real
-   outage on either side still breaks. The result is then a function of the EARLIER point's time of a neighbouring pair
-   (a pair that crosses the seam is judged by the hourly side, whose step is the larger). Without a seam, or with every
-   point on one side of it, this is the plain number it always was. splitAtGaps takes either. */
+   outage on either side still breaks. The result is then a function of a neighbouring pair's two times (a pair that
+   crosses the seam is judged by the larger threshold). A side too short or too uneven for a spacing of its own borrows
+   the other side's, so an outage next to it still breaks, and with neither side able to judge the seam adds nothing.
+   Without a seam, or with every point on one side of it, this is the plain number it always was. splitAtGaps takes
+   either. */
 export function gapThresholdMs(times, seamMs = null) {
   if (typeof seamMs === "number" && Number.isFinite(seamMs)) {
     const before = times.filter((t) => t < seamMs);
@@ -41,7 +43,12 @@ export function gapThresholdMs(times, seamMs = null) {
     if (before.length > 0 && after.length > 0) {
       const beforeMs = gapThresholdMs(before);
       const afterMs = gapThresholdMs(after);
-      return (earlierMs) => (earlierMs < seamMs ? beforeMs : afterMs);
+      if (Number.isFinite(beforeMs) || Number.isFinite(afterMs)) {
+        const early = Number.isFinite(beforeMs) ? beforeMs : afterMs;
+        const late = Number.isFinite(afterMs) ? afterMs : beforeMs;
+        const crossing = Math.max(early, late);
+        return (earlierMs, laterMs) => (earlierMs >= seamMs ? late : laterMs < seamMs ? early : crossing);
+      }
     }
   }
   const deltas = [];
@@ -59,13 +66,13 @@ export function gapThresholdMs(times, seamMs = null) {
 }
 
 /* Splits ascending positions (indices into times) into runs of neighbours no further apart than thresholdMs: a number, or
-   the function gapThresholdMs returns for a series with a seam (it is given the earlier point's time). */
+   the function gapThresholdMs returns for a series with a seam (it is given the pair's two times). */
 export function splitAtGaps(indices, times, thresholdMs) {
   const runs = [];
   let run = null;
   let prev = -1;
   for (const i of indices) {
-    if (run === null || times[i] - times[prev] > (typeof thresholdMs === "function" ? thresholdMs(times[prev]) : thresholdMs)) {
+    if (run === null || times[i] - times[prev] > (typeof thresholdMs === "function" ? thresholdMs(times[prev], times[i]) : thresholdMs)) {
       run = [];
       runs.push(run);
     }

@@ -189,13 +189,22 @@ out.seamRawOutage = marks(draw(hourly.concat(seq(seamAt, seamAt + 29), seq(seamA
 out.seamAllRaw = marks(draw(seq(0, 119), { series: oneSeries, gapSeamMs: T0 + 500 * MIN }));
 out.seamAllRawOutage = marks(draw(withGap, { series: oneSeries, gapSeamMs: T0 }));
 out.seamBad = marks(draw(withGap, { series: oneSeries, gapSeamMs: NaN }));
-/* a seamed threshold is a function of the earlier point's time; a plain one is a number */
-const at = (t, x) => (typeof t === "function" ? t(x) : t);
+/* a side too short for a spacing of its own borrows the other side's, so an outage next to it still breaks. Two hourly points, a
+   19 hour silence, then one-minute points. And 22 hourly points, then 2 raw points 19 hours apart. */
+const silenceEnd = 20 * 60;
+out.seamShortHourlyOutage = marks(draw([0, 60].concat(seq(silenceEnd, silenceEnd + 59)), { series: oneSeries, gapSeamMs: T0 + silenceEnd * MIN }));
+out.seamShortRawOutage = marks(draw(hourly.concat([seamAt, seamAt + 19 * 60]), seamExtra));
+/* neither side can judge: the seam adds nothing */
+const bothShort = [0, 60, silenceEnd, silenceEnd + 1].map((m) => m * MIN);
+out.seamBothShortIsPlain = charts.gapThresholdMs(bothShort, silenceEnd * MIN) === charts.gapThresholdMs(bothShort);
+/* a seamed threshold is a function of a pair's two times; a plain one is a number */
+const at = (t, x, y) => (typeof t === "function" ? t(x, y) : t);
 out.seamThreshold = {
   plain: charts.gapThresholdMs(noGap.map((m) => m * MIN), null),
   oneSide: charts.gapThresholdMs(noGap.map((m) => m * MIN), 500 * MIN),
-  hourlySide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), 0),
-  rawSide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt + 5) * MIN),
+  hourlySide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), 0, 60 * MIN),
+  rawSide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt + 5) * MIN, (seamAt + 6) * MIN),
+  crossing: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt - 60) * MIN, seamAt * MIN),
 };
 
 out.threshold = {

@@ -204,6 +204,44 @@ public class TimeSeriesGapsTests
     }
 
     [Fact]
+    public void AnOutageAcrossTheSeam_StillBreaks_WhenTheHourlySideIsTooShortForASpacing()
+    {
+        /* Hourly points at 00:00 and 01:00, a silence, then one-minute points from 20:00. The hourly side borrows the raw side's
+           threshold, so the one-hour step and the silence both break. */
+        var xs = new[] { Hours(0), Hours(1) }.Concat(Enumerable.Range(0, 60).Select(m => Minutes(20, m))).ToArray();
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(20));
+
+        Assert.Equal(2, Breaks(outYs));
+    }
+
+    [Fact]
+    public void AnOutageInsideARawSideTooShortForASpacing_StillBreaks()
+    {
+        /* 22 hourly points, then 2 raw points 19 hours apart. The raw side borrows the hourly side's threshold. */
+        var xs = Enumerable.Range(0, 22).Select(h => Hours(h)).Concat(new[] { Hours(22), Hours(41) }).ToArray();
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var (_, outYs) = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(22));
+
+        Assert.Equal(1, Breaks(outYs));
+    }
+
+    [Fact]
+    public void WithNeitherSideLongEnoughForASpacing_TheSeamAddsNothing()
+    {
+        var xs = new[] { Hours(0), Hours(1), Hours(20), Minutes(20, 1) };
+        var ys = xs.Select(_ => 1.0).ToArray();
+
+        var plain = TimeSeriesGaps.BreakAtGaps(xs, ys);
+        var seamed = TimeSeriesGaps.BreakAtGaps(xs, ys, Hours(20));
+
+        Assert.Equal(1, Breaks(plain.Ys));
+        Assert.Equal(plain.Xs, seamed.Xs);
+    }
+
+    [Fact]
     public void ASeamWithEveryPointOnOneSideOfIt_IsThePlainRule()
     {
         var xs = MinuteCadence(30).Concat(MinuteCadence(30, 45_000.5)).ToArray();

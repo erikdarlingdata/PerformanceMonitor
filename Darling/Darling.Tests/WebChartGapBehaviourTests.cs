@@ -236,10 +236,25 @@ public sealed class WebChartGapBehaviourTests
     }
 
     [Fact]
+    public void AnOutageNextToASideTooShortForASpacing_StillBreaks()
+    {
+        var r = Run();
+        /* Two hourly points, a 19 hour silence, then one-minute points: the hourly side borrows the raw side's threshold. */
+        Assert.Equal(1, N(r, "seamShortHourlyOutage", "lines"));
+        Assert.Equal(2, N(r, "seamShortHourlyOutage", "dots"));
+        /* 22 hourly points, then 2 raw points 19 hours apart: the raw side borrows the hourly side's. */
+        Assert.Equal(1, N(r, "seamShortRawOutage", "lines"));
+        Assert.Equal(1, N(r, "seamShortRawOutage", "dots"));
+        /* Neither side can judge: the seam adds nothing. */
+        Assert.True(r.GetProperty("seamBothShortIsPlain").GetBoolean());
+    }
+
+    [Fact]
     public void EachSideOfTheSeam_IsJudgedAgainstItsOwnSpacing()
     {
         var t = Run().GetProperty("seamThreshold");
         Assert.Equal(3 * 60 * 60000, t.GetProperty("hourlySide").GetDouble());
         Assert.Equal(5 * 60000, t.GetProperty("rawSide").GetDouble());
+        Assert.Equal(3 * 60 * 60000, t.GetProperty("crossing").GetDouble());
     }
 }
