@@ -30,7 +30,7 @@ public sealed class McpToolGuideHeadsAnalyzeProcedurePlanTests
     private static readonly string[] HeadFacts =
     [
         "by sql_handle (Darling) or plan_handle (Lite)",
-        "No plan: not_collected if the engine can't collect procedure_stats, else unavailable.",
+        "No plan: not_collected on Lite or if engine lacks procedure_stats, else unavailable.",
         "labelled impact_basis",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat (regression risk for other plans, write cost)",

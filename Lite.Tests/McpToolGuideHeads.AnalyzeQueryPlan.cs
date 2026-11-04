@@ -22,15 +22,14 @@ public sealed class McpToolGuideHeadsAnalyzeQueryPlanTests
 {
     private const string Tool = "analyze_query_plan";
 
-    /// <summary>The guardrail facts the head must state: what "latest" means (the lookup's own ORDER BY), Lite's
-    /// one miss status (#7522: <c>AnalyzeQueryPlan</c> can only answer not_collected, because Lite never stores a
-    /// plan, so the Darling head's "else unavailable" branch must not appear here), the missing-index guardrails the plan-tool truth pins keep in every plan tool's head
+    /// <summary>The guardrail facts the head must state: what "latest" means (the lookup's own ORDER BY), the miss sentence (#7522: one sentence true on both products, since shared tools keep byte-identical heads: Lite
+    /// keeps no plans, so there a miss is always not_collected), the missing-index guardrails the plan-tool truth pins keep in every plan tool's head
     /// (the impact_basis label; corroboration, never a diagnosis; the fixed caveat's regression-risk clause),
     /// the operator cut's basis and counts, and the null-not-zero rule for actual_* fields (#3541 A12).</summary>
     private static readonly string[] HeadFacts =
     [
         "Analyzes query_hash's latest plan.",
-        "Lite keeps no plans, so a miss is always not_collected.",
+        "No plan: not_collected on Lite or if engine lacks query_stats, else unavailable.",
         "labelled impact_basis",
         "corroboration for a statement already measured slow, never a diagnosis",
         "every row carries the fixed caveat (regression risk for other plans, write cost)",
@@ -51,8 +50,6 @@ public sealed class McpToolGuideHeadsAnalyzeQueryPlanTests
         {
             Assert.Contains(fact, served.Served, StringComparison.Ordinal);
         }
-
-        Assert.DoesNotContain("unavailable", served.Served, StringComparison.Ordinal);
     }
 
     /// <summary>D9: nothing dropped. Every sentence of the pre-#3898 description, including Lite's own

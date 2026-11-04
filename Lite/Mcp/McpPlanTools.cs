@@ -105,7 +105,7 @@ public sealed class McpPlanTools
     internal static string PlansNotKept() => McpHelpers.Status("not_collected", PlansNotKeptMessage);
 
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes query_hash's latest plan. Lite keeps no plans, so a miss is always not_collected. " +
+        "Analyzes query_hash's latest plan. No plan: not_collected on Lite or if engine lacks query_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
@@ -143,7 +143,7 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
-        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). Lite keeps no plans, so a miss is always not_collected. " +
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected on Lite or if engine lacks procedure_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
