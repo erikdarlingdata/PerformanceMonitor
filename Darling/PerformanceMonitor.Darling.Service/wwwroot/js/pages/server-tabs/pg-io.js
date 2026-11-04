@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { trendSubject } from "../../util.js";
+
 
 /* `total_reads` / `total_read_time_ms` are the WINDOW's (#3613); the combination count is the PAGE's and is
    labelled as such - the read spells it `combinations_returned` since #3653, the same `<noun>s_returned` key
@@ -60,6 +62,11 @@ export function pgIoTrendSpecs(ctx) {
       ...common,
       title: "I/O Trend",
       subtitle: ctx.label + ", the busiest backend and context in this window, per second; Writes/sec is left out on a server with no write counters (Amazon Aurora)",
+      /* #7428: names the backend and context the read followed. */
+      subtitleFrom: (data) => {
+        const subject = trendSubject(data && data.backend_type && data.context ? data.backend_type + " in the " + data.context + " context" : null, data && data.subject_source);
+        return subject ? ctx.label + ", " + subject + ", per second; Writes/sec is left out on a server with no write counters (Amazon Aurora)" : null;
+      },
       series: [
         { key: "reads_per_second", label: "Reads/sec" },
         /* #3897: a point is a bucket of intervals, so its busiest single interval rides beside the pooled rate. */
@@ -95,6 +102,24 @@ export function pgIoTrendSpecs(ctx) {
       noSeriesText: noReadBytesText,
     },
   ];
+}
+
+/* #7428: why the Checkpoints and WAL tiles are blank, in words, from the reply's own fields. Two reasons, and a tile can have either or both:
+   a restart inside the window blanks the checkpoint tiles (#3955), and PostgreSQL 17 removed buffers_backend from pg_stat_bgwriter, which the reply
+   says in buffers_backend_availability. A reset of the background writer's counters blanks buffers_backend on an older server too. Null when
+   nothing is blank for a reason this knows. */
+export function pgWriteStatsBlankNote(data) {
+  if (!data || typeof data !== "object") return null;
+  const parts = [];
+  if (data.postmaster_restarted === true) {
+    parts.push("PostgreSQL restarted in this window, so Requested, % Requested, Checkpoint write and Buffers (checkpoint) are blank: the shutdown checkpoint is counted as requested and its write work lands in the same counters.");
+  }
+  if (typeof data.buffers_backend_availability === "string" && data.buffers_backend_availability.startsWith("not_collected")) {
+    parts.push((data.postmaster_restarted === true ? "Buffers (backend) is blank for a different reason: " : "Buffers (backend) is blank because ") + "PostgreSQL 17 removed that counter from pg_stat_bgwriter. Whether backends write their own buffers is in pg_stat_io, on the By Backend, Object and Context panel.");
+  } else if (data.buffers_backend == null && data.counter_reset === true) {
+    parts.push("Buffers (backend) is blank because the background writer's counters were reset inside this window.");
+  }
+  return parts.length ? parts.join(" ") : null;
 }
 
 export const PG_WRITE_STATS = [

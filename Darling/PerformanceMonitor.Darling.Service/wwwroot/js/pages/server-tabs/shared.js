@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -22,6 +22,20 @@ import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-co
 export function codeDisclosure(text) {
   if (text == null || text === "") return document.createTextNode("—");
   return disclosure(text, el("pre", { class: "code" }, [text]), { max: 100 });
+}
+
+/**
+ * #7428: the Query ID cell of a PostgreSQL grid. 0 is work that belongs to no statement (a background process, or a
+ * statement the server did not attribute), which a bare "0" beside a real 19-digit id reads as an id; null is a target
+ * that does not report one, the dash every other absent value uses. The id stays the row's value for sort, filter and
+ * CSV export (the grid reads the key, not this text), so only the cell on screen and Copy carry the words.
+ */
+export function pgQueryIdText(key = "queryid") {
+  return (row) => {
+    const v = row[key];
+    if (v == null || v === "") return "—";
+    return String(v) === "0" ? "no statement" : String(v);
+  };
 }
 
 /**
@@ -152,6 +166,7 @@ export function fanout(read, params, specs, intro = null) {
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
+        applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
       } catch (e) {
@@ -742,6 +757,7 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;
   /* #7410: `noteShort` (the plain sentence over a long note) and `emptyLine` (the plain empty sentence), see panels.js. */
+  /* #7428: further descriptor fields the positional list has no slot for, such as `noteFrom`. */
   if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
 }
@@ -764,8 +780,8 @@ export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle,
  * finding} is the type — which is data, not the {status,message} envelope, so it reaches vizStat and renders
  * as a row of em-dashes. vizStat spends this at exactly the all-null case; see the guard there.
  */
-export function stat(title, read, params, stats, subtitle, span = 1, emptyText) {
-  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText });
+export function stat(title, read, params, stats, subtitle, span = 1, emptyText, extra = null) {
+  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText, ...(extra || {}) });
 }
 
 /**

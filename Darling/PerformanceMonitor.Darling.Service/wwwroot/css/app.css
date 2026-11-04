@@ -556,6 +556,11 @@ table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* #7392: a number column's header sits over its right-aligned values, not beside the next column's header. */
 table.data th.num { text-align: right; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
+/* #7428: a statement preview in a grid (Sampled Waits, OS CPU by Query) closed to one line no longer claims its full 640px. At 1280px
+   wide that pushed a grid to scroll sideways with the preview cut off at the edge, so the width follows the window: 15% of it, never
+   under 12rem and never over the old 640px, which only a very wide window reaches. Open, the text wraps in that width. */
+table.data td.wrap > .disclosure { max-width: clamp(12rem, 15vw, 640px); }
+table.data td.wrap > .disclosure[open] > .disc-body .code { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A long text cell on one line, the rest on demand (#5644 W11). The full text stays in the node; the clip is only paint. */
 table.data td.clamp { max-width: 28rem; }
 .clamp-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

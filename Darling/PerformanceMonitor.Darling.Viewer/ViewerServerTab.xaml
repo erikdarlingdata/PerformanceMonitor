@@ -4862,7 +4862,7 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
-                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
                                     <DataGridTextColumn Header="CPU (ms)" Binding="{Binding TotalCpuMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="User (ms)" Binding="{Binding ExecUserTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="System (ms)" Binding="{Binding ExecSystemTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
@@ -4871,7 +4871,15 @@
                                     <DataGridTextColumn Header="Disk Read" Binding="{Binding ExecReadBytes}" SortMemberPath="ExecReadBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Disk Write" Binding="{Binding ExecWriteBytes}" SortMemberPath="ExecWriteBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
+                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
+                                    <!-- #7428: the statement behind the id, last like the statement grid above, so the numbers stay in view. -->
+                                    <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- #2566 captured plans. Under the statement grid because a plan only means
@@ -4890,7 +4898,7 @@
                             <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
                                     <DataGridTextColumn Header="Top Node" Binding="{Binding TopNodeType}" Width="150"/>
                                     <DataGridTextColumn Header="Nodes" Binding="{Binding NodeCount}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
                                     <!-- Ranked by total: a plan that takes 40ms constantly costs more than
@@ -4901,10 +4909,18 @@
                                     <!-- CAPTURES, not executions: the collector reads an overlapping tail
                                          of the log, so this is a frequency signal rather than a count. -->
                                     <DataGridTextColumn Header="Captures" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
-                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="*">
+                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="300">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding PlanJson}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <!-- #7428: the statement behind the id, after the plan so the numbers stay in view. The plan holds no statement text. -->
+                                    <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -5029,10 +5045,18 @@
                         <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140" SortMemberPath="FirstSeenAtUtc"/>
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140" SortMemberPath="LastSeenAtUtc"/>
                         <DataGridTextColumn Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
-                        <DataGridTemplateColumn Header="Caveats" Width="*">
+                        <DataGridTemplateColumn Header="Caveats" Width="300">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding Caveats}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Caveats}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <!-- #7428: the statement behind the Query ID, last so the numbers stay in view. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
@@ -5213,13 +5237,21 @@
                              sampling profiler, not a measured duration. -->
                         <DataGridTextColumn Header="Est. Wait (ms)" Binding="{Binding EstimatedWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
-                        <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Backends Seen" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <!-- Zero means the wait belonged to no statement - a background process -
                              rather than an unknown query. Joins pg_statement_stats.queryid. A dash is a target that
                              does not report a query id (PostgreSQL 10 to 13, #6836). -->
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId, TargetNullValue='—'}" Width="180"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="180"/>
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
-                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="140" SortMemberPath="CaptureTimeUtc"/>
+                        <!-- #7428: the statement behind the id, last like the statement grid on the Queries tab. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid></ui:ViewportBox>
                 <!-- #6385: the web's Wait Trend, as a chart (ViewerServerTab.PgTrends.cs). -->
@@ -5664,7 +5696,15 @@
                         <!-- Usually NOT 1: the extension defaults to 1/max_connections, so these counts
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
+                        <!-- #7428: the statement behind the Query ID, last so the numbers stay in view. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <!-- Newest row per predicate, so the rows can come from different snapshots. -->
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>

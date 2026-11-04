@@ -40,6 +40,9 @@ public static class DarlingPgWaitSamplingReader
     /// NULL (#6836) is a different statement: the target does not report a query id (the service sampler on
     /// PostgreSQL 10 to 13, whose pg_stat_activity has no query_id). It is "not reported", never zero, and it
     /// joins to no statement.</param>
+    /// <param name="QueryText">#7428: the statement text captured for <see cref="QueryId"/> in
+    /// <c>collect.pg_statement_text</c>, or null when the hourly capture has not reached that id yet. Also null for
+    /// id 0 and for a null id, which name no statement. Never an empty string standing in for "none".</param>
     /// <param name="SampleCount">Samples observed IN THE WINDOW, already differenced.</param>
     /// <param name="EstimatedWaitMs"><c>SampleCount × profile_period_ms</c>. An estimate from a sampling
     /// profiler, not a measured duration.
@@ -64,7 +67,8 @@ public static class DarlingPgWaitSamplingReader
         long EstimatedWaitMs,
         int BackendCount,
         bool CounterReset,
-        DateTime CaptureTime);
+        DateTime CaptureTime,
+        string? QueryText = null);
 
     /// <summary>
     /// One page of sampled waits plus the denominator their shares are taken over (#3541 A7).
@@ -89,7 +93,13 @@ public static class DarlingPgWaitSamplingReader
        sum of the rows it had fetched, so a three-row page summed to 100% of the samples by construction.
        The CASE is repeated inside the SUM rather than referenced by alias because a window function cannot
        name a select-list alias of the same level; the two expressions are pinned identical by test. Appended
-       LAST so the ordinal ORDER BY 4 still names sample_count. */
+       LAST so the ordinal ORDER BY 4 still names sample_count.
+
+       #7428: the statement text is joined AFTER the cap, in a wrapper over the ranked page, so only the page's
+       rows (limit + 1, 21 by default) look anything up. The text store is keyed on (server_id, queryid) with that
+       pair as its PRIMARY KEY (#2219), so the join is an index lookup per row on every store and cannot
+       multiply a row: one text per id by construction. Query id 0 and NULL find nothing and read as null. The
+       outer ORDER BY repeats the inner keys plus query_id, so a tie between two statements is stable, and the outer LIMIT repeats the cap (a no-op, the page is already that size) so the cap stays the last word of the statement. */
     public const string PgWaitSamplingSql = """
         WITH newest AS (
             SELECT DISTINCT ON (event_type, event, query_id)
@@ -108,7 +118,8 @@ public static class DarlingPgWaitSamplingReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             ORDER BY event_type, event, query_id, collection_time ASC
-        )
+        ),
+        ranked AS (
         SELECT *
         FROM (
         SELECT
@@ -138,6 +149,17 @@ public static class DarlingPgWaitSamplingReader
            nothing), so the shares of the series that did move still divide by the same denominator. */
         WHERE sample_count > 0
         ORDER BY 4 DESC, event_type, event
+        LIMIT $4
+        )
+        SELECT
+            r.event_type, r.event, r.query_id, r.sample_count, r.profile_period_ms, r.backend_count,
+            r.counter_reset, r.collection_time, r.window_total_samples,
+            t.query_text
+        FROM ranked AS r
+        LEFT JOIN collect.pg_statement_text AS t
+               ON  t.server_id = $1
+               AND t.queryid   = r.query_id
+        ORDER BY r.sample_count DESC, r.event_type, r.event, r.query_id
         LIMIT $4
         """;
 
@@ -230,7 +252,8 @@ public static class DarlingPgWaitSamplingReader
                 CounterReset: !reader.IsDBNull(6) && reader.GetBoolean(6),
                 CaptureTime: reader.IsDBNull(7)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc),
+                QueryText: reader.IsDBNull(9) ? null : reader.GetString(9)));
         }
 
         return new PgWaitSamplingPage(rows, windowTotalSamples);

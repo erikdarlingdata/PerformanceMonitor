@@ -58,6 +58,7 @@ import {
   noteStrip,
   disclosure,
   markPartialSubtitle,
+  applyDataSubtitle,
   localizeIsoText,
   localizeAlertDetail,
   noValuesText,
@@ -264,9 +265,12 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    /* #7428: a note the page composes from the answer's fields (`noteFrom(data)`), for a sentence the server does not write, such as why a tile is blank. */
+    if (typeof desc.noteFrom === "function") moreNotes.push(desc.noteFrom(res.data));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
     const floor = windowFloorStrip(res.data, desc);
     /* #5644 W12: a row-capped panel stops claiming the window it was asked for in its heading. */
+    applyDataSubtitle(body.parentNode, res.data, desc);
     markPartialSubtitle(body.parentNode, res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */

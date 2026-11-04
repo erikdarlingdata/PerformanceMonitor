@@ -44,13 +44,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgKernelStatsTools
 {
-    [McpServerTool(Name = "get_pg_kernel_stats"), Description("pg_stat_kcache: per-query-shape OS CPU (user/system, ms) and device I/O. Pairs with get_pg_top_queries (ELAPSED = CPU + waiting) to split a slow statement into CPU-bound vs waiting. Bytes are DEVICE reads/writes: zero means cache-served, not unread. queryid joins get_pg_top_queries, get_pg_wait_sampling. Ranked by total CPU. PAGE BOUNDED BY limit: queries_returned/truncated. SHARES ARE OF THE WINDOW: pct_of_total_cpu divides by total_cpu_ms, not the page sum. status empty usually means just one collection so far - values are per-interval deltas needing a second to difference. <<GUIDE>> Gets per-query-shape OPERATING SYSTEM resource usage from the pg_stat_kcache extension: CPU split into user and system time, bytes that reached the storage device, and major page faults. Use this together with get_pg_top_queries, which reports ELAPSED time: elapsed is CPU plus waiting, so comparing the two tells you whether a slow statement is burning CPU or waiting on something, which is the first split any tuning question needs. The byte counters are DEVICE reads and writes, so a zero means the operating system page cache served the request rather than that no data was read - do not read them as logical I/O. queryid joins get_pg_top_queries and get_pg_wait_sampling. Rows are ranked by total CPU. THE PAGE IS BOUNDED BY limit: queries_returned is how many shapes you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap burned less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_cpu's denominator is total_cpu_ms, the WHOLE window's user + system CPU across every (database, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_cpu_ms (what the page adds up to) and total_cpu_ms is the CPU the cap left out; returned_pct_of_total is that ratio stated once. Maximum query shapes to return, most CPU first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")]
+    [McpServerTool(Name = "get_pg_kernel_stats"), Description("pg_stat_kcache: per-query-shape OS CPU (user/system, ms) and device I/O. Pairs with get_pg_top_queries (ELAPSED = CPU + waiting) to split a slow statement into CPU-bound vs waiting. Bytes are DEVICE reads/writes: zero means cache-served, not unread. queryid joins get_pg_top_queries, get_pg_wait_sampling; Ranked by total CPU. PAGE BOUNDED BY limit: queries_returned/truncated. SHARES ARE OF THE WINDOW: pct_of_total_cpu divides by total_cpu_ms, not the page sum. status empty usually means just one collection so far - values are per-interval deltas needing a second to difference. <<GUIDE>> Gets per-query-shape OPERATING SYSTEM resource usage from the pg_stat_kcache extension: CPU split into user and system time, bytes that reached the storage device, and major page faults. Use this together with get_pg_top_queries, which reports ELAPSED time: elapsed is CPU plus waiting, so comparing the two tells you whether a slow statement is burning CPU or waiting on something, which is the first split any tuning question needs. The byte counters are DEVICE reads and writes, so a zero means the operating system page cache served the request rather than that no data was read - do not read them as logical I/O. queryid joins get_pg_top_queries and get_pg_wait_sampling. query_text is the statement behind each queryid (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly capture reaches that queryid. Rows are ranked by total CPU. THE PAGE IS BOUNDED BY limit: queries_returned is how many shapes you got, truncated says the window held more, and the rows are the heaviest so the ones past the cap burned less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_cpu's denominator is total_cpu_ms, the WHOLE window's user + system CPU across every (database, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_cpu_ms (what the page adds up to) and total_cpu_ms is the CPU the cap left out; returned_pct_of_total is that ratio stated once. Maximum query shapes to return, most CPU first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")]
     public static async Task<string> GetPgKernelStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum query shapes to return, most CPU first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -105,7 +106,7 @@ public sealed class DarlingMcpPgKernelStatsTools
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_kernel_stats", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
-            return BuildKernelStatsJson(resolved.DisplayName, hours_back, page, limit, notice);
+            return BuildKernelStatsJson(resolved.DisplayName, hours_back, page, limit, notice, full_text);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -127,7 +128,8 @@ public sealed class DarlingMcpPgKernelStatsTools
         int hoursBack,
         DarlingPgKernelStatsReader.PgKernelStatsPage page,
         int limit,
-        McpWindowNotice? notice = null)
+        McpWindowNotice? notice = null,
+        bool fullText = false)
     {
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
@@ -141,6 +143,10 @@ public sealed class DarlingMcpPgKernelStatsTools
             /* String, like every other queryid on this surface — a signed 64-bit value would round in
                a double-decoding JSON parser and produce an id that joins to nothing. */
             queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+            /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+               that id (the same rules as get_pg_top_queries). Beside the id so a reader never has to look it up. */
+            query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, DarlingMcpPgStatementTools.QueryTextPreviewLength),
+            query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > DarlingMcpPgStatementTools.QueryTextPreviewLength,
             database_name = r.DatabaseName,
             cpu_ms = Math.Round(r.TotalCpuMs, 1),
             /* Kept split rather than only summed: system time dominated by kernel work is a different

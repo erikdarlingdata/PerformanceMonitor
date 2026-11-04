@@ -6,9 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { fmtMs, el, disclosure } from "../../util.js";
+import { fmtMs, el, disclosure, trendSubject } from "../../util.js";
 import { detailColumn, firstSentence, spillWord, cacheWord, rollbackWord } from "../../pg-grid-text.js";
-import { codeDisclosure, listCell } from "./shared.js";
+import { codeDisclosure, listCell, pgQueryIdText } from "./shared.js";
 
 /**
  * A duration cell that honours the PostgreSQL collectors' −1 "not applicable" sentinel.
@@ -76,6 +76,11 @@ export function pgQueryDurationTrendSpecs(ctx) {
       ...common,
       title: "Query Duration Trend",
       subtitle: ctx.label + ", the statement with the most execution time in this window; a step that persists is a plan or index change",
+      /* #7428: names the statement the read followed. */
+      subtitleFrom: (data) => {
+        const subject = trendSubject(data && data.queryid ? "query ID " + data.queryid : null, data && data.queryid_source);
+        return subject ? ctx.label + ", " + subject + "; a step that persists is a plan or index change" : null;
+      },
       series: [
         { key: "mean_exec_ms", label: "Mean ms/exec" },
         /* #3960: a point is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
@@ -90,6 +95,7 @@ export function pgQueryDurationTrendSpecs(ctx) {
       hideWhenNoRows: true,
       title: "Statement Calls per Second",
       subtitle: ctx.label + ", the same statement",
+      subtitleFrom: (data) => (data && data.queryid ? ctx.label + ", query ID " + data.queryid : null),
       series: [{ key: "calls_per_second", label: "Calls/sec" }],
       format: "num2",
       unit: "calls/s",
@@ -114,6 +120,11 @@ export function pgDatabaseTrendSpecs(ctx) {
       ...common,
       title: "Database Trend",
       subtitle: ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+      /* #7428: names the database the read followed. */
+      subtitleFrom: (data) => {
+        const subject = trendSubject(data && data.database, data && data.database_source);
+        return subject ? ctx.label + ", " + subject + "; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval" : null;
+      },
       series: [
         { key: "cache_hit_pct", label: "Cache Hit %" },
         /* #3897: a point is a bucket of intervals; the cliff this chart exists to show is its worst one. */
@@ -197,11 +208,15 @@ export const PG_PREDICATE_COLUMNS = [
   { key: "table_name", label: "Table" },
   { key: "column_name", label: "Column" },
   { key: "operator", label: "Op" },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "rows_evaluated", label: "Rows Evaluated", format: "int" },
   { key: "rows_filtered", label: "Rows Filtered", format: "int" },
   { key: "filtered_pct", label: "Filtered %", format: "num1" },
   { key: "worst_estimate_error_ratio", label: "Worst Est. Error", format: "num2" },
   { key: "sample_rate", label: "Sample Rate", format: "num2" },
+  /* #7428: the statement behind the id, last like Top Query Shapes, so the numbers stay on the page. Null until the
+     hourly capture reaches the id, and always null for "no statement". */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 /* granted is second, right beside the mode, because an ungranted lock is the entire finding and burying it
@@ -220,7 +235,7 @@ export const PG_LOCK_STATS_COLUMNS = [
    blocks written IS, because a spill is the explanation for a statement whose time makes no sense from its
    row count, and it is the one counter PostgreSQL exposes that changes what you would do next. */
 export const PG_PLAN_COLUMNS = [
-  { key: "queryid", label: "Query ID", mono: true },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "top_node_type", label: "Top Node" },
   { key: "node_count", label: "Nodes", format: "int" },
   { key: "total_duration_ms", label: "Total", format: "ms" },
@@ -231,6 +246,9 @@ export const PG_PLAN_COLUMNS = [
      statement actually ran, and this label has to keep the two apart. */
   { key: "captures", label: "Captures", format: "int" },
   { key: "plan_hash", label: "Plan Hash", mono: true },
+  /* #7428: the statement behind the id, last like Top Query Shapes, so the numbers stay on the page. Null until the
+     hourly capture reaches the id, and always null for "no statement". */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 /* Remedy last and deliberately widest. Facet, state and observed value are what the eye scans down; the

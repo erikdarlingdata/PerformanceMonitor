@@ -35,13 +35,17 @@ public static class DarlingPgTrendReader
     /// guard keeps unreachable today; the reader carries the NULL rather than reading it as 0, because a 0
     /// here is a measured idle interval and an unknowable one is not that. The same rule holds for every
     /// <c>*PerSecond</c> field on <see cref="PgIoTrendPoint"/> and <see cref="PgDatabaseTrendPoint"/>.</param>
+    /// <param name="BackendCount">#7428: the stored <c>backend_count</c> of the snapshot, and null on a point whose interval
+    /// had no samples. On the extension tier that figure is the distinct pids in pg_wait_sampling's cumulative profile, so it only
+    /// rises until a reset and would put backends on an interval where nothing waited. On the service sampler it is the last
+    /// window's, and 0 on a window that did not see the event. A point with no samples claims no backends on either.</param>
     /// <param name="CounterReset">The profile was reset inside this interval, so the point covers only the
     /// time since the reset rather than the whole interval.</param>
     public readonly record struct PgWaitTrendPoint(
         DateTime CollectionTimeUtc,
         long SampleCount,
         double? EstimatedWaitMsPerSecond,
-        int BackendCount,
+        int? BackendCount,
         bool CounterReset);
 
     /// <param name="MeanExecMs">The interval's total execution time over its calls — what one execution
@@ -109,7 +113,11 @@ public static class DarlingPgTrendReader
                 THEN (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END)
                      * coalesce(profile_period_ms, 0)::double precision / interval_seconds
             END AS estimated_wait_ms_per_second,
-            coalesce(backend_count, 0)          AS backend_count,
+            /* #7428: NULL, not the stored figure, on an interval with no samples. The extension's backend_count is a running
+               total of distinct pids since the profile started, so it kept climbing through intervals where nothing waited. */
+            CASE WHEN (CASE WHEN samples < prev_samples THEN samples ELSE samples - prev_samples END) > 0
+                 THEN coalesce(backend_count, 0)
+            END                                 AS backend_count,
             (samples < prev_samples)            AS counter_reset
         FROM differenced
         /* The first snapshot has nothing to difference against. Dropping it is not a lost point: it is the
@@ -351,7 +359,7 @@ public static class DarlingPgTrendReader
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
                 reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
-                reader.IsDBNull(3) ? 0 : (int)reader.GetInt64(3),
+                reader.IsDBNull(3) ? (int?)null : (int)reader.GetInt64(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4)));
         }
 

@@ -647,10 +647,9 @@ export function partialWindowSubtitle(data, desc) {
   return capped ? "newest rows only, back to " + localTime(capped.oldest) : null;
 }
 
-/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
-export function markPartialSubtitle(panel, data, desc) {
-  const text = partialWindowSubtitle(data, desc);
-  if (!text || !panel) return;
+/** The heading's `.panel-sub` span of a panel node, or null. */
+function panelSubNode(panel) {
+  if (!panel) return null;
   const find = (node) => {
     for (const c of Array.from(node.children || [])) {
       const k = c.className || (typeof c.getAttribute === "function" ? c.getAttribute("class") : null);
@@ -661,8 +660,42 @@ export function markPartialSubtitle(panel, data, desc) {
     return null;
   };
   const head = Array.from(panel.children || [])[0];
-  const sub = head ? find(head) : null;
+  return head ? find(head) : null;
+}
+
+/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
+export function markPartialSubtitle(panel, data, desc) {
+  const text = partialWindowSubtitle(data, desc);
+  if (!text) return;
+  const sub = panelSubNode(panel);
   if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * A subtitle that depends on the answer (#7428). A panel's subtitle is written before its read, so it cannot name what the
+ * read chose (the wait event, the backend and context, the statement, the database a trend follows). A descriptor that
+ * carries `subtitleFrom(data)` gets its heading's `.panel-sub` span replaced with the string that returns once the answer is
+ * in. A function that returns anything but a non-empty string leaves the static subtitle as it was.
+ */
+export function applyDataSubtitle(panel, data, desc) {
+  if (!desc || typeof desc.subtitleFrom !== "function") return;
+  const text = desc.subtitleFrom(data);
+  if (typeof text !== "string" || !text.trim()) return;
+  const sub = panelSubNode(panel);
+  if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * How a trend's subject is worded in its subtitle: the name, then "(chosen automatically)" when the answer's `*_source`
+ * sentence says the read chose it, or "(partly chosen automatically)" when only half was (the I/O pair). The sentence is
+ * the server's own ("as requested", or one that says "chosen automatically"), so a subject somebody named is not
+ * labelled as a guess. An answer with no source sentence gets the bare name.
+ */
+export function trendSubject(name, source) {
+  if (typeof name !== "string" || !name) return null;
+  if (typeof source !== "string" || !source || source === "as requested") return name;
+  if (source.startsWith("chosen automatically")) return name + " (chosen automatically)";
+  return source.includes("chosen automatically") ? name + " (partly chosen automatically)" : name;
 }
 
 /**

@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPlanTools
 {
-    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Redacted at collection: no statement text or literals. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored — node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Join query_id to get_pg_top_queries for the statement's normalized text, its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
+    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Plan redacted at collection (no statement text or literals). query_text is the statement behind queryid. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored — node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Each row carries query_text, the statement's normalized text from the hourly statement capture (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until that capture reaches the queryid and always null for queryid 0; join query_id to get_pg_top_queries for its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
     public static async Task<string> GetPgPlans(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -57,6 +57,7 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Maximum plan shapes to return. Default 10. See the tool's reading guide.")] int limit = 10,
         [Description("Only return plans for this queryid, as a string. Optional. See the tool's reading guide.")] string? query_id = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -109,7 +110,7 @@ public sealed class DarlingMcpPgPlanTools
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", resolved.ServerName, start, now, emptyAnswer: false, logger, cancellationToken);
-            return BuildPlansJson(resolved.DisplayName, hours_back, rows, limit, notice);
+            return BuildPlansJson(resolved.DisplayName, hours_back, rows, limit, notice, full_text);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -436,7 +437,8 @@ public sealed class DarlingMcpPgPlanTools
         int hoursBack,
         IReadOnlyList<DarlingPgPlanCaptureReader.PgPlanCaptureRow> fetched,
         int limit,
-        McpWindowNotice? windowNotice = null)
+        McpWindowNotice? windowNotice = null,
+        bool fullText = false)
     {
         var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
@@ -447,6 +449,10 @@ public sealed class DarlingMcpPgPlanTools
                are past 2^53 and any parser decoding JSON numbers as doubles rounds one — and queryid is an
                equality join key, which rounding loses outright rather than approximates. */
             queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+            /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+               that id (the same rules as get_pg_top_queries), and always null for queryid 0. */
+            query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, DarlingMcpPgStatementTools.QueryTextPreviewLength),
+            query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > DarlingMcpPgStatementTools.QueryTextPreviewLength,
             plan_hash = r.PlanHash,
             top_node_type = r.TopNodeType,
             node_count = r.NodeCount,
@@ -477,8 +483,9 @@ public sealed class DarlingMcpPgPlanTools
             truncated,
             note = "Plans are REDACTED at collection: statement text is dropped and literals inside the "
                  + "plan are replaced with placeholders. Node types, relation names, costs, row estimates "
-                 + "and tree shape are intact. Join queryid to get_pg_top_queries for the statement text "
-                 + "and its call counts."
+                 + "and tree shape are intact. query_text is the statement behind each queryid, from the "
+                 + "hourly statement capture (null until it reaches that id). Join queryid to get_pg_top_queries "
+                 + "for its call counts."
                  + (truncated
                      ? $" TRUNCATED at the row limit of {limit}: the window holds more plan shapes than this, "
                        + "ranked below these by total duration. Raise limit, or pass query_id to pin one "
