@@ -25,7 +25,7 @@ public sealed class PlanRegressionInputsAdviceTests
     {
         var meta = new Dictionary<string, double>
         {
-            ["worst_regression_factor"] = 12,
+            ["lead_regression_factor"] = 12,
             ["offender_count"] = 2,
             ["latest_cpu_per_exec_us"] = 120_000,
             ["best_cpu_per_exec_us"] = 10_000,
@@ -96,7 +96,7 @@ public sealed class PlanRegressionInputsAdviceTests
         {
             ["latest_cpu_per_exec_us"] = 455,
             ["best_cpu_per_exec_us"] = 21,
-            ["worst_regression_factor"] = 21.7,
+            ["lead_regression_factor"] = 21.7,
         }));
 
         Assert.Contains("(455 us vs 21 us of CPU per execution)", advice.Investigation, StringComparison.Ordinal);
