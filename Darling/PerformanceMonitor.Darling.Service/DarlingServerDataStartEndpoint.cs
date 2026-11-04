@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// #7386: <c>GET /api/server-data-start?server=&lt;route key&gt;</c>, when one server was first collected, answered as
-/// <c>{ "server": "...", "data_start_utc": "2026-11-03T08:56:24.0000000Z" }</c> (null when the server has no row yet). The server
+/// <c>{ "server": "...", "data_start_utc": "2026-11-03T08:56:24.123Z" }</c> (null when the server has no row yet). The server
 /// page calls it once when it opens and keeps the answer for ten minutes, so a chart over a range longer than the server's
 /// history starts its time axis where the data starts, as the desktop viewer's charts do.
 ///
