@@ -2683,7 +2683,7 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <TextBlock Grid.Row="0" Text="Session Counts Over Time" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
                     <ScottPlot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
                     <Border Grid.Row="2" Background="{DynamicResource BackgroundDarkBrush}" CornerRadius="4" Padding="12,8" Margin="0,4,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">

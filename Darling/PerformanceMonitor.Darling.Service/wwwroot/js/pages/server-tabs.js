@@ -893,10 +893,10 @@ export const SERVER_TABS = [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),
       ...fanout("get_session_stats", { server }, [
-        { title: "Sessions", subtitle: SNAPSHOT, viz: "stat", stats: SESSION_STATS },
+        { title: "Sessions", subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out", viz: "stat", stats: SESSION_STATS },
         {
           title: "Sessions by Application",
-          subtitle: SNAPSHOT,
+          subtitle: SNAPSHOT + ", user sessions with an application name, the monitor's own left out",
           viz: "table",
           rowsKey: "applications",
           columns: APPLICATION_COLUMNS,

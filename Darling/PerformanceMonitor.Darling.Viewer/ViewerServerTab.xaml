@@ -3070,11 +3070,11 @@
                     <RowDefinition Height="*" MinHeight="90"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="Session Counts Over Time" Style="{StaticResource SectionHeader}"/>
+                <TextBlock Grid.Row="0" Text="Session Counts Over Time (every session on the server, background and the monitor included)" Style="{StaticResource SectionHeader}"/>
                 <scottplot:WpfPlot Grid.Row="1" x:Name="SessionStatsChart"/>
                 <!-- Sessions by Application (#6388): the newest per-application snapshot, the read get_session_stats serves as applications. -->
                 <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0">
-                    <TextBlock Text="Sessions by Application (newest snapshot, a moment not the window)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Sessions by Application (newest snapshot, user sessions with an application name, the monitor left out)" Style="{StaticResource SectionHeader}" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     <TextBlock Text="Collected:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <TextBlock x:Name="SessionsByApplicationCollectedText" Text="--" VerticalAlignment="Center"/>
                 </StackPanel>

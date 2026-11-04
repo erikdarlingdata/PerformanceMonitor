@@ -215,6 +215,8 @@ const SESSION_TREND_SERIES = [
   { key: "sessions_waiting_for_memory", label: "Waiting for memory" },
 ];
 
+export const SESSION_TREND_SCOPE = "Counts all sessions on the server, background (system) sessions and the monitor's own included. The Sessions tile counts user sessions with an application name and leaves the monitor out, so it reads lower.";
+
 /** Session Stats trend: the server-wide session counts per bucket, with the newest bucket's top application and host as text. */
 export function sessionStatsTrendPanel(server, ctx) {
   ctx = withPanelSignal(ctx);
@@ -244,6 +246,9 @@ export function sessionStatsTrendPanel(server, ctx) {
         unit: "sessions",
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),
+      /* #7416: this trend counts every row of sys.dm_exec_sessions, background sessions and the monitor's own included. The Sessions tile
+         beside it counts user sessions with an application name and leaves the monitor out, so the two numbers differ by design. */
+      el("div", { class: "mp-metric-note", text: SESSION_TREND_SCOPE }),
       top.length ? el("div", { class: "mp-metric-note", text: "Top in the newest bucket: " + top.join("; ") + "." }) : null,
       chartNote(res.data, "level"),
     ]);
