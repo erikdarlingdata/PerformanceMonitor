@@ -14,6 +14,9 @@
  * in quotes so an end can be seen. Every other value draws as stored. The desktop viewers' ConfigValueText.VisibleWhitespace is
  * the same rule. This module imports nothing, so a harness can run it as shipped. */
 
+/* #7483: said after the visible form, so the row states why its two cells look alike. */
+const WHITESPACE_ONLY_NOTE = " (white space only)";
+
 const MARKS = { " ": "·", "\t": "→", "\n": "↵", "\r": "␍" };
 
 /** True when the two strings are not equal but are equal once every white-space character is removed. */
@@ -37,6 +40,6 @@ export function visibleWhitespace(text) {
 export function configValueCell(row, key, otherKey) {
   const own = row[key];
   if (own == null) return null;
-  if (differOnlyInWhitespace(own, row[otherKey])) return visibleWhitespace(own);
+  if (differOnlyInWhitespace(own, row[otherKey])) return visibleWhitespace(own) + WHITESPACE_ONLY_NOTE;
   return own === "" ? null : String(own);
 }

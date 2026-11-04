@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Common;
 /// trailing space (<c>log_line_prefix</c>) drew two cells that read the same, so the row looked like a change that changed
 /// nothing. When the two values differ ONLY in whitespace, both cells show their whitespace: a space as a middle dot, a tab as an
 /// arrow, a line break as a return mark, any other white-space character as its code point, with the value in quotes so an end
-/// can be seen. Every other value draws as stored. The web grids' <c>config-values.js</c> is the same rule.
+/// can be seen, and the cell says "(white space only)" (#7483). Every other value draws as stored. The web grids' <c>config-values.js</c> is the same rule.
 /// </summary>
 public static class ConfigValueText
 {
