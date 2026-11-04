@@ -16,7 +16,10 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpLongQueryTools
 {
-    [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off — enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort — Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached — every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule.")]
+    /// <summary>The <c>include_monitor</c> parameter text (#7416 item 11), the twin of Darling's.</summary>
+    public const string IncludeMonitorDescription = "Include the monitor's own statements (program name starts PerformanceMonitor). Default false: left out. Set true to see a slow collector run.";
+
+    [McpServerTool(Name = "get_long_query_completions"), Description("Gets the SLOWEST long-running query completions in the window: rpc/batch completions over the trace's duration threshold, plus attentions (cancels/timeouts), ranked duration DESC, attentions (no duration) last. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none slower than the page; oldest/newest_returned_event_time bound the slowest runs' ages, NOT how far the read reached. Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off — enable 'long_query_completions' in the schedule. <<GUIDE>> Gets the SLOWEST long-running query completions in the window, captured by the opt-in long-query trace: rpc/batch completions whose duration exceeded the trace threshold, plus attentions (client cancels / query timeouts), ranked by duration DESC with attentions (no duration) last. Shows duration, CPU, reads/writes, row count, result (OK/Error/Abort — Abort means the long query was cancelled), the statement text, and the calling session/app/login. THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned is how many rows you got and truncated says the window held more than limit. Because the page is duration-RANKED, oldest_returned_event_time / newest_returned_event_time tell you how old the slowest runs are and say NOTHING about how far back the read reached — every row in the window was a candidate, so a truncated page still holds the window's slowest. query_identity is the key to group rows by: it is the engine's query_hash when the engine gave one (batch-level events carry none, so query_hash is null there), otherwise text: plus a fingerprint of the statement text that does not merge statements differing only in a literal. An attention row (client cancel or timeout) carries no statement text, so its query_identity is null and it cannot be grouped by it; a null query_identity is never a group key, so do not pool those rows under one. Both SKUs keep the same population. The collector is OFF by default; if it returns empty, enable the 'long_query_completions' collector in the schedule. The monitor's own statements (program name starting PerformanceMonitor) are left out unless include_monitor is true, so an idle server answers empty.")]
     public static async Task<string> GetLongQueryCompletions(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -25,7 +28,8 @@ public sealed class McpLongQueryTools
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description(IncludeMonitorDescription)] bool include_monitor = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -57,7 +61,7 @@ public sealed class McpLongQueryTools
                before the duration ranking and the limit + 1 fetch, so the page is the slowest N of the chosen database. */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
             var rows = await dataService.GetSlowestLongQueryCompletionsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1,
-                databaseNames: database == null ? null : new[] { database }, tags: tagScope);
+                databaseNames: database == null ? null : new[] { database }, tags: tagScope, includeMonitor: include_monitor);
             if (rows.Count == 0)
             {
                 /* #5244 round 2 (L2): not_collected and precondition echo database_name like every other shape. */
@@ -84,7 +88,8 @@ public sealed class McpLongQueryTools
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + McpBlockingTools.ForChosenDatabase(database)
                         + (tagScope.Active ? $" for query tag '{tagScope.Requested}'" : "")
-                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : "."),
+                        + (collectorMayBeOff ? ". The long_query_completions collector is opt-in (default OFF) — enable it in the collector schedule to capture data." : ".")
+                        + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                     database, /* #5244 review L2: the echo rides on an empty answer too */
                     emptyNotice.AsHints()));
             }

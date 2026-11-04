@@ -70,15 +70,15 @@ public sealed class QueryEventsDatabaseFilterLiveTests
             var end = await SeedAsync(cs!, ct);
             var start = end.AddHours(-1);
 
-            var ab = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), ct);
+            var ab = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 100, DatabaseFilter.Of([DbA, DbB]), cancellationToken: ct);
             Assert.Equal(new[] { DbA, DbA, DbB }, ab.Select(r => r.DatabaseName).Order().ToArray());
-            var all = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 100, DatabaseFilter.All, ct);
+            var all = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 100, DatabaseFilter.All, cancellationToken: ct);
             Assert.Equal(6, all.Count);
             var viaDefault = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 100, cancellationToken: ct);
             Assert.Equal(6, viaDefault.Count);
 
             /* The cap is applied AFTER the filter: C holds the 2nd and 3rd slowest rows, but the top 2 of [A, B] are A's 9 s and B's 6 s. */
-            var capped = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 2, DatabaseFilter.Of([DbA, DbB]), ct);
+            var capped = await DarlingLongQueryReader.GetRecentLongQueryCompletionsAsync(postgres, ServerId, start, end, 2, DatabaseFilter.Of([DbA, DbB]), cancellationToken: ct);
             Assert.Equal(new long?[] { 9_000_000, 6_000_000 }, capped.Select(r => r.DurationMicroseconds).ToArray());
 
             /* The tool overload: the page holds only the chosen databases, and a miss names them. */
@@ -93,7 +93,7 @@ public sealed class QueryEventsDatabaseFilterLiveTests
             Assert.Equal("empty", miss.GetProperty("status").GetString());
             Assert.Contains("for the chosen databases", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
             var publicMiss = JsonDocument.Parse(await DarlingMcpLongQueryTools.GetLongQueryCompletions(
-                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, null, null, ct)).RootElement;
+                postgres, ServerName, 1, 100, DateTime.UtcNow.AddDays(-30).ToString("o"), null, null, false, null, ct)).RootElement;
             Assert.DoesNotContain("for the chosen databases", publicMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
 
             bodySucceeded = true;

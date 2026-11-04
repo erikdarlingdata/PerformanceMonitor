@@ -72,9 +72,11 @@ public sealed partial class ViewerDataService
     /// Recent long-running query completions (#1496) for one server, from the BASE
     /// <c>long_query_completions</c> table (a post-V14 collector has no <c>v_*</c> passthrough view). Same
     /// windowed shape as the blocking read (event_time DESC, LIMIT 200); the grid applies a view-only
-    /// DESCENDING-by-duration sort. $1 server_id, $2 window start, $3 window end (naive UTC), $4 db filter.
+    /// DESCENDING-by-duration sort. $1 server_id, $2 window start, $3 window end (naive UTC), $4 db filter, $5 include_monitor: false (the default) leaves out the monitor's own statements, the rows whose stored
+    /// <c>client_app_name</c> starts with the monitor's program name prefix (#7416 item 11), a prefix match so a user's application
+    /// that merely contains the words is kept.
     /// </summary>
-    public const string LongQueryCompletionsSql = """
+    public static readonly string LongQueryCompletionsSql = $$"""
         SELECT
             collection_time,
             event_time,
@@ -101,6 +103,7 @@ public sealed partial class ViewerDataService
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
+        AND   ($5::boolean OR client_app_name IS NULL OR client_app_name NOT ILIKE '{{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}}')
         /*TAG:hash:query_hash*/
         ORDER BY event_time DESC
         LIMIT 200
@@ -124,7 +127,7 @@ public sealed partial class ViewerDataService
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     public async Task<List<ViewerLongQueryRow>> GetRecentLongQueryCompletionsAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, QueryTagFilter? tags = null, bool includeMonitor = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<ViewerLongQueryRow>();
 
@@ -132,6 +135,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = includeMonitor });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
