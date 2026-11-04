@@ -25,7 +25,7 @@ public sealed class WebBlockedReportFoldTests
 
     /* The tool's answer to limit 5 when only the newest report fits: the other four are listed, not returned. */
     private const string SizeCutAnswer = """
-        {"server":"sql01","reports_returned":1,"truncated":true,
+        {"server":"sql01","reports_returned":1,"truncated":true,"more_reports_than_limit":true,
          "oldest_returned_event_time":"2026-01-02T20:00:00.0000000Z","order":"event_time_desc",
          "left_out_count":4,
          "left_out_reports":[
@@ -43,7 +43,7 @@ public sealed class WebBlockedReportFoldTests
     [Fact]
     public void LeftOutReports_BecomeRowsWithoutXml_AndTheNoteSaysWhy()
     {
-        var folded = Assert.IsType<JsonObject>(JsonNode.Parse(WebBlockedReportFold.Fold(SizeCutAnswer, 5)));
+        var folded = Assert.IsType<JsonObject>(JsonNode.Parse(WebBlockedReportFold.Fold(SizeCutAnswer)));
 
         var rows = Assert.IsType<JsonArray>(folded["reports"]);
         Assert.Equal(5, rows.Count);
@@ -66,7 +66,7 @@ public sealed class WebBlockedReportFoldTests
     {
         await using var store = NeverConnects();
         var cancelled = new CancellationToken(canceled: true);
-        var folded = WebBlockedReportFold.Fold(SizeCutAnswer, 5);
+        var folded = WebBlockedReportFold.Fold(SizeCutAnswer);
 
         var answered = await WebDataStartNote.AddAsync(store, "get_blocked_process_xml", "sql01", 24, WindowEnd, folded, null, cancelled);
 
@@ -77,20 +77,30 @@ public sealed class WebBlockedReportFoldTests
     }
 
     [Fact]
-    public void APageWhoseRowsAllFit_UnderTheLimit_IsNotCalledTruncated()
+    public void APageWhoseRowsAllFit_ExactlyTheLimit_IsNotCalledTruncated()
     {
-        /* Five rows listed, ten allowed: the size target cut the reply, but every report the page selected is now listed, so the
-           grid shows the whole page and the row-limit sentence (which the capped-list note writes for truncated) would be false. */
-        var folded = WebBlockedReportFold.Fold(SizeCutAnswer, 10);
+        /* Five rows listed after the fold and a window that held exactly the limit (the tool says more_reports_than_limit false): the
+           size target cut the reply, but every report the page selected is now listed, so the grid shows the whole page and the
+           row-limit sentence (which the capped-list note writes for truncated) would be false. */
+        var folded = WebBlockedReportFold.Fold(SizeCutAnswer.Replace("\"more_reports_than_limit\":true", "\"more_reports_than_limit\":false"));
+        Assert.Equal(5, JsonNode.Parse(folded)!["reports"]!.AsArray().Count);
         Assert.False(JsonNode.Parse(folded)!["truncated"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void AWindowThatHeldMoreThanTheLimit_StaysTruncated_EvenWhenTheGridHoldsExactlyTheLimit()
+    {
+        var folded = WebBlockedReportFold.Fold(SizeCutAnswer);
+        Assert.Equal(5, JsonNode.Parse(folded)!["reports"]!.AsArray().Count);
+        Assert.True(JsonNode.Parse(folded)!["truncated"]!.GetValue<bool>());
     }
 
     [Fact]
     public void AnAnswerWithNothingLeftOut_IsUnchanged()
     {
         const string plain = """{"server":"sql01","reports_returned":1,"truncated":false,"left_out_count":0,"reports":[{"event_time":"2026-01-02T20:00:00Z"}]}""";
-        Assert.Equal(plain, WebBlockedReportFold.Fold(plain, 5));
+        Assert.Equal(plain, WebBlockedReportFold.Fold(plain));
         const string status = """{"status":"empty","message":"none"}""";
-        Assert.Equal(status, WebBlockedReportFold.Fold(status, 5));
+        Assert.Equal(status, WebBlockedReportFold.Fold(status));
     }
 }

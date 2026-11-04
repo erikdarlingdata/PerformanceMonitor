@@ -452,6 +452,9 @@ public sealed class McpBlockingTools
                    reports WITH XML in the window than limit". */
                 reports_returned = fitCount,
                 truncated = truncated || leftOut > 0,
+                /* #7545: the row-limit fact alone, for a page that must tell "the window held more than limit" from "the size target left some
+                   out" (truncated is true for either). The web page's capped-list note reads it. */
+                more_reports_than_limit = truncated,
                 oldest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Min(r => r.EventTime)),
                 newest_returned_event_time = McpHelpers.FormatEffectiveStart(page.Max(r => r.EventTime)),
                 order = "event_time_desc",

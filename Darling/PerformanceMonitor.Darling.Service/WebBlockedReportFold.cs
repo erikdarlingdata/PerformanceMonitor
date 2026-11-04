@@ -24,9 +24,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 internal static class WebBlockedReportFold
 {
-    internal static async Task<string> FoldAsync(Task<string> read, int limit) => Fold(await read, limit);
+    internal static async Task<string> FoldAsync(Task<string> read) => Fold(await read);
 
-    internal static string Fold(string result, int limit)
+    internal static string Fold(string result)
     {
         JsonObject? payload;
         try
@@ -101,9 +101,10 @@ internal static class WebBlockedReportFold
         }
 
         /* The tool's truncated is "more reports than the page, or some left out for size". With the left-out ones listed, only the
-           first can still be true: the grid is the whole page when it holds fewer rows than the limit, and may stop at the limit
-           otherwise. Rows past the tool's list of 20 are not shown, so they keep it true. */
-        payload["truncated"] = notListed > 0 || reports.Count >= limit;
+           first can still be true, and the tool sends it on its own as more_reports_than_limit (a window holding exactly limit reports
+           is not more). Rows past the tool's list of 20 are not shown, so they keep truncated true. */
+        var moreThanLimit = payload["more_reports_than_limit"] is JsonValue more && more.TryGetValue<bool>(out var flag) && flag;
+        payload["truncated"] = notListed > 0 || moreThanLimit;
 
         payload["left_out_note"] =
             (added == 1 ? "1 report has no XML here" : $"{added} reports have no XML here")

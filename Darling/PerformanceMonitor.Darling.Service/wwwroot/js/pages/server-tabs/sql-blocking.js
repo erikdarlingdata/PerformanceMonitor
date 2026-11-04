@@ -287,19 +287,35 @@ function deadlockXmlColumns(server, scope = null) {
   ];
 }
 
+/* A report's identity in the reply: the four fields the grid row shows. null and a missing field are the same value. */
+function sameReport(a, b) {
+  const same = (x, y) => (x ?? null) === (y ?? null);
+  return !!a && same(a.event_time, b.event_time) && same(a.database_name, b.database_name) && same(a.blocked_spid, b.blocked_spid) && same(a.blocking_spid, b.blocking_spid);
+}
+
 /**
- * #7545: the XML of one report the read left out to stay within its reply size, fetched alone (the tool's own advice: as_of at the
- * report's event time, limit 1). The row is filled in on success, so the Report cell and the Save XML button share one fetch, and a
- * failure is not remembered so the next click tries again. Rejects with a sentence for the person.
+ * #7545: the XML of one report the read left out to stay within its reply size, fetched alone. The fetch is as_of at the report's event
+ * time, and two reports can share that time, so it asks for a few and takes only the one whose event time, database and both session
+ * ids match the row: another report's XML is never attached. The row is filled in on success, so the Report cell and the Save XML
+ * button share one fetch, and a failure is not remembered so the next click tries again. Rejects with a sentence for the person.
  */
 export function loadReportXml(row) {
   if (row.blocked_process_report_xml) return Promise.resolve(row.blocked_process_report_xml);
   if (row.xmlLoading) return row.xmlLoading;
-  const pending = readTool("get_blocked_process_xml", { server: row.server, hours: 1, as_of: row.event_time, limit: 1 })
+  const pending = readTool("get_blocked_process_xml", { server: row.server, hours: 1, as_of: row.event_time, limit: 5 })
     .then((res) => {
-      const found = res && res.kind === "data" && res.data && Array.isArray(res.data.reports) ? res.data.reports[0] : null;
+      const data = res && res.kind === "data" && res.data ? res.data : null;
+      const reports = data && Array.isArray(data.reports) ? data.reports : [];
+      const found = reports.find((r) => sameReport(r, row));
       const xml = found && found.blocked_process_report_xml;
-      if (!xml) throw new Error("The report could not be read now. Try again, or narrow the time range.");
+      if (!xml) {
+        const again = data && Array.isArray(data.left_out_reports) && data.left_out_reports.some((r) => sameReport(r, row));
+        throw new Error(
+          again
+            ? "This report could not be read here: other reports share its time and the reply is too large to hold them all."
+            : "The report could not be read now. Try again, or narrow the time range."
+        );
+      }
       row.blocked_process_report_xml = xml;
       row.xml_left_out = false;
       return xml;

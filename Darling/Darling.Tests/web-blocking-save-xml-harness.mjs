@@ -170,13 +170,16 @@ if (scenario === "save") {
   const b = saveButtons(bprPanel)[0];
   out.disabled = !!b.disabled;
   out.hasClick = !!(b.listeners.click && b.listeners.click.length);
-} else if (scenario === "leftout") {
-  /* #7545: the read folded a report it left out for size into the grid: a row with no XML, a Load XML button, and the note why. */
+} else if (scenario === "leftout" || scenario === "sametime" || scenario === "nomatch") {
+  /* #7545: the read folded a report it left out for size into the grid: a row with no XML, a Load XML button, and the note why.
+     sametime: another report shares the row's event_time and the stub answers with it FIRST; nomatch: only that other report comes back. */
   const leftOut = { event_time: "2026-07-01T10:40:00.0000000", server: "SRV1", database_name: "AppDb", blocked_spid: 71, blocking_spid: 72, wait_time_ms: 500, blocked_process_report_xml: null, xml_left_out: true };
   const loaded = { ...leftOut, blocked_process_report_xml: "<loaded-report/>", xml_left_out: undefined };
+  const other = { ...loaded, blocked_spid: 70, blocked_process_report_xml: "<other-report/>" };
   const left_out_note = "1 of the 2 newest reports have no XML here, because one reply holds about 32 KB.";
+  const alone = scenario === "sametime" ? [other, loaded] : scenario === "nomatch" ? [other] : [loaded];
   const { bprPanel } = await buildPanels([deadlock()], [report, leftOut], { left_out_note }, (url) => {
-    return url.searchParams.get("limit") === "1" ? data({ server: "SRV1", reports: [loaded] }) : data({ server: "SRV1", reports: [report, leftOut], left_out_note });
+    return url.searchParams.has("as_of") ? data({ server: "SRV1", reports: alone }) : data({ server: "SRV1", reports: [report, leftOut], left_out_note });
   });
   out.rows = all(bprPanel, "tbody").flatMap((tb) => tb.children).length;
   out.noteShown = bprPanel.textContent.includes(left_out_note);
@@ -189,6 +192,9 @@ if (scenario === "save") {
   out.loadFetches = fetched.length;
   out.loadUrl = fetched[0] || "";
   out.reportShown = bprPanel.textContent.includes("XML capture (");
+  out.otherShown = bprPanel.textContent.includes("other-report");
+  out.loadButtonsAfter = all(bprPanel, "button").filter((b) => b.textContent === "Load XML").length;
+  out.errorShown = bprPanel.textContent.includes("could not be read");
   const save = saveButtons(bprPanel);
   out.saveButtons = save.length;
   for (const b of save) if (b.listeners.click) await b.listeners.click[b.listeners.click.length - 1]();
