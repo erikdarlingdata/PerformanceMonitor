@@ -79,6 +79,14 @@ const scenarios = {
     const fa = keepScrollSwap(a, 100, "waits");
     out.swapped = wrapOf(fa).scrollTop; out.other = wrapOf(b).scrollTop; out.sameBox = page.wraps()[1] === wrapOf(b);
   },
+  wrapRemovedAheadOfSameName() {
+    /* Two panels draw grids with one name. The first one's poll returns no rows, so it draws a strip and has no wrap left: the
+       second takes its place (waits|0) and must not be given the first's position. */
+    const a = grid("waits", 100); const b = grid("waits", 100); page.appendChild(a); page.appendChild(b);
+    wrapOf(a).scrollTop = 500; wrapOf(b).scrollTop = 200;
+    keepScroll(() => { const strip = new FakeNode("div"); strip.className = "strip"; page.insertBefore(strip, a); page.removeChild(a); });
+    out.wraps = page.wraps().length; out.b = wrapOf(b).scrollTop; out.sameBox = page.wraps()[0] === wrapOf(b);
+  },
   topGridStaysTop() {
     const g = grid("waits", 100); page.appendChild(g);
     const fresh = keepScrollSwap(g, 100, "waits");

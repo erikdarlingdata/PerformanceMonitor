@@ -83,8 +83,11 @@ function gridWraps() {
 export function keepScroll(fn) {
   const y = globalThis.scrollY;
   const grids = [];
+  /* Every wrap on the page before the swap. A wrap in this set is one the swap did not make: it keeps its own position. */
+  const before = new Set();
   gridWraps().forEach((w, id) => {
-    if (w.scrollTop > 0 || w.scrollLeft > 0) grids.push({ id, was: w, top: w.scrollTop, left: w.scrollLeft });
+    before.add(w);
+    if (w.scrollTop > 0 || w.scrollLeft > 0) grids.push({ id, top: w.scrollTop, left: w.scrollLeft });
   });
   fn();
   if (y > 0 || grids.length) {
@@ -96,8 +99,10 @@ export function keepScroll(fn) {
       const now = gridWraps();
       grids.forEach((g) => {
         const w = now.get(g.id);
-        /* A wrap the swap left in place keeps its own position. A fresh one is set after layout, and clamps to its new height. */
-        if (!w || w === g.was) return;
+        /* A wrap the swap left in place keeps its own position, even when a wrap ahead of it went and moved its name and place
+           (a panel that drew zero rows has no wrap left, so the same-name wrap after it takes its slot). Only a wrap that is new
+           since the swap takes a remembered position: it is set after layout, and clamps to its new height. */
+        if (!w || before.has(w)) return;
         w.scrollTop = g.top;
         w.scrollLeft = g.left;
       });

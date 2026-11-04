@@ -93,6 +93,15 @@ public sealed class GridScrollKeepTests
     }
 
     [Fact]
+    public void A_grid_is_not_given_the_position_of_a_same_name_grid_that_lost_its_box()
+    {
+        var r = Run("wrapRemovedAheadOfSameName");
+        Assert.Equal(1, Int(r, "wraps"));
+        Assert.True(r.GetProperty("sameBox").GetBoolean());
+        Assert.Equal(200, Int(r, "b"));
+    }
+
+    [Fact]
     public void A_grid_at_the_top_stays_at_the_top()
     {
         Assert.Equal(0, Int(Run("topGridStaysTop"), "top"));
