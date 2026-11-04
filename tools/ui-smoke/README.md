@@ -111,7 +111,8 @@ How the page is kept the same on every run:
 - A screenshot is taken again until two in a row are identical. If that does not happen in 8 tries, the page fails.
 - The service marks the two unreachable servers "collection stale" a couple of minutes after the seed anchor, and "offline"
   after 30. The shots wait until `/api/fleet` shows every card stale. They give up after 4 minutes with one message if the
-  cards never got there, and with another if the cards are already past stale.
+  cards never got there, and with another if a card is already Offline. A card is Offline after 30 minutes, or at once if seed.sql
+  gave its server no `collection_log` row (the long-name server has one, #7569).
 - The database size in the status bar is not the same on every run. Its width changes when it gains a digit (99 MB to 100 MB).
   In one run the item was missing, because the read of the size had not finished. A mask hides the text, not the box. For the
   shots, `shots.mjs` adds a style that hides the item and the separator before it, so the bar is the same either way.

@@ -178,7 +178,7 @@ export async function runShots({ config, baseUrl, outDir, only, settle }) {
         break;
       }
       if (offline > 0) {
-        return { problems: [`screenshots: the fleet is already past collection stale (${seen}); the cards go Offline 30 minutes after the seed anchor, so the walk ran too long for the seed to stay stale. Shorten the walk or re-seed.`], shots: [] };
+        return { problems: [`screenshots: the fleet is already past collection stale (${seen}); a card reads Offline either 30 minutes after the seed anchor (the run took too long: shorten it or re-seed) or from the first poll when seed.sql wrote it no collection_log row (#7569).`], shots: [] };
       }
     } catch {
       /* the service answers again on the next poll */

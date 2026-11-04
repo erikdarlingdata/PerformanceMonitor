@@ -173,6 +173,12 @@ FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'wait_stats', 4), (2, 'cpu_utilization_stats', 1), (3, 'memory_stats', 1), (4, 'file_io_stats', 2), (5, 'query_stats', 12))
     AS cl(n, name, rows_collected);
 
+-- collection_log, the long-name server (#7569): one successful row at the anchor. With none, the fleet reads that card Offline from the first poll
+-- (registered, never collected), so the screenshot step, which waits for every card to be collection stale, took it for a fleet that had aged
+-- past 30 minutes. With one row it turns stale 2 minutes after the anchor and Offline 30 minutes after, like the other two. log_id 8900000.
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES (8900000, :lsid, :'lname', 'cpu_utilization_stats', :'anchor'::timestamp, 120, 'SUCCESS', 1);
+
 -- blocked_process_reports: Blocking tab. Two reports, 1 and 2 hours back. blocked_report_id 9000001 and 9000002.
 INSERT INTO collect.blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid,
     wait_time_ms, wait_resource, lock_mode, blocked_status, blocked_client_app, blocked_host_name, blocked_login_name, blocked_sql_text,
