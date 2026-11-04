@@ -630,20 +630,48 @@ RETURNING journal_id";
     /// changes list then shows it and its undo works, exactly as for a gated change. Both rows carry no request id. The connection must be
     /// the store owner's: the journal keeps these events to it. Answers the <c>action_called</c> journal id.
     /// </summary>
+    public static Task<long> JournalDirectChangeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string actor, string reason, string tool, string kind, string targetId, string afterJson, CancellationToken cancellationToken) =>
+        JournalDirectChangeAsync(connection, transaction, now, serverId, actor, reason, tool, kind, targetId, null, afterJson, cancellationToken);
+
+    /// <summary>
+    /// The same two rows with a before image (#7414): an agent that changes or deletes a rule with no claim behind it journals the rule as it
+    /// was, so the Agent changes list shows what moved and its undo puts the rule back. A null <paramref name="beforeJson"/> is a change that
+    /// created the row. <paramref name="actor"/> is <c>agent:&lt;id&gt;</c> there. Both rows carry no request id, so no new column is needed.
+    /// </summary>
     public static async Task<long> JournalDirectChangeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
-        int? serverId, string actor, string reason, string tool, string kind, string targetId, string afterJson, CancellationToken cancellationToken)
+        int? serverId, string actor, string reason, string tool, string kind, string targetId, string? beforeJson, string afterJson,
+        CancellationToken cancellationToken)
     {
         var called = new JsonObject
         {
             ["tool"] = tool,
             ["kind"] = kind,
             ["target"] = new JsonObject { ["id"] = targetId, ["server_id"] = serverId, ["database"] = null },
-            ["before"] = null,
+            ["before"] = beforeJson is null ? null : JsonNode.Parse(beforeJson),
         }.ToJsonString();
         var calledId = await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_called", actor, reason, called, cancellationToken);
         var done = new JsonObject { ["called_id"] = calledId, ["after"] = JsonNode.Parse(afterJson) }.ToJsonString();
         await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_done", actor, null, done, cancellationToken);
         return calledId;
+    }
+
+    /// <summary>
+    /// The service's agent switch for a change that has no request behind it (#7414), read in the change's own transaction and held
+    /// <c>FOR NO KEY UPDATE</c> to its end, as the gate holds it for a store write: a person turning agent changes off waits for the
+    /// change in flight, and a change that starts after it reads it off. Null when agent changes are on (a store with no row reads as on).
+    /// </summary>
+    public static async Task<AgentActionRefusal?> DirectChangeSwitchRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(AgentActionsEnabledStoreWriteLockedSql, connection, transaction)
+        {
+            CommandTimeout = DeadlockSignatureStore.MergeCommandTimeoutSeconds,
+        };
+        var enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
+        return enabled ? null
+            : new AgentActionRefusal(AgentActionCodes.ActionsOff,
+                "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.");
     }
 
     private static async Task<long> InsertDirectJournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
