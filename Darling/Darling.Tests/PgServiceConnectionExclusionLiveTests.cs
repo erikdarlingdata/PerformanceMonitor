@@ -124,9 +124,19 @@ public sealed class PgServiceConnectionExclusionLiveTests
         await ExecAsync(service, "BEGIN; SELECT pg_catalog.txid_current()", ct);
         await ExecAsync(application, "BEGIN; SELECT pg_catalog.txid_current()", ct);
 
-        var rows = await ReadAsync(PgSessionStatesCollector.Instance, Context(await ServerMajorAsync(collector, ct)), collector, ct);
-
-        Assert.DoesNotContain(rows, row => row.ApplicationName == serviceName);
-        Assert.Contains(rows, row => row.ApplicationName == "pm7428-application");
+        /* An autovacuum worker on the shared test store can hold an older xmin for a few seconds. While it does, it is the horizon holder and the
+           application's young transaction is not reported. The exclusion is asserted on every read, and the read repeats until the worker has gone. */
+        var major = await ServerMajorAsync(collector, ct);
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (true)
+        {
+            var rows = await ReadAsync(PgSessionStatesCollector.Instance, Context(major), collector, ct);
+            Assert.DoesNotContain(rows, row => row.ApplicationName == serviceName);
+            if (rows.Any(row => row.ApplicationName == "pm7428-application"))
+                return;
+            if (DateTime.UtcNow >= deadline)
+                Assert.Fail("the application's transaction was never the horizon holder. Sessions read: " + string.Join(", ", rows.Select(row => row.BackendType + "/" + row.ApplicationName)));
+            await Task.Delay(500, ct);
+        }
     }
 }
