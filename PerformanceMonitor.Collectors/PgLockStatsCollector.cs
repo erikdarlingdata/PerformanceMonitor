@@ -118,8 +118,8 @@ WHERE l.pid <> pg_catalog.pg_backend_pid()
    every capture, and read as a standing lock on the user's server. Same exclusion by application_name, and the same
    pinned literals, as the wait sampler. The tradeoff: a lock the service's own connection really does hold on the
    target (a remediation action in flight) is not shown here either. The service takes no lock it keeps on the user's
-   objects, so this costs nothing the monitored workload can feel. A lock with no live backend (a prepared
-   transaction) has no pg_stat_activity row, so its NULL application_name is kept by the coalesce. */
+   objects, so this costs nothing the monitored workload can feel. The coalesce keeps a lock whose pg_stat_activity row is
+   missing, which the LEFT JOIN yields as a NULL application_name. */
 AND   coalesce(a.application_name, '') NOT IN ('" + PgWaitSamplingCollector.ServiceApplicationName + "', '" + PgWaitSamplingCollector.ServiceRemediationApplicationName + @"')
 GROUP BY d.datname, l.locktype, l.mode, l.granted, l.relation, c.relname
 /* Ungranted first, then the biggest queues: the row that matters is always a queue, and a grid that opened
