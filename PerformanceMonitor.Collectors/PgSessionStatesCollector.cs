@@ -284,8 +284,8 @@ WITH activity AS
     WHERE a.pid IS NOT NULL
     /* Never report the collector's own session. Darling's read sits in pg_stat_activity with an open
        transaction and a backend_xmin like anything else, so without this it is a PERMANENT row: the
-       zero-rows-when-healthy state becomes unreachable and every denominator is padded by one. Same
-       exclusion, same reason, as pg_blocking and pg_xmin_horizon. */
+       zero-rows-when-healthy state becomes unreachable and every denominator is padded by one.
+       pg_blocking and pg_xmin_horizon leave out their own session for the same reason. */
     AND   a.pid <> pg_backend_pid()
     /* Nor any other connection this service holds open (#7381). The wait sampler runs its 30 second batch
        on a second connection, inside a transaction with a snapshot, so pg_sleep sat here as a Critical
@@ -318,8 +318,8 @@ totals AS
 (
     SELECT
         /* EVERY backend the view reports, background workers included — checkpointer, walwriter, the
-           autovacuum launcher and any autovacuum workers, minus this collector's own session and minus
-           parallel workers. Not filtered to backend_type = 'client backend', deliberately: backend_type is
+           autovacuum launcher and any autovacuum workers, minus this collector's own session, minus this
+           service's other connections (#7381) and minus parallel workers. Not filtered to backend_type = 'client backend', deliberately: backend_type is
            in the privileged column set, so that filter would come back NULL for every row on a target
            without pg_monitor and collapse the denominator to zero — losing it precisely where the numerator
            is already unreliable. A handful of background rows inflates the count on a quiet instance and
@@ -336,10 +336,12 @@ totals AS
            value. */
         count(*) FILTER (WHERE state = 'active')::int                       AS active_sessions,
         count(*) FILTER (WHERE is_idle_in_transaction)::int                 AS idle_in_transaction_sessions,
-        /* The oldest holder on the instance, or NULL when nothing holds the horizon at all. Computed over
-           the FULL activity set rather than over the reportable subset, because the horizon is a property of
-           the instance: a young transaction can be the oldest holder, and calling a filtered survivor 'the
-           holder' would name the wrong session precisely when the real one fell below the floor. */
+        /* The oldest holder outside this service's own connections (#7381), or NULL when nothing else holds
+           the horizon. Computed over the whole activity CTE rather than over the reportable subset: a young
+           transaction can be the oldest holder, and calling a filtered survivor 'the holder' would name the
+           wrong session precisely when the real one fell below the floor. It is not the instance-wide oldest:
+           when a service connection is older, the next-oldest session is marked. That session is younger
+           than the sampler's 30 second batch, and the 2-sample floor keeps it out of Critical. */
         max(horizon_age) FILTER (WHERE horizon_age >= 0)                    AS oldest_horizon_age
     FROM activity
 ),

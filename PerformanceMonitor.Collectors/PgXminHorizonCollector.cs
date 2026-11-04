@@ -91,7 +91,9 @@ WITH holders AS
     AND   a.pid <> pg_backend_pid()
     /* Nor any other connection this service holds open (#7381): the wait sampler's batch runs on a second
        connection inside a transaction, and would otherwise be named as a 'session' holder. Same two
-       application_name values the sampler excludes itself by. */
+       application_name values the sampler excludes itself by. So the 'session' row is the oldest holder
+       outside this service's connections: when the sampler's batch is older, the next-oldest session is
+       named, younger than that batch of 30 seconds at most. */
     AND   coalesce(a.application_name, '') NOT IN ('" + PgWaitSamplingCollector.ServiceApplicationName + "', '" + PgWaitSamplingCollector.ServiceRemediationApplicationName + @"')
 
     UNION ALL
