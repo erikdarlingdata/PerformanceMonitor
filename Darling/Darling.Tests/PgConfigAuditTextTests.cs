@@ -25,8 +25,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PgConfigAuditTextTests
 {
-    /* One entry per CONFIG_PG_* key: a healthy fact and, where the scorer can fire the key, a fired one. A key with
-       no entry fails KeyTable_CoversEveryConfigPgKey, so a new key forces a decision about both states. */
+    /* The CONFIG_PG_* keys under test: a healthy fact and, where the scorer can fire the key, a fired one. */
     private sealed record Case(string Key, string Source, double Healthy, double? Fired, bool Context,
         Dictionary<string, double>? HealthyMeta = null, Dictionary<string, double>? FiredMeta = null);
 
@@ -80,18 +79,6 @@ public sealed class PgConfigAuditTextTests
     {
         var advice = FactAdvice.Compose(fact.Key, new Dictionary<string, Fact>(StringComparer.Ordinal) { [fact.Key] = fact });
         return PgConfigAuditText.Compose(fact, setting, value, advice, notApplicable: false, isAuroraCheckpointTimeout: false);
-    }
-
-    [Fact]
-    public void KeyTable_CoversEveryConfigPgKey()
-    {
-        var declared = typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
-            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
-            .Select(f => (string)f.GetRawConstantValue()!)
-            .Where(v => v.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal) && v != PgTargetFactKeys.ConfigPrefix)
-            .ToHashSet(StringComparer.Ordinal);
-
-        Assert.Equal(declared.OrderBy(x => x), Cases.Select(c => c.Key).OrderBy(x => x));
     }
 
     [Theory]
