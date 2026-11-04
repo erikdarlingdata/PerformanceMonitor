@@ -5180,7 +5180,14 @@
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True"
                           AutoGenerateColumns="False" IsReadOnly="True">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Facet" Binding="{Binding Facet}" Width="170"/>
+                        <!-- #7410: the plain label; the raw facet name is the tooltip. -->
+                        <DataGridTemplateColumn Header="Facet" Width="230" SortMemberPath="Facet">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Facet}" Margin="5,2" ToolTip="{Binding FacetName}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Header="Satisfied" Binding="{Binding Satisfied}" Width="80"/>
                         <DataGridTextColumn Header="Observed" Binding="{Binding Observed}" Width="240"/>
                         <DataGridTextColumn Header="What it means / what to do" Binding="{Binding Detail}" Width="*"/>

@@ -745,7 +745,7 @@ public partial class ViewerServerTab
         if (PgCollectorIsGatedOff("pg_lock_stats"))
         {
             PgLockStatsGrid.ItemsSource = null;
-            PgLockStatsNote.Text = PanelNote("pg_lock_stats", 0, string.Empty);
+            ShowNote(PgLockStatsNote, PanelNoteParts("pg_lock_stats", 0, string.Empty, string.Empty));
             PgLockStatsDataStartBanner.Visibility = Visibility.Collapsed;
             return;
         }
@@ -765,18 +765,35 @@ public partial class ViewerServerTab
         var queued = rows.Where(r => !r.Granted).ToList();
         var totalCaptures = rows.Count == 0 ? 0 : rows[0].TotalCaptures;
 
-        PgLockStatsNote.Text = rows.Count == 0
-            ? PanelNote("pg_lock_stats", 0,
+        ShowNote(PgLockStatsNote, rows.Count == 0
+            ? PanelNoteParts("pg_lock_stats", 0,
+                "No lock sample was taken for this server in this window.",
                 "No lock sample was taken for this server in this window, so an empty grid says nothing "
                 + "about whether anything contended. Check the pg_lock_stats collector on the Overview tab.")
-            : queued.Count == 0
-                ? $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
-                  + "window was granted, which is the healthy answer rather than a missing read."
-                : $"{queued.Count:N0} lock queue(s) across {totalCaptures:N0} captures. These are SAMPLES, "
-                  + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
-                  + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
-                  + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
-                  + "Relation with an OID is a lock in a different database, not a missing name.";
+            : LockStatsRowsNote(queued.Count, totalCaptures));
+    }
+
+    /// <summary>
+    /// #7410: the note over a Lock Stats grid that has rows. One plain line says how many lock queues were seen in how many captures;
+    /// how to read the capture columns and the Mode column is kept as the hover text.
+    /// </summary>
+    internal static PanelNoteText LockStatsRowsNote(int queuedCount, long totalCaptures)
+    {
+        if (queuedCount == 0)
+        {
+            return new PanelNoteText(
+                $"No lock was waiting in any of {totalCaptures:N0} captures. Every lock held in this window was granted.",
+                $"No lock was waiting in any of {totalCaptures:N0} captures — every lock held in this "
+                + "window was granted, which is the healthy answer rather than a missing read.");
+        }
+
+        return new PanelNoteText(
+            $"{queuedCount:N0} lock {(queuedCount == 1 ? "queue" : "queues")} across {totalCaptures:N0} captures.",
+            $"{queuedCount:N0} lock queue(s) across {totalCaptures:N0} captures. These are SAMPLES, "
+            + "so the capture columns are the denominator: a queue seen once in 60 captures is a blip, "
+            + "and one seen in 55 is a standing problem. The Mode column decides the remedy — an "
+            + "ungranted AccessExclusiveLock is a DDL everything else is queued behind. A blank "
+            + "Relation with an OID is a lock in a different database, not a missing name.");
     }
 
     /// <summary>
@@ -1089,10 +1106,11 @@ public partial class ViewerServerTab
             + "answer here, not a missing read."));
 
         PgAutovacuumGrid.ItemsSource = autovacuumTask.Result.Select(PgDisplay.Autovacuum).ToList();
-        PgAutovacuumNote.Text = PanelNote("pg_autovacuum_stats", autovacuumTask.Result.Count,
+        ShowNote(PgAutovacuumNote, PanelNoteParts("pg_autovacuum_stats", autovacuumTask.Result.Count,
+            "No table reported an autovacuum backlog in this window.",
             "No table reported an autovacuum backlog in this window. This collector runs on the WRITER "
             + "only — pg_stat_user_tables reports zeros on a replica — so an empty grid on a reader is "
-            + "expected rather than informative.");
+            + "expected rather than informative."));
 
         PgWraparoundGrid.ItemsSource = wraparoundTask.Result.Select(PgDisplay.Wraparound).ToList();
         PgWraparoundNote.Text = PanelNote("pg_wraparound_stats", wraparoundTask.Result.Count,
@@ -1112,10 +1130,16 @@ public partial class ViewerServerTab
     }
 
     /// <summary>The plain name of a plan-capture readiness facet, for the one-line note. A facet this build does not know keeps its own name.</summary>
-    private static string PlanCaptureFacetLabel(string facet) => facet switch
+    internal static string PlanCaptureFacetLabel(string facet, bool capitalize = false)
+    {
+        var label = PlanCaptureFacetLabelLower(facet);
+        return capitalize && label.Length > 0 && label != facet ? char.ToUpperInvariant(label[0]) + label[1..] : label;
+    }
+
+    private static string PlanCaptureFacetLabelLower(string facet) => facet switch
     {
         "extension_available" => "the auto_explain extension",
-        "library_loaded" => "auto_explain loaded at server start",
+        "library_loaded" => "the auto_explain library loaded at server start",
         "capture_threshold" => "a plan capture threshold",
         "plan_text_setting" => "plan text logging",
         "plan_attribution" => "query ids in the log",
@@ -1215,10 +1239,11 @@ public partial class ViewerServerTab
 
         PgIoStatsGrid.ItemsSource = PgDisplay.IoRows(rows);
         UpdateTruncationBanner(PgIoStatsDataStartBanner, await DataStartOrNullAsync(dataStartTask, "PostgreSQL I/O Stats"), startUtc);
-        PgIoNote.Text = PanelNote("pg_io_stats", rows.Count,
+        ShowNote(PgIoNote, PanelNoteParts("pg_io_stats", rows.Count,
+            "No I/O was recorded in this window.",
             "No backend / object / context combination did any I/O in this window. This view needs "
             + "PostgreSQL 16 or newer, where pg_stat_io exists; below that the collector does not run and "
-            + "the Overview tab says so.");
+            + "the Overview tab says so."));
 
         await LoadPgWriteStatsAsync(startUtc, endUtc);
         await LoadPgBufferUsageAsync(startUtc, endUtc);
