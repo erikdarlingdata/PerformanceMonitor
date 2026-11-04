@@ -55,6 +55,7 @@ import {
   sourceStrip,
   clampText,
   plainEmptyStrip,
+  noteStrip,
   disclosure,
   markPartialSubtitle,
   localizeIsoText,
@@ -121,6 +122,8 @@ export function emptyHeadline(desc, res) {
  */
 export function panelEmptyStrip(desc, res) {
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
+  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine);
   const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
   return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
@@ -276,8 +279,8 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
       floor,
       /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
       sourceStrip(res.data, desc),
-      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
-      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      typeof note === "string" && note.trim() ? noteStrip(desc, note) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
     ]);
   } catch (e) {
@@ -1292,10 +1295,11 @@ export function reapplyGridSort(tbody) {
    the table never renders with no columns. */
 export function visibleColumns(cols, rows) {
   const kept = cols.filter((c) => {
-    if (!c.hideWhenEmpty) return true;
+    if (!c.hideWhenEmpty && !c.hideWhenZero) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
-      return v != null && v !== "";
+      /* #7410: `hideWhenZero` also drops a column whose every value is 0, the counters only some engines fill (Top Query Shapes' temp blocks, WAL and peak memory). */
+      return v != null && v !== "" && !(c.hideWhenZero && Number(v) === 0);
     });
   });
   return kept.length ? kept : cols;
@@ -1370,7 +1374,7 @@ function cell(row, c) {
     const full = getPath(row, c.detailKey);
     if (typeof full === "string" && full !== "") {
       const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
-      const box = disclosure(text, detail, { max: 60 });
+      const box = disclosure(text, detail, { max: c.detailMax || 60 });
       box.classList.add("cell-detail");
       return el("td", { class: cls.join(" ") || null }, [box]);
     }

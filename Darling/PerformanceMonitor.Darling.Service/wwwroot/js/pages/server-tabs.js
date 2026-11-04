@@ -88,6 +88,13 @@ export { waitsPanel, drawWaitTrends, namedTrendPanel, drawNamedTrends } from "./
  * The tab registry, in the order the desktop viewer presents them. `build(server, ctx)` returns the tab's nodes;
  * `ctx` is `{ hours, label }` — the page's time range and its human label.
  */
+/* #7410: the two Index Bloat panels read one tool whose note is a long paragraph (population counts, accuracy figures, the exact-measurement
+   command) and whose empty text repeats it. The page says one sentence and keeps the tool's own text one click away. */
+const INDEX_BLOAT_PLAIN = {
+  noteShort: "These are estimates from catalog statistics, not page reads. An index with a reason in Not Measured has no estimate, which is not the same as healthy.",
+  emptyLine: "No index has a bloat estimate for this window yet.",
+};
+
 export const SERVER_TABS = [
   {
     id: "overview",
@@ -1407,7 +1414,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "facets",
         PG_PLAN_CAPTURE_READINESS_COLUMNS,
-        ctx.label + ", the newest reading of each facet in it; in the order to fix them, top to bottom; the remedy is per facet, and on Aurora/RDS it says which changes need a parameter group and a reboot",
+        ctx.label + ", newest reading of each setting, in the order to fix them",
         "No readiness state collected. The collector has not run for this server yet, or the window is shorter than its hourly run."
       ),
       /* #3607: the rest of the logging surface, directly under plan-capture readiness because it is the
@@ -1422,7 +1429,7 @@ export const POSTGRES_TABS = [
         { server },
         "facets",
         PG_LOGGING_AUDIT_COLUMNS,
-        "newest configuration snapshot; verdict describes the log lines each setting writes - partial means a threshold is filtering and is the recommended posture for log_min_duration_statement; the remedy is worded for this server's hosting flavour",
+        "newest configuration snapshot, one row per setting",
         "No configuration snapshot to audit. pg_server_config runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection - this is the absence of evidence, not a verdict about the server's logging."
       ),
       /* Directly UNDER the query shapes, because that is the question it answers (#2539). A statement whose
@@ -1514,7 +1521,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
-        ctx.label + ", newest 50 across every family; messages as PostgreSQL wrote them, SQL in them normalized, the statement never stored; Sightings counts re-reads of the same line, not repeats",
+        ctx.label + ", newest 50 across every family, statements never stored",
         "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
@@ -1876,10 +1883,11 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 25 },
         "indexes",
         PG_INDEX_BLOAT_COLUMNS,
-        ctx.label + ", estimated from catalog statistics with no page reads; a row with a reason instead of a number has no answer, which is not the same as healthy",
+        ctx.label + ", estimated from catalog statistics, no page reads",
         "Nothing recorded for this server yet. It is collected once a day, so a short window or a new install is empty here.",
         2,
-        "note"
+        "note", null, null, null, null, null, false, null,
+        INDEX_BLOAT_PLAIN
       ),
       /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
          whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
@@ -1905,7 +1913,8 @@ export const POSTGRES_TABS = [
         ctx.label + ", only the indexes that have an answer, biggest reclaimable bytes first",
         "Nothing recorded for this server in this window. It is collected once a day.",
         2,
-        "note"
+        "note", null, null, null, null, null, false, null,
+        INDEX_BLOAT_PLAIN
       ),
     ],
   },
@@ -1928,7 +1937,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
-        ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
+        ctx.label + ", newest first",
         "No configuration parameter changed value in this window."
       ),
       tablePanel(

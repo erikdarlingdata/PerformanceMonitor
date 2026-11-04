@@ -32,6 +32,25 @@ const RULES = {
     [/^No scans recorded/, "Candidate"],
   ],
   lastScan: [[/^No last-scan timestamp/, "None recorded"]],
+  /* get_pg_database_stats writes the same three paragraphs on every row, so a cell shows the verdict word and the paragraph opens on a click (#7410). */
+  spill: [
+    [/^No temp files/, "None"],
+    [/^This database wrote temp files[\s\S]*?A handful of very large/, "Few, very large files"],
+    [/^This database wrote temp files[\s\S]*?Mid-sized spill files/, "Mid-sized files"],
+    [/^This database wrote temp files[\s\S]*?Many small spill files/, "Many small files"],
+  ],
+  cache: [
+    [/^No block accesses/, "No accesses"],
+    [/^[\d.,]+% of block accesses[\s\S]*?At or above the conventional/, "At target"],
+    [/^[\d.,]+% of block accesses[\s\S]*?Below the conventional 99% target but not alarming/, "Slightly below target"],
+    [/^[\d.,]+% of block accesses[\s\S]*?Well below/, "Well below target"],
+  ],
+  rollback: [
+    [/^No transactions completed/, "No transactions"],
+    [/^[\d.,]+% of completed transactions[\s\S]*?A rollback storm/, "Rollback storm"],
+    [/^[\d.,]+% of completed transactions[\s\S]*?Higher than a healthy/, "Higher than usual"],
+    [/^[\d.,]+% of completed transactions[\s\S]*?A normal share/, "Normal"],
+  ],
   fillfactor: [[/^This table has a non-default fillfactor/, "Reserved space"]],
   toast: [[/^This table has out-of-line TOAST/, "Has TOAST"]],
   indexSkip: [
@@ -79,3 +98,12 @@ export const lastScanNoteWord = (text) => shortWord("lastScan", text);
 export const fillfactorNoteWord = (text) => shortWord("fillfactor", text);
 export const toastNoteWord = (text) => shortWord("toast", text);
 export const indexSkipWord = (text) => shortWord("indexSkip", text);
+export const spillWord = (text) => shortWord("spill", text);
+export const cacheWord = (text) => shortWord("cache", text);
+export const rollbackWord = (text) => shortWord("rollback", text);
+
+/** A column that shows a short word and opens the field's full paragraph on a click (#6154, #7410). What is true of every row goes in `hint`, the header tooltip. */
+export function detailColumn(key, label, word, hint, extra) {
+  const short = (row) => word(row[key]);
+  return { key, label, hint, display: (row) => short(row) ?? "—", sortValue: short, detailKey: key, ...extra };
+}

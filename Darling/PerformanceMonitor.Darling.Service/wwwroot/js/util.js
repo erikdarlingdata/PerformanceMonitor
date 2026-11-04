@@ -304,6 +304,34 @@ export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
 }
 
+/**
+ * #7410: a yellow note with a long tool text behind it. `short` is the one plain sentence the strip shows. The tool's whole note sits
+ * behind "More detail" (the same disclosure plainEmptyStrip uses), so nothing is lost.
+ */
+export function noticeStripWithDetail(short, full) {
+  if (typeof full !== "string" || !full.trim() || plainText(full) === short) return noticeStrip(short);
+  return el("div", { class: "strip notice plain-note", role: "status" }, [
+    localizeIsoText(short),
+    disclosure("More detail", localizeIsoText(plainText(full)), { title: "What the read said, in full" }),
+  ]);
+}
+
+/** A note longer than this many characters shows its first sentence and keeps the rest behind "More detail" (#7410). */
+const LONG_NOTE_CHARS = 300;
+
+/**
+ * #7410: the strip a read's `note` draws above a grid that has rows. A panel that names `noteShort` shows that sentence. Any other note
+ * longer than LONG_NOTE_CHARS shows its first sentence and the rest one click away, so a tool's paragraph is never a wall above the rows.
+ * A short note is drawn as it always was.
+ */
+export function noteStrip(desc, note) {
+  if (desc && typeof desc.noteShort === "string" && desc.noteShort) return noticeStripWithDetail(desc.noteShort, note);
+  const text = plainText(note);
+  if (text.length <= LONG_NOTE_CHARS) return noticeStrip(note);
+  const m = /^(.{20,240}?[.!?])(\s|$)/s.exec(text);
+  return noticeStripWithDetail(m ? m[1] : text.slice(0, 200).trimEnd() + "…", note);
+}
+
 /** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
     yellow `strip notice`, which is for a caveat about otherwise good data. `caveat` is true when the line also carries one (a cut list, a
     shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. */

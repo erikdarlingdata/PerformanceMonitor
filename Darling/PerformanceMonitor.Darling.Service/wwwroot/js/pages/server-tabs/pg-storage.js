@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
+import { detailColumn, bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
 
 /* The suppression count is a first-class tile rather than a per-row detail, because the usual cause is one
    instance-wide permissions gap: pg_stats is filtered by SELECT privilege and pg_monitor does not grant it,
@@ -31,13 +31,6 @@ export const PG_INDEX_USAGE_STATS = [
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
   { key: "truncated", pageCut: "The window held more indexes than the grid below lists.", label: "Truncated", format: "bool" },
 ];
-
-/* #6154: a column whose read writes a paragraph per row. The cell shows the short word `word(text)` gives, sorts and filters on it, and the
-   full text opens under it on a click (panels.js `detailKey`). What is true of every row goes in `hint`, the header tooltip. */
-function detailColumn(key, label, word, hint, extra) {
-  const short = (row) => word(row[key]);
-  return { key, label, hint, display: (row) => short(row) ?? "—", sortValue: short, detailKey: key, ...extra };
-}
 
 export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "schema_name", label: "Schema" },
