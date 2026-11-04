@@ -52,6 +52,7 @@ class FakeNode {
 globalThis.Node = FakeNode;
 globalThis.document = {
   body: new FakeNode("body"),
+  querySelectorAll: () => [],
   createElement: (t) => new FakeNode(t),
   createElementNS: (ns, t) => new FakeNode(t),
   createTextNode: (t) => new FakeNode("#text", t),

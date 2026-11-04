@@ -69,6 +69,7 @@ globalThis.MutationObserver = class { observe() {} disconnect() {} };
 if (typeof globalThis.location === "undefined") globalThis.location = { hash: "#/ag" };
 globalThis.document = {
   activeElement: null,
+  querySelectorAll: () => [],
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
@@ -78,6 +79,7 @@ globalThis.document = {
 globalThis.Node = FakeNode;
 globalThis.document = {
   activeElement: null,
+  querySelectorAll: () => [],
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
