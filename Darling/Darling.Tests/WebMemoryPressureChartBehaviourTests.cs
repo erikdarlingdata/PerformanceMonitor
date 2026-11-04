@@ -109,7 +109,7 @@ public sealed class WebMemoryPressureChartBehaviourTests
     public void ADataAnswerThatCarriesAWindowNote_DrawsItOnTheGrid_AndNotOnTheChart()
     {
         var r = Run("floor");
-        var notes = r.GetProperty("notices").EnumerateArray().Select(n => n.GetString()!).Where(n => n.Contains("partial window", StringComparison.Ordinal)).ToArray();
+        var notes = r.GetProperty("notices").EnumerateArray().Select(n => n.GetString()!).Where(n => n.Contains("partial window", StringComparison.OrdinalIgnoreCase)).ToArray();
         Assert.Single(notes);
         Assert.Equal(1, r.GetProperty("tableRows").GetInt32());
     }

@@ -388,6 +388,27 @@ public sealed class ViewerRecommendationCardTests
             Remediation = remediation,
         });
 
+    [Theory]
+    [InlineData("DISK_SPACE", false)]
+    [InlineData("DB_CONFIG", false)]
+    [InlineData("CONFIG_MAXDOP", false)]
+    [InlineData("LCK_M_S", true)]
+    [InlineData("CPU_SQL_PERCENT", true)]
+    public void Card_ShowOpenInActiveQueries_FollowsWhetherRunningQueriesCanExplainTheRoot(string rootFactKey, bool shown)
+    {
+        var start = new DateTime(2026, 7, 1, 10, 0, 0, DateTimeKind.Utc);
+        var card = new RecommendationCardViewModel(new RecommendationItem
+        {
+            Severity = RecommendationSeverity.Warning,
+            Title = "t",
+            ServerId = 7,
+            WindowStartUtc = start,
+            WindowEndUtc = start.AddHours(2),
+            RootFactKey = rootFactKey,
+        });
+        Assert.Equal(shown, card.ShowOpenInActiveQueries);
+    }
+
     // ── Incident-vs-config-fix gate on the deep-link (fixes the #1427 "shows on every finding" bug) ──
 
     [Fact]

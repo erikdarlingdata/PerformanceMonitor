@@ -1384,7 +1384,10 @@ public sealed class DarlingMcpTools
                         // #2138: the machine-first projection — see analyze_server's twin field.
                         structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the viewer's rule.
-                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation)
+                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation),
+                        // #7416: the root is a standing state (a setting, a volume's free space), true at every hour
+                        // whatever is running, so no running query explains the card and the Queries link is not offered.
+                        standing_state = FactKinds.IsStandingStateKey(f.RootFactKey)
                     };
                 })
             }, McpHelpers.JsonOptions), notice);

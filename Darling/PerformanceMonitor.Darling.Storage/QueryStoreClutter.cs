@@ -96,6 +96,33 @@ public static class QueryStoreClutter
     public const string ReasonReplica = "qs_read_only_replica";
     public const string ReasonNotMeasured = "not_measured";
 
+    /// <summary>
+    /// A reason token in words for a person (#7416): <c>qs_off</c> reads "Query Store off". The MCP payload keeps the tokens, which a
+    /// client branches on. A token outside the closed set above is printed as it is. A band of Unknown is "not graded" (nothing was
+    /// judged: Query Store is off, the database is a read-only replica, or the window held nothing), and the row's text says so.
+    /// </summary>
+    public static string ReasonText(string token) => token switch
+    {
+        ReasonReadCostDominant => "Read cost dominates",
+        ReasonPlanChurnHigh => "High plan churn",
+        ReasonOneShotPlans => "Mostly one-shot plans",
+        ReasonPlansAtCap => "Plans per query at the cap",
+        ReasonStorageNearCap => "Storage near the cap",
+        ReasonQueryStoreReadOnly => "Query Store read-only",
+        ReasonQueryStoreOff => "Query Store off",
+        ReasonReplica => "Query Store read-only (replica)",
+        ReasonNotMeasured => "Nothing measured in this window",
+        _ => token,
+    };
+
+    /// <summary>The reasons of a row as one line: the words, and "not graded" after them when the band is Unknown.</summary>
+    public static string ReasonsLine(HealthSeverity verdict, IEnumerable<string> reasons)
+    {
+        var words = string.Join(", ", reasons.Select(ReasonText));
+        if (verdict != HealthSeverity.Unknown) return words;
+        return words.Length == 0 ? "Not graded" : words + " (not graded)";
+    }
+
     /// <summary>The <c>actual_state</c> token for a Query Store that is not recording at all.</summary>
     private const string StateOff = "OFF";
 

@@ -607,12 +607,14 @@ internal static class TrendPayloads
     /// takes a gauge's null for an unknown rate.
     /// </summary>
     public static Dictionary<string, object?> PerfmonLatestRow(
-        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType)
+        string counterName, string instanceName, long value, long? deltaValue, long? sampleIntervalSeconds, int? cntrType, string? objectName = null)
     {
         var row = new Dictionary<string, object?>
         {
             ["counter_name"] = counterName,
             ["instance_name"] = instanceName,
+            /* #7416: the perfmon object the counter belongs to. The same counter and instance can come from two objects (Transaction Delay, _Total), and without this the two rows read alike. */
+            ["object_name"] = objectName,
             ["value"] = value,
             ["delta_value"] = deltaValue,
             ["cntr_type"] = cntrType,
