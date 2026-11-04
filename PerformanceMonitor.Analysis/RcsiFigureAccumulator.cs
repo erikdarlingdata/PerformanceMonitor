@@ -58,12 +58,17 @@ public sealed class RcsiFigureAccumulator
     }
 
     /// <summary>The figures for a tracked database, or null when it was never tracked. The percent is the
-    /// whole-number reader share of reader plus writer waits, and 0 when there were none.</summary>
+    /// whole-number reader share of reader plus writer waits. With no reader or writer waits the share is
+    /// undefined: it is 0 when the database had no blocking events and no deadlocks (measured, nothing found),
+    /// and null when it had events or deadlocks that were not reader or writer waits (schema or bulk-update
+    /// locks, or deadlocks alone), so a share of 0 is never printed beside counts it does not describe.</summary>
     public RcsiInactionFigures? Get(string database)
     {
         if (!_byDatabase.TryGetValue(database, out var c)) return null;
         var denominator = c.Readers + c.Writers;
-        var pct = denominator > 0 ? (int)(100 * c.Readers / denominator) : 0;
+        int? pct = denominator > 0
+            ? (int)(100 * c.Readers / denominator)
+            : (c.Events > 0 || c.Deadlocks > 0 ? null : 0);
         return new RcsiInactionFigures(Clamp(c.Events), Clamp(c.Deadlocks), pct);
     }
 

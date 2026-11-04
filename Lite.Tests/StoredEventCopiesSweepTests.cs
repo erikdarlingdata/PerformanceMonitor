@@ -41,6 +41,7 @@ public class StoredEventCopiesSweepTests
         [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
         [("LocalDataService.Overview.cs", "v_deadlocks")] = 1,
         [("LocalDataService.DailySummary.cs", "v_deadlocks")] = 1,
+        [("DrillDownCollector.Config.cs", "v_deadlocks")] = 1, // #7448: the per-database RCSI deadlock count, DeadlockDistinctCount grouped by database
 
         /* The two last-capture reads, MAX(collection_time) with no time window: a batch that stored only copies of
            events already held still read the session, so its collection_time is a true capture. */
@@ -165,6 +166,7 @@ public class StoredEventCopiesSweepTests
             ["DuckDbFactCollector.Waits.cs"] = 1,
             ["LocalDataService.Overview.cs"] = 1,
             ["LocalDataService.DailySummary.cs"] = 1,
+            ["DrillDownCollector.Config.cs"] = 1,
         };
         var actual = LiteSources()
             .Select(p => (File: Path.GetFileName(p), Count: Regex.Matches(File.ReadAllText(p), @"StoredEventCopies\.DeadlockDistinctCount").Count))

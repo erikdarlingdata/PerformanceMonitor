@@ -126,7 +126,7 @@ VALUES ($1, $2, $3, $4, $2, 5000, 900, $5, 'suspended', $6, $7)",
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
             var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
-            foreach (var db in new[] { "ReadDb", "WriteDb", "QuietDb", "OutDb", "tempdb", "master" })
+            foreach (var db in new[] { "ReadDb", "WriteDb", "QuietDb", "OutDb", "SchemaDb", "DeadlockDb", "tempdb", "master" })
                 await SeedConfigAsync(connection, ct, end, db);
 
             /* ReadDb: three shared-lock waits and one exclusive wait (75 percent readers), and two deadlocks. */
@@ -139,6 +139,10 @@ VALUES ($1, $2, $3, $4, $2, 5000, 900, $5, 'suspended', $6, $7)",
             await SeedWaitsAsync(connection, ct, end.AddHours(-2).AddMinutes(30), "WriteDb", "Sch-M", 2, 400);
             /* OutDb: reader waits a day before the window, which the figures must not count. */
             await SeedWaitsAsync(connection, ct, end.AddHours(-30), "OutDb", "S", 4, 500);
+            /* SchemaDb: only schema locks, so there are events but no reader or writer wait to take a share of. */
+            await SeedWaitsAsync(connection, ct, end.AddHours(-2), "SchemaDb", "Sch-M", 2, 700);
+            /* DeadlockDb: a deadlock and no blocked-process wait at all. */
+            await SeedDeadlockAsync(connection, ct, end.AddHours(-2), "DeadlockDb");
             /* tempdb carries reader waits too: it still must not appear. */
             await SeedWaitsAsync(connection, ct, end.AddHours(-2), "tempdb", "S", 3, 600);
 
@@ -146,7 +150,7 @@ VALUES ($1, $2, $3, $4, $2, 5000, 900, $5, 'suspended', $6, $7)",
 
             var names = JsonSerializer.SerializeToElement(finding.DrillDown!["config_issues"]).EnumerateArray()
                 .Select(r => r.GetProperty("database").GetString()).Order().ToArray();
-            Assert.Equal(["OutDb", "QuietDb", "ReadDb", "WriteDb"], names);
+            Assert.Equal(["DeadlockDb", "OutDb", "QuietDb", "ReadDb", "SchemaDb", "WriteDb"], names);
 
             var read = Row(finding, "ReadDb");
             Assert.Equal(4, read.GetProperty("rcsi_blocking_events").GetInt32());
@@ -164,6 +168,28 @@ VALUES ($1, $2, $3, $4, $2, 5000, 900, $5, 'suspended', $6, $7)",
                 Assert.Equal(0, row.GetProperty("rcsi_blocking_events").GetInt32());
                 Assert.Equal(0, row.GetProperty("rcsi_deadlocks").GetInt32());
                 Assert.Equal(0, row.GetProperty("rcsi_reader_writer_pct").GetInt32());
+            }
+
+            /* Events or deadlocks without a single reader or writer wait: the counts stay and the share is unknown (null), not 0. */
+            var schema = Row(finding, "SchemaDb");
+            Assert.Equal(2, schema.GetProperty("rcsi_blocking_events").GetInt32());
+            Assert.Equal(0, schema.GetProperty("rcsi_deadlocks").GetInt32());
+            Assert.Equal(JsonValueKind.Null, schema.GetProperty("rcsi_reader_writer_pct").ValueKind);
+            var deadlockOnly = Row(finding, "DeadlockDb");
+            Assert.Equal(0, deadlockOnly.GetProperty("rcsi_blocking_events").GetInt32());
+            Assert.Equal(1, deadlockOnly.GetProperty("rcsi_deadlocks").GetInt32());
+            Assert.Equal(JsonValueKind.Null, deadlockOnly.GetProperty("rcsi_reader_writer_pct").ValueKind);
+
+            /* The consent text built from the drill-down row alone (no carried figures) states no percent for either. */
+            foreach (var unknown in new[] { "SchemaDb", "DeadlockDb" })
+            {
+                var action = new RemediationAction(
+                    "RCSI", "set", Array.Empty<ForcePlanTarget>(),
+                    new[] { new DbConfigTarget(unknown, DbConfigSetting.ReadCommittedSnapshotOn, "OFF") });
+                var disclosure = Assert.IsType<RiskDisclosure>(FactRiskDisclosure.GetForAction(action, finding));
+                var text = string.Join(" ", disclosure.RisksOfNotChanging.Select(r => r.Text));
+                Assert.DoesNotContain("%", text);
+                Assert.DoesNotContain("majority was writer/writer", text);
             }
 
             var target = Assert.Single(FactRemediation.CollectRcsiTargets(finding));
