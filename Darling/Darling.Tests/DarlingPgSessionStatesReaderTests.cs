@@ -496,6 +496,25 @@ public class DarlingPgSessionStatesReaderTests
         Assert.DoesNotContain("passing sighting", finding, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7381: a forgotten idle-in-transaction writer on a quiet target is the oldest holder at age 0, and
+    /// the severity band says Warning for it. The text must say the same thing in the same row rather than
+    /// "VACUUM lost nothing" alone.
+    /// </summary>
+    [Fact]
+    public void AnAgeOfZeroThatIsAlsoLongIdleInTransactionIsToldSoAndAgreesWithSeverity()
+    {
+        var row = Row(sampleCount: 10, horizonHolderSamples: 10, idleInTransactionSamples: 10,
+            peakHorizonAge: 0, peakStateDurationMs: 600_000);
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(row);
+
+        Assert.Equal("Warning", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Contains("never rose above 0", finding, StringComparison.Ordinal);
+        Assert.Contains("idle inside a transaction", finding, StringComparison.Ordinal);
+        Assert.Contains("OTHER axis", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
+    }
+
     /// <summary>The floor is 2 holder samples, so 2 of 2 with a real age is still Critical.</summary>
     [Fact]
     public void TwoHolderSamplesWithARealAgeAreStillCritical()
