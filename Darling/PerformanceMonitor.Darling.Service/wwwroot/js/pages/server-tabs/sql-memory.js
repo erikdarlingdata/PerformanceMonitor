@@ -34,6 +34,7 @@ export const PLAN_CACHE_STATS = [
   { key: "summary.total_plans", label: "Plans", format: "int" },
   { key: "summary.single_use_plans", label: "Single-use", format: "int" },
   { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
+  { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
   { key: "summary.total_size_mb", label: "Cached plans size", format: "mb" },
   { key: "summary.single_use_size_mb", label: "Single-use size", format: "mb" },
   { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },

@@ -51,7 +51,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
         "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current.";
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
-    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads'. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
+    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads'. bloat_level is decided by the compiled_* figures, which leave out parse trees and extended procedures: single_use_percent counts every cache entry, so it can read high on a cache that is NORMAL. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
     public static async Task<string> GetPlanCacheBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -79,6 +79,9 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             var totalSizeMb = rows.Sum(r => (long)r.TotalSizeMb);
             var singleUseSizeMb = rows.Sum(r => (long)r.SingleUseSizeMb);
             var (bloatLevel, bloatRecommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(rows);
+            var compiled = rows.Where(r => PlanCacheBloatRule.IsCompiled(r.CacheObjType)).ToList();
+            var compiledPlans = compiled.Sum(r => (long)r.TotalPlans);
+            var compiledSingleUse = compiled.Sum(r => (long)r.SingleUsePlans);
 
             return JsonSerializer.Serialize(new
             {
@@ -93,6 +96,10 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
                     total_size_mb = totalSizeMb,
                     single_use_size_mb = singleUseSizeMb,
                     wasted_percent = totalSizeMb > 0 ? Math.Round(100.0 * singleUseSizeMb / totalSizeMb, 1) : 0,
+                    compiled_plans = compiledPlans,
+                    compiled_single_use_plans = compiledSingleUse,
+                    compiled_single_use_percent = compiledPlans > 0 ? Math.Round(100.0 * compiledSingleUse / compiledPlans, 1) : 0,
+                    compiled_single_use_size_mb = compiled.Sum(r => (long)r.SingleUseSizeMb),
                     bloat_level = bloatLevel,
                     bloat_recommendation = bloatRecommendation
                 },

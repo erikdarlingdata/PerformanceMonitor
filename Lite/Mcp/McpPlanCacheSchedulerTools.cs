@@ -19,7 +19,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanCacheSchedulerTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
-    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans per cache/object type, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads' or Forced Parameterization. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
+    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans per cache/object type, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads' or Forced Parameterization. bloat_level is decided by the compiled_* figures, which leave out parse trees and extended procedures: single_use_percent counts every cache entry, so it can read high on a cache that is NORMAL. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
     public static async Task<string> GetPlanCacheBloat(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -61,6 +61,10 @@ public sealed class McpPlanCacheSchedulerTools
                     total_plans = summary.TotalPlans,
                     single_use_plans = summary.SingleUsePlans,
                     single_use_percent = singleUsePercent,
+                    compiled_plans = summary.CompiledPlans,
+                    compiled_single_use_plans = summary.CompiledSingleUsePlans,
+                    compiled_single_use_percent = summary.CompiledPlans > 0 ? Math.Round(100.0 * summary.CompiledSingleUsePlans / summary.CompiledPlans, 1) : 0,
+                    compiled_single_use_size_mb = summary.CompiledSingleUseSizeMb,
                     oldest_plan_create_time = summary.OldestPlanCreateTime?.ToString("o"),
                     bloat_level = bloat.Level,
                     bloat_recommendation = bloat.Recommendation
