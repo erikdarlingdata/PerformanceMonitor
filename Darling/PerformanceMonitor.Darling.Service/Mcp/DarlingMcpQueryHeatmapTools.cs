@@ -207,6 +207,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 time_bin_count = cells.Select(c => c.TimeBucket).Distinct().Count(),
                 cell_count = cells.Count,
                 /* Which slice of [window_start, window_end] actually came back. When truncated is true the

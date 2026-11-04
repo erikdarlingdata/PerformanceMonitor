@@ -333,6 +333,110 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     private readonly ConcurrentDictionary<int, ConcurrentQueue<string>> _waitStatsClearWarnings = new();
 
     /// <inheritdoc />
+    public IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime)
+        => new BaselineSnapshot(this, serverId, groups, keys, collectionTime);
+
+    /// <summary>#7419: see <see cref="IDeltaBaselineSnapshot"/>. Restores only what still carries the run's own collection
+    /// time, so a baseline cleared or replaced by anyone else after the capture is never overwritten.</summary>
+    private sealed class BaselineSnapshot : IDeltaBaselineSnapshot
+    {
+        private readonly CollectorDeltaCalculator _owner;
+        private readonly int _serverId;
+        private readonly DateTime _time;
+        private List<(string Group, string Key, bool Existed, long Value, DateTime? Timestamp)>? _entries = new();
+        private List<(string Group, bool Existed, DateTime Current, DateTime? Previous)>? _passes = new();
+
+        public BaselineSnapshot(CollectorDeltaCalculator owner, int serverId, IReadOnlyList<string> groups,
+            IReadOnlyCollection<string> keys, DateTime time)
+        {
+            _owner = owner;
+            _serverId = serverId;
+            _time = time;
+            owner._cache.TryGetValue(serverId, out var serverCache);
+            owner._passes.TryGetValue(serverId, out var serverPasses);
+            foreach (var group in groups)
+            {
+                ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>? groupCache = null;
+                serverCache?.TryGetValue(group, out groupCache);
+                foreach (var key in keys)
+                {
+                    if (groupCache is not null && groupCache.TryGetValue(key, out var existing))
+                    {
+                        _entries.Add((group, key, true, existing.Value, existing.Timestamp));
+                    }
+                    else
+                    {
+                        _entries.Add((group, key, false, 0L, null));
+                    }
+                }
+
+                if (serverPasses is not null && serverPasses.TryGetValue(group, out var pass))
+                {
+                    _passes.Add((group, true, pass.Current, pass.Previous));
+                }
+                else
+                {
+                    _passes.Add((group, false, default, null));
+                }
+            }
+        }
+
+        public void Restore()
+        {
+            var entries = _entries;
+            var passes = _passes;
+            _entries = null;
+            _passes = null;
+            if (entries is null || passes is null)
+            {
+                return;
+            }
+
+            if (_owner._cache.TryGetValue(_serverId, out var serverCache))
+            {
+                foreach (var (group, key, existed, value, timestamp) in entries)
+                {
+                    if (!serverCache.TryGetValue(group, out var groupCache)
+                        || !groupCache.TryGetValue(key, out var now)
+                        || now.Timestamp != _time)
+                    {
+                        continue; /* not written by this run, or cleared since */
+                    }
+
+                    if (existed)
+                    {
+                        groupCache[key] = (value, timestamp);
+                    }
+                    else
+                    {
+                        groupCache.TryRemove(key, out _);
+                    }
+                }
+            }
+
+            if (_owner._passes.TryGetValue(_serverId, out var serverPasses))
+            {
+                foreach (var (group, existed, current, previous) in passes)
+                {
+                    if (!serverPasses.TryGetValue(group, out var now) || now.Current != _time)
+                    {
+                        continue;
+                    }
+
+                    if (existed)
+                    {
+                        serverPasses[group] = (current, previous);
+                    }
+                    else
+                    {
+                        serverPasses.TryRemove(group, out _);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public IReadOnlyDictionary<string, long> PeekBaselines(int serverId, string collectorName)
     {
         if (!_cache.TryGetValue(serverId, out var serverCache)
