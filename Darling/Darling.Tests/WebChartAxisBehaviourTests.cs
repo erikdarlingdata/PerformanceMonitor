@@ -95,6 +95,46 @@ public sealed class WebChartAxisBehaviourTests
         Assert.True(sweep.GetProperty("repeatCount").GetInt32() == 0, sweep.GetProperty("repeats").ToString());
     }
 
+    /// <summary>A chart of counts keeps every gridline on a whole number, so a small-count axis reads 0, 1, 2 and never "1 1 1 0 0 0".
+    /// (This replaces a source-text pin of niceScale's signature in ChartIntegerTicksPinTests, #5833.)</summary>
+    [Fact]
+    public void ACountAxis_KeepsWholeNumberTicks_WhereTheSameRangeOtherwiseStepsByFractions()
+    {
+        var a = Run().GetProperty("integerAxis");
+        foreach (var c in a.GetProperty("withOption").EnumerateArray())
+        {
+            var max = c.GetProperty("max").GetDouble();
+            var ticks = c.GetProperty("ticks").EnumerateArray().Select(t => t.GetDouble()).ToArray();
+            Assert.All(ticks, t => Assert.Equal(Math.Round(t), t));
+            Assert.Equal(ticks.Length, ticks.Distinct().Count());
+            Assert.True(ticks[^1] >= max);
+        }
+
+        Assert.Contains(a.GetProperty("without").EnumerateArray().Select(t => t.GetDouble()), t => t != Math.Round(t));
+        var drawn = Strings(a.GetProperty("drawn")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(drawn.Length, drawn.Distinct().Count());
+    }
+
+    /// <summary>#7488: a size axis whose labels step up to GB puts its ticks on whole GB (20, 40, 60), not on whole MB that read 19.5 / 39.1 / 58.6.
+    /// A chart whose largest value stays under 1,024 MB keeps the ticks it had. The expected words are built in Node with the page's own number
+    /// formatter, so the test holds in any locale.</summary>
+    [Fact]
+    public void ASizeAxis_ThatStepsUpToGb_PicksItsTicksInGb_AndASmallOneKeepsItsMbTicks()
+    {
+        var a = Run().GetProperty("sizeAxis");
+        Assert.Equal(Strings(a.GetProperty("bigExpected")), Strings(a.GetProperty("big")));
+        Assert.NotEqual(Strings(a.GetProperty("bigWithout")), Strings(a.GetProperty("big")));
+
+        // Composed panels: both the left axis and the overlay axis on the right.
+        Assert.Equal(Strings(a.GetProperty("composedLeftExpected")), Strings(a.GetProperty("composedLeft")));
+        Assert.Equal(Strings(a.GetProperty("composedRightExpected")), Strings(a.GetProperty("composedRight")));
+
+        // Under 1,024 MB the axis is exactly the one it drew without the size unit.
+        Assert.Equal(Strings(a.GetProperty("smallWithout")), Strings(a.GetProperty("small")));
+        Assert.Equal(Strings(a.GetProperty("edgeWithout")), Strings(a.GetProperty("edge")));
+        Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith("MB", l, StringComparison.Ordinal));
+    }
+
     /// <summary>The Custom View chart: 80,000 MB reads "78.1 GB" and the axis margins are as wide as the widest label, left and
     /// right, so no digit is cut. A chart with small numbers keeps its 58 px left margin and 56 px right gutter.</summary>
     [Fact]
