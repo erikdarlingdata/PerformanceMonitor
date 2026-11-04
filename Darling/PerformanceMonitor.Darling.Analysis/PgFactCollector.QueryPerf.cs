@@ -776,7 +776,7 @@ compared AS
         -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
         -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
         -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
-        (l.cpu_per_exec - b.cpu_per_exec) * l.execs AS lost_cpu_us,
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
@@ -799,11 +799,11 @@ candidates AS
     FROM compared
     WHERE regression_factor >= 2
     -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
-    -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
-    -- regression_factor and the scorer.
+    -- near-zero-cost queries whose ratios are all sampling jitter. Magnitude ranking is the ORDER BY below (#7417).
     AND   latest_total_cpu_us >= 10000000
-    -- #7417: and the regression must have LOST that much of it (PlanRegressionRanking.MinimumLostCpuMicroseconds).
-    AND   lost_cpu_us >= " + PerformanceMonitor.Analysis.PlanRegressionRanking.MinimumLostCpuMicrosecondsSql + @"
+    -- #7417: and a CPU-path regression must have LOST that much of it (PlanRegressionRanking). A duration-path row keeps the
+    -- bar above: it got slower through waits more than CPU, so its CPU loss is small by construction.
+    AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
     -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code and
     -- cannot be fixed by anyone monitoring. Left out BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
     AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
@@ -816,7 +816,7 @@ candidates AS
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
-    ORDER BY lost_cpu_us DESC, regression_factor DESC
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
     LIMIT 100
 )
 SELECT
@@ -846,7 +846,7 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = c.database_name
   AND x.query_id = c.query_id
-ORDER BY c.lost_cpu_us DESC, c.regression_factor DESC";
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution
@@ -1204,7 +1204,9 @@ ORDER BY c.lost_cpu_us DESC, c.regression_factor DESC";
                advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
             if (offenderCount > 0)
             {
-                fact.Metadata["worst_regression_factor"] = worstFactor;
+                /* #7417: the LEAD offender's factor (the one that lost the most CPU), the figure the advice pairs with the
+                   lead's own per-execution costs below. Another kept row can have a larger factor. */
+                fact.Metadata["lead_regression_factor"] = worstFactor;
                 fact.Metadata["worst_query_id"] = worstQueryId;
                 fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
                 fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;

@@ -13,7 +13,7 @@ namespace PerformanceMonitor.Analysis;
 /// Darling (<c>PgFactCollector.QueryPerf</c>) and Lite (<c>DuckDbFactCollector.QueryPerf</c>) both build their SQL from
 /// these members, so the two cannot drift.
 /// <para>The read used to rank by the regression factor alone. A statement at 455 us against 21 us of CPU per execution
-/// is 21.7x and led the card, with its force statement first, ahead of a 1.2 s against 74 ms statement (16.4x) that
+/// is 21.7x and led the card, with its force statement first, ahead of a 1.2 s against 74 ms statement (16.2x) that
 /// cost the server far more. The ranking key is now the CPU the regression lost: the difference per execution between
 /// the latest plan and the best plan, times the latest plan's executions in the window. The factor breaks ties.</para>
 /// </summary>
@@ -24,7 +24,7 @@ public static class PlanRegressionRanking
     /// near-zero costs), applied now to the part of that total the regression added. A statement whose latest plan
     /// burned 10 seconds but lost less than 10 of them to the plan change is mostly the cost it always had, and a
     /// 455 us statement needs over 23,000 executions in the window to clear it, at which point it really is 10 seconds
-    /// of lost CPU and ranks below a larger loss.</summary>
+    /// of lost CPU and ranks below a larger loss. It applies on the CPU path only, see <see cref="LostCpuFloorSql"/>.</summary>
     public static long MinimumLostCpuMicroseconds { get; } =
         long.Parse(MinimumLostCpuMicrosecondsSql, System.Globalization.CultureInfo.InvariantCulture);
 
@@ -37,4 +37,22 @@ public static class PlanRegressionRanking
     /// test holding the figures uses.</summary>
     public static double LostCpuMicroseconds(double latestCpuPerExec, double bestCpuPerExec, double latestExecutions) =>
         (latestCpuPerExec - bestCpuPerExec) * latestExecutions;
+
+    /// <summary>The SQL expression for <c>lost_cpu_us</c>, over the <c>l</c> (latest plan) and <c>b</c> (best plan) aliases
+    /// every one of the four reads uses: the fact reads and the drill-down reads in both products. The drill-down must
+    /// rank its rows the way the fact does, or the force statement (built from the drill-down's rows) would not lead with
+    /// the fact's lead offender.</summary>
+    public const string LostCpuExpressionSql = "(l.cpu_per_exec - b.cpu_per_exec) * l.execs";
+
+    /// <summary>The floor as a WHERE condition, over the <c>compared</c> or <c>scored</c> CTE's columns. It applies to a row
+    /// on the CPU path only (CPU at least 2x, the factor is the CPU ratio). A row on the duration path (duration at least
+    /// 4x with CPU only 1.25x to 2x) is a statement that got slower through waits or contention more than CPU, and its
+    /// CPU loss is small by construction, so a CPU floor would drop exactly the rows that path exists to keep. It keeps
+    /// the old bar, the latest plan's 10 CPU-seconds, and still ranks by <c>lost_cpu_us</c> and then the factor.</summary>
+    public const string LostCpuFloorSql =
+        "(lost_cpu_us >= " + MinimumLostCpuMicrosecondsSql + " OR latest_cpu / NULLIF(best_cpu, 0) < 2)";
+
+    /// <summary>The ORDER BY of all four reads: the CPU lost first, the factor to break ties. The first row leads the card
+    /// and the first force target.</summary>
+    public const string OrderBySql = "lost_cpu_us DESC, regression_factor DESC";
 }

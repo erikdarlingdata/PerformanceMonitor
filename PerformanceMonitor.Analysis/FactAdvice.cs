@@ -978,7 +978,7 @@ public static class FactAdvice
     /// <summary>#6267: PLAN_REGRESSION fired on a cost regression (a fact raised by timeouts or errors alone carries no cost
     /// figures), the case the "force the historically faster plan" text is true for.</summary>
     private static bool CostRegressionFired(IReadOnlyDictionary<string, Fact> facts) =>
-        Fired(facts, "PLAN_REGRESSION") && FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor") is not null;
+        Fired(facts, "PLAN_REGRESSION") && FactMeta(facts, "PLAN_REGRESSION", "lead_regression_factor") is not null;
 
     /// <summary>
     /// Names the query-level findings that ACTUALLY co-fired this window (plan regression, parameter
@@ -1843,7 +1843,7 @@ public static class FactAdvice
     private static AdviceBlock ComposePlanRegression(IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["PLAN_REGRESSION"];
-        var factor = FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor");
+        var factor = FactMeta(facts, "PLAN_REGRESSION", "lead_regression_factor");
         var failureOffenders = FactMeta(facts, "PLAN_REGRESSION", "failure_offender_count");
         /* #6267: a fact raised by timeouts or errors alone carries no cost figures. */
         if (factor is null)
