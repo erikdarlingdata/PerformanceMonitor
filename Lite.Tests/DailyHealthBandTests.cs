@@ -562,7 +562,7 @@ public class DailyHealthBandTests
         Assert.Contains("Top wait: CXPACKET", line);
         Assert.Contains("High-CPU samples: 4", line);
         Assert.Contains("Total wait: 150.0 s", line);
-        Assert.Contains("Unique queries: 87", line);
+        Assert.Contains("Queries stored: 87", line);
     }
 
     [Fact]
@@ -584,12 +584,12 @@ public class DailyHealthBandTests
     public void BuildKeyMetricsLine_NullUniqueQueries_SaysNotMaterialized_NotZero()
     {
         var notCarried = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, null);
-        Assert.Contains("Unique queries: " + DailyHealthBandCalculator.UniqueQueriesNotMaterialized, notCarried);
-        Assert.DoesNotContain("Unique queries: 0", notCarried);
+        Assert.Contains("Queries stored: " + DailyHealthBandCalculator.UniqueQueriesNotMaterialized, notCarried);
+        Assert.DoesNotContain("Queries stored: 0", notCarried);
         Assert.Equal("not materialized at this tier", DailyHealthBandCalculator.UniqueQueriesNotMaterialized);
 
         var measuredZero = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, 0);
-        Assert.Contains("Unique queries: 0", measuredZero);
+        Assert.Contains("Queries stored: 0", measuredZero);
         Assert.DoesNotContain(DailyHealthBandCalculator.UniqueQueriesNotMaterialized, measuredZero);
     }
 

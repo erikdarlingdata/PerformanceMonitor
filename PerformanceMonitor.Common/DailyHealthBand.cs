@@ -554,7 +554,7 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// The day-detail key-metrics one-liner from a day's roll-up: top wait type, high-CPU sample count,
-        /// total wait time, and unique query count. Formatting lives here (shared by both apps, unit-testable)
+        /// total wait time, and stored query count. Formatting lives here (shared by both apps, unit-testable)
         /// so the two hosts render the line identically.
         ///
         /// <para>#3653 A6: <paramref name="uniqueQueries"/> is <c>null</c> when the store's rollup tier never
@@ -573,7 +573,7 @@ namespace PerformanceMonitor.Common
                 : UniqueQueriesNotMaterialized;
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Unique queries: {3}",
+                "Top wait: {0}     High-CPU samples: {1:N0}     Total wait: {2}     Queries stored: {3}",
                 wait, highCpuEvents, totalWait, queries);
         }
 

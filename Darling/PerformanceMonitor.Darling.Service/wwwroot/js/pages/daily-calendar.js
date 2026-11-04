@@ -174,7 +174,7 @@ function metricsLine(d) {
   const queries = d.unique_queries == null ? "not materialized at this tier" : numberText(d.unique_queries);
   return (
     "Top wait: " + wait + "   High-CPU samples: " + numberText(d.high_cpu_events ?? 0) +
-    "   Total wait: " + numberText(d.total_wait_time_sec ?? 0) + " s   Unique queries: " + queries
+    "   Total wait: " + numberText(d.total_wait_time_sec ?? 0) + " s   Queries stored: " + queries
   );
 }
 
