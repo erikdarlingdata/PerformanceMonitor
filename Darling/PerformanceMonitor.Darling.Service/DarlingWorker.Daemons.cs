@@ -998,7 +998,8 @@ public sealed partial class DarlingWorker
         await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
-            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas),
+            PerformanceMonitor.Collectors.PgOwnStatement.Mark(
+                PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)),
             connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

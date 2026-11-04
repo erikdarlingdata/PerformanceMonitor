@@ -237,6 +237,9 @@ public sealed class DarlingMcpPgStatementTools
                 /* #6131: a preview by default (full_text opts back in), flagged when it cut. */
                 query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, QueryTextPreviewLength),
                 query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength,
+                /* #7567: one of the monitoring service's own statements (its collectors' reads, the wait sampler's sleep). Kept
+                   in the list, since a heavy collector is worth seeing, but marked so it is not read as the application's. */
+                service_statement = r.IsServiceStatement,
             };
         })
         .ToList();

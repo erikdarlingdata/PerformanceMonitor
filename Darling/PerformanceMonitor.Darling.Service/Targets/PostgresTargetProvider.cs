@@ -99,7 +99,7 @@ public sealed class PostgresTargetProvider : ITargetProvider
                 nameof(connection));
         }
 
-        var command = new NpgsqlCommand(query.Text, npgsqlConnection) { CommandTimeout = commandTimeoutSeconds };
+        var command = new NpgsqlCommand(PgOwnStatement.Mark(query.Text), npgsqlConnection) { CommandTimeout = commandTimeoutSeconds };
 
         foreach (var parameter in query.Parameters)
         {

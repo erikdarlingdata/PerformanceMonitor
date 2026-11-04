@@ -98,6 +98,8 @@ WITH stmt_series AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    /* #7567: the service's own statements (PgOwnStatement.Marker) are no bad actor and no part of the window's total. */
+    AND   " + PerformanceMonitor.Collectors.PgOwnStatement.NotOwnOnStats + @"
     WINDOW identity AS (
         PARTITION BY queryid, database_id, user_id, toplevel
         ORDER BY collection_time

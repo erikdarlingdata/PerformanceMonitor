@@ -52,7 +52,16 @@ public static class DarlingPgStatementReader
            ago genuinely has none, and after a major-version upgrade re-keys queryid the new ids have none until
            the next refresh. Distinguishing "not captured yet" from "" is what stops a caller reading an empty
            string as the query. */
-        string? QueryText = null);
+        string? QueryText = null)
+    {
+        /// <summary>
+        /// #7567: true when the statement is one of this service's own collector statements (the trailing
+        /// <see cref="PerformanceMonitor.Collectors.PgOwnStatement.Marker"/> comment in its stored text). Derived from the
+        /// text, so it is false for a statement whose text has not been captured yet, and for one another client ran first
+        /// since the last <c>pg_stat_statements_reset()</c>: both err toward showing it as the application's.
+        /// </summary>
+        public bool IsServiceStatement => PerformanceMonitor.Collectors.PgOwnStatement.IsOwn(QueryText);
+    }
 
     /// <summary>
     /// One page of the top-queries read, plus the denominator its shares are taken over.

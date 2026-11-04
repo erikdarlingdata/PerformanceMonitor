@@ -43,6 +43,7 @@ WITH per_collection AS (
            SUM(delta_total_exec_time_ms)::DOUBLE PRECISION AS stmt_ms
     FROM pg_statement_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   " + PerformanceMonitor.Collectors.PgOwnStatement.NotOwnOnStats + @"
     GROUP BY queryid, collection_time
 ),
 collections AS (

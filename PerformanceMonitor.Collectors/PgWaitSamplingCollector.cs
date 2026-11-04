@@ -243,21 +243,22 @@ WHERE a.pid <> pg_backend_pid()
     public static string SamplerBatchSql(bool hasQueryId)
     {
         var snapshot = SamplerSnapshotSql(hasQueryId);
-        var sb = new System.Text.StringBuilder();
-        sb.Append(snapshot).Append(';');
+        var statements = new System.Collections.Generic.List<string> { snapshot };
         for (var i = 1; i < SamplerSnapshotsPerCycle; i++)
         {
             /* InvariantCulture, like every number this file puts in SQL or state: StringBuilder.Append(double)
                formats under the host's culture, and a half-second period on a comma-decimal host would emit
                pg_sleep(0,5) - a review catch on #3645 before any period but 1.0 ever shipped. */
-            sb.Append("\nSELECT pg_sleep(")
-              .Append((SamplerPeriodMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture))
-              .Append(");")
-              .Append("\nSELECT pg_stat_clear_snapshot();")
-              .Append(snapshot).Append(';');
+            statements.Add("SELECT pg_sleep("
+                + (SamplerPeriodMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")");
+            statements.Add("SELECT pg_stat_clear_snapshot()");
+            statements.Add(snapshot);
         }
 
-        return sb.ToString();
+        /* #7567: pg_stat_statements stores each statement of a batch on its own, so each carries its own marker
+           (PgOwnStatement.Marker, trailing: a leading comment is cut from the stored text). Without it the sampler's
+           pg_sleep is the top row of the view on a quiet server and Analysis reads it as the application's. */
+        return PgOwnStatement.MarkBatch(statements);
     }
 
     private static string QueryText => @"
