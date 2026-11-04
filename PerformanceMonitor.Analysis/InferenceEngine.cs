@@ -21,7 +21,10 @@ namespace PerformanceMonitor.Analysis;
 /// </summary>
 public class InferenceEngine
 {
-    private const double MinimumSeverityThreshold = 0.5;
+    /// <summary>The severity an incident fact must clear to root a story. Internal because the scorer and
+    /// the relationship graphs read it as the bar a PEER fact must clear to corroborate or link
+    /// another (<see cref="FactScorer.ClearsRootBar"/>, #7464).</summary>
+    internal const double MinimumSeverityThreshold = 0.5;
     /// <summary>Hops the greedy traversal will follow from a root before it stops (a safety limit); the
     /// longest story path is therefore this plus the root — <see cref="StoryConfidence.MaxPathNodes"/>.</summary>
     internal const int MaxPathDepth = 10;
