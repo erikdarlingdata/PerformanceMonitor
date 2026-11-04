@@ -38,11 +38,20 @@ public sealed class ChartRenderHelper
         chart.Plot.Clear();
     }
 
-    /// <summary>Shows the legend on a chart and tracks it for cleanup on the next refresh.</summary>
+    /// <summary>
+    /// Shows the legend on a chart and tracks it for cleanup on the next refresh. #7385: the legend runs horizontally and
+    /// wraps only when it does not fit the chart's width, so a chart pays for a second legend line only when it must (the
+    /// default is one line per series). <see cref="WrappedLegendLayout"/> gives the panel the wrapped height in the same render.
+    /// </summary>
     public void ShowChartLegend(ScottPlot.WPF.WpfPlot chart)
     {
-        _legendPanels[chart] = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
-        chart.Plot.Legend.FontSize = 13;
+        var panel = chart.Plot.ShowLegend(ScottPlot.Edge.Bottom);
+        _legendPanels[chart] = panel;
+        var legend = chart.Plot.Legend;
+        legend.FontSize = 13;
+        legend.Orientation = ScottPlot.Orientation.Horizontal;
+        legend.TightHorizontalWrapping = true;
+        chart.Plot.Layout.LayoutEngine = new WrappedLegendLayout(panel);
     }
 
     /// <summary>
@@ -52,18 +61,13 @@ public sealed class ChartRenderHelper
     public void SetLegendPanel(ScottPlot.WPF.WpfPlot chart, ScottPlot.IPanel? panel) => _legendPanels[chart] = panel;
 
     /// <summary>
-    /// Sets up an empty chart with dark theme, Y-axis label, legend, and a centered "No Data" annotation.
+    /// Sets up an empty chart with dark theme, Y-axis label, and a centered "No Data" annotation. #7385: no legend box (the
+    /// name is already in the plot), and no tick labels, so the chart's own frame is small; <see cref="ChartGroupAligner"/>
+    /// gives it its neighbors' frame when it sits in a group.
     /// </summary>
     public void RefreshEmptyChart(ScottPlot.WPF.WpfPlot chart, string legendText, string yAxisLabel)
     {
         ChartStyle.ReapplyAxisColors(chart);
-
-        /* Add invisible scatter to create legend entry (matches data chart layout) */
-        var placeholder = chart.Plot.Add.Scatter(new double[] { 0 }, new double[] { 0 });
-        placeholder.LegendText = legendText;
-        placeholder.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("Placeholder"));
-        placeholder.MarkerSize = 0;
-        placeholder.LineWidth = 0;
 
         /* Add centered "No Data" text */
         var text = chart.Plot.Add.Text($"{legendText}\nNo Data", 0, 0);
@@ -79,8 +83,6 @@ public sealed class ChartRenderHelper
         chart.Plot.Axes.Left.TickGenerator = new ScottPlot.TickGenerators.EmptyTickGenerator();
         chart.Plot.YLabel(yAxisLabel);
 
-        /* Show legend to match data chart layout */
-        ShowChartLegend(chart);
         chart.Refresh();
     }
 }

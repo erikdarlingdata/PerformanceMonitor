@@ -257,15 +257,28 @@ public static partial class PgTargetAdvice
         }
     }
 
-    /// <summary>The routine the anomaly judged against: the bucket's centre (median when the robust frame had one,
-    /// else mean) ± its effective dispersion, as percentages of the collection's execution time.</summary>
+    /// <summary>The routine the anomaly judged against, in the SAME frame as the "times its usual variation" beside it
+    /// (#7396). When the gate scored in the robust frame (<c>baseline_robust_sigma</c> above zero) that is the median ±
+    /// the MAD-derived sigma; otherwise, and for a fact written before the key existed, the mean ± the classical
+    /// dispersion. Printing the classical dispersion beside a robust sigma let one card say "± 25.4%" and "25 times"
+    /// for a peak of 100%, two different measures. Percentages of the collection's execution time.</summary>
     private static string RoutineClause(Fact anomaly)
     {
         var median = anomaly.Metadata.GetValueOrDefault("baseline_median");
-        var mean = anomaly.Metadata.GetValueOrDefault("baseline_mean");
-        var centre = median > 0 ? median : mean;
-        var stddev = anomaly.Metadata.GetValueOrDefault("baseline_stddev");
-        return string.Format(CultureInfo.InvariantCulture, "its own routine of {0:0.#}% ± {1:0.#}% for this hour-of-week", centre * 100, stddev * 100);
+        var robustSigma = anomaly.Metadata.GetValueOrDefault("baseline_robust_sigma");
+        double centre, spread;
+        if (robustSigma > 0)
+        {
+            centre = median;
+            spread = robustSigma;
+        }
+        else
+        {
+            var mean = anomaly.Metadata.GetValueOrDefault("baseline_mean");
+            centre = median > 0 ? median : mean;
+            spread = anomaly.Metadata.GetValueOrDefault("baseline_stddev");
+        }
+        return string.Format(CultureInfo.InvariantCulture, "its own routine of {0:0.#}% ± {1:0.#}% for this hour-of-week", centre * 100, spread * 100);
     }
 
     /// <summary>The absolute share named for what it is on the measured population — context, never the grade.
