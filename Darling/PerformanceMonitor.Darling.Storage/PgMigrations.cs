@@ -2549,6 +2549,19 @@ ALTER TABLE collect.blocked_process_reports ADD COLUMN IF NOT EXISTS blocking_op
 CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_process_reports;";
 
     /// <summary>
+    /// V242 (#7590): <c>collect.servers.connect_down_since</c> and <c>collect.servers.last_connect_error</c>, the service's own answer to
+    /// "can I reach this server right now". A failed connect stamps the first failure's time (kept while the failures continue, so it
+    /// survives a service restart) and the exception message the service log prints; a good connect clears both. Every surface that bands a
+    /// server reads them, so a server whose connection has failed reads Offline at once instead of waiting out the 30 minute collection age.
+    /// Both nullable, no DEFAULT, no backfill: NULL says the last connect succeeded or none has failed since this rung, which makes no claim.
+    /// No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V242Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS connect_down_since timestamp,
+    ADD COLUMN IF NOT EXISTS last_connect_error text;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3047,6 +3060,7 @@ $rung$;";
         new Migration(239, "compose-fleet-rollup", V239Sql),
         new Migration(240, "query-store-top-daily-weighted", V240Sql),
         new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
+        new Migration(242, "server-connect-down-state", V242Sql),
     };
 
     /// <summary>

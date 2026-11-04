@@ -1013,6 +1013,13 @@ public sealed class ServerSummaryItem
     /// </summary>
     public DateTime? RegisteredAt { get; set; }
 
+    /// <summary>When the service's connect to this server first failed (UTC), or null (#7590). Copied from the registry row the card was built
+    /// from; set, <see cref="ApplyFreshness(DateTime)"/> bands the card Offline and <see cref="FleetRollup.BuildReason"/> says why.</summary>
+    public DateTime? ConnectDownSince { get; set; }
+
+    /// <summary>The last connect error text while <see cref="ConnectDownSince"/> is set (#7590).</summary>
+    public string? LastConnectError { get; set; }
+
     /// <summary>
     /// Headline CPU display: total non-idle CPU prominently with the SQL-only number alongside, e.g.
     /// "64% (SQL 60%)". Falls back to a single number when only one value is available.
@@ -1533,6 +1540,12 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(
             lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc);
 
+    /// <summary>The registration rule with the service's own connection answer folded in (#7590): a failed connect is Offline at once.
+    /// One rule for every surface, <see cref="ServerHealthClassifier.ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime, DateTime?)"/>.</summary>
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc);
+
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
     /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
@@ -1546,7 +1559,7 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

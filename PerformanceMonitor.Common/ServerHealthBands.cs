@@ -839,6 +839,59 @@ namespace PerformanceMonitor.Common
                 : ClassifyFreshness(lastCollectionUtc, nowUtc);
 
         /// <summary>
+        /// The freshness ladder with the service's own connection answer folded in (#7590). A server whose connect has failed
+        /// (<paramref name="connectDownSinceUtc"/> is the first failure of the current outage, stored on the registry) is
+        /// <see cref="ServerFreshness.Offline"/> at once: the service has no connection to it, so no collector can run, and waiting out
+        /// <see cref="ServerHealthThresholds.OfflineThreshold"/> only shows green tiles for up to 30 minutes. A server with no failed
+        /// connect keeps the age rule untouched, including the 30 minute wait #2794 measured, because a quiet server with nothing failed is
+        /// a different thing from one that cannot be reached. Every surface that bands from the registry calls this one function.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            DateTime? connectDownSinceUtc) =>
+            connectDownSinceUtc.HasValue
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// The reason a failed connect puts on a card, in place of "collection stale" or "no recent collection" (#7590):
+        /// <c>Server unreachable since 2026-11-04 14:03 UTC</c>, then the last connect error when one is stored. The time is UTC
+        /// because the store is, and a surface that wants local time formats the stored instant itself.
+        /// </summary>
+        public static string UnreachableReason(DateTime sinceUtc, string? lastError)
+        {
+            var text = "Server unreachable since " + sinceUtc.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+            return string.IsNullOrWhiteSpace(lastError) ? text : text + ": " + lastError.Trim();
+        }
+
+        /// <summary>
+        /// How a tile reads while its server is unreachable: the values are the last collected ones, and this says so with their age
+        /// (<c>last known, 12 min ago</c>).
+        /// </summary>
+        public static string LastKnownLabel(DateTime? lastCollectionUtc, DateTime nowUtc)
+        {
+            if (!lastCollectionUtc.HasValue)
+            {
+                return "no last known value";
+            }
+
+            var age = nowUtc - lastCollectionUtc.Value;
+            if (age < TimeSpan.Zero)
+            {
+                age = TimeSpan.Zero;
+            }
+
+            var words = age.TotalMinutes < 1 ? "under a minute"
+                : age.TotalHours < 1 ? ((int)age.TotalMinutes).ToString(System.Globalization.CultureInfo.InvariantCulture) + " min"
+                : age.TotalDays < 1 ? ((int)age.TotalHours).ToString(System.Globalization.CultureInfo.InvariantCulture) + " h"
+                : ((int)age.TotalDays).ToString(System.Globalization.CultureInfo.InvariantCulture) + " d";
+            return "last known, " + words + " ago";
+        }
+
+        /// <summary>
         /// CPU band: &gt;= 95% Critical, &gt;= 80% Warning; nothing bandable Unknown. One ladder, applied to
         /// whichever percentage is a fraction of a capacity that does not move.
         ///

@@ -107,7 +107,8 @@ SELECT s.server_id, COALESCE(s.display_name, s.server_name) AS display_name, s.s
            AND   m.wait_type_pattern IS NULL
            AND   m.job_name_pattern IS NULL
            AND   m.client_app_pattern IS NULL
-       ) AS is_silenced
+       ) AS is_silenced,
+       s.connect_down_since, s.last_connect_error
 FROM servers s
 WHERE s.is_enabled
 ORDER BY s.server_name";
@@ -709,8 +710,8 @@ AND   s.server_id <> 0";
     /// none.</param>
     /// <param name="registeredAt">The registry's <c>created_date</c> from the same row, or null.</param>
     /// <param name="now">The roll-up's reference instant, the one the window was cut from.</param>
-    internal static ServerFreshness ClassifyWindowedFreshness(DateTime? lastCollection, DateTime? registeredAt, DateTime now) =>
-        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now);
+    internal static ServerFreshness ClassifyWindowedFreshness(DateTime? lastCollection, DateTime? registeredAt, DateTime now, DateTime? connectDownSince = null) =>
+        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now, connectDownSince);
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
@@ -1263,7 +1264,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
            the sidebar row happened not to, which is the argument for none of them writing it out. #3935: the
            band itself comes from the shared ladder too, with the one departure a windowed read needs — an
            empty window on a server registered before it is Offline, not "never collected". */
-        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now);
+        /* #7590: a server whose connect has failed is Offline at once, whatever the age of its last collection. */
+        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, server.ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1299,6 +1301,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             IsOnline = isOnline,
             AwaitingFirstCollection = awaitingFirstCollection,
             CollectionStale = collectionStale,
+            ConnectDownSince = server.ConnectDownSince,
+            LastConnectError = server.ConnectDownSince.HasValue ? server.LastConnectError : null,
             /* W1b: the windowed read's newest collection, else (offline past the window) the real last one, display only. */
             LastCollectionTime = lastCollection ?? olderCollection,
             CpuPercent = cpuPercent,
@@ -1514,6 +1518,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     {
         if (c.IsOnline == false)
         {
+            /* #7590: the service's own connect failed, so the reason is that and its error, not an age. */
+            if (c.ConnectDownSince.HasValue)
+            {
+                return ServerHealthClassifier.UnreachableReason(c.ConnectDownSince.Value, c.LastConnectError);
+            }
+
             return "Offline - no recent collection";
         }
 
@@ -1705,7 +1715,9 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 reader.IsDBNull(2) ? "" : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
-                !reader.IsDBNull(5) && reader.GetBoolean(5)));
+                !reader.IsDBNull(5) && reader.GetBoolean(5),
+                reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Unspecified),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return rows;
@@ -2585,7 +2597,8 @@ AND   {SqlServerCollectedTargetSql}";
 
     /* ─────────────────────────── raw-read carriers (internal) ─────────────────────────── */
 
-    internal readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced);
+    internal readonly record struct FleetServerRow(int ServerId, string DisplayName, string ServerName, int? EngineEdition, string? EngineKind, bool IsSilenced,
+        DateTime? ConnectDownSince = null, string? LastConnectError = null);
     internal readonly record struct CpuRow(double? SqlCpu, double? OtherCpu);
 
     /// <summary>One PostgreSQL/Aurora target's newest current Performance Insights row (#3281). One struct
@@ -2963,6 +2976,14 @@ public sealed class FleetServerCard
     /// every collector's last run a success.</para>
     /// </summary>
     [JsonPropertyName("collection_stale")] public bool CollectionStale { get; init; }
+
+    /// <summary>When the service's connect to this server first failed in the current outage (UTC), or null while the last connect
+    /// succeeded (#7590). Set, the card is Offline and its reason reads "Server unreachable since ...", and the last values on it are the
+    /// last collected ones, not live readings. Read from the registry the service writes on every connect attempt.</summary>
+    [JsonPropertyName("connect_down_since")] public DateTime? ConnectDownSince { get; init; }
+
+    /// <summary>The last connect error text the service logged for this server while <c>connect_down_since</c> is set (#7590); null otherwise.</summary>
+    [JsonPropertyName("last_connect_error")] public string? LastConnectError { get; init; }
 
     /// <summary>The newest collection inside the fleet read's two-day window
     /// (<see cref="DarlingFleetReader.LastCollectionWindow"/>); null when the window holds none. A null means

@@ -2055,6 +2055,44 @@ ORDER BY server_name";
     internal static Task<string> GetCollectionHealthUncut(NpgsqlDataSource postgres, string? server_name, CancellationToken cancellationToken) =>
         GetCollectionHealthCoreAsync(postgres, server_name, full_detail: false, uncutText: true, logger: null, cancellationToken);
 
+    /// <summary>The registry read behind <c>server_connection</c> on <c>get_collection_health</c> (#7590).</summary>
+    internal const string ServerConnectionSql = "SELECT connect_down_since, last_connect_error FROM servers WHERE server_id = $1";
+
+    /// <summary>The server-level connection answer for <c>get_collection_health</c>: null while the last connect succeeded, else an object saying
+    /// collection is waiting on the connection, since when, and the last connect error (#7590). A read that fails answers null: this block is
+    /// additive and must not take the collector rows down with it.</summary>
+    internal static async Task<object?> ReadServerConnectionAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(ServerConnectionSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return null;
+            }
+
+            var since = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified);
+            var error = reader.IsDBNull(1) ? null : reader.GetString(1);
+            return new
+            {
+                status = "waiting_on_connection",
+                since = since.ToString("o"),
+                last_connect_error = error,
+                message = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. "
+                    + ServerHealthClassifier.UnreachableReason(since, error) + ". The collector rows are the last runs from before the connection failed.",
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "get_collection_health: the connection state could not be read; the reply carries none");
+            return null;
+        }
+    }
+
     private static async Task<string> GetCollectionHealthCoreAsync(
         NpgsqlDataSource postgres,
         string? server_name,
@@ -2387,9 +2425,14 @@ ORDER BY server_name";
             /* #6254: the Query Store collector's newest read source, when it has one. Empty with the replica setting off, and then the
                reply is the one it was before. Read after the memo like the run times above: it is a fact about the newest run. */
             var readSources = await DarlingDataReader.ReadCollectionHealthReadSourcesAsync(postgres, resolved.ServerId, windowStartUtc, cancellationToken);
+            /* #7590: the server-level answer. Null (and so absent from the reply) while the last connect succeeded. */
+            var serverConnection = await ReadServerConnectionAsync(postgres, resolved.ServerId, nowUtc, logger, cancellationToken);
             Func<int, string> healthReply = collectorCount => McpHelpers.WithCollectorReadSource(DarlingCollectionCaveatReader.AttachToJson(JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.DisplayName,
+                /* #7590: set only while the service cannot connect to this server. The collector rows below are the last runs from before the
+                   connection failed, so none of them is being run now: this says collection is waiting on the connection and does not relabel them. */
+                server_connection = serverConnection,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
                    answering: counting_since moving proves a RESTART (a crash-restart reads identically to
                    an install), and a capability fingerprint identifies a build only when the change in

@@ -70,7 +70,39 @@ ON CONFLICT (server_id) DO UPDATE SET
     machine_identity = CASE WHEN EXCLUDED.machine_identity IS NULL AND servers.server_name = EXCLUDED.server_name AND servers.engine_kind = EXCLUDED.engine_kind
                             THEN servers.machine_identity ELSE EXCLUDED.machine_identity END,
     is_aws_rds = EXCLUDED.is_aws_rds,
-    is_aws_rds_web_or_express = EXCLUDED.is_aws_rds_web_or_express;";
+    is_aws_rds_web_or_express = EXCLUDED.is_aws_rds_web_or_express,
+    connect_down_since = NULL,
+    last_connect_error = NULL;";
+
+    /* The failed-connect half of the registry (V242, #7590). connect_down_since keeps the FIRST failure of an outage (COALESCE), so it also
+       survives a service restart while the server stays down; the error is the latest. A server that has never connected has no row yet and
+       matches nothing here: it has no collection to be stale, and reads as awaiting its first collection. The good connect clears both in
+       UpsertServerSql above. */
+    internal const string MarkConnectFailedSql = @"
+UPDATE servers
+SET connect_down_since = COALESCE(connect_down_since, $2),
+    last_connect_error = $3
+WHERE server_id = $1;";
+
+    /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints (V242, #7590).
+    /// Failure-isolated like the other observability writes: it logs at Debug and never throws.</summary>
+    public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, int serverId, string? error, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(MarkConnectFailedSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue((object?)error ?? DBNull.Value);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(ex, "Connect-failure state write failed for server {ServerId}", serverId);
+        }
+    }
 
     /* The identity the registry holds for this registration BEFORE the connect's upsert (#6351). An upsert cannot hand back the
        value it overwrote, so it is read right before; the connect path is single-threaded per server, so nothing writes between. */
