@@ -246,7 +246,7 @@ public sealed class PgTargetVacuumLiveTests
                 Assert.Contains("rose at 1,083 per hour", advice.GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 /* #3691 lane 43 (M3): the clause the retired one-row limit could not write. Before it the card
                    said "1 other table is persistently past their line too" and the operator had to call
-                   get_pg_autovacuum to learn which; the population sentence still says that, and now the
+                   get_pg_autovacuum_health to learn which; the population sentence still says that, and now the
                    persistence sentence names the table with its own ratio, span and slope. */
                 Assert.Contains(
                     "; and one more: public.appendonly (2.4× for 2 hours, 10,000/h and rising). ",

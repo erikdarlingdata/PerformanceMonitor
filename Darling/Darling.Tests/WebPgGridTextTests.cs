@@ -89,6 +89,26 @@ public sealed class WebPgGridTextTests
     private static string[] Strings(JsonElement r, string name) =>
         r.GetProperty(name).EnumerateArray().Select(e => e.GetString() ?? "").ToArray();
 
+    [Fact]
+    public void TheEvictionSentence_IsBuiltFromTheReadsFields_NotFromItsNoteText()
+    {
+        var unknown = new DarlingPgStatementReader.PgEvictionInfo(false, null, null);
+        var none = new DarlingPgStatementReader.PgEvictionInfo(true, 0, 5000);
+        var one = new DarlingPgStatementReader.PgEvictionInfo(true, 1, 5000);
+        var many = new DarlingPgStatementReader.PgEvictionInfo(true, 1234, 5000);
+        var evictions = new[] { unknown, none, one, many }
+            .Select(i => JsonSerializer.SerializeToElement(DarlingMcpPgStatementTools.BuildEvictions(i))).ToArray();
+
+        var shown = Strings(RunHarness(new { evictions }), "evictionShort");
+
+        Assert.StartsWith("This server does not report how often pg_stat_statements dropped entries.", shown[0], StringComparison.Ordinal);
+        Assert.Equal("", shown[1]);
+        Assert.StartsWith("pg_stat_statements dropped its least-used entries 1 time in this window", shown[2], StringComparison.Ordinal);
+        Assert.StartsWith("pg_stat_statements dropped its least-used entries 1,234 times in this window", shown[3], StringComparison.Ordinal);
+        // The note itself is a paragraph with a restart caveat and a count in brackets; the sentence over the grid is not that text.
+        Assert.DoesNotContain("postmaster", shown[3], StringComparison.Ordinal);
+    }
+
     private static JsonElement RunHarness(object input)
     {
         var js = PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
