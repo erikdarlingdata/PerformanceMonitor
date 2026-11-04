@@ -3248,8 +3248,12 @@ ORDER BY server_name";
                 status = r.Status,
                 /* #4198: a preview by default — see ErrorMessagePreviewLength's doc comment above this
                    method — with full_text opting back into the whole (up to 4000-character) field. */
-                error_message = full_text ? r.ErrorMessage : McpHelpers.Truncate(r.ErrorMessage, ErrorMessagePreviewLength),
-                error_message_truncated = !full_text && r.ErrorMessage is not null && r.ErrorMessage.Length > ErrorMessagePreviewLength,
+                /* #7416: the stored column holds a SUCCESS run's note ("shred gated: 1"), not an error. error_message is the error of a run
+                   that did not succeed, and the note of a successful run is run_note, so a reader never takes a note for an error. */
+                error_message = full_text ? CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage) : McpHelpers.Truncate(CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage), ErrorMessagePreviewLength),
+                error_message_truncated = !full_text && CollectorHealthClassifier.RunError(r.Status, r.ErrorMessage) is { } errText && errText.Length > ErrorMessagePreviewLength,
+                run_note = full_text ? CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage) : McpHelpers.Truncate(CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage), ErrorMessagePreviewLength),
+                run_note_truncated = !full_text && CollectorHealthClassifier.RunNote(r.Status, r.ErrorMessage) is { } noteText && noteText.Length > ErrorMessagePreviewLength,
                 /*
                     The phase decomposition, emitted here rather than only SELECTed because persisting a
                     column nothing reports is half a feature. V108 and V109 both widened CollectionLogSql
@@ -3530,7 +3534,8 @@ ORDER BY server_name";
                 sql_store_ms = fr.Entry.SqlStoreMs is null ? (double?)null : Math.Round(fr.Entry.SqlStoreMs.Value, 0),
                 rows_collected = fr.Entry.RowsCollected,
                 status = fr.Entry.Status,
-                error_message = fr.Entry.ErrorMessage,
+                error_message = CollectorHealthClassifier.RunError(fr.Entry.Status, fr.Entry.ErrorMessage),
+                run_note = CollectorHealthClassifier.RunNote(fr.Entry.Status, fr.Entry.ErrorMessage),
                 sql_phases = fr.Entry.SqlOpenMs is null && fr.Entry.SqlDrainMs is null && fr.Entry.WatermarkMs is null ? null : new
                 {
                     open_ms = fr.Entry.SqlOpenMs is null ? (double?)null : Math.Round(fr.Entry.SqlOpenMs.Value, 0),

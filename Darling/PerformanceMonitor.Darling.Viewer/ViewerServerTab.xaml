@@ -4203,8 +4203,11 @@
                                 <DataGridTextColumn Binding="{Binding RowsCollected, StringFormat=N0}" ElementStyle="{StaticResource NumericCell}" Width="80">
                                     <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RowsCollected" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Rows" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding MessageFormatted}" Width="*">
-                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="MessageFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                <DataGridTextColumn Binding="{Binding ErrorFormatted}" Width="*">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
+                                </DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding NoteFormatted}" Width="*">
+                                    <DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="NoteFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Note" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header>
                                 </DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>

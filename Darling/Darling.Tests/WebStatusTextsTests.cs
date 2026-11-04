@@ -96,17 +96,17 @@ public sealed class WebStatusTextsTests
 
         Assert.Contains("collection for this server is stale", stale, StringComparison.Ordinal);
         Assert.DoesNotContain("normal", stale, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("No running SQL Agent jobs found", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("No SQL Agent job is running.", stale, StringComparison.Ordinal);
 
-        Assert.Contains("No running SQL Agent jobs found", online, StringComparison.Ordinal);
+        Assert.Contains("No SQL Agent job is running.", online, StringComparison.Ordinal);
         Assert.DoesNotContain("stale", online, StringComparison.Ordinal);
 
         /* The same through the server page, which hands the tab ctx.offline from the server's fleet card (is_online false). */
         var pageStale = r.GetProperty("pageJobsStale").GetString()!;
         var pageOnline = r.GetProperty("pageJobsOnline").GetString()!;
         Assert.Contains("collection for this server is stale", pageStale, StringComparison.Ordinal);
-        Assert.DoesNotContain("No running SQL Agent jobs found", pageStale, StringComparison.Ordinal);
-        Assert.Contains("No running SQL Agent jobs found", pageOnline, StringComparison.Ordinal);
+        Assert.DoesNotContain("No SQL Agent job is running.", pageStale, StringComparison.Ordinal);
+        Assert.Contains("No SQL Agent job is running.", pageOnline, StringComparison.Ordinal);
         Assert.DoesNotContain("stale", pageOnline, StringComparison.Ordinal);
     }
 
@@ -116,7 +116,7 @@ public sealed class WebStatusTextsTests
         /* The page already held an online card, painted from it, and the fresh card (is_online false) came after. */
         var flip = Run().GetProperty("pageJobsFlip").GetString()!;
         Assert.Contains("collection for this server is stale", flip, StringComparison.Ordinal);
-        Assert.DoesNotContain("No running SQL Agent jobs found", flip, StringComparison.Ordinal);
+        Assert.DoesNotContain("No SQL Agent job is running.", flip, StringComparison.Ordinal);
     }
 
     [Fact]

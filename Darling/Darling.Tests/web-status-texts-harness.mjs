@@ -75,7 +75,7 @@ globalThis.fetch = async (url) => {
     : u.pathname === "/api/active-queries/live/available"
     ? { can_queue: true, can_edit: true, managed_store: false }
     : u.pathname.endsWith("/get_running_jobs")
-    ? { status: "empty", message: "No running SQL Agent jobs found (or the running_jobs collector has not run yet)." }
+    ? { status: "empty", message: "No SQL Agent job is running." }
     : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };

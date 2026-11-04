@@ -2835,6 +2835,31 @@ namespace PerformanceMonitor.Common
         public static string FormatRunMessage(string? message, string? readSource) =>
             AppendReadSource(message ?? string.Empty, readSource);
 
+        /// <summary>
+        /// #7416: the store keeps ONE text column per log row (<c>error_message</c>) and the collectors write their run notes into it on
+        /// SUCCESS rows ("shred gated: 1", "plans rendered: 0, ..."). On a row that did not succeed the same column holds the error. A
+        /// SUCCESS row therefore has no error, only a note, and the Error column of a log grid must not show it.
+        /// </summary>
+        public static bool IsRunNote(string? status) =>
+            string.Equals(status?.Trim(), "SUCCESS", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>#7416: the row's error text: its stored message unless the row succeeded (then the message is a note, see <see cref="IsRunNote"/>). Null for none.</summary>
+        public static string? RunError(string? status, string? message) =>
+            IsRunNote(status) || string.IsNullOrEmpty(message) ? null : message;
+
+        /// <summary>#7416: the row's run note: its stored message when the row succeeded, null otherwise.</summary>
+        public static string? RunNote(string? status, string? message) =>
+            IsRunNote(status) && !string.IsNullOrEmpty(message) ? message : null;
+
+        /// <summary>#7416: the grids' Error cell: the error text only, blank for a row that has none.</summary>
+        public static string FormatRunError(string? status, string? message) =>
+            RunError(status, message) ?? string.Empty;
+
+        /// <summary>#7416: the grids' Note cell: the run note with the run's read source after it (<see cref="FormatRunMessage"/>'s wording).
+        /// A failed row's message is its error, so only its read source can appear here.</summary>
+        public static string FormatRunNoteCell(string? status, string? message, string? readSource) =>
+            AppendReadSource(RunNote(status, message) ?? string.Empty, readSource);
+
         private static string AppendReadSource(string note, string? readSource)
         {
             if (string.IsNullOrWhiteSpace(readSource))

@@ -204,6 +204,14 @@ public static class CollectorRuntimePrecondition
     public const int FirstRunSlackMinutes = 10;
 
     /// <summary>
+    /// #7416: the empty answer of <c>get_running_jobs</c> on both SKUs. The read knows whether the collector has ever run for the server
+    /// (a SUCCESS run or a snapshot in the store), so the message says which of the two empties it is instead of hedging between them.
+    /// </summary>
+    public static string RunningJobsEmptyMessage(bool collectorRan) => collectorRan
+        ? "No SQL Agent job is running."
+        : "The running_jobs collector has not run for this server yet, so no job state is known.";
+
+    /// <summary>
     /// What could stop the running_jobs collector, as <c>get_running_jobs</c> words it on both SKUs. One copy, so
     /// the Lite and Darling tools cannot drift apart. Each cause is named as possible, because the gated-off arm
     /// cannot see which one applies.
