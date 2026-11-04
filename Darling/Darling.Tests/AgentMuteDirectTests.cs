@@ -494,9 +494,9 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
             var update = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, id,
                 "{\"reason\":\"widen\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddDays(1)) + "\",\"metric_name\":null,\"server_id\":null,\"server_name\":null}", agentSeat: Named));
 
-            Assert.True(DarlingMcpAgentMuteDirect.AllAlertsCode == (string?)create["reason"], create.ToJsonString());
-            Assert.Contains("An operator can make a rule that matches every alert", (string?)create["message"], StringComparison.Ordinal);
-            Assert.True(DarlingMcpAgentMuteDirect.AllAlertsCode == (string?)update["reason"], update.ToJsonString());
+            Assert.True(DarlingMcpAgentMuteDirect.NoMetricCode == (string?)create["reason"], create.ToJsonString());
+            Assert.Contains("An operator can make a rule with no metric", (string?)create["message"], StringComparison.Ordinal);
+            Assert.True(DarlingMcpAgentMuteDirect.NoMetricCode == (string?)update["reason"], update.ToJsonString());
             Assert.Equal("1", await RuleCountAsync(c));
             Assert.Equal("High CPU", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{id}'"));
             Assert.Equal(journal, await JournalCountAsync(c));
@@ -645,6 +645,37 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
         });
     }
 
+    /// <summary>A rule with no metric is refused even when it names something else. On one server, or with only a source, it would silence every alert it covers for 7 days.</summary>
+    [Fact]
+    public async Task ARuleWithNoMetric_ThatNamesAServerOrASource_IsRefusedOnCreateUpdateAndEnable_AndWritesNothing()
+    {
+        await RunAsync(async c =>
+        {
+            var oneServer = Parse(await Create(c, Named, metric: null, serverId: 7, action: "mute"));
+            var sourceOnly = Parse(await DarlingMcpAlertTools.CreateMuteRule(c.Source, external_source: "nagios", reason: "alert storm",
+                expires_at: Iso(DateTime.UtcNow.AddDays(1)), action: "mute", agentSeat: Named));
+            Assert.True(DarlingMcpAgentMuteDirect.NoMetricCode == (string?)oneServer["reason"], oneServer.ToJsonString());
+            Assert.True(DarlingMcpAgentMuteDirect.NoMetricCode == (string?)sourceOnly["reason"], sourceOnly.ToJsonString());
+            Assert.Equal("0", await RuleCountAsync(c));
+
+            var created = Parse(await Create(c, Named, metric: "High CPU", serverId: 7, action: "mute"));
+            var id = (string)created["mute_rule"]!["id"]!;
+            var journal = await JournalCountAsync(c);
+            var update = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, id,
+                "{\"reason\":\"widen\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddDays(1)) + "\",\"metric_name\":null}", agentSeat: Named));
+            Assert.True(DarlingMcpAgentMuteDirect.NoMetricCode == (string?)update["reason"], update.ToJsonString());
+            Assert.Equal("High CPU", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{id}'"));
+
+            var operatorRule = Guid.NewGuid().ToString();
+            await ExecAsync(c.Connection, $@"INSERT INTO config_mute_rules (id, enabled, created_at_utc, server_id, server_name, reason, expires_at_utc, action)
+VALUES ('{operatorRule}', FALSE, now() AT TIME ZONE 'utc', 7, 'srv-7', 'operator rule', '{Iso(DateTime.UtcNow.AddDays(2))}', 'mute')", c.Ct);
+            var enable = Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, operatorRule, true, agentSeat: Named, reason: "turn it on"));
+            Assert.Equal(DarlingMcpAgentMuteDirect.NoMetricCode, (string?)enable["reason"]);
+            Assert.Equal("False", await ScalarAsync(c, $"SELECT enabled FROM config_mute_rules WHERE id = '{operatorRule}'"));
+            Assert.Equal(journal, await JournalCountAsync(c));
+        });
+    }
+
     [Fact]
     public async Task AnEnable_OfARuleThatMatchesEveryAlert_IsRefused_ButItsDisableIsNot()
     {
@@ -655,8 +686,8 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
 VALUES ('{id}', FALSE, now() AT TIME ZONE 'utc', 'operator rule', '{Iso(DateTime.UtcNow.AddDays(2))}', 'mute')", c.Ct);
 
             var refused = Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, id, true, agentSeat: Named, reason: "turn it on"));
-            Assert.Equal(DarlingMcpAgentMuteDirect.AllAlertsCode, (string?)refused["reason"]);
-            Assert.Contains("An operator can make a rule that matches every alert", (string?)refused["message"], StringComparison.Ordinal);
+            Assert.Equal(DarlingMcpAgentMuteDirect.NoMetricCode, (string?)refused["reason"]);
+            Assert.Contains("An operator can make a rule with no metric", (string?)refused["message"], StringComparison.Ordinal);
             Assert.Equal("False", await ScalarAsync(c, $"SELECT enabled FROM config_mute_rules WHERE id = '{id}'"));
             Assert.Equal("0", await JournalCountAsync(c));
 

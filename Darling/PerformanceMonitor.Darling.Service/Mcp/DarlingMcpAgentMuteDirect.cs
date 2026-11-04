@@ -49,7 +49,7 @@ internal static class DarlingMcpAgentMuteDirect
     internal const string ExpiryCode = "agent_mute_expiry";
     internal const string ReasonCode = "agent_mute_reason";
     internal const string LifetimeCode = "agent_mute_lifetime";
-    internal const string AllAlertsCode = "agent_mute_all_alerts";
+    internal const string NoMetricCode = "agent_mute_no_metric";
     internal const string RepeatCode = "agent_mute_repeat";
     internal const string SizeCode = "agent_mute_size";
     internal const string RateCode = "agent_mute_rate";
@@ -80,9 +80,12 @@ internal static class DarlingMcpAgentMuteDirect
     /// <summary>True when the rule's reason ends with an agent attribution suffix (either path's), so an agent made or last changed it.</summary>
     internal static bool IsAgentMade(MuteRule rule) => rule.Reason is { } r && AgentSuffix.IsMatch(r);
 
-    internal static AgentActionRefusal MatchesEveryAlertRefusal() => new(AllAlertsCode,
-        "A rule with no metric and no server would silence every alert, including the service's own health alerts and the daily report. " +
-        "Name a metric (any server or one server). An operator can make a rule that matches every alert. Nothing was written.");
+    /// <summary>True when the rule names no metric. It then silences every alert it covers, on one server, on all servers or wherever a pattern or a source reaches, so only an operator can make it.</summary>
+    internal static bool NamesNoMetric(MuteRule rule) => string.IsNullOrWhiteSpace(rule.MetricName);
+
+    internal static AgentActionRefusal NoMetricRefusal() => new(NoMetricCode,
+        "A rule with no metric would silence every alert it covers, including the service's own health alerts and the daily report. " +
+        "Name a metric (any server or one server). An operator can make a rule with no metric. Nothing was written.");
 
     /// <summary>
     /// The renewal bound (#7414): 7 days is a lifetime, counted from the rule's <c>created_at_utc</c>, not a window that slides. An agent's
@@ -357,8 +360,8 @@ SELECT EXISTS (
                 var stored = JsonNode.Parse(answer)!["mute_rule"]!;
                 created = await DarlingMcpAlertTools.FindRuleAsync(new PgMuteRuleStore(connection, transaction), (string)stored["id"]!);
                 /* Judged on the rule as the store holds it. A refusal here is not "created", so nothing commits. */
-                if (created is { MatchesEveryAlert: true })
-                    return (Refusal(MatchesEveryAlertRefusal()), null, null);
+                if (created is not null && NamesNoMetric(created))
+                    return (Refusal(NoMetricRefusal()), null, null);
                 if (created is not null && await MadeRecentlyAsync(connection, transaction, created, now, ct))
                     return (Refusal(RepeatRefusal()), null, null);
             }
@@ -422,8 +425,8 @@ SELECT EXISTS (
                 return (DarlingMcpAlertTools.Outcome("invalid", error ?? "changes_json is invalid."), null, null);
             if (ExpiryRefusal(after.ExpiresAtUtc, now) is { } badExpiry)
                 return (Refusal(badExpiry), null, null);
-            if (after.MatchesEveryAlert)
-                return (Refusal(MatchesEveryAlertRefusal()), null, null);
+            if (NamesNoMetric(after))
+                return (Refusal(NoMetricRefusal()), null, null);
             if (LifetimeRefusal(before, after) is { } lifetime)
                 return (Refusal(lifetime), null, null);
             /* An update that moves the rule onto another server, metric or action is a rule made on that match, so it is held to the same
@@ -454,9 +457,9 @@ SELECT EXISTS (
                bound cannot be put in force by an agent. Turning it off is always allowed: it can only make the operator hear more. */
             if (enabled && ExpiryRefusal(before.ExpiresAtUtc, now) is { } badExpiry)
                 return (Refusal(badExpiry), null, null);
-            /* The same rule as create and update: an operator's disabled rule that matches every alert is not put in force by an agent. */
-            if (enabled && before.MatchesEveryAlert)
-                return (Refusal(MatchesEveryAlertRefusal()), null, null);
+            /* The same rule as create and update: an operator's disabled rule with no metric is not put in force by an agent. */
+            if (enabled && NamesNoMetric(before))
+                return (Refusal(NoMetricRefusal()), null, null);
 
             var answer = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(new PgMuteRuleStore(connection, transaction), rule_id, enabled);
             return (answer, before, null);
