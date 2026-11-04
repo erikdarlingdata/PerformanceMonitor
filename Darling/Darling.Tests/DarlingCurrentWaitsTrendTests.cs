@@ -85,11 +85,19 @@ public sealed class DarlingCurrentWaitsTrendTests
             await SeedWaitAsync(connection, ct, t10, "LCK_M_X", 500, blockingSessionId: 99, database: "AppDb");
             await SeedWaitAsync(connection, ct, t10, "PAGEIOLATCH_SH", 250, blockingSessionId: 0, database: "AppDb");
 
+            /* #7577: a parallel query's exchange threads wait on their OWN session (blocking_session_id = session_id). Four of them
+               are not four blocked sessions, and a session blocked on several threads is one blocked session. */
+            var t5 = MinutesAgo(5);
+            for (var thread = 0; thread < 4; thread++)
+            {
+                await SeedWaitAsync(connection, ct, t5, "CXCONSUMER", 300, blockingSessionId: 55, database: "AppDb");
+            }
+
             var hit = await DarlingMcpDataTools.GetCurrentWaitsTrend(dataSource, ServerName, 4, null);
             var root = JsonDocument.Parse(hit).RootElement;
 
             var waits = root.GetProperty("waiting_tasks");
-            Assert.Equal(2, waits.GetArrayLength());
+            Assert.Equal(3, waits.GetArrayLength());
 
             /*
                 Only the LCK row is blocked (blocking_session_id > 0). The PAGEIOLATCH row waits on IO and
@@ -111,7 +119,7 @@ public sealed class DarlingCurrentWaitsTrendTests
             Assert.Equal("OtherDb", filteredBlocked[0].GetProperty("database_name").GetString());
 
             /* The wait series is server-wide and is deliberately NOT narrowed by the database filter. */
-            Assert.Equal(3, filteredRoot.GetProperty("waiting_tasks").GetArrayLength());
+            Assert.Equal(4, filteredRoot.GetProperty("waiting_tasks").GetArrayLength());
 
             bodySucceeded = true;
         }
