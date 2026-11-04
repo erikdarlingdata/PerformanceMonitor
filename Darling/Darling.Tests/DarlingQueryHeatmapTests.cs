@@ -725,7 +725,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 Assert.False(grid.TryGetProperty("truncation_note", out _));
 
                 var empty = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 1));
-                Assert.Equal("empty", empty.GetProperty("status").GetString());
+                Assert.Equal("unavailable", empty.GetProperty("status").GetString());
                 Assert.False(empty.TryGetProperty("hints", out _));
                 bodySucceeded = true;
             }

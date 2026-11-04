@@ -178,7 +178,20 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
             Assert.Contains("current_duration_formatted", jobs, StringComparison.Ordinal);
 
             await DeleteRowsAsync(connection, ct, keepServer: true);
-            Assert.Equal("empty", DarlingMcpTestData.StatusOf(await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName)));
+            /* #7459: no row and no run on record is nobody having looked, so unavailable (it used to say empty and hedge that the collector
+               may not have run). A successful run that stored nothing is the look: empty, as of that run. */
+            var never = await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName);
+            Assert.Equal("unavailable", DarlingMcpTestData.StatusOf(never));
+            Assert.Contains("has not completed a run yet", never, StringComparison.Ordinal);
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1,$2,$3,'running_jobs',$4,0,'SUCCESS',NULL,0,0,0)",
+                CollectionIdGenerator.Next(), ServerId, ServerName, DarlingMcpTestData.Naive(t));
+            var looked = await DarlingMcpJobTools.GetRunningJobs(postgres, ServerName);
+            Assert.Equal("empty", DarlingMcpTestData.StatusOf(looked));
+            Assert.Contains("as of the running_jobs collector's latest successful run", looked, StringComparison.Ordinal);
+            Assert.DoesNotContain("has not run yet", looked, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
@@ -196,7 +209,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, bool keepServer = false)
     {
-        var sql = $"DELETE FROM running_jobs WHERE server_id = {ServerId};";
+        var sql = $"DELETE FROM running_jobs WHERE server_id = {ServerId}; DELETE FROM collection_log WHERE server_id = {ServerId};";
         if (!keepServer) sql += $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);

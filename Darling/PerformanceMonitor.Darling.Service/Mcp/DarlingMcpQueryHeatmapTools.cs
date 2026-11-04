@@ -282,7 +282,7 @@ public sealed class DarlingMcpQueryHeatmapTools
         if (!hasInWindow)
         {
             return McpHelpers.Status(
-                "empty",
+                "unavailable",
                 $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }

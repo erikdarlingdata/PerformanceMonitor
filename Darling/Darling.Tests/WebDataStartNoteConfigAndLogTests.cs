@@ -328,7 +328,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_blocking", "pg_blocking_edges", "empty", ["blocking_sampled", "cycles_only"], ["unavailable"], "DarlingMcpPgBlockingTools.cs"),
         ("get_pg_database_stats", "pg_database_stats", "empty", ["database_activity"], ["unavailable"], "DarlingMcpPgDatabaseTools.cs"),
         ("get_pg_session_states", "pg_session_states", "empty", ["session_states"], ["unavailable"], "DarlingMcpPgSessionStatesTools.cs"),
-        ("get_pg_io_stats", "pg_io_stats", "empty", ["io_activity"], [], "DarlingMcpPgIoTools.cs"),
+        ("get_pg_io_stats", "pg_io_stats", "empty", ["io_activity"], ["unavailable"], "DarlingMcpPgIoTools.cs"),
         ("get_pg_replication_stats", "pg_replication_stats", "empty", [], [], "DarlingMcpPgReplicationStatsTools.cs"),
         ("get_pg_database_trend", "pg_database_stats", "empty", ["database_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_query_duration_trend", "pg_statement_stats", "empty", ["query_duration_trend"], [], "DarlingMcpPgTrendTools.cs"),
