@@ -157,16 +157,20 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     private static readonly DateTime s_bootAnchor = new(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
 
     /// <summary>
-    /// One query row: sample_time, notification, the two indicators, then the raw ring buffer timestamp. Without an
-    /// explicit raw value it is the stamp's offset from a fixed anchor, so rows in one read keep their real order
-    /// and spacing (what the query returns, since both come from the same ms_ticks).
+    /// One query row: sample_time, notification, the two indicators, the raw ring buffer timestamp, then the
+    /// instance start time. Without an explicit raw value it is the stamp's offset from a fixed anchor, so rows in
+    /// one read keep their real order and spacing (what the query returns, since both come from the same
+    /// ms_ticks). Without an explicit start time it is <see cref="s_startTime"/>.
     /// </summary>
-    private static object[] Rec(object stamp, string notification, int process, int system, long? raw = null)
+    private static object[] Rec(object stamp, string notification, int process, int system, long? raw = null, DateTime? startTime = null)
         => new object[]
         {
             stamp, notification, process, system,
             raw ?? (stamp is DateTime d ? (long)(d - s_bootAnchor).TotalMilliseconds : 0L),
+            startTime ?? s_startTime,
         };
+
+    private static readonly DateTime s_startTime = new(2026, 5, 20, 8, 0, 0, DateTimeKind.Unspecified);
 
     private static readonly DateTime s_held = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
     private const long HeldRaw = 5_000_000_000;
@@ -491,23 +495,81 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// #7441: a server restart makes the raw timestamps a new, smaller series. Remembered values from the old
-    /// series would skip the new records, so a jump in the boot instant clears them, and the nearest-row guess is
-    /// not made either (no held record survives a restart): the new record 3 minutes after the watermark is kept.
+    /// #7441: a restart or reboot makes the raw timestamps a new, smaller series. Remembered values from the old
+    /// series would skip the new records, so a changed instance start time clears them, and the nearest-row guess
+    /// is not made either (no held record survives a restart): both new records, 3 and 4 minutes after the
+    /// watermark, are kept. A reboot moves the computed boot instant by the whole old uptime, so the old
+    /// boot-instant test caught this case as well: this one guards the new start-time test, it does not fail
+    /// on the old code.
     /// </summary>
     [Fact]
-    public async Task ReadAsync_ServerRestarted_NewSeriesIsNotSkippedByTheOldMemory()
+    public async Task ReadAsync_ServerRestarted_EveryNewRowIsKept()
     {
         var server = NewServer();
         var first = await PollAsync(HeldAndOlderRead(5, TimeSpan.Zero), server, watermark: null);
         var watermark = first.Max(r => r.SampleTime);
 
+        var restartedAt = s_startTime.AddDays(30);
         using var afterRestart = new FakeCollectorDataReader(
-            Rec(watermark.AddMinutes(3), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, raw: 1_000));
+            Rec(watermark.AddMinutes(3), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, raw: 1_000, startTime: restartedAt),
+            Rec(watermark.AddMinutes(4), "RESOURCE_MEMPHYSICAL_LOW", 2, 0, raw: 2_000, startTime: restartedAt));
         var rows = await PollAsync(afterRestart, server, watermark);
 
-        var row = Assert.Single(rows);
-        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", row.MemoryNotification);
+        Assert.Equal(2, rows.Count);
+    }
+
+    /// <summary>
+    /// #7441: a VM suspend or an NTP step moves SYSUTCDATETIME() forward, so every computed sample_time jumps by
+    /// the same amount while the instance start time and the raw timestamps do not. The jump here is 5 minutes,
+    /// past the watermark by more than the gap between the two records. Neither record is stored again. The
+    /// earlier version read the moved boot instant as a restart, dropped its memory and stored both.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_ClockJumpsForwardWithSameStartTime_StoresNoRepeats()
+    {
+        var server = NewServer();
+        var first = await PollAsync(HeldAndOlderRead(2_000, TimeSpan.Zero), server, watermark: null);
+        Assert.Equal(2, first.Count);
+        var watermark = first.Max(r => r.SampleTime);
+
+        var jump = TimeSpan.FromMinutes(5);
+        var afterJump = await PollAsync(HeldAndOlderRead(2_000, jump), server, watermark);
+        Assert.Empty(afterJump);
+
+        /* A genuinely new record is still kept after the jump. */
+        using var withNew = new FakeCollectorDataReader(
+            Rec(s_held.AddMilliseconds(-2_000) + jump, "RESOURCE_MEM_STEADY", 0, 0, HeldRaw - 2_000),
+            Rec(s_held + jump, "RESOURCE_MEMPHYSICAL_LOW", 2, 0, HeldRaw),
+            Rec(s_held.AddMinutes(1) + jump, "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, HeldRaw + 60_000));
+        var kept = Assert.Single(await PollAsync(withNew, server, watermark));
+        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", kept.MemoryNotification);
+    }
+
+    /// <summary>
+    /// #7441: a quiet server (one record in the ring buffer, nothing new) polled 500 times by the host's loop,
+    /// with the clock stepping forward 10 minutes at poll 100 and again at poll 300, stores that record once.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_QuietServerWithClockSteps_StoresNothingAfterTheFirstRead()
+    {
+        var server = NewServer();
+        DateTime? watermark = null;
+        var stored = 0;
+        for (var poll = 0; poll < 500; poll++)
+        {
+            var step = (poll >= 100 ? TimeSpan.FromMinutes(10) : TimeSpan.Zero) + (poll >= 300 ? TimeSpan.FromMinutes(10) : TimeSpan.Zero);
+            using var reader = new FakeCollectorDataReader(
+                Rec(s_held + step + TimeSpan.FromMilliseconds(18.0 * poll), "RESOURCE_MEM_STEADY", 0, 0, HeldRaw));
+
+            var rows = await PollAsync(reader, server, watermark);
+            stored += rows.Count;
+            if (rows.Count > 0)
+            {
+                watermark = rows.Max(r => r.SampleTime);
+            }
+        }
+
+        Assert.Equal(1, stored);
     }
 
     /// <summary>

@@ -38,6 +38,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE
     @ms_ticks bigint,
+    @start_time datetime,
     /* SYSUTCDATETIME(), not SYSDATETIME(): @now is the base for a STORED sample_time, and both readers of
        memory_pressure_events.sample_time treat it as naive UTC -- Darling passes it to
        ViewerTimeHelper.ForDisplay, which takes naive-UTC input, and Lite windows it with the UTC-based
@@ -53,7 +54,10 @@ DECLARE
        CollectorTimestampFrameTests pins both directions. */
     @now datetime2(7) = SYSUTCDATETIME();
 
-SELECT /* PerformanceMonitorLite */ @ms_ticks = dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi;
+SELECT /* PerformanceMonitorLite */
+    @ms_ticks = dosi.ms_ticks,
+    @start_time = dosi.sqlserver_start_time
+FROM sys.dm_os_sys_info AS dosi;
 
 SELECT /* PerformanceMonitorLite */
     /* MILLISECOND, not SECOND-truncated -- see CpuUtilizationCollector's identical fix (#2749) for the
@@ -72,7 +76,11 @@ SELECT /* PerformanceMonitorLite */
     memory_indicators_system = t.record.value('(/Record/ResourceMonitor/IndicatorsSystem)[1]', 'integer'),
     /* The raw ring buffer timestamp (ms since the server started). It does not move with the clocks that
        skew sample_time, so ReadAsync uses it as the record's identity (#7441). */
-    ring_timestamp = t.timestamp
+    ring_timestamp = t.timestamp,
+    /* When this SQL Server instance started. It changes on a service restart and on a reboot, and does not
+       change on a VM suspend or a clock step, so ReadAsync can tell a new raw timestamp series from a
+       sample_time that merely moved (#7441). */
+    start_time = @start_time
 FROM
 (
     SELECT
@@ -137,28 +145,25 @@ OPTION(RECOMPILE);";
     internal static readonly TimeSpan HeldRecordMaxSkew = TimeSpan.FromMinutes(10);
 
     /// <summary>
-    /// How far the server's boot instant (the row's <c>sample_time</c> minus its raw <c>timestamp</c>) may move
-    /// between two reads before the read memory is cleared as a restart. Boot drifts by the same 60 ppm skew
-    /// (18 ms per 5-minute poll), so a minute is far past drift. A false restart (a suspended VM resumed) costs
-    /// one cold-start guess, and a missed restart would skip new records, so this errs towards clearing.
-    /// </summary>
-    internal static readonly TimeSpan RestartTolerance = TimeSpan.FromMinutes(1);
-
-    /// <summary>
-    /// What the last read left for a server. <c>Boot</c> is that read's boot instant. <c>Confirmed</c> is the
+    /// What the last read left for a server. <c>StartTime</c> is the instance start time that read saw
+    /// (<c>sys.dm_os_sys_info.sqlserver_start_time</c>): a different value on a later read means the instance
+    /// restarted or the machine rebooted, so the raw ring buffer timestamps are a new series and the remembered
+    /// ones mean nothing. A VM suspend or a clock step moves the computed <c>sample_time</c> but not this value
+    /// or the raw timestamps, so the memory stays valid across them. <c>Confirmed</c> is the
     /// highest raw ring buffer timestamp known to be stored or dropped for good (every row at or below it is
     /// skipped). <c>Pending</c> is the highest raw timestamp the last read handed to the host to store: it
     /// becomes <c>Confirmed</c> only when the next read sees the watermark past <c>PendingBasis</c> (the
     /// watermark the last read ran under), because the host moves the watermark only after a write succeeds, and
     /// a read whose write failed must find its rows again.
     /// </summary>
-    private sealed record ReadMemory(DateTime Boot, long? Confirmed, long? Pending, DateTime? PendingBasis);
+    private sealed record ReadMemory(DateTime StartTime, long? Confirmed, long? Pending, DateTime? PendingBasis);
 
     private readonly ConcurrentDictionary<int, ReadMemory> _memory = new();
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var all = new List<(Row Row, bool NullStamp, long Raw)>();
+        DateTime? readStart = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -168,6 +173,10 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt32(3)), nullStamp, reader.IsDBNull(4) ? 0 : reader.GetInt64(4)));
+            if (readStart is null && !reader.IsDBNull(5))
+            {
+                readStart = reader.GetDateTime(5);
+            }
         }
 
         var watermark = context.Watermark;
@@ -187,20 +196,11 @@ OPTION(RECOMPILE);";
             };
         }
 
-        /* The boot instant is the same for every row in a read and moves only by drift, so a jump is a restart:
-           the raw timestamps are a new series and the remembered ones mean nothing. */
-        DateTime? readBoot = null;
-        foreach (var (row, nullStamp, raw) in all)
-        {
-            if (!nullStamp)
-            {
-                readBoot = row.SampleTime.AddMilliseconds(-raw);
-                break;
-            }
-        }
-
+        /* A different instance start time is a restart or a reboot: the raw timestamps are a new series and the
+           remembered ones mean nothing. Any other change, a suspended VM or a stepped clock included, leaves the
+           raw series alone, so the memory is kept and no record is stored twice. */
         var restarted = false;
-        if (memory is not null && readBoot is { } boot && (boot - memory.Boot).Duration() > RestartTolerance)
+        if (memory is not null && readStart is { } start && start != memory.StartTime)
         {
             memory = null;
             restarted = true;
@@ -276,7 +276,7 @@ OPTION(RECOMPILE);";
             }
         }
 
-        if (readBoot is { } newBoot)
+        if (readStart is { } newStart)
         {
             var newConfirmed = confirmed;
             if (skippedMax is { } sm)
@@ -284,7 +284,7 @@ OPTION(RECOMPILE);";
                 newConfirmed = confirmed is { } old ? Math.Max(old, sm) : sm;
             }
 
-            _memory[context.ServerId] = new ReadMemory(newBoot, newConfirmed, keptMax, keptMax is null ? null : watermark);
+            _memory[context.ServerId] = new ReadMemory(newStart, newConfirmed, keptMax, keptMax is null ? null : watermark);
         }
         else if (memory is not null)
         {
