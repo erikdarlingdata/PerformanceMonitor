@@ -316,7 +316,7 @@ public static class FactAdvice
             "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
             "ANOMALY_MEMORY_PRESSURE" => ComposeAnomalyMemoryPressure(factsByKey),
             "ANOMALY_WAIT_PROFILE" => ComposeAnomalyWaitProfile(factsByKey),
-            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event"),
+            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event", "blocked process report", BlockingSpikeUnitNote),
             "ANOMALY_DEADLOCK_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_DEADLOCK_SPIKE", "deadlock"),
             "ANOMALY_OBJECT_GROWTH" => ComposeAnomalyObjectGrowth(factsByKey),
             "ANOMALY_OBJECT_CONTENTION" => ComposeAnomalyObjectContention(factsByKey),
@@ -1199,6 +1199,8 @@ public static class FactAdvice
         if (perHour is > 0)
             inv.Append($", about {perHour.Value:0.#} per hour");
         inv.Append('.');
+        // #7537: say what is counted. A blocked process report row is not a wait; the spike anomaly counts rows.
+        inv.Append(" Each is one wait: a blocked session waiting on one blocker counts once, however many blocked process reports it produced.");
         if (heads is > 0)
             inv.Append($" {Plural(heads.Value, "distinct head blocker")}.");
         if (avgWait is > 0)
@@ -2141,6 +2143,18 @@ public static class FactAdvice
             : "this server's hour-of-week baseline";
 
     /// <summary>
+    /// #7537: ANOMALY_BLOCKING_SPIKE counts blocked process report ROWS (the detector's COUNT(*), and its baseline
+    /// is in the same unit), while BLOCKING_EVENTS counts WAITS. The blocked process threshold fires again every
+    /// interval while a session waits, so a long wait is one wait and several rows. The sentence says which unit
+    /// the figure is in, so the two counts are never read as one number.
+    /// </summary>
+    private const string BlockingSpikeUnitNote =
+        " This counts blocked process report rows, and the blocked process threshold fires again every interval a session " +
+        "keeps waiting, so one long wait adds several. It is not the blocking event count, which counts each wait once; " +
+        "the two figures for the same window will differ. The baseline it is compared with is in report rows too. " +
+        "On a server that has no blocked process reports, the rows are blocking snapshots from the DMVs.";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
@@ -2153,9 +2167,11 @@ public static class FactAdvice
     /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
     /// </para>
     /// </summary>
-    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
+    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun, string? countNoun = null, string unitNote = "")
     {
         var fallback = _byKey[key];
+        // #7537: what the number counts. The remediation still names the regular finding's threshold by `noun`.
+        var counted = countNoun ?? noun;
         var current = FactMeta(facts, key, "current_count");
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
@@ -2165,11 +2181,11 @@ public static class FactAdvice
         {
             var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
             var invZero =
-                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"{Plural(current.Value, counted)} this window. This server's baseline for this hour-of-week is not thin — " +
                 $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
                 "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
                 "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
-                "treating it as chronic.";
+                "treating it as chronic." + unitNote;
             var remZero =
                 "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
                 "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
@@ -2177,7 +2193,7 @@ public static class FactAdvice
                 $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
             return fallback with
             {
-                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Headline = $"{Plural(current.Value, counted)} this window — against a month in which this hour saw none",
                 Investigation = invZero,
                 Remediation = remZero
             };
@@ -2190,25 +2206,26 @@ public static class FactAdvice
         if (isNew)
         {
             var invNew =
-                $"{Plural(current.Value, noun)} this window — a first occurrence, with no established baseline for this " +
+                $"{Plural(current.Value, counted)} this window — a first occurrence, with no established baseline for this " +
                 "hour-of-week yet to compare against. Treat it as a new event, not a proven regression: check whether it " +
-                "coincides with a workload change, a deploy, or a one-off before treating it as chronic.";
+                "coincides with a workload change, a deploy, or a one-off before treating it as chronic." + unitNote;
             var remNew =
                 $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
                 "with its chain or graph detail on a later window; treat it then. A one-time event that matches a known cause needs only awareness.";
             return fallback with
             {
-                Headline = $"{Plural(current.Value, noun)} this window — first occurrence, no baseline yet",
+                Headline = $"{Plural(current.Value, counted)} this window — first occurrence, no baseline yet",
                 Investigation = invNew,
                 Remediation = remNew
             };
         }
 
         var baseRate = FactMeta(facts, key, "baseline_rate");
-        var inv = new StringBuilder($"{Plural(current.Value, noun)} this window — about {ratio.Value:0.#}× the normal rate for this hour-of-week");
+        var inv = new StringBuilder($"{Plural(current.Value, counted)} this window — about {ratio.Value:0.#}× the normal rate for this hour-of-week");
         if (baseRate is not null)
             inv.Append($" (baseline {baseRate.Value:0.#})");
         inv.Append(". This is a spike against the time-of-week baseline, not necessarily a sustained problem — check whether it coincides with a workload change or a one-off event.");
+        inv.Append(unitNote);
 
         var rem =
             $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
@@ -2216,7 +2233,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{noun} rate spiked to {ratio.Value:0.#}× its baseline for this time of week",
+            Headline = $"{counted} rate spiked to {ratio.Value:0.#}× its baseline for this time of week",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -3459,9 +3476,9 @@ public static class FactAdvice
 
         t["ANOMALY_BLOCKING_SPIKE"] = new AdviceBlock(
             Headline:
-                "Blocking events are anomalously elevated compared to baseline — a ratio above 3x normal rate",
+                "Blocked process reports are anomalously elevated compared to baseline — a ratio above 3x normal rate",
             Investigation:
-                "Ratio-based scoring: 3x baseline = 0.5 score, 10x = 1.0, so this finding means the blocking rate is well above the workload's normal pattern for this hour-of-week bucket. When BLOCKING_EVENTS also surfaced data, the top chains are attached, including whether the head was sleeping (the abandoned-transaction signature). Open Blocking → Blocked Process Reports and zoom to the window to see whether the rate is climbing or a one-shot spike. A sudden ratio spike often points to a recent deploy, schema change, or new query pattern that introduced fresh contention.",
+                "Ratio-based scoring: 3x baseline = 0.5 score, 10x = 1.0, so this finding means the rate of blocked process reports is well above the workload's normal pattern for this hour-of-week bucket. It counts report rows, and the threshold fires again every interval a session keeps waiting, so a long wait adds several; BLOCKING_EVENTS counts each wait once, so the two figures differ for the same window. When BLOCKING_EVENTS also surfaced data, the top chains are attached, including whether the head was sleeping (the abandoned-transaction signature). Open Blocking → Blocked Process Reports and zoom to the window to see whether the rate is climbing or a one-shot spike. A sudden ratio spike often points to a recent deploy, schema change, or new query pattern that introduced fresh contention.",
             Remediation:
                 "First question: what changed? Recent deploy, schema migration, new query pattern, job running outside its normal window. If a sleeping head topped the chain, that is the abandoned-transaction signature — but this is a report on a window that has passed, so the chain has cleared and a KILL buys nothing; fix the code path that left a BEGIN TRAN open on its error/timeout path (SET XACT_ABORT ON) so it stops recurring. For systemic increases without an obvious change, the BLOCKING_EVENTS standard playbook applies: RCSI for reader/writer waits, shorter transactions for writer/writer, index tuning to reduce lock-hold duration on the slow operations everyone is queueing behind.");
 

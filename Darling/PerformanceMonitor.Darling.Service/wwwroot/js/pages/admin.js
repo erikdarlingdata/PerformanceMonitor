@@ -28,7 +28,7 @@
    it reaches a row. */
 
 import { VIZ } from "../panels.js";
-import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
+import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { dailyReportEditor } from "./admin-daily-report.js";
@@ -1325,13 +1325,20 @@ const buildProfilesTab = (body, generation) => buildProfiles(body, generation, {
 });
 
 const SETTINGS_NOTE =
-  "Read only, except the Daily Health Report, which a signed-in admin can change here. Delivery credentials (SMTP, webhooks) are not reported by this read. The data-collection flags " +
+  "Read only, except the Daily Health Report, which a signed-in admin can change here. Delivery credentials (SMTP, webhooks) are not shown on this page. The data-collection flags " +
   "(plan capture and similar) are not carried by it either; they stay in the desktop Settings window.";
+
+/** #7410: a store with no saved alert settings yet says so in one plain sentence; the tool's text (it talks of rows and the store)
+    stays behind "More detail". Null for any other reply. */
+export function settingsUnavailableStrip(res) {
+  if (!res || res.kind !== "empty" || res.status !== "unavailable") return null;
+  return plainEmptyStrip(res, "No alert settings have been saved yet, so the service is running on its defaults.");
+}
 
 async function buildSettings(body, generation) {
   const [res, session] = await Promise.all([readTool("get_alert_settings", {}), getSession()]);
   if (generation !== renderGeneration) return;
-  const bad = failure(res);
+  const bad = settingsUnavailableStrip(res) || failure(res);
   if (bad) return mount(body, bad);
   const sections = settingSections(res.data);
   if (!sections.length) return mount(body, emptyStrip("The service reported no alert settings."));
