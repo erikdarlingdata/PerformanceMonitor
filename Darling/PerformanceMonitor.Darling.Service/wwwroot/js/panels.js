@@ -1474,12 +1474,12 @@ function vizStat(data, desc) {
 const MAX_GROUP_SERIES = 8;
 const OTHER_GROUP = "(other)";
 const GROUP_KEY_PREFIX = "g:";
-export function groupedPoints(rows, xKey, groupKey, valueKey) {
+export function groupedPoints(rows, xKey, groupKey, valueField) {
   const totals = new Map();
   for (const r of rows) {
     if (!r || r[xKey] == null) continue;
     const g = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
-    totals.set(g, (totals.get(g) || 0) + (Number(r[valueKey]) || 0));
+    totals.set(g, (totals.get(g) || 0) + (Number(r[valueField]) || 0));
   }
   const ranked = [...totals.keys()].sort((a, b) => totals.get(b) - totals.get(a) || (a < b ? -1 : a > b ? 1 : 0));
   const kept = ranked.length > MAX_GROUP_SERIES ? ranked.slice(0, MAX_GROUP_SERIES - 1) : ranked;
@@ -1489,7 +1489,7 @@ export function groupedPoints(rows, xKey, groupKey, valueKey) {
     if (!r || r[xKey] == null) continue;
     const g0 = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
     const g = kept.includes(g0) ? g0 : OTHER_GROUP;
-    const v = Number(r[valueKey]);
+    const v = Number(r[valueField]);
     if (!Number.isFinite(v)) continue;
     /* A group is a database or wait type NAME, so it is data: the point holds no prototype (a database named __proto__ is an ordinary
        key) and each group's key carries a prefix (a database named like xKey, collection_time, does not overwrite the point's time). */
