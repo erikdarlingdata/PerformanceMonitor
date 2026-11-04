@@ -90,10 +90,10 @@ export { waitsPanel, drawWaitTrends, namedTrendPanel, drawNamedTrends } from "./
  * `ctx` is `{ hours, label }` — the page's time range and its human label.
  */
 /* #7410: the two Index Bloat panels read one tool whose note is a long paragraph (population counts, accuracy figures, the exact-measurement
-   command) and whose empty text repeats it. The page says one sentence and keeps the tool's own text one click away. */
+   command). The page says one sentence and keeps the tool's own text one click away. Its empty reply is not shortened: it warns that the
+   daily collector may not have run in a short window, and the page does not drop that. */
 const INDEX_BLOAT_PLAIN = {
   noteShort: "These are estimates from catalog statistics, not page reads. An index with a reason in Not Measured has no estimate, which is not the same as healthy.",
-  emptyLine: "No index has a bloat estimate for this window yet.",
 };
 
 export const SERVER_TABS = [
@@ -526,7 +526,7 @@ export const SERVER_TABS = [
         "daily collection",
         "No object size rows recorded. Index and object stats are collected daily."
       ),
-      tablePanelPlain(
+      tablePanel(
         "Persistent Version Store",
         "get_pvs_stats",
         { server },
@@ -865,7 +865,7 @@ export const SERVER_TABS = [
     id: "changes",
     label: "Config Changes",
     build: (server, ctx) => [
-      tablePanelPlain(
+      tablePanel(
         "Server Configuration Changes",
         "get_server_config_changes",
         { server, hours: ctx.hours },
@@ -874,7 +874,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No server configuration changed in this window."
       ),
-      tablePanelPlain(
+      tablePanel(
         "Database Configuration Changes",
         "get_database_config_changes",
         { server, hours: ctx.hours },
@@ -883,7 +883,7 @@ export const SERVER_TABS = [
         ctx.label,
         "No database configuration changed in this window."
       ),
-      tablePanelPlain(
+      tablePanel(
         "Trace Flag Changes",
         "get_trace_flag_changes",
         { server, hours: ctx.hours },
@@ -1302,7 +1302,6 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_extensions", { server, hours: ctx.hours, limit: 50 }, [
         {
           title: "Extensions",
-          emptyLine: true,
           subtitle: ctx.label + ", per database; 'available' means CREATE EXTENSION would work",
           viz: "table",
           rowsKey: "extensions",
@@ -1414,7 +1413,7 @@ export const POSTGRES_TABS = [
          is a different registry with a different shape; here it belongs beside the two reads whose absence
          it explains, and its own empty text is what stops that explanation being circular. Every facet is
          shown, satisfied ones included — a list of only the failures cannot show that capture is working. */
-      tablePanelPlain(
+      tablePanel(
         "Plan Capture Readiness",
         "get_pg_plan_capture_readiness",
         { server, hours: ctx.hours, limit: 25 },
@@ -1429,7 +1428,7 @@ export const POSTGRES_TABS = [
          read reports the snapshot time as captured_at. Every setting is shown whatever its
          verdict, for the reason the readiness grid shows satisfied facets: a list of only the failures
          cannot show that a target IS instrumented. */
-      tablePanelPlain(
+      tablePanel(
         "Logging Settings Audit",
         "get_pg_logging_audit",
         { server },
@@ -1486,7 +1485,7 @@ export const POSTGRES_TABS = [
       /* #2629: what the queries above actually FILTER on. Placed on Activity rather than Storage because
          it is evidence about the workload, not about the disk — and it belongs beside top queries, since
          a predicate row and a query row are two views of the same execution. */
-      tablePanelPlain(
+      tablePanel(
         "Predicate Selectivity",
         "get_pg_predicate_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1495,7 +1494,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", sampled counts - scale by 1/sample rate and treat the product as an estimate",
         "No predicate statistics in this window. pg_qualstats samples executions and needs a restart to load, so an empty panel here usually means it is not loaded."
       ),
-      tablePanelPlain(
+      tablePanel(
         "Column Statistics",
         "get_pg_column_stats",
         { server, hours: ctx.hours, limit: 25 },
@@ -1742,7 +1741,6 @@ export const POSTGRES_TABS = [
       ...fanout("get_pg_io_stats", { server, hours: ctx.hours, limit: 20 }, [
         {
           title: "I/O Summary",
-          emptyLine: true,
           subtitle: ctx.label + ", differenced across the window",
           viz: "stat",
           stats: PG_IO_SUMMARY_STATS,
@@ -1962,7 +1960,7 @@ export const POSTGRES_TABS = [
         ctx.label + ", newest first",
         "No configuration parameter changed value in this window."
       ),
-      tablePanelPlain(
+      tablePanel(
         "Settings",
         "get_pg_server_config",
         { server },

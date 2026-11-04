@@ -564,7 +564,11 @@ table.data td.clamp { max-width: 28rem; }
 .plan-summary { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 4px 0; }
 /* #7410: a prose column that takes the width the grid has. It wraps at a floor of 12rem, grows with a wide screen, and the grid scrolls sideways only when
    the floors alone do not fit. The closed summary of a click-to-open cell in it wraps too, so a sentence is read without opening it. */
+/* #7410: a column built only so Copy and the CSV carry it (exportOnly) is not drawn. */
+table.data .export-only { display: none; }
 table.data td.flow-cell { min-width: 12rem; max-width: none; overflow-wrap: anywhere; }
+/* #7410: a narrower floor for the short wrapping columns of a wide grid (Logging Settings Audit), so its last column is not pushed past the panel at 1280 px. */
+table.data td.flow-cell.flow-narrow { min-width: 8rem; }
 table.data td.flow-cell .disclosure { max-width: none; }
 table.data td.flow-cell .disclosure > .disc-summary { white-space: normal; overflow: visible; text-overflow: clip; }
 /* The query text of Top Query Shapes keeps room to read: its closed summary is one line, and without a floor the auto layout squeezes it to a few characters. */

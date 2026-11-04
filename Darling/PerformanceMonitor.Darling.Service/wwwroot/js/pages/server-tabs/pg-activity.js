@@ -282,14 +282,14 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
     sortValue: (row) => row.value,
   },
   { key: "change_needs", label: "Change needs", small: true },
-  { key: "recommended", label: "Recommended", wrap: true, cellClass: () => "flow-cell" },
-  { key: "unlocks", label: "Unlocks", wrap: true, cellClass: () => "flow-cell" },
+  { key: "recommended", label: "Recommended", wrap: true, cellClass: () => "flow-cell flow-narrow" },
+  { key: "unlocks", label: "Unlocks", wrap: true, cellClass: () => "flow-cell flow-narrow" },
   {
     key: "remedy",
     label: "Cost and remedy",
     cellClass: () => "flow-cell",
     sortable: false,
-    copyValue: (row) => [row.cost_note, row.remedy].filter(Boolean).join(" "),
+    copyValue: (row) => row.remedy ?? "",
     render: (row) => {
       const parts = [];
       if (row.remedy) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Remedy. "]), row.remedy]));
@@ -300,6 +300,10 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
       return box;
     },
   },
+  /* #7410: not drawn, still in Copy and the CSV: the fields the Value cell and the remedy cell fold in. */
+  { key: "unit", label: "Unit", exportOnly: true },
+  { key: "source", label: "Source", exportOnly: true },
+  { key: "cost_note", label: "Cost", exportOnly: true },
 ];
 
 /* #7410: the query text is the second column, with room to read (`query-cell`), and not the last one cut off after a few characters. The
