@@ -53,14 +53,14 @@ public static class QueryStoreRegressionRules
     /// #7592: a cost row ranks LOW, whatever its percent, when it added less than this many milliseconds of duration over the
     /// window (its recent runs times the rise in duration per run) AND less than <see cref="GradeMinAddedPerRunMs"/> per run. One
     /// minute: 162 runs of a 13 ms query that was 5 ms (+168%) add 1.3 s, and read CRITICAL on a quiet server. The row stays listed,
-    /// because the percent is true. Spelled "1 minute" in the tools' text and in the Viewer's, by hand, as <see cref="CostMinAddedCpuMs"/> is.
+    /// because the percent is true. Spelled "1 minute" in the tools' text, by hand, as <see cref="CostMinAddedCpuMs"/> is.
     /// </summary>
     public const int GradeMinAddedDurationMs = 60_000;
 
     /// <summary>
     /// #7592: the per-run half of the grade floor. A row under <see cref="GradeMinAddedDurationMs"/> in total keeps its percent
     /// bands when each run got at least this many milliseconds slower: 4 runs that went from 0.12 ms to 3,263 ms add 13 s in total
-    /// but are a real slowdown for whoever hit them. One second, spelled "1 second" in the tools' text and in the Viewer's.
+    /// but are a real slowdown for whoever hit them. One second, spelled "1 second" in the tools' text.
     /// </summary>
     public const int GradeMinAddedPerRunMs = 1_000;
 
