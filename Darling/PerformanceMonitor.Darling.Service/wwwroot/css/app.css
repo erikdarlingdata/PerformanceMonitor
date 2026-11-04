@@ -520,7 +520,9 @@ a:hover { text-decoration: underline; }
   border-radius: var(--radius-sm);
   padding: 0.7rem 0.85rem;
 }
-.stat .value { font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* A tile value with no space in it (SOS_SCHEDULER_YIELD, PREEMPTIVE_OS_*) has no place to wrap and ran past its tile (#7485).
+   overflow-wrap: anywhere breaks it only when it does not fit, so the tile grows taller and a wide tile looks as before. */
+.stat .value { font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .stat .value.small { font-size: 1rem; font-weight: 600; }
 /* A stat whose descriptor carries a pre-computed severity hint colors its value (coloring only, never a re-band). */
 .stat .value.sev-Healthy { color: var(--ok); }

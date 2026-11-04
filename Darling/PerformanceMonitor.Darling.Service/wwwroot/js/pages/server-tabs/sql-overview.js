@@ -117,7 +117,7 @@ function dailyRangeGrid(rows, missing) {
 
 export const OVERVIEW_STATS = READ_FIELDS.get_server_summary.stat.stats;
 
-const DAILY_STATS = [
+export const DAILY_STATS = [
   { key: "summary_date", label: "Date", format: "text", small: true },
   /* One health card, not two. The daily-summary row carried overall_health as the band's LABEL
      (DarlingHealthReader: OverallHealth => DailyHealthBandCalculator.Label(HealthBand)) — the same value
@@ -125,7 +125,7 @@ const DAILY_STATS = [
      the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
   { key: "health_band", label: "Band", format: "text", small: true },
   { key: "top_wait_type", label: "Top wait", format: "text", small: true },
-  { key: "total_wait_time_sec", label: "Total wait", format: "int" },
+  { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
   { key: "unique_queries", label: "Unique queries", format: "int" },
   { key: "blocking_events", label: "Blocking", format: "int" },
   { key: "deadlock_count", label: "Deadlocks", format: "int" },
