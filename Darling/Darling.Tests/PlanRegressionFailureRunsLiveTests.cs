@@ -182,14 +182,14 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
         if (costFactor is { } expectedFactor)
         {
             Assert.Equal(1, fact.Metadata["offender_count"]);
-            Assert.Equal(expectedFactor, fact.Metadata["worst_regression_factor"], 3);
+            Assert.Equal(expectedFactor, fact.Metadata["lead_regression_factor"], 3);
             Assert.Equal(20, fact.Metadata["worst_query_id"]);
             Assert.Equal(new PlanRegressionOffender(Db, 20), Assert.Single(pass.PlanRegressionOffenders!));
         }
         else
         {
             Assert.Equal(0, fact.Metadata["offender_count"]);
-            Assert.False(fact.Metadata.ContainsKey("worst_regression_factor"));
+            Assert.False(fact.Metadata.ContainsKey("lead_regression_factor"));
             Assert.Empty(pass.PlanRegressionOffenders ?? []);
         }
 

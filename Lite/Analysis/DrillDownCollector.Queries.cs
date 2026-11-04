@@ -637,7 +637,7 @@ deduped AS
     -- returns are the head of the ranking the fact has already computed -- the same detection over the same
     -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
     -- read run twice. The two reads fold plans the same way (plan_agg, then plan_dedup) and rank the same
-    -- way, so this read's top five are among the fact's twenty. The lists are matched independently, which
+    -- way (the CPU the regression lost, then the factor: PlanRegressionRanking, #7417), so this read's top five are among the fact's twenty. The lists are matched independently, which
     -- admits every pairing of the listed databases and query ids: a superset of the offenders, never a
     -- subset.
     AND   ($5::VARCHAR[] IS NULL
@@ -729,6 +729,9 @@ compared AS
         END AS regression_factor,
         l.replica_role,
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost, the PLAN_REGRESSION fact's ranking key (PlanRegressionRanking). The force
+        -- statement is built from the rows of this read in order, so it must rank them the way the fact does.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
@@ -768,9 +771,11 @@ FROM compared
 CROSS JOIN svr
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #7417: the fact's lost-CPU floor on the CPU path, and its order. The first row is the fact's lead offender.
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY regression_factor DESC
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
 LIMIT 5";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

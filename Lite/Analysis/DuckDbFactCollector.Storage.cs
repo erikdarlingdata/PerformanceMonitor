@@ -112,7 +112,9 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             var dataFileStallWriteMs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
             var dataFileWrites = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
-            if (totalReads > 0)
+            /* #7417: a read average over a handful of I/Os is not a storage problem. The count is SUM(delta_reads) over
+               this query's own window, the rows the average was computed from (IoVolumeFloor). */
+            if (IoVolumeFloor.ReadsClearFloor(totalReads))
             {
                 var avgReadLatency = (double)totalStallReadMs / totalReads;
                 facts.Add(new Fact
@@ -130,7 +132,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
                 });
             }
 
-            if (totalWrites > 0)
+            /* #7417: totalWrites is the log and tempdb writes the scored latency covers, so user data file writes cannot lend volume. */
+            if (IoVolumeFloor.WritesClearFloor(totalWrites))
             {
                 /* #6959: the scored value is the log files and tempdb data files only (a session waits on a log flush
                    and on a tempdb spill write). User data files are checkpoint and lazy-writer targets that no session

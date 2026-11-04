@@ -524,7 +524,9 @@ public class FactScorer
             // Parameter sensitivity: worst max/min worker-time ratio. Magnitude-driven —
             // concerning at 10x, critical at 100x — so a lone catastrophic plan still scores high.
             "PARAMETER_SENSITIVITY" => ApplyThresholdFormula(fact.Value, 10, 100),
-            // Plan regression: worst per-exec cost factor vs the best plan. Concerning 2x, critical 10x.
+            // Plan regression: the LEAD offender's per-exec cost factor vs its best plan. Concerning 2x, critical 10x.
+            // #7417: the lead is the regression that lost the most CPU, not the largest factor, so a modest factor on a
+            // costly statement scores modestly (2.1x scores 0.51, still past the 0.5 display bar: every kept row is 2x or more).
             "PLAN_REGRESSION" => ApplyThresholdFormula(fact.Value, 2, 10),
             // WS4: plan-XML advisories (advise-only), parsed from the top collected query plans.
             // Each scores only when >=1 was found (Value = count) and roots a standalone card via

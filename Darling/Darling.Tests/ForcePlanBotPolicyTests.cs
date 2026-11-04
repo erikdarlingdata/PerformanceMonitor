@@ -607,7 +607,7 @@ public sealed class ForcePlanBotPolicyTests
         {
             var metadata = new Dictionary<string, double>
             {
-                ["worst_regression_factor"] = 6,
+                ["lead_regression_factor"] = 6,
                 ["offender_count"] = 2,
                 ["latest_cpu_per_exec_us"] = 60000,
                 ["best_cpu_per_exec_us"] = 10000,
