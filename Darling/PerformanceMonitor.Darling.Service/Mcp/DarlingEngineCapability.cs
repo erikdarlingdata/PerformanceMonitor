@@ -153,7 +153,7 @@ WHERE server_id = ANY($1)";
 
     /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
     internal static bool IsReadableSecondaryGated(string collectorName) =>
-        collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction";
+        collectorName is "query_store" or "query_store_forced_plans" or "query_store_hints" or "plan_correction" or "query_store_health";
 
     /// <summary>
     /// #7159: the <c>not_collected</c> envelope for a read whose every figure comes from SQL Server tables (CPU, memory, blocking,
