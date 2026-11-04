@@ -527,7 +527,7 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
 
             /* An agent's own new rule: it can renew inside creation + 7 days, and not past it. */
             /* A different metric and server from the rules above: the agent edits of those are in the journal, and the same-match check would refuse a repeat. */
-            var made = (string)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 9, action: "mute", expires: Iso(DateTime.UtcNow.AddDays(1))))["mute_rule"]!["id"]!;
+            var made = (string)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 8, action: "mute", expires: Iso(DateTime.UtcNow.AddDays(1))))["mute_rule"]!["id"]!;
             Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, made, Changes(Iso(DateTime.UtcNow.AddDays(3))), agentSeat: Named))["status"]);
             await ExecAsync(c.Connection, $"UPDATE config_mute_rules SET created_at_utc = now() AT TIME ZONE 'utc' - interval '6 days' WHERE id = '{made}'", c.Ct);
             Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode,
