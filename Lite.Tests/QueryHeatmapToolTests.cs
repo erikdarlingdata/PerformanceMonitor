@@ -108,7 +108,7 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
         await SeedAsync(baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
 
         var noWindow = Root(await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 2));
-        Assert.Equal("empty", noWindow.GetProperty("status").GetString());
+        Assert.Equal("unavailable", noWindow.GetProperty("status").GetString());
         var noWindowText = noWindow.GetProperty("message").GetString()!;
         Assert.Contains("Widen hours_back", noWindowText, StringComparison.Ordinal);
         Assert.DoesNotContain("EVER", noWindowText, StringComparison.Ordinal);
@@ -275,7 +275,7 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
         /* The same LENGTH of window at the default anchor cannot reach it — so it is the anchor doing the
            work, not hours_back. */
         var unanchored = Root(await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 1));
-        Assert.Equal("empty", unanchored.GetProperty("status").GetString());
+        Assert.Equal("unavailable", unanchored.GetProperty("status").GetString());
         Assert.Contains("Widen hours_back", unanchored.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
         /* An anchor we cannot use is refused, never silently treated as now. */

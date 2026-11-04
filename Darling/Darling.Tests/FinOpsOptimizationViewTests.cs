@@ -518,7 +518,10 @@ public sealed class FinOpsOptimizationViewLiveTests
         using var tool = await ToolAsync(ds, TempdbOnlyServerName, 24, 10, ct);
         Assert.Equal("ok", Section(tool, "tempdb_pressure").GetProperty("status").GetString());
         Assert.Equal(4, Section(tool, "tempdb_pressure").GetProperty("rows").GetArrayLength());
-        foreach (var name in new[] { "idle_databases", "wait_categories", "expensive_queries", "memory_grant_efficiency" })
+        /* #7459: this server has no query-stats coverage, so idle_databases cannot say which databases are idle. */
+        Assert.Equal("unavailable", Section(tool, "idle_databases").GetProperty("status").GetString());
+        Assert.Equal(0, Section(tool, "idle_databases").GetProperty("rows").GetArrayLength());
+        foreach (var name in new[] { "wait_categories", "expensive_queries", "memory_grant_efficiency" })
         {
             Assert.Equal("empty", Section(tool, name).GetProperty("status").GetString());
             Assert.Equal(0, Section(tool, name).GetProperty("rows").GetArrayLength());
