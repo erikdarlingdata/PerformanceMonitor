@@ -18,7 +18,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 internal static class CollectorCountText
 {
-    /// <summary>The word every surface uses for the NO_PERMISSIONS plus EXTENSION_MISSING count.</summary>
+    /// <summary>The status bar's word for the NO_PERMISSIONS plus EXTENSION_MISSING count. The Overview card and the web viewer spell the same words themselves.</summary>
     public const string NeedSetup = "need setup";
 
     /// <summary>
