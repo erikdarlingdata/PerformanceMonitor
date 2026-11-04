@@ -351,9 +351,13 @@ public sealed class ViewerServerSummaryDisplayTests
     [Fact]
     public void LastCollectionDisplay_TreatsStoredValueAsUtc_ShownLocal()
     {
+        /* #7422: the display zone is named, so the answer does not depend on the machine's zone or on today's date. The property reads
+           ViewerTimeHelper.CurrentDisplayZone(), whose default clock is a fixed offset taken from today's offset, and ToLocalTime applies
+           the offset of the stored value's own date: on a daylight saving machine a July value and a November today differ by an hour. */
         var storedUtc = new DateTime(2026, 7, 3, 3, 30, 45, DateTimeKind.Unspecified);
-        var expected = DateTime.SpecifyKind(storedUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        Assert.Equal(expected, new ServerSummaryItem { LastCollectionTime = storedUtc }.LastCollectionDisplay);
+        var minusFour = TimeZoneInfo.CreateCustomTimeZone("w2a-minus-four", TimeSpan.FromHours(-4), "w2a", "w2a");
+        var now = new DateTime(2026, 11, 3, 12, 0, 0, DateTimeKind.Utc);
+        Assert.Equal("2026-07-02 23:30:45", ServerSummaryItem.FormatLastCollect(storedUtc, minusFour, now));
     }
 
     [Fact]
