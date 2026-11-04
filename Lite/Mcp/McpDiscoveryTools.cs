@@ -83,14 +83,9 @@ public sealed class McpDiscoveryTools
             return McpHelpers.Status("empty", "No servers are configured.");
         }
 
-        var lines = new List<string> { $"Monitored servers ({servers.Count}):\n" };
+        var rows = new List<object>(servers.Count);
         foreach (var s in servers)
         {
-            var roTag = s.ReadOnlyIntent ? " [Read-Only]" : "";
-            var display = string.IsNullOrEmpty(s.DisplayName) || s.DisplayName == s.ServerName
-                ? $"{s.ServerName}{roTag}"
-                : $"{s.DisplayName} ({s.ServerName}){roTag}";
-
             var status = serverManager.GetConnectionStatus(s.Id);
             var statusText = status.IsOnline switch
             {
@@ -101,14 +96,27 @@ public sealed class McpDiscoveryTools
 
             var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
             var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayNameWithIntent, s.RegisteredAtUtc);
+            var lastCollection = summary?.LastCollectionTime;
             /* #3967: a server whose history has aged out of the archive has no collection to show either,
-               and "No data collected" would claim it never collected. */
-            var lastCollection = summary?.LastCollectionTime?.ToString("o")
-                ?? (summary?.CollectionFreshness == ServerFreshness.Offline ? "none retained" : "No data collected");
+               and "No data collected" would claim it never collected. #7527: the reason rides in
+               last_collection_note now that last_collection is a stamp or null. */
+            string? lastCollectionNote = lastCollection is null
+                ? (summary?.CollectionFreshness == ServerFreshness.Offline ? "none retained" : "No data collected")
+                : null;
 
-            lines.Add($"- {display} [{statusText}] (last collection: {lastCollection})");
+            rows.Add(new
+            {
+                server_name = s.ServerName,
+                display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
+                status = statusText,
+                read_only = s.ReadOnlyIntent,
+                /* #7527: a UTC stamp, the same shape Darling's list_servers answers. The store keeps collection times in UTC. */
+                last_collection = lastCollection is { } at ? DateTime.SpecifyKind(at, DateTimeKind.Utc).ToString("o") : null,
+                last_collection_note = lastCollectionNote
+            });
         }
 
-        return string.Join("\n", lines);
+        /* #7527: JSON like every other read, and like Darling's list_servers (server_count + servers). */
+        return JsonSerializer.Serialize(new { server_count = rows.Count, servers = rows }, McpHelpers.JsonOptions);
     }
 }
