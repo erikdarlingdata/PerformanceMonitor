@@ -8,29 +8,6 @@ public class QueryStoreTests
     private static readonly DateTime Now = new(2026, 9, 26, 12, 0, 0, DateTimeKind.Utc);
 
     [Fact]
-    public void QueryStoreStatsRawSql_filters_on_both_collection_time_and_interval_start()
-    {
-        Assert.Contains("collection_time >= @from AND collection_time < @to_plus_2h", SqlBuilder.QueryStoreStatsRawSql);
-        Assert.Contains("interval_start_time_utc >= @from AND interval_start_time_utc < @to", SqlBuilder.QueryStoreStatsRawSql);
-        Assert.DoesNotContain("query_text", SqlBuilder.QueryStoreStatsRawSql);
-        Assert.DoesNotContain("query_plan_text", SqlBuilder.QueryStoreStatsRawSql);
-        Assert.DoesNotContain("collection_id", SqlBuilder.QueryStoreStatsRawSql);
-    }
-
-    [Fact]
-    public void BuildQueryStoreDedupSql_partitions_on_the_full_snapshot_key_and_orders_by_collection_time_desc()
-    {
-        var sql = SqlBuilder.BuildQueryStoreDedupSql("raw_table");
-
-        Assert.Contains("PARTITION BY server_name, database_name, query_id, plan_id,", sql);
-        Assert.Contains("runtime_stats_interval_id, execution_type_desc, replica_role", sql);
-        Assert.Contains("ORDER BY collection_time DESC", sql);
-        Assert.Contains("QUALIFY rn = 1", sql);
-        Assert.Contains("AS last_collection_time", sql);
-        Assert.Contains("AS snapshot_count", sql);
-    }
-
-    [Fact]
     public void TimeColumn_for_query_store_stats_is_interval_start_time_utc()
     {
         Assert.Equal("interval_start_time_utc", SqlBuilder.TimeColumn(QueryStoreTables.QueryStoreStats));

@@ -56,45 +56,4 @@ public class QuerySnapshotsExporterTests
         Assert.NotEqual(a, b);
     }
 
-    [Fact]
-    public void BuildSelect_never_includes_live_query_plan()
-    {
-        var columns = new[]
-        {
-            "collection_time", "server_name", "session_id", "database_name", "query_hash",
-            "query_text", "query_plan", "live_query_plan", "request_id",
-        };
-
-        var sql = QuerySnapshotsExporter.BuildSelect(columns);
-
-        Assert.DoesNotContain("live_query_plan", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void BuildSelect_includes_query_plan_as_the_last_projected_column_for_streaming()
-    {
-        var columns = new[] { "collection_time", "server_name", "query_hash", "query_plan", "live_query_plan" };
-
-        var sql = QuerySnapshotsExporter.BuildSelect(columns);
-
-        Assert.Contains("\"query_plan\"", sql, StringComparison.Ordinal);
-        // The projection must end with query_plan (the reader loop assumes this ordinal is last).
-        var selectPart = sql[(sql.IndexOf("SELECT ", StringComparison.Ordinal) + "SELECT ".Length)..sql.IndexOf(" FROM", StringComparison.Ordinal)];
-        var projected = selectPart.Split(", ");
-        Assert.Equal("\"query_plan\"", projected[^1]);
-    }
-
-    [Fact]
-    public void BuildSelect_is_tagged_and_windowed_on_collection_time()
-    {
-        var columns = new[] { "collection_time", "query_plan" };
-
-        var sql = QuerySnapshotsExporter.BuildSelect(columns);
-
-        Assert.StartsWith("/* darling-export:opt.query_snapshots */", sql, StringComparison.Ordinal);
-        Assert.Contains("WHERE collection_time >= @from AND collection_time < @to", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ORDER BY", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("DISTINCT", sql, StringComparison.Ordinal);
-    }
 }

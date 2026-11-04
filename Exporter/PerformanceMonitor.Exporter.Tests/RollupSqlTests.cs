@@ -81,36 +81,6 @@ public class RollupSqlTests
         Assert.Throws<ArgumentException>(() => RollupSql.Build("not_a_real_spec"));
     }
 
-    // -- The golden SQL shape, normalized for whitespace (design doc §2.3.3). --
-
-    [Fact]
-    public void MemoryGrantStatsHourly_matches_the_golden_shape()
-    {
-        var sql = RollupSql.Build("memory_grant_stats_hourly");
-        var normalized = Regex.Replace(sql, @"\s+", " ").Trim();
-
-        string[] expectedFragments =
-        [
-            "\"server_name\"", "\"resource_semaphore_id\"", "\"pool_id\"",
-            "date_trunc('hour', \"collection_time\") AS \"hour\"",
-            "avg(\"granted_memory_mb\") AS \"granted_memory_mb_avg\"",
-            "max(\"granted_memory_mb\") AS \"granted_memory_mb_max\"",
-            "arg_max(\"granted_memory_mb\", \"collection_time\") AS \"granted_memory_mb_last\"",
-            "avg(\"available_memory_mb\") AS \"available_memory_mb_avg\"",
-            "min(\"available_memory_mb\") AS \"available_memory_mb_min\"",
-            "arg_max(\"available_memory_mb\", \"collection_time\") AS \"available_memory_mb_last\"",
-            "sum(\"timeout_error_count_delta\") FILTER (WHERE \"sample_interval_seconds\" IS DISTINCT FROM 0) AS \"timeout_error_count_delta_sum\"",
-            "CAST(sum(\"sample_interval_seconds\") AS BIGINT) AS \"sample_interval_seconds_sum\"",
-            "count(*) AS \"sample_count\"",
-            "GROUP BY ALL",
-        ];
-
-        foreach (var fragment in expectedFragments)
-        {
-            Assert.Contains(fragment, normalized);
-        }
-    }
-
     // -- 12 planted samples give exact avg, max and last. --
 
     [Fact]
@@ -143,6 +113,8 @@ public class RollupSqlTests
         Assert.Equal(5.0, Convert.ToDouble(row[columns["available_memory_mb_min"]]), 3);
         Assert.Equal(60.0, Convert.ToDouble(row[columns["available_memory_mb_last"]]), 3);
         Assert.Equal(12, Convert.ToInt32(row[columns["sample_count"]]));
+        Assert.Equal(720L, ToLong(row[columns["sample_interval_seconds_sum"]]));  // 12 samples of 60 s, a BIGINT sum
+        Assert.Equal(["server_name", "resource_semaphore_id", "pool_id", "hour"], new[] { "server_name", "resource_semaphore_id", "pool_id", "hour" }.Where(columns.ContainsKey));
     }
 
     private static Dictionary<string, int> ColumnsOf(DuckDBConnection connection, string sql)
@@ -181,6 +153,8 @@ public class RollupSqlTests
         var columns = ColumnsOf(connection, sql);
 
         Assert.Equal(5L, ToLong(row[columns["timeout_error_count_delta_sum"]]));
+        Assert.Equal(60L, ToLong(row[columns["sample_interval_seconds_sum"]]));
+        Assert.Equal(2, Convert.ToInt32(row[columns["sample_count"]]));   // the interval-0 sample is still a sample, only its delta is left out
     }
 
     // -- A counter reset: 100, 150, 20, 60 -> _delta_in_hour 110, _first 100, _last 60. --

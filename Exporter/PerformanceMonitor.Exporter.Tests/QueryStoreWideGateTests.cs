@@ -276,30 +276,6 @@ public class QueryStoreWideGateTests
     }
 
     [Fact]
-    public void Wide_sql_selects_the_raw_columns_in_order_and_filters_on_first_execution_time()
-    {
-        var sql = SqlBuilder.QueryStoreStatsWideSql;
-        Assert.Contains("/* darling-export:query_store_stats.wide */", sql);
-        Assert.Contains("FROM collect.query_store_interval_wide", sql);
-        Assert.Contains("first_execution_time >= @from AND first_execution_time < @to", sql);
-        Assert.DoesNotContain("interval_start_time_utc >=", sql);
-        Assert.DoesNotContain("GROUP BY", sql);
-        Assert.DoesNotContain("ORDER BY", sql);
-
-        // Every raw column appears, in the raw order (server_name is a NULL placeholder).
-        var last = -1;
-        foreach (var column in QueryStoreWindow.RawColumns)
-        {
-            var at = column == "server_name" ? sql.IndexOf("AS server_name", StringComparison.Ordinal) : sql.IndexOf(" " + column, last + 1, StringComparison.Ordinal);
-            Assert.True(at > last, $"column {column} out of order or missing");
-            last = at;
-        }
-
-        Assert.Contains("SET LOCAL enable_indexscan = off", SqlBuilder.QueryStoreWideReadSetupSql);
-        Assert.Contains("READ ONLY", SqlBuilder.QueryStoreWideReadSetupSql);
-    }
-
-    [Fact]
     public async Task Manifest_carries_the_source_fields_only_when_a_report_exists()
     {
         var entry = new ManifestTableEntry

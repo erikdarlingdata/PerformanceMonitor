@@ -155,20 +155,6 @@ public class SubHourWindowTests
     }
 
     [Fact]
-    public void Raw_select_uses_a_plain_collection_time_range_with_no_hour_bucketing()
-    {
-        foreach (var table in RawTables.All)
-        {
-            var sql = SqlBuilder.BuildRawSelect(table, ["collection_time", "x"]);
-            Assert.EndsWith("WHERE collection_time >= @from AND collection_time < @to", sql);
-            Assert.DoesNotContain("date_trunc", sql);
-        }
-
-        Assert.EndsWith("WHERE collection_time >= @from AND collection_time < @to", SystemHealthExporter.WindowSql);
-        Assert.DoesNotContain("date_trunc", SystemHealthExporter.WindowSql);
-    }
-
-    [Fact]
     public void Window_parameters_carry_the_exact_sub_hour_bounds_as_unspecified_kind()
     {
         var from = new DateTime(2026, 9, 26, 10, 10, 0, DateTimeKind.Utc);

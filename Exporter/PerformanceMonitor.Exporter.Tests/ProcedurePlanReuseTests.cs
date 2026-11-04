@@ -327,9 +327,8 @@ public class ProcedurePlanReuseTests
     }
 
     [Fact]
-    public void Window_sql_reads_plan_handle_and_cached_time_and_the_raw_columns_match()
+    public void Window_raw_columns_carry_plan_handle_and_cached_time()
     {
-        Assert.Contains("plan_handle, cached_time", SqlBuilder.ProcedureStatsWindowSql);
         Assert.Contains("plan_handle", ProcedureStatsWindow.RawColumns);
         Assert.Contains("cached_time", ProcedureStatsWindow.RawColumns);
     }

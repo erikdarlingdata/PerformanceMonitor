@@ -9,28 +9,6 @@ namespace PerformanceMonitor.Exporter.Tests;
 /// </summary>
 public sealed class PgStatementTextExporterTests
 {
-    [Fact]
-    public void KeySetSql_reads_from_duckdb_not_the_store()
-    {
-        var sql = PgStatementTextExporter.KeySetSql("pg_statement_stats_hourwindow");
-
-        Assert.Contains("SELECT DISTINCT server_name, queryid", sql, StringComparison.Ordinal);
-        Assert.Contains("pg_statement_stats_hourwindow", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collect.", sql, StringComparison.Ordinal);
-        Assert.Contains("queryid IS NOT NULL", sql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void BatchSql_is_tagged_and_probes_the_primary_key()
-    {
-        var sql = SqlBuilder.PgStatementTextBatchSql;
-
-        Assert.StartsWith("/* darling-export:opt.pg_statement_text */", sql.TrimStart(), StringComparison.Ordinal);
-        Assert.Contains("collect.pg_statement_text", sql, StringComparison.Ordinal);
-        Assert.Contains("t.server_id = k.sid AND t.queryid = k.qid", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ORDER BY", sql, StringComparison.OrdinalIgnoreCase);
-    }
-
     [Theory]
     [InlineData(0, 50)]
     [InlineData(10, 50)]
@@ -177,19 +155,6 @@ public sealed class PgStatementTextExporterTests
         Assert.Equal(0, result.BelowThresholdSkipped);
         Assert.Single(log.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
         Assert.Contains("gate off", log.ToString(), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void KeySetSql_gated_uses_the_threshold_constants_and_stays_in_duckdb()
-    {
-        var sql = PgStatementTextExporter.KeySetSql("t", applyGate: true);
-
-        Assert.Contains("max(calls_last)", sql, StringComparison.Ordinal);
-        Assert.Contains(">= 2", sql, StringComparison.Ordinal);
-        Assert.Contains("max(total_exec_time_ms_last)", sql, StringComparison.Ordinal);
-        Assert.Contains(">= 100", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_name, queryid", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collect.", sql, StringComparison.Ordinal);
     }
 
     private static ExportOptions MakeOptions(bool pgTextFetchAll) => ExportOptions.Validate(

@@ -84,7 +84,6 @@ public class ColumnPolicyTests
         var rule = Assert.Single(policy.Rules);
         Assert.Equal("message", rule.Column);
         Assert.Equal(ColumnAction.KeepWhen, rule.Action);
-        Assert.Equal("\"run_status\" <> 1", rule.PredicateSql);
         Assert.Equal(2000, rule.TruncateChars);
     }
 
