@@ -55,7 +55,7 @@ import { queryHeatmapCard } from "./query-heatmap.js";
 import { systemEventsChartSpecs, COUNTERS_INTRO, counterChartsDrawn } from "./system-events-charts.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { PG_EVICTION_STATS, PG_BLOCKING_STATS, PG_DATABASE_STATS, pgQueryDurationTrendSpecs, pgDatabaseTrendSpecs, PG_DEADLOCK_GRAPH_COLUMNS, PG_DEADLOCK_COLUMNS, PG_LOG_EVENT_COLUMNS, PG_COLUMN_STATS_COLUMNS, PG_PREDICATE_COLUMNS, PG_LOCK_STATS_COLUMNS, PG_PLAN_COLUMNS, PG_PLAN_CAPTURE_READINESS_COLUMNS, PG_LOGGING_AUDIT_COLUMNS, PG_TOP_QUERY_COLUMNS, PG_BLOCKING_CHAIN_COLUMNS, PG_BLOCKING_CYCLE_COLUMNS, PG_DATABASE_COLUMNS } from "./server-tabs/pg-activity.js";
-import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS } from "./server-tabs/pg-config.js";
+import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS, PG_AUDIT_COLUMNS } from "./server-tabs/pg-config.js";
 import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
 import { momentStat, PG_CPU_SERIES, PG_EXTENSION_CENSUS_COLUMNS, PG_EXTENSION_COLUMNS } from "./server-tabs/pg-overview.js";
 import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-replication.js";
@@ -1959,6 +1959,15 @@ export const POSTGRES_TABS = [
         PG_CONFIG_CHANGE_COLUMNS,
         ctx.label + ", newest first",
         "No configuration parameter changed value in this window."
+      ),
+      tablePanel(
+        "Configuration Audit",
+        "audit_config",
+        { server },
+        "recommendations",
+        PG_AUDIT_COLUMNS,
+        SNAPSHOT,
+        "No configuration facts have been collected yet. The settings collector runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection."
       ),
       tablePanel(
         "Settings",
