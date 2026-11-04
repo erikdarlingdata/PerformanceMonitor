@@ -1320,10 +1320,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             MemoryMb = memory.MemoryMb,
             BufferPoolMb = memory.BufferPoolMb,
             GrantedMemoryMb = pressure.GrantedMemoryMb,
-            MemoryWaiterCount = pressure.WaiterCount,
-            MemoryTimeoutCount = pressure.TimeoutCount,
-            MemoryForcedCount = pressure.ForcedCount,
-            HasMemoryPressure = hasMemoryPressure,
+            MemoryWaiterCount = ServerMetricSources.DmvSourced(pressure.WaiterCount, isPostgres),
+            MemoryTimeoutCount = ServerMetricSources.DmvSourced(pressure.TimeoutCount, isPostgres),
+            MemoryForcedCount = ServerMetricSources.DmvSourced(pressure.ForcedCount, isPostgres),
+            HasMemoryPressure = memoryPressureForBand,
             MemorySeverity = ServerHealthClassifier.MemorySeverity(memoryPressureForBand),
             BlockingCount = blockingCount,
             MaxBlockingWaitMs = maxBlockingWaitMs,
@@ -1565,7 +1565,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 : "Threads low");
         }
 
-        if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure)
+        if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure == true)
         {
             parts.Add($"Memory {c.MemoryWaiterCount} grant waiter{(c.MemoryWaiterCount == 1 ? "" : "s")}");
         }
@@ -3047,10 +3047,13 @@ public sealed class FleetServerCard
     [JsonPropertyName("memory_mb")] public double? MemoryMb { get; init; }
     [JsonPropertyName("buffer_pool_mb")] public double? BufferPoolMb { get; init; }
     [JsonPropertyName("granted_memory_mb")] public double? GrantedMemoryMb { get; init; }
-    [JsonPropertyName("memory_waiter_count")] public long MemoryWaiterCount { get; init; }
-    [JsonPropertyName("memory_timeout_count")] public long MemoryTimeoutCount { get; init; }
-    [JsonPropertyName("memory_forced_count")] public long MemoryForcedCount { get; init; }
-    [JsonPropertyName("has_memory_pressure")] public bool HasMemoryPressure { get; init; }
+    /* #7560: the four memory-grant readings below are null on a PostgreSQL target, as cpu_percent is when nothing measured
+       it. PostgreSQL has no resource-semaphore view, so the old false and zeros read as "no memory pressure" when nothing
+       was looked at. memory_severity already read Unknown there. */
+    [JsonPropertyName("memory_waiter_count")] public long? MemoryWaiterCount { get; init; }
+    [JsonPropertyName("memory_timeout_count")] public long? MemoryTimeoutCount { get; init; }
+    [JsonPropertyName("memory_forced_count")] public long? MemoryForcedCount { get; init; }
+    [JsonPropertyName("has_memory_pressure")] public bool? HasMemoryPressure { get; init; }
     [JsonPropertyName("memory_severity")] public HealthSeverity MemorySeverity { get; init; }
 
     /// <summary>Blocking WAITS in the window (#5644 W1: a blocked session, its blocker and the wait's start): what the
@@ -3241,10 +3244,11 @@ public sealed class FleetServerCard
            percent-of-allocated — a card contradicting itself, and a routine scale-up ranked as maxed out. */
         CapacityUtilizationPercent = AcuUtilizationPercent,
         CpuSource = CpuSource,
-        /* Re-derived from IsPostgres rather than read back off the published counts, because those are
-           deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
-           card's own severity says it does not have. */
-        HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
+        /* Re-derived from IsPostgres rather than read back off the published fields. On PostgreSQL the four
+           memory fields are published as null (#7560) and HasMemoryPressure is already null on the card, so this
+           guard is a safety net: the ranking must never get a memory measurement the card says it does not have.
+           The blocking count below is still a structural zero on PostgreSQL (#3017), hence DmvSourced. */
+        HasMemoryPressure = IsPostgres ? null : HasMemoryPressure,
         /* The wait count the card shows and banded on (#7028). */
         BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         PeakSnapshotWaitSeconds = MaxSnapshotWaitMs.HasValue ? MaxSnapshotWaitMs.Value / 1000.0 : null,

@@ -1101,7 +1101,9 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    /* #7560: PostgreSQL has no blocked-process reports or blocking DMV snapshots behind this count, so its 0 is structural
+       (the band reads Unknown through BlockingCountForBand). "--" is the word the tile uses for a reading it does not have. */
+    public string BlockingDisplay => IsOffline || IsPostgres ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
