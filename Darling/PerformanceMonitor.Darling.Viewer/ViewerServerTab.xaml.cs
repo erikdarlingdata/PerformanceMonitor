@@ -137,7 +137,13 @@ public partial class ViewerServerTab : UserControl
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
             FileIoReadChart, FileIoWriteChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
-            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart);
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            // #7385: the other chart groups that now scroll the same way
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadThroughputChart, FileIoWriteThroughputChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
