@@ -308,8 +308,8 @@ public static class FactAdvice
             // Anomaly facts: state the observed value, how many times its usual variation above the hour-of-week normal level, and
             // the baseline itself — "X is N times its usual variation above its normal level for this time of week".
             "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees.", "avg_cpu_in_window"),
-            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does.", "avg_latency_ms"),
-            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does" + AnomalyIoOpsClause(factsByKey, "ANOMALY_READ_LATENCY", "reads") + ".", "avg_latency_ms"),
+            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes (log files and tempdb) ran slower than this hour-of-week normally does" + AnomalyIoOpsClause(factsByKey, "ANOMALY_WRITE_LATENCY", "writes") + ".", "avg_latency_ms"),
             "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week.", "avg_batch_requests"),
             "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm.", "avg_connections"),
             "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
@@ -594,7 +594,18 @@ public static class FactAdvice
         string headline, remediation;
         if (maxdop == 0)
         {
-            headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
+            /* #7417: the server's own scheduler count when SERVER_HARDWARE carries it (its cpu_count; an Azure SQL Database's vCores).
+               MAXDOP 0 stops at 64, so a bigger box says "up to 64 of N". With no fact the sentence carries no number. */
+            var schedulers = facts.TryGetValue("SERVER_HARDWARE", out var hardwareFact)
+                             && hardwareFact.Metadata.TryGetValue("cpu_count", out var cpuCount) && cpuCount >= 1
+                ? (int)cpuCount
+                : 0;
+            var schedulerNote = schedulers == 0
+                ? ""
+                : schedulers > 64
+                    ? $" (up to 64 of this server's {schedulers})"
+                    : $" ({schedulers} on this {(basis.FromVcores ? "database" : "server")})";
+            headline = $"MAXDOP is 0 — a single query can fan out across every scheduler{schedulerNote}";
             remediation =
                 $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
                 $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
@@ -1514,6 +1525,14 @@ public static class FactAdvice
             Investigation = inv.ToString(),
             Remediation = rem
         };
+    }
+
+    /// <summary>#7417: " (across N reads in the window)" from the anomaly's <c>window_io_ops</c> metadata, so the card shows the
+    /// volume the <see cref="IoVolumeFloor"/> let through. Empty on a fact stored before the metadata existed.</summary>
+    private static string AnomalyIoOpsClause(IReadOnlyDictionary<string, Fact> facts, string key, string verb)
+    {
+        var ops = FactMeta(facts, key, "window_io_ops");
+        return ops is > 0 ? $" (across {ops.Value:N0} {verb} in the window)" : "";
     }
 
     /// <summary>
@@ -3236,7 +3255,7 @@ public static class FactAdvice
 
         t["CONFIG_MAXDOP"] = new AdviceBlock(
             Headline:
-                "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)",
+                "MAXDOP is 0 — a single query can fan out across every scheduler",
             Investigation:
                 "`max degree of parallelism` at 0 lets one query use all available schedulers, up to a hard limit of 64 processors. On a server with more cores than a single NUMA node, that lets one large query monopolize schedulers and drive up CXPACKET / SOS_SCHEDULER_YIELD; on a small box — a single NUMA node of 8 or fewer logical processors — MAXDOP 0 is within Microsoft's guidance and is far less likely to be the problem. Open Configuration → Server Configuration to see the value alongside the socket/core layout. Note this is the SERVER default: MAXDOP can be overridden per database with `ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = N`, which takes precedence for queries running in that database — so if the parallelism is concentrated in one database, set it there rather than changing the instance default. (The analysis engine scores only the server default today; per-database overrides live in the database scoped configuration.)",
             Remediation:

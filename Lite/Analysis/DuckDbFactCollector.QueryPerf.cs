@@ -561,6 +561,10 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
+        -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
+        -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
+        (l.cpu_per_exec - b.cpu_per_exec) * l.execs AS lost_cpu_us,
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
@@ -609,10 +613,13 @@ WHERE regression_factor >= 2
 -- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
 -- regression_factor and the scorer.
 AND   latest_total_cpu_us >= 10000000
+-- #7417: and the regression must have LOST that much of it (PlanRegressionRanking.MinimumLostCpuMicroseconds).
+AND   lost_cpu_us >= " + PerformanceMonitor.Analysis.PlanRegressionRanking.MinimumLostCpuMicrosecondsSql + @"
 -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY regression_factor DESC
+-- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
+ORDER BY lost_cpu_us DESC, regression_factor DESC
 -- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
 -- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
 -- offender short.
@@ -665,7 +672,7 @@ LIMIT 100";
             {
                 var row = kept[i];
 
-                // Rows arrive ordered by regression_factor DESC — the first kept row is the worst offender.
+                // Rows arrive ordered by the CPU the regression lost (#7417), the factor second — the first kept row is the worst offender.
                 if (i == 0)
                 {
                     worstQueryId = row.QueryId;

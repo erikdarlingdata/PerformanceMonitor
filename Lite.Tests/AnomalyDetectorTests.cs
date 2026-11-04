@@ -662,18 +662,18 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         await SeedBaselineIo(stallReadMs: 20, reads: 10);
         await SeedBaselineCpu(10, variance: 2); // HasBaselineData canary
         for (int i = 0; i < 16; i++)
-            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 600 : 20, reads: 10);
+            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 1200 : 40, reads: 20); // #7417: 16 rows x 20 reads clears the 250-read volume floor, so the gate decides
 
         var quiet = await _detector.DetectAnomaliesAsync(CreateContext());
         Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
 
-        // Window B, same baseline: every row at 40 ms (400 ms of stall over 10 reads) and one at 60 ms —
+        // Window B, same baseline: every row at 40 ms (800 ms of stall over 20 reads) and one at 60 ms —
         // peak 60, mean 41.25, both far over the cutoff and the floor. Fires, Value and
         // current_latency_ms are the PEAK (no longer the average), avg_latency_ms carries the mean.
         await ExecuteSeedAsync($"DELETE FROM file_io_stats WHERE server_id = {ServerId} AND collection_time >= '{_analysisStart:yyyy-MM-dd HH:mm:ss}'");
         _baselineProvider.ClearCache();
         for (int i = 0; i < 16; i++)
-            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 600 : 400, reads: 10);
+            await SeedFileIoAsync(_analysisStart.AddMinutes(i * 15), stallReadMs: i == 7 ? 1200 : 800, reads: 20);
 
         var sustained = await _detector.DetectAnomaliesAsync(CreateContext());
         var read = sustained.FirstOrDefault(f => f.Key == "ANOMALY_READ_LATENCY");

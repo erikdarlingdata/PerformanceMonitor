@@ -1487,7 +1487,7 @@ public sealed class DarlingAnomalyBaselineTests
 
             /* Window A: one hot file row in an otherwise-baseline window. */
             for (var i = 0; i < 16; i++)
-                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 20L);
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 20L, 0L, i == 7 ? 1200L : 40L); // #7417: 16 rows x 20 reads clears the 250-read floor, so the gate decides
 
             var quiet = await detector.DetectAnomaliesAsync(context);
             Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
@@ -1501,7 +1501,7 @@ public sealed class DarlingAnomalyBaselineTests
                 await clearWindow.ExecuteNonQueryAsync(ct);
             }
             for (var i = 0; i < 16; i++)
-                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 10L, 0L, i == 7 ? 600L : 400L);
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 20L, 0L, i == 7 ? 1200L : 800L);
 
             var sustained = await detector.DetectAnomaliesAsync(context);
             var fact = Assert.Single(sustained);
