@@ -51,6 +51,7 @@ jobs:
       pg_old_targets: ${{ steps.plan.outputs.pg_old_targets }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
+      exporter: ${{ steps.exporter.outputs.exporter }}
     steps:
       - uses: actions/checkout@v7
 
@@ -102,6 +103,36 @@ jobs:
 
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
             --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+
+      # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
+      # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
+      # trusted all run it. Root files (the solution, Directory.*.props, global.json, nuget.config) are in the `root` filter.
+      - name: Decide whether the exporter job runs
+        id: exporter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import importlib.util, os, sys
+          spec = importlib.util.spec_from_file_location("ci_select", ".github/scripts/ci-select.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["ci_select"] = mod
+          spec.loader.exec_module(mod)
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          rules = mod.Rules()
+          root_and_exporter = rules.build["exporter"] + rules.build["root"] + ["Directory.Packages.props"]
+          run = (
+              os.environ["EVENT_NAME"] != "pull_request"
+              or os.environ["BASE_REF"] != "dev"
+              or any(f.startswith("unknown/") for f in files)
+              or bool(rules._hits(root_and_exporter, files))
+          )
+          print("exporter=" + ("true" if run else "false"))
+          PY
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
       # says so in one notice), and a draft sets nothing.
@@ -378,6 +409,66 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # The Darling export tool (Exporter/): restore in locked mode, build, and run its tests. It is a plain net10.0 console app,
+  # so it runs on Linux, where Docker is available for the tests that start a real PostgreSQL (they skip themselves without
+  # Docker). The verdict job folds the result into `CI result`, so this adds no required check of its own.
+  exporter:
+    name: Exporter build and test
+    needs: plan
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.exporter == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # The exact SDK version from global.json, for the reason the build job gives.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(python3 -c "import json; print(json.load(open('global.json'))['sdk']['version'])")
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore the exporter projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj --locked-mode
+
+      - name: Build the exporter tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-restore
+
+      - name: Test the exporter (fast)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category!=Slow" --blame-hang-timeout 300s
+
+      - name: Test the exporter (slow)
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 300s
+
   # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17, so a NULL an old server sends or a
   # column a supported version lacks (#6206, #6836) turns the pull request red. Runs only when the plan says a file it covers
   # changed (ci-plan.py's PG_OLD_TARGET_PATHS); the nightly runs it every night. Reuses the build job's artifact.
@@ -514,7 +605,7 @@ jobs:
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build, test, pg-old-targets]
+    needs: [plan, build, test, pg-old-targets, exporter]
     # Nothing to say for a draft, which sets no status: skip the runner too.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
@@ -535,6 +626,9 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           PLAN_PG_OLD: ${{ needs.plan.outputs.pg_old_targets }}
           PG_OLD_RESULT: ${{ needs.pg-old-targets.result }}
+          PLAN_RUN: ${{ needs.plan.outputs.run }}
+          PLAN_EXPORTER: ${{ needs.plan.outputs.exporter }}
+          EXPORTER_RESULT: ${{ needs.exporter.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
@@ -559,6 +653,8 @@ jobs:
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
             want_pg=skipped;    [ "${PLAN_PG_OLD}" = "true" ] && [ "${PLAN_BUILD}" = "true" ] && want_pg=success
             [ "${PG_OLD_RESULT}" = "${want_pg}" ]   || { state=failure; failed="${failed} pg-old-targets (${PG_OLD_RESULT})"; }
+            want_exporter=skipped; [ "${PLAN_RUN}" = "true" ] && [ "${PLAN_EXPORTER}" = "true" ] && want_exporter=success
+            [ "${EXPORTER_RESULT}" = "${want_exporter}" ] || { state=failure; failed="${failed} exporter (${EXPORTER_RESULT})"; }
           fi
           # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
           # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull
