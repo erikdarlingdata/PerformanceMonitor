@@ -79,7 +79,7 @@ function probe(arg) {
   };
   walk(main, null);
 
-  /* content-past-edge: against #main's content edge and against every panel and card. */
+  /* content-past-edge: against #main's right edge (its border box, so its padding is not counted as past it) and against every panel and card. */
   const mainRect = main.getBoundingClientRect();
   const mainCs = getComputedStyle(main);
   const containers = [{ el: main, right: mainRect.right }].concat(
@@ -180,7 +180,15 @@ export async function runLayout({ config, baseUrl, outDir, only, settle, browser
         await page.setViewportSize({ width, height: HEIGHT });
         if (i === 0) await page.goto(baseUrl + "/" + spec.hash, { waitUntil: "domcontentloaded" });
         else await page.reload({ waitUntil: "domcontentloaded" });
-        await settle(page);
+        try {
+          await settle(page);
+        } catch (first) {
+          /* The wait the walk retries (smoke.mjs): one more load, and a retry that settles is printed, never hidden. A measured failure gets no retry. */
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await settle(page);
+          console.log(`FLAKE ${tag}: did not settle once (${String(first && first.message ? first.message : first).split("
+")[0]}), settled on the retry`);
+        }
         /* A chart draws at the width its box has once it is on screen: let one animation frame pass before measuring. */
         await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
         const result = await page.evaluate(probe, { minChartHeight: MIN_CHART_HEIGHT, minChartWidth: MIN_CHART_WIDTH, checkFill: width >= 2000 });
