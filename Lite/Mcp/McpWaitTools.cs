@@ -217,7 +217,8 @@ public sealed class McpWaitTools
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description(McpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -237,7 +238,7 @@ public sealed class McpWaitTools
 
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The read was UNBOUNDED with a Take(limit) on top, and the envelope stated no bound. */
-            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1, includeMonitor: include_monitor);
 
             /* #4966: where this server's waiting_tasks start for the window, beside the page cut below — truncated
                says the window held more than limit, this says the store did not hold the window's head. The page's
@@ -259,9 +260,10 @@ public sealed class McpWaitTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         database == null
-                            ? "No waiting tasks captured in the specified time range."
+                            ? "No waiting tasks captured in the specified time range." + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them.")
                             : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
-                              + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
+                              + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds."
+                              + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                         notice.AsHints()));
             }
 

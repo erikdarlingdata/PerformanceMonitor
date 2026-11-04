@@ -74,7 +74,7 @@ import { fileIoPanel, TEMPDB_SERIES, FILE_IO_COLUMNS, DB_SIZE_COLUMNS, TABLE_SIZ
 import { MEMORY_STATS, PLAN_CACHE_STATS, MEMORY_SERIES, CLERK_COLUMNS, GRANT_WINDOW_COLUMNS, SEMAPHORE_WINDOW_COLUMNS, GRANT_COLUMNS, SEMAPHORE_COLUMNS, memoryClerksTrendPanel, memoryPressurePanels, CACHE_TYPE_COLUMNS } from "./server-tabs/sql-memory.js";
 import { overviewStripsPanel, dailySummaryPanels, OVERVIEW_STATS } from "./server-tabs/sql-overview.js";
 import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
-import { waitsPanel, WAITING_TASK_COLUMNS, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
+import { waitsPanel, waitingTasksPanel, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
 export { serverTrendPanel, seriesTrendPanel } from "./server-tabs/shared.js";
 export { perfmonPanel, drawPerfmonTrends, sessionStatsTrendPanel } from "./server-tabs/sql-activity.js";
 export { fileIoGrain, fileIoPanel } from "./server-tabs/sql-io.js";
@@ -132,15 +132,7 @@ export const SERVER_TABS = [
     label: "Wait Stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
-      tablePanelPlain(
-        "Waiting Tasks",
-        "get_waiting_tasks",
-        { server, hours: ctx.hours, limit: 30 },
-        "tasks",
-        withWaitLink(WAITING_TASK_COLUMNS, server, "collection_time"),
-        ctx.label,
-        "No waiting tasks were captured in this window."
-      ),
+      waitingTasksPanel(server, ctx),
       tablePanelPlain(
         "Latch Stats",
         "get_latch_stats",

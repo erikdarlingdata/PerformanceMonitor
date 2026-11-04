@@ -79,7 +79,7 @@ public sealed class WaitingTasksCollectorDefinitionTests
     public void PayloadColumns_MatchSchemaOrder()
     {
         Assert.Equal(
-            new[] { "session_id", "wait_type", "wait_duration_ms", "blocking_session_id", "resource_description", "database_name" },
+            new[] { "session_id", "wait_type", "wait_duration_ms", "blocking_session_id", "resource_description", "database_name", "program_name" },
             WaitingTasksCollector.Instance.PayloadColumns.Select(c => c.Name).ToArray());
     }
 
@@ -87,8 +87,8 @@ public sealed class WaitingTasksCollectorDefinitionTests
     public async Task ReadAndWrite_WidensSmallints_AndKeepsNullPlaceholder()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)71, "LCK_M_X", 4500L, (short)55, "StackOverflow" },
-            new object[] { (short)72, "PAGEIOLATCH_SH", 20L, DBNull.Value, DBNull.Value });
+            new object[] { (short)71, "LCK_M_X", 4500L, (short)55, "StackOverflow", "PerformanceMonitor Darling" },
+            new object[] { (short)72, "PAGEIOLATCH_SH", 20L, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
 
@@ -96,13 +96,23 @@ public sealed class WaitingTasksCollectorDefinitionTests
 
         var writer = new RecordingCollectorRowWriter();
         WaitingTasksCollector.Instance.WritePayload(rows[0], writer, CollectorTestContext.Make(s_deltas));
-        Assert.Equal(new object?[] { 71, "LCK_M_X", 4500L, 55, null, "StackOverflow" }, writer.Values);
+        Assert.Equal(new object?[] { 71, "LCK_M_X", 4500L, 55, null, "StackOverflow", "PerformanceMonitor Darling" }, writer.Values);
 
         writer.Values.Clear();
         WaitingTasksCollector.Instance.WritePayload(rows[1], writer, CollectorTestContext.Make(s_deltas));
         Assert.Equal(72, writer.Values[0]);          /* smallint widened to int */
         Assert.Null(writer.Values[3]);               /* null blocking session survives */
         Assert.Null(writer.Values[4]);               /* resource_description placeholder */
+        Assert.Null(writer.Values[6]);               /* #7573: a session with no program name stores NULL, never a placeholder */
+    }
+
+    [Fact]
+    public void BuildQuery_ReadsTheSessionsProgramName()
+    {
+        /* #7573: the program name comes from sys.dm_exec_sessions on session_id, LEFT-joined so a task whose session ended is kept. */
+        var text = WaitingTasksCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
+        Assert.Contains("program_name = es.program_name", text, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -113,16 +123,16 @@ public sealed class WaitingTasksCollectorDefinitionTests
            the collector now skips ignored types just like WaitStatsCollector, so both wait surfaces honor
            the same list (Lite: ignored_wait_types.json, Darling: IgnoredWaitDefaults.All). */
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)57, "LCK_M_X", 200L, (short)58, "SalesDb" },
-            new object[] { (short)60, "WAITFOR", 5000L, DBNull.Value, "SalesDb" },
-            new object[] { (short)62, "SOS_SCHEDULER_YIELD", 15L, DBNull.Value, "SalesDb" });
+            new object[] { (short)57, "LCK_M_X", 200L, (short)58, "SalesDb", "App" },
+            new object[] { (short)60, "WAITFOR", 5000L, DBNull.Value, "SalesDb", "App" },
+            new object[] { (short)62, "SOS_SCHEDULER_YIELD", 15L, DBNull.Value, "SalesDb", DBNull.Value });
 
         var context = CollectorTestContext.Make(s_deltas, ignored: new[] { "WAITFOR" });
 
         var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Equal(2, rows.Count);
-        Assert.Equal(new WaitingTasksCollector.Row(57, "LCK_M_X", 200L, 58, "SalesDb"), rows[0]);
-        Assert.Equal(new WaitingTasksCollector.Row(62, "SOS_SCHEDULER_YIELD", 15L, null, "SalesDb"), rows[1]);
+        Assert.Equal(new WaitingTasksCollector.Row(57, "LCK_M_X", 200L, 58, "SalesDb", "App"), rows[0]);
+        Assert.Equal(new WaitingTasksCollector.Row(62, "SOS_SCHEDULER_YIELD", 15L, null, "SalesDb", null), rows[1]);
     }
 }

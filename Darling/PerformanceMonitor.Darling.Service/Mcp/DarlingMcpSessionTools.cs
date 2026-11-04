@@ -461,9 +461,10 @@ public sealed class DarlingMcpSessionTools
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
+        [Description(DarlingMcpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken, include_monitor);
 
     /// <summary>
     /// #5244: <see cref="GetWaitingTasks(NpgsqlDataSource,string,int,int,string,ILogger,CancellationToken)"/> over a SET of
@@ -473,10 +474,12 @@ public sealed class DarlingMcpSessionTools
     /// looked at) and otherwise says the CHOSEN databases had none, not that nothing was captured; the echoed <c>database_name</c> is the
     /// name for one database and "the chosen databases" for two or more.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetWaitingTasks(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, DatabaseFilter databases, string? as_of,
-        ILogger? logger = null, CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default, bool includeMonitor = false)
     {
+    #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -491,7 +494,7 @@ public sealed class DarlingMcpSessionTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken, includeMonitor);
 
             /* #4966: the window floor, as get_active_queries writes it (see there). */
             var windowStart = now.AddHours(-hours_back);
@@ -510,7 +513,7 @@ public sealed class DarlingMcpSessionTools
                         notice.AsHints()), cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints()), cancellationToken);
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No waiting tasks captured in the specified time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken);
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
