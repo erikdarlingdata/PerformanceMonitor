@@ -30,6 +30,7 @@
  */
 
 import { getSession } from "../views-api.js";
+import { findingCategoryName } from "../finding-categories.js";
 import { el, apiGet, apiWrite, listOnlyNote, readToolWithinKeptHistory, keptWindowStrip, noticeStrip, readErrorStrip, emptyStrip, loadingStrip, localTime, bandClass, dbScopeChip, storeHash } from "../util.js";
 
 /** The desktop's severity cutoffs: >= 1.5 Critical, >= 0.75 Warning, else Info. */
@@ -129,7 +130,7 @@ export function readableStory(key) {
 
 /** The finding's own headline; a story key in words when it has none. Never the raw key. */
 export function findingTitle(f) {
-  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category || "Finding";
+  return (f.advice && f.advice.headline) || readableStory(f.story_path) || findingCategoryName(f.category) || "Finding";
 }
 
 /* ─────────────────────────── state ─────────────────────────── */
@@ -322,7 +323,7 @@ function card(server, f, showTitle) {
   const kids = [
     el("div", { class: "reco-head" }, [
       el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
-      f.category ? el("span", { class: "muted", text: " · " + f.category }) : null,
+      f.category ? el("span", { class: "muted", text: " · " + findingCategoryName(f.category) }) : null,
     ]),
     showTitle ? el("h4", { text: findingTitle(f) }) : null,
     advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,

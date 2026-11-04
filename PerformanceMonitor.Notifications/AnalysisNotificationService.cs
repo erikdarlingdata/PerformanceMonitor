@@ -818,7 +818,7 @@ public sealed class AnalysisNotificationService : IDisposable
     /// </summary>
     private static string FindingTitle(AnalysisFinding f) =>
         FactAdvice.GetForFinding(f)?.Headline
-            ?? (string.IsNullOrEmpty(f.RootFactKey) ? f.Category : f.RootFactKey);
+            ?? (string.IsNullOrEmpty(f.RootFactKey) ? FindingCategoryNames.DisplayName(f.Category) : f.RootFactKey);
 }
 
 /// <summary>
@@ -848,7 +848,7 @@ internal static class FindingMessageFormatter
     /// </summary>
     public static string CurrentValue(AnalysisFinding finding)
     {
-        var root = string.IsNullOrEmpty(finding.RootFactKey) ? finding.Category : finding.RootFactKey;
+        var root = string.IsNullOrEmpty(finding.RootFactKey) ? FindingCategoryNames.DisplayName(finding.Category) : finding.RootFactKey;
         var sb = new StringBuilder(root);
 
         if (finding.RootFactValue.HasValue)
@@ -874,7 +874,7 @@ internal static class FindingMessageFormatter
     /// </summary>
     public static (string Title, string Message) BalloonText(AnalysisFinding finding)
     {
-        var category = string.IsNullOrEmpty(finding.Category) ? "Performance finding" : finding.Category;
+        var category = string.IsNullOrEmpty(finding.Category) ? "Performance finding" : FindingCategoryNames.DisplayName(finding.Category);
         var server = string.IsNullOrEmpty(finding.ServerName) ? "this server" : finding.ServerName;
         var title = $"Analysis: {category} on {server}";
 

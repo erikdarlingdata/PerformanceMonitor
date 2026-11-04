@@ -151,6 +151,14 @@ try {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits" })] });
       return { text: root.textContent };
     },
+    categoryNames: async () => {
+      /* #7486: the card shows the plain category name, and a category the map does not know shows as it is. */
+      const root = await run("srv-a", { findings: [
+        finding({ finding_id: 1, category: "bad_actor", incident_id: "inc-1" }),
+        finding({ finding_id: 2, category: "weird_new_source", incident_id: "inc-2" }),
+      ] });
+      return { text: root.textContent };
+    },
     truncation: async () => {
       const root = await run("srv-a", { findings: sample, truncated: true, truncation_note: "READ-CAP-NOTE", findings_truncated: true, findings_truncated_note: "PAGE-NOTE" });
       return { text: root.textContent };

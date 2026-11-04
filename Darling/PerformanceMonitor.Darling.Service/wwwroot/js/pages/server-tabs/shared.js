@@ -13,6 +13,7 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
 import { findingTitle, severityLabel } from "../analysis-findings.js";
+import { findingCategoryName } from "../../finding-categories.js";
 import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
 
@@ -1253,7 +1254,8 @@ export function seriesTrendPanel(server, ctx, kind) {
 
 export const FINDING_COLUMNS = [
   { key: "last_seen", label: "Last seen", format: "time" },
-  { key: "category", label: "Category" },
+  /* #7486: the plain name, not the internal word (bad_actor). Sort and the column filter follow what is shown, and the CSV keeps the raw value. */
+  { key: "category", label: "Category", display: (r) => findingCategoryName(r.category), sortValue: (r) => findingCategoryName(r.category) },
   /* The finding's headline, not its story key; severity as a word, not the score (the cards on the Recommendations tab do the same). */
   { key: "story_path", label: "Finding", display: (r) => findingTitle(r), sortValue: (r) => findingTitle(r), wrap: true },
   { key: "severity", label: "Severity", display: (r) => severityLabel(r.severity), sortValue: (r) => Number(r.severity), cellClass: (r) => { const w = severityLabel(r.severity); return w === "Info" ? null : "sev-" + w; } },
