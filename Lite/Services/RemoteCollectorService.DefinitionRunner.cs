@@ -1299,6 +1299,7 @@ public partial class RemoteCollectorService
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
+                IBaselineRollback? baselineRollback = null;
                 using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
                 try
@@ -1308,6 +1309,10 @@ public partial class RemoteCollectorService
                         ? serverReader(plan)
                         : await command.ExecuteReaderAsync(itemToken);
                     rows = await definition.ReadAsync(reader, context, itemToken);
+
+                    /* #7419: the read has advanced the delta baselines of rows it may not store. Every end of the run
+                       before the write (the probe read below, the budget, a stop, the store connection) hands them back. */
+                    baselineRollback = rows as IBaselineRollback;
 
                     /* #1851: a definition that declares it may hand back an OPTIONAL trailing
                        (item_name, error_text) result set naming items its own server-side cursor
@@ -1332,6 +1337,7 @@ public partial class RemoteCollectorService
                        collector runs minutes on a monitored server. Returning skips the storage phase and the
                        state-persistence at the method tail, which is what keeps the watermark from moving. */
                     _ = ex;
+                    baselineRollback?.RollBackBaselines();
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     telemetry.SqlMs = sqlSlice.ElapsedMilliseconds;
                     telemetry.HostNote = EnumeratedCollectorDriver.WholeCycleBudgetNote(budgetSeconds);
@@ -1340,6 +1346,13 @@ public partial class RemoteCollectorService
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
                         definition.Name, context.ServerName, budgetSeconds);
                     return 0;
+                }
+                catch
+                {
+                    /* #7419: any other end of the read before the store (a stop, a fault in the probe read) stores nothing.
+                       Darling's runner has the same arm. */
+                    baselineRollback?.RollBackBaselines();
+                    throw;
                 }
 
                 /* Optional best-effort second query on the same connection (e.g. server_properties'
@@ -1363,9 +1376,25 @@ public partial class RemoteCollectorService
                 sqlMs += sqlSlice.ElapsedMilliseconds;
 
                 var storageSlice = Stopwatch.StartNew();
-                using var duckConnection = _duckDb.CreateConnection();
-                await duckConnection.OpenAsync(cancellationToken);
-                rowsWritten = WriteBatch(duckConnection, definition, rows, serverId, context.ServerName, collectionTime, context);
+                DuckDBConnection? openingConnection = null;
+                try
+                {
+                    openingConnection = _duckDb.CreateConnection();
+                    await openingConnection.OpenAsync(cancellationToken);
+                }
+                catch
+                {
+                    /* #7419: the store cannot be opened, so nothing is stored. The write's own rollback never runs. */
+                    openingConnection?.Dispose();
+                    baselineRollback?.RollBackBaselines();
+                    throw;
+                }
+
+                using (openingConnection)
+                {
+                    rowsWritten = WriteBatch(openingConnection, definition, rows, serverId, context.ServerName, collectionTime, context);
+                }
+
                 storageMs += storageSlice.ElapsedMilliseconds;
 
                 /* The single item's write returned: land what the definition staged for it. A throw above
