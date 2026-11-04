@@ -1335,7 +1335,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && rs.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
@@ -1412,13 +1412,13 @@ public class FactScorer
         {
             Description = "CPU spike present — regressed plan likely driving it",
             Boost = 0.25,
-            Predicate = facts => facts.TryGetValue("CPU_SPIKE", out var f) && f.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("CPU_SPIKE", out var f) && ClearsRootBar(f)
         },
         new()
         {
             Description = "SQL Server CPU elevated — regressed plan contributing",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var f) && f.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var f) && ClearsRootBar(f)
         }
     ];
 
@@ -1555,7 +1555,7 @@ public class FactScorer
         {
             Description = "TempDB usage elevated — latch contention likely on TempDB allocation pages",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && t.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
@@ -1646,7 +1646,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE also present — broad memory starvation, not isolated compile pressure",
             Boost = 0.2,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }
     ];
 
@@ -1665,8 +1665,8 @@ public class FactScorer
         {
             Description = "Reader/writer lock waits present — RCSI could prevent some deadlocks",
             Boost = 0.3,
-            Predicate = facts => (facts.ContainsKey("LCK_M_S") && facts["LCK_M_S"].BaseSeverity > 0)
-                              || (facts.ContainsKey("LCK_M_IS") && facts["LCK_M_IS"].BaseSeverity > 0)
+            Predicate = facts => (facts.TryGetValue("LCK_M_S", out var lckS) && ClearsRootBar(lckS))
+                              || (facts.TryGetValue("LCK_M_IS", out var lckIS) && ClearsRootBar(lckIS))
         },
         new()
         {
@@ -1714,7 +1714,9 @@ public class FactScorer
         {
             Description = "I/O latency elevated — auto_shrink may be causing fragmentation and I/O pressure",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
+                              && db.Metadata.GetValueOrDefault("auto_shrink_on_count") > 0
+                              && facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && ClearsRootBar(io)
         },
         new()
         {
@@ -1722,7 +1724,7 @@ public class FactScorer
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
-                              && facts.TryGetValue("LCK_M_S", out var lckS) && lckS.BaseSeverity > 0
+                              && facts.TryGetValue("LCK_M_S", out var lckS) && ClearsRootBar(lckS)
         },
         new()
         {
@@ -1730,7 +1732,7 @@ public class FactScorer
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
-                              && facts.TryGetValue("LCK_M_IS", out var lckIS) && lckIS.BaseSeverity > 0
+                              && facts.TryGetValue("LCK_M_IS", out var lckIS) && ClearsRootBar(lckIS)
         },
         new()
         {
@@ -1739,8 +1741,8 @@ public class FactScorer
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
                               && facts.TryGetValue("DEADLOCKS", out var dl) && dl.BaseSeverity > 0
-                              && (facts.TryGetValue("LCK_M_S", out var s) && s.BaseSeverity > 0
-                               || facts.TryGetValue("LCK_M_IS", out var i) && i.BaseSeverity > 0)
+                              && (facts.TryGetValue("LCK_M_S", out var s) && ClearsRootBar(s)
+                               || facts.TryGetValue("LCK_M_IS", out var i) && ClearsRootBar(i))
         }
     ];
 
@@ -1753,7 +1755,7 @@ public class FactScorer
         {
             Description = "TempDB usage elevated — growing TempDB on a nearly full volume",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && t.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
@@ -1790,9 +1792,9 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD present — scheduler pressure during CPU spike",
+            Description = "SOS_SCHEDULER_YIELD elevated — scheduler pressure during CPU spike",
             Boost = 0.3,
-            Predicate = facts => facts.ContainsKey("SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].BaseSeverity > 0
+            Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
@@ -1844,7 +1846,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits present — memory grant pressure in wait stats",
             Boost = 0.3,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
@@ -1869,9 +1871,26 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
             Boost = 0.2,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }
     ];
+
+    /// <summary>
+    /// Does this fact's BASE severity clear the bar the InferenceEngine uses for a fact to root a story on its own
+    /// (<see cref="InferenceEngine.MinimumSeverityThreshold"/>, 0.5)? The test an amplifier or a relationship edge
+    /// uses on a CONTINUOUSLY scored peer (a wait fraction, a latency, CPU %, TEMPDB_USAGE).
+    ///
+    /// <para>#7464: those facts score a tiny positive base on ANY trace (<see cref="ApplyThresholdFormula"/>
+    /// grades 0.5 * value / concerning below the concerning bar), so <c>BaseSeverity &gt; 0</c> meant "the wait or
+    /// the read happened at all". On an idle server that matched 15 ms of LCK_M_S, 2.75 MB of tempdb and a 5 ms
+    /// read, and the boost (<c>Severity = Base * (1 + boost)</c>) lifted a 0.3 settings fact past the root bar the
+    /// 0.3 exists to stay under. A peer must be at a level that could root its own story to corroborate another.</para>
+    ///
+    /// <para>Not for a PRESENCE fact, whose base is 0 or a real band and never a trace: an event count that is
+    /// exactly 0 when nothing happened (DEADLOCKS, BLOCKING_EVENTS, MEMORY_PRESSURE_EVENTS), a fact gated before it
+    /// scores (THREADPOOL, see <see cref="ScoreAll"/>), or an anomaly that fired. Those keep <c>&gt; 0</c>.</para>
+    /// </summary>
+    internal static bool ClearsRootBar(Fact fact) => fact.BaseSeverity >= InferenceEngine.MinimumSeverityThreshold;
 
     /// <summary>
     /// Checks if a wait type is present with at least the given fraction of period.
