@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Models;
@@ -114,6 +116,40 @@ VALUES ($1, $2, $3, $4, $5, 'TestDb', $6, 'running', 0, 'LCK_M_X', 1000, 600000,
 
         var rows = await new PileupSnapshotReader(_duckDb).ReadWindowAsync(_serverId, _at.AddMinutes(-5), CancellationToken.None);
         Assert.Equal(3, rows.Count);
+    }
+
+    /* The ACTIVE_QUERIES fact and the CPU spike drill-down's queries count only the application's rows. The old reads had no program
+       predicate and counted all six. */
+    [Fact]
+    public async Task TheAnalysisFactAndTheSpikeDrillDown_CountOnlyTheApplicationsRows()
+    {
+        await SeedAsync();
+        await ExecAsync(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, $2, $3, $4, $2, $5, 95, 0)",
+            _nextId--, DateTime.SpecifyKind(_at, DateTimeKind.Unspecified), _serverId, ServerName, _at);
+
+        var context = new AnalysisContext
+        {
+            ServerId = _serverId,
+            ServerName = ServerName,
+            TimeRangeStart = _at.AddMinutes(-5),
+            TimeRangeEnd = _at.AddMinutes(5),
+        };
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(context);
+        var fact = Assert.Single(facts, f => f.Key == "ACTIVE_QUERIES");
+        Assert.Equal(3, fact.Metadata["total_snapshots"]);
+        Assert.Equal(3, fact.Metadata["distinct_sessions"]);
+
+        var finding = new AnalysisFinding { RootFactKey = "CPU_SPIKE", StoryPath = "CPU_SPIKE", PathKeys = ["CPU_SPIKE"], Severity = 1.0 };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], context);
+        Assert.NotNull(finding.DrillDown);
+        Assert.True(finding.DrillDown!.TryGetValue("queries_at_spike", out var raw), "no queries_at_spike drill-down");
+        var sessions = System.Text.Json.JsonSerializer.SerializeToElement(raw).EnumerateArray()
+            .Select(e => e.GetProperty("session_id").GetInt32()).OrderBy(i => i).ToArray();
+        Assert.Equal(new[] { 63, 64, 65 }, sessions);
     }
 
     private async Task ExecAsync(string sql, params object?[] values)

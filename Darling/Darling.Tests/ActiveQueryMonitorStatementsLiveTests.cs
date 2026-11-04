@@ -169,6 +169,66 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /* #7573: the Analysis reads (the ACTIVE_QUERIES fact and the CPU spike drill-down's queries) count only the application's rows. Four rows
+       a minute apart, two the monitor's. The old reads had no program predicate and counted all four. */
+    [Fact]
+    public async Task TheAnalysisFactAndTheSpikeDrillDown_CountOnlyTheApplicationsRows()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var end = await SeedAsync(cs!, new string?[] { "PerformanceMonitorDarling", "Orders.Api", "PerformanceMonitorLite", null }, ct);
+            using (var connection = new NpgsqlConnection(cs))
+            {
+                await connection.OpenAsync(ct);
+                var peak = DarlingMcpTestData.Naive(end.AddMinutes(-3).AddSeconds(-30));
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO collect.cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, 95, 0)",
+                    CollectionIdGenerator.Next(), peak, ServerId, ServerName, peak);
+            }
+
+            var context = new PerformanceMonitor.Analysis.AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = end.AddHours(-1),
+                TimeRangeEnd = end,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+
+            var fact = Assert.Single(await new PerformanceMonitor.Darling.Analysis.PgFactCollector(postgres).CollectFactsAsync(context), f => f.Key == "ACTIVE_QUERIES");
+            Assert.Equal(2, fact.Metadata["total_snapshots"]);
+            Assert.Equal(2, fact.Metadata["distinct_sessions"]);
+
+            var finding = new PerformanceMonitor.Analysis.AnalysisFinding
+            {
+                ServerId = ServerId,
+                RootFactKey = "CPU_SPIKE",
+                StoryPath = "CPU_SPIKE",
+                PathKeys = ["CPU_SPIKE"],
+                Severity = 0.6,
+            };
+            await new PerformanceMonitor.Darling.Analysis.PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
+            Assert.NotNull(finding.DrillDown);
+            Assert.True(finding.DrillDown!.TryGetValue("queries_at_spike", out var raw), "no queries_at_spike drill-down");
+            var sessions = JsonSerializer.SerializeToElement(raw).EnumerateArray().Select(e => e.GetProperty("session_id").GetInt32()).OrderBy(i => i).ToArray();
+            Assert.Equal(new[] { 61, 63 }, sessions);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, $"DELETE FROM collect.cpu_utilization_stats WHERE server_id = {ServerId}");
+                await DeleteRowsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     /* A quiet server whose only sessions are the monitor's answers empty, and the empty text says they were left out. */
     [Fact]
     public async Task OnlyMonitorRows_AnswerEmpty_AndTheTextSaysTheyAreLeftOut()
