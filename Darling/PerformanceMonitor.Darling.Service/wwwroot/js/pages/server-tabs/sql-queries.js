@@ -458,7 +458,9 @@ export const QS_OVERHEAD_WAIT_COLUMNS = [
   { key: "waiting_tasks_total", label: "Waiting Tasks", format: "int" },
   { key: "measured_seconds", label: "Measured s", format: "int" },
   { key: "rows_observed", label: "Rows", format: "int" },
-  { key: "rows_unknowable", label: "Unrateable Rows", format: "int" },
+  /* #7416: a count of samples whose interval could not be measured, which are left out of the ms/hour rating. It is zero on almost every server, and a
+     column of zeros said nothing, so it shows only when some wait has such a sample. */
+  { key: "rows_unknowable", label: "Unrateable Rows", format: "int", hideWhenAllZero: true, hint: "Samples whose interval could not be measured. They count in Rows but are left out of the ms/hour rating." },
   { key: "last_observed", label: "Last Seen", format: "time" },
 ];
 

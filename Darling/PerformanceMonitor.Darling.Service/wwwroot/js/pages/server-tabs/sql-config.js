@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, mount, errorStrip, readErrorStrip, emptyStrip, noticeStrip, localTime, serverClockTime, dbFilteredEmptyText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, mount, errorStrip, readErrorStrip, emptyStrip, noticeStrip, localTime, serverClockTime, dbFilteredEmptyText, fmtStatusWord } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { panelShell } from "./shared.js";
 
@@ -206,8 +206,17 @@ function agentAlertGapWhich(r) {
 export function withAgentAlertNames(rows) {
   return (rows || []).map((r) => ({ ...r, alert_names: agentAlertGapWhich(r) }));
 }
+export function alertSetupText(data) {
+  const status = data && data.instance_status;
+  if (typeof status !== "string" || !status) return null;
+  if (status.toLowerCase() !== "gaps") return fmtStatusWord(status);
+  const n = Array.isArray(data.gaps) ? data.gaps.length : 0;
+  return n > 0 ? n + (n === 1 ? " gap" : " gaps") : fmtStatusWord(status);
+}
 const AGENT_ALERT_STAT_COLUMNS = [
-  { key: "instance_status", label: "Alert setup", format: "text", small: true },
+  /* #7416: "gaps" alone said nothing about how many. The tile counts the rows of the gap grid below it, and the word has the casing the other
+     status tiles use. */
+  { key: "instance_status", label: "Alert setup", format: "status", small: true, display: alertSetupText },
   { key: "alert_count", label: "Alerts defined", format: "int" },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
@@ -281,14 +290,16 @@ const DATABASE_PROTECTION_COLUMNS = [
   protectionFact("full_backup", "Last full backup"),
   protectionFact("log_backup", "Last log backup"),
   protectionFact("checkdb", "Last good CHECKDB"),
-  { key: "platform", label: "Platform", display: (r) => (r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : ""), small: true },
+  /* #7416: the column reads "native" on a boxed server, which draws as nothing, so it is dropped when no row names a platform. */
+  { key: "platform_label", label: "Platform", hideWhenEmpty: true, small: true },
   { key: "excluded_reason", label: "Not judged because", small: true },
 ];
 const DATABASE_PROTECTION_STATS = [
   { key: "summary.text", label: "Overdue", format: "text", small: true, sentence: true },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
-const overdueFirst = (rows) => [...rows].sort((a, b) => {
+export const platformLabel = (r) => (r && r.platform && r.platform !== "native" ? String(r.platform).replace(/_/g, " ") : "");
+const overdueFirst = (rows) => [...rows].map((r) => ({ ...r, platform_label: platformLabel(r) })).sort((a, b) => {
   const score = (r) => ["full_backup", "log_backup", "checkdb"].filter((k) => r[k] && r[k].overdue).length;
   return score(b) - score(a);
 });
