@@ -77,6 +77,13 @@ function panelMemoryKey(read, params, spec) {
   return read + "|" + JSON.stringify(params || {}) + "|" + spec.title;
 }
 function hidesPanel(spec, res, shell, key) {
+  /* #7409: a spec that says `hideWhenNotCollected` is not drawn when the read answers "not collected" (it does not apply to this
+     kind of server), the same switch tablePanel and the Instance CPU panel use. Any other answer draws it again. */
+  if (spec.hideWhenNotCollected) {
+    const gone = res.kind === "empty" && res.status === "not_collected";
+    shell.panel.style.display = gone ? "none" : "";
+    if (gone) return true;
+  }
   if (!spec.hideWhenNoRows) return false;
   /* A failed read is not "no rows": hiding the card would leave a problem list that could not load looking like a clean server.
      The card stays (or comes back) and shows the read's error (release walk, W12). */

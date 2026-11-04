@@ -119,7 +119,7 @@ try {
   const waitsFull = await draw("waits", {
     get_pg_wait_stats: { waits: [{ event_type: "IO", wait_event: "DataFileRead", samples: 3 }] },
     get_pg_wait_sampling: { waits: [{ event_type: "IO", wait_event: "DataFileRead", queryid: null, samples: 3, backends: 1 }] },
-    get_pg_wait_trend: { points: [{ bucket: "2026-11-01T00:00:00Z", samples: 4 }] },
+    get_pg_wait_trend: { points: [{ collection_time: "2026-11-01T00:00:00Z", estimated_wait_ms_per_second: 4 }, { collection_time: "2026-11-01T00:05:00Z", estimated_wait_ms_per_second: 6 }] },
   });
   const titles = ["Wait Events", "Sampled Waits", "Wait Trend"];
 

@@ -16,13 +16,29 @@
 
    buffers_backend is here rather than buried with the other buffer counters because it is the one that
    lands on a user query: a backend writing its own dirty buffer is a query paying for the write. */
-export const PG_WAIT_TREND_COLUMNS = [
-  { key: "collection_time", label: "When", format: "time" },
-  { key: "estimated_wait_ms_per_second", label: "Est. wait ms/sec", format: "num2" },
-  { key: "sample_count", label: "Samples", format: "int" },
-  { key: "backend_count", label: "Backends", format: "int", small: true },
-  { key: "counter_reset", label: "Profile reset", format: "bool", small: true },
-];
+/* #7394: the Wait Trend as a chart, the one series of the desktop viewer's PgWaitTrendHost. `counter_reset` is a profile reset
+   (pg_wait_sampling_reset_profile() or a restart): the interval reports everything since it, so it is marked rather than read as a spike. */
+export function pgWaitTrendSpecs(ctx) {
+  return [
+    {
+      viz: "line",
+      title: "Wait Trend",
+      subtitle: ctx.label + ", the event that dominates this window, over time; estimates from a sampling profiler, so the shape is the finding",
+      rowsKey: "points",
+      xKey: "collection_time",
+      series: [{ key: "estimated_wait_ms_per_second", label: "Est. wait ms/sec" }],
+      format: "num2",
+      unit: "ms/s",
+      span: 2,
+      hideEmptySeries: true,
+      /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the chart is not drawn there. */
+      hideWhenNotCollected: true,
+      resetKey: "counter_reset",
+      resetLabel: "Profile reset",
+      emptyText: "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.",
+    },
+  ];
+}
 
 export const PG_WAIT_SAMPLING_COLUMNS = [
   { key: "event_type", label: "Type" },

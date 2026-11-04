@@ -53,14 +53,14 @@ import { queryStoreHistoryColumn } from "./query-store-history.js";
 import { queryHeatmapCard } from "./query-heatmap.js";
 import { systemEventsChartSpecs, COUNTERS_INTRO, counterChartsDrawn } from "./system-events-charts.js";
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
-import { PG_EVICTION_STATS, PG_BLOCKING_STATS, PG_DATABASE_STATS, PG_QUERY_DURATION_TREND_COLUMNS, PG_DATABASE_TREND_COLUMNS, PG_DEADLOCK_GRAPH_COLUMNS, PG_DEADLOCK_COLUMNS, PG_LOG_EVENT_COLUMNS, PG_COLUMN_STATS_COLUMNS, PG_PREDICATE_COLUMNS, PG_LOCK_STATS_COLUMNS, PG_PLAN_COLUMNS, PG_PLAN_CAPTURE_READINESS_COLUMNS, PG_LOGGING_AUDIT_COLUMNS, PG_TOP_QUERY_COLUMNS, PG_BLOCKING_CHAIN_COLUMNS, PG_BLOCKING_CYCLE_COLUMNS, PG_DATABASE_COLUMNS } from "./server-tabs/pg-activity.js";
+import { PG_EVICTION_STATS, PG_BLOCKING_STATS, PG_DATABASE_STATS, pgQueryDurationTrendSpecs, pgDatabaseTrendSpecs, PG_DEADLOCK_GRAPH_COLUMNS, PG_DEADLOCK_COLUMNS, PG_LOG_EVENT_COLUMNS, PG_COLUMN_STATS_COLUMNS, PG_PREDICATE_COLUMNS, PG_LOCK_STATS_COLUMNS, PG_PLAN_COLUMNS, PG_PLAN_CAPTURE_READINESS_COLUMNS, PG_LOGGING_AUDIT_COLUMNS, PG_TOP_QUERY_COLUMNS, PG_BLOCKING_CHAIN_COLUMNS, PG_BLOCKING_CYCLE_COLUMNS, PG_DATABASE_COLUMNS } from "./server-tabs/pg-activity.js";
 import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS } from "./server-tabs/pg-config.js";
-import { PG_IO_SUMMARY_STATS, PG_IO_TREND_COLUMNS, PG_WRITE_STATS, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
+import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
 import { momentStat, PG_CPU_SERIES, PG_EXTENSION_CENSUS_COLUMNS, PG_EXTENSION_COLUMNS } from "./server-tabs/pg-overview.js";
 import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-replication.js";
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
-import { PG_WAIT_TREND_COLUMNS, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
+import { pgWaitTrendSpecs, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
 import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
@@ -1455,15 +1455,7 @@ export const POSTGRES_TABS = [
          reset, so the ratio above is a lifetime average that barely moves - a database that fell off a
          cliff an hour ago still reads 99% because of the weeks behind it. Differenced per interval, the
          cliff is on screen. Same for spills: a weekly total cannot tell one bad afternoon from a leak. */
-      tablePanel(
-        "Database Trend",
-        "get_pg_database_trend",
-        { server, hours: ctx.hours },
-        "points",
-        PG_DATABASE_TREND_COLUMNS,
-        ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
-        "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
-      ),
+      ...fanout("get_pg_database_trend", { server, hours: ctx.hours }, pgDatabaseTrendSpecs(ctx)),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
          Blocking tab — get_pg_blocking's chains live here too — and because this answers a different
          question from that one: which modes and relations are contended OVER TIME, rather than who is
@@ -1528,15 +1520,7 @@ export const POSTGRES_TABS = [
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
          The statement grid above ranks by total time across the window, which hides a step change - a query
          that doubled halfway through still ranks where its average puts it. */
-      tablePanel(
-        "Query Duration Trend",
-        "get_pg_query_duration_trend",
-        { server, hours: ctx.hours },
-        "points",
-        PG_QUERY_DURATION_TREND_COLUMNS,
-        ctx.label + ", the statement with the most execution time in this window; a step that persists is a plan or index change",
-        "No statement recorded execution time in this window, so there is nothing to follow."
-      ),
+      ...fanout("get_pg_query_duration_trend", { server, hours: ctx.hours }, pgQueryDurationTrendSpecs(ctx)),
       /* The graphs themselves, under the summary - the same pairing the SQL Server Deadlocks tab makes.
          The read takes an optional hash, so this panel needs no drill-down plumbing: without one it
          answers with the most recent graphs. */
@@ -1726,17 +1710,7 @@ export const POSTGRES_TABS = [
       /* #2663 the first PostgreSQL time series. The single-window panels above rank what this server waits
          on; this follows ONE of them over time, which is the question they cannot answer. Parameterised by
          event, so it needs one chosen - the toolbar default is the event that dominates the window. */
-      tablePanel(
-        "Wait Trend",
-        "get_pg_wait_trend",
-        { server, hours: ctx.hours },
-        "points",
-        PG_WAIT_TREND_COLUMNS,
-        ctx.label + ", the event that dominates this window, over time; estimates from a sampling profiler, so the shape is the finding",
-        "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.",
-        2, null, null, null, null, null, null, false, null,
-        true
-      ),
+      ...fanout("get_pg_wait_trend", { server, hours: ctx.hours }, pgWaitTrendSpecs(ctx)),
     ],
   },
 
@@ -1793,15 +1767,7 @@ export const POSTGRES_TABS = [
          buffer pool with a ring buffer, so folding its misses in with the normal context's understates both
          and the two have opposite remedies. No drill-down plumbing: the read chooses the busiest pair when
          the toolbar names none, and says which it chose. */
-      tablePanel(
-        "I/O Trend",
-        "get_pg_io_trend",
-        { server, hours: ctx.hours },
-        "points",
-        PG_IO_TREND_COLUMNS,
-        ctx.label + ", the busiest backend and context in this window, per second; avg read ms is blank unless the server has track_io_timing on, which is off by default",
-        "No I/O samples for this combination in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the combination is being collected."
-      ),
+      ...fanout("get_pg_io_trend", { server, hours: ctx.hours }, pgIoTrendSpecs(ctx)),
     ],
   },
 
