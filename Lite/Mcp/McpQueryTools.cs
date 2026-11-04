@@ -1276,7 +1276,9 @@ public sealed class McpQueryTools
             var startUtc = windowEnd.AddHours(-hours_back);
             var points = await dataService.GetBucketedProcedureDurationTrendAsync(
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
-            if (points.Count == 0)
+            /* #7498: with no database filter the read plots each idle run as a 0, so a window with no stored row is
+               asked about here, the question Darling's read answers itself. A filtered read already returns no points. */
+            if (points.Count == 0 || (database == null && !await dataService.HasProcedureStatInWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd)))
             {
                 var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None), database);
                 if (gated != null)

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -346,6 +347,28 @@ ORDER BY 1";
     /// per-collection read over <c>v_procedure_stats</c>, gathered into buckets.</summary>
     public Task<List<QueryTrendPoint>> GetBucketedProcedureDurationTrendAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes, IReadOnlyList<string>? databaseNames = null) =>
         ReadBucketedDurationTrendAsync("v_procedure_stats", serverId, hoursBack, asOfUtc, bucketMinutes, databaseNames);
+
+    /// <summary>
+    /// #7498: whether the window holds a stored procedure row. Darling's duration read answers no points when it holds none
+    /// (the window <c>EXISTS</c> in <c>DurationTrendRouting</c>). Lite's unfiltered read plots each idle run as a 0, so
+    /// <c>get_procedure_duration_trend</c> asks the same question here.
+    /// </summary>
+    public async Task<bool> HasProcedureStatInWindowAsync(int serverId, int hoursBack, DateTime asOfUtc)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        return await ReadWindowSkippingEmptyArchiveAsync<bool>("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<bool> ReadAsync(string relation)
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT 1 FROM {relation} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 LIMIT 1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            return await command.ExecuteScalarAsync() is not null and not DBNull;
+        }
+    }
 
     /// <summary>
     /// The shared body of the two bucketed duration reads (#3897), Darling's
