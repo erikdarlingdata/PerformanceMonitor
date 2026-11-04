@@ -14,7 +14,7 @@ requests (#6656), and it is not a required check.
 | File | What it is |
 | --- | --- |
 | `run-ui-smoke.ps1` | The entry, in CI and locally: builds the service, starts it on the store, waits for `/api/ping` and the config seed, applies `seed.sql`, runs `smoke.mjs`, stops the service. |
-| `darling.ui-smoke.json` | The service config. Three servers, `ui-sql` (SQL Server), `ui-pg` (PostgreSQL) and a SQL Server with a 71-character name (#7479), all at addresses nothing listens on (`127.0.0.1` port 1), so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) The web host asks for its token on loopback too, so `web.network` holds only a token. `run-ui-smoke.ps1` makes a fresh one per run, signs in once, and passes the session cookie to `smoke.mjs` and `shots.mjs`, so the pages render as a signed-in editor sees them. |
+| `darling.ui-smoke.json` | The service config. Three servers, `ui-sql` (SQL Server), `ui-pg` (PostgreSQL) and a SQL Server with a 70-character name (#7479), all at addresses nothing listens on (`127.0.0.1` port 1), so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) The web host asks for its token on loopback too, so `web.network` holds only a token. `run-ui-smoke.ps1` makes a fresh one per run, signs in once, and passes the session cookie to `smoke.mjs` and `shots.mjs`, so the pages render as a signed-in editor sees them. |
 | `seed.sql` | The rows. Every time is relative to the store's own clock and every count is fixed, so the assertions are exact. |
 | `pages.json` | The pages and what each must show. |
 | `smoke.mjs` | The browser walk (`playwright-core`, the installed Chrome or Edge). |
@@ -75,8 +75,8 @@ are capped and left-aligned on purpose, #2772 and #7402).
 
 Time added: about 1.7 s for each page and width, 126 loads, so 3.5 minutes on a laptop (210 s measured), on top of the walk.
 
-The seed has hard names and a long grid for this pass: a database with a 76-character name (two queries and its files), a third server with
-a 71-character name, and 300 queries in `BulkDb` that give the Queries grid several hundred rows.
+The seed has hard names and a long grid for this pass: a database with a 77-character name (two queries and its files), a third server with
+a 70-character name, and 300 queries in `BulkDb` that give the Queries grid several hundred rows.
 
 ## Screenshot baselines
 

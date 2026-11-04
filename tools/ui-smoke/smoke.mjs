@@ -229,6 +229,9 @@ for (const spec of config.pages) {
   for (const p of r.problems) console.log(`       PROBLEM ${p}`);
 }
 
+/* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), before the layout pass and the screenshot stage, so a hang or a throw in either cannot lose it. */
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
+
 /* The layout pass (#7479): every page again at 600, 1280 and 2560 px wide, measured. UI_SMOKE_LAYOUT=off skips it. A failure fails the run. */
 let layout = { failures: [], rows: [], seconds: 0 };
 if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off") {
@@ -242,9 +245,6 @@ if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off") {
   console.log(`layout: ${layout.rows.length} page/width loads in ${layout.seconds}s, ${layout.failures.length} failures`);
 }
 await browser.close();
-
-/* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), so nothing the screenshot stage does can lose it. */
-writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
 
 /* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the
    stage (Chromium not installed, an unwritable folder) is a screenshot problem like any other: it fails the run, it does not crash it. */

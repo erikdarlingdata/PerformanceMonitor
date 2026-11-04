@@ -105,7 +105,7 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
         Assert.Equal(360, await CountAsync("collect.memory_stats", sql));
         Assert.Equal(4 * 360, await CountAsync("collect.wait_stats", sql));
         Assert.Equal(2 * 360, await CountAsync("collect.file_io_stats", sql));
-        /* 14 queries (the last two in a 76-character database name) x 36, plus the 300 one-collection queries of BulkDb (#7479). */
+        /* 14 queries (the last two in a 77-character database name) x 36, plus the 300 one-collection queries of BulkDb (#7479). */
         Assert.Equal((14 * 36) + 300, await CountAsync("collect.query_stats", sql));
         Assert.Equal(1, await CountAsync("collect.server_properties", sql));
         Assert.Equal(8, await CountAsync("collect.database_size_stats", sql));

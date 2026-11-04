@@ -14,9 +14,9 @@
 --
 -- Seeded (SQL Server target "ui-sql", 6 hours back, one row a minute unless said otherwise):
 --   cpu_utilization_stats 360 | memory_stats 360 | wait_stats 4 types x 360 | file_io_stats 2 files x 360
---   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes), plus (#7479) 2 queries in a 76-character database name x 36, and 300 queries in
+--   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes), plus (#7479) 2 queries in a 77-character database name x 36, and 300 queries in
 --   BulkDb x 1 collection (a grid of several hundred rows) | server_properties 1
---   database_size_stats 4 databases x 2 files, newest minute (the fourth has a 76-character name, #7479) | collection_log 5 collectors x 72 (every 5 minutes), all success
+--   database_size_stats 4 databases x 2 files, newest minute (the fourth has a 77-character name, #7479) | collection_log 5 collectors x 72 (every 5 minutes), all success
 --   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1 (metric 'High CPU', the name #/triage resolves)
 --   ag_replica_states 2 (one group, SalesAG: UISQL01 primary, UISQL02 secondary) | ag_database_replica_states 4 (2 databases x 2 replicas), newest minute
 -- Seeded (PostgreSQL target "ui-pg"):
@@ -47,7 +47,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
 
--- A third SQL Server with a 71-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
+-- A third SQL Server with a 70-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
 -- has an observed-registry row and nothing else: like the other two it is at an address nothing listens on.
 SELECT server_id AS lsid, host AS lname
 FROM config.config_monitored_servers
