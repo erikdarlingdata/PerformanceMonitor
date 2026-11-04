@@ -93,7 +93,9 @@ const PAGE_FOR_TOOLS = [
   ["the Query Store Health panel", ["get_query_store_health"]],
   ["the Memory tab", ["get_memory_grants", "get_memory_trend", "get_resource_semaphore"]],
   ["the System Events tab", ["get_default_trace_events"]],
-  ["the Replication tab", ["get_pg_replication_slots", "get_pg_replication_stats"]],
+  /* #7402: the slots read is the Slots section, so a message on the Replication tab's own Connected Replicas panel points at that section, not at the page the reader is already on. */
+  ["the Slots section of the Replication tab", ["get_pg_replication_slots"]],
+  ["the Replication tab", ["get_pg_replication_stats"]],
   ["the Vacuum tab", ["get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"]],
   ["the Waits tab", ["get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_kernel_stats"]],
   ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
@@ -155,6 +157,11 @@ const FIELD_WORDS = [
   [/\bnote_count\b/g, "the note count"],
   [/\btotal_runs\b/g, "Runs"],
   [/\bsession_missing\b/g, "session missing"],
+  /* #7402: the Index Bloat note is written for an MCP client and names the read's fields. The page names the columns it shows. */
+  [/\bexact_measurement_command\b/g, "the Measure It Exactly column"],
+  [/\bestimated_reclaimable_bytes\b/g, "the Reclaimable column"],
+  [/\bskipped_reason\b/g, "Not Measured reason"],
+  [/\bavg_leaf_density\b/g, "Leaf Density %"],
 ];
 
 /* The rewrites that name one known internal token each (a hints pointer, a window parameter, a denial flag). They are the

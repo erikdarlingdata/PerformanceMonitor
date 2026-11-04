@@ -223,7 +223,10 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   if (note) parts.push(note);
   if (isNotCollectedBlock(block) && !Array.isArray(block.servers)) return el("div", { class: "panel", "data-section": section.name }, parts);
   if (Array.isArray(block.servers)) {
-    for (const s of block.servers) {
+    /* #7402: the sections run in the order the reader sees the names (the display name), not the connection key's. */
+    const named = block.servers.map((s) => ({ s, name: displayNameFor(servers, s.server) }));
+    named.sort((a, b) => a.name.localeCompare(b.name));
+    for (const { s } of named) {
       /* #6157: the heading is the display name of the server; the read names it by its connection key. */
       parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       if (isEmptyBlock(s)) {

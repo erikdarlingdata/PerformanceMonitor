@@ -287,12 +287,12 @@ a:hover { text-decoration: underline; }
    way — two servers on an ultrawide gave two ~1000px cards, a lone server one full-width card, all whitespace
    past what six small stat tiles want. A bounded max track (260-460px, ~the width the issue measured as reading
    "correctly") keeps cards at a comfortable size, so the grid adds columns as it widens rather than fattening a
-   few cards. The flat grid centres the leftover space; the indented tag-group grid overrides that to start
-   (below) so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
+   few cards. Both server-card grids start the cards at the left edge (#7402), so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
    .grid is shared with the triage page, whose span-2 cards and notice strips want the full width. */
 .server-grid {
+  /* #7402: the cards start at the left edge, under the Servers heading, instead of floating in the middle with a gutter on each side. */
   grid-template-columns: repeat(auto-fit, minmax(260px, 460px));
-  justify-content: center;
+  justify-content: start;
 }
 
 /* #2020: grouped (tag-tree) fleet view — collapsible tag headers, each with its card grid indented beneath.
@@ -896,6 +896,16 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .strip.notice { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
 .strip.loading { color: var(--muted); }
 .strip.source { color: var(--muted); font-size: 0.85em; }
+
+/* #7402: ONE spacing rule for a banner and for a Run now row. Whatever follows either one (a panel, a table, a button row,
+   a Copy bar) starts a normal gap below it, at every width, instead of each page adding its own margin. In normal flow this
+   collapses with a margin the next block already has. A grid or flex parent owns spacing with its gap, so it is left alone. */
+.strip:not(:last-child), .run-row:not(:last-child) { margin-bottom: 0.75rem; }
+.grid > .strip, .panel-grid > .strip, .stats > .strip { margin-bottom: 0; }
+/* The Run now row (Queries Run live now, Collection Health Run all collectors now): the button, then its explanation in
+   the page's small muted text, wrapping beside the button rather than under it. */
+.run-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0.4rem 0.75rem; }
+.run-row .muted { flex: 1 1 20rem; min-width: 0; font-size: 0.85rem; }
 
 .all-healthy {
   display: flex;

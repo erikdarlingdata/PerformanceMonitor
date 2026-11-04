@@ -58,6 +58,7 @@ import {
   markPartialSubtitle,
   localizeIsoText,
   localizeAlertDetail,
+  noValuesText,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
@@ -1440,6 +1441,10 @@ function vizLine(data, desc) {
      now draws that lone bucket as a marker (a single reading IS data) rather than the old "not enough data
      points" strip — so a series that reached one bucket reads consistently beside siblings that reached two. */
   if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
+  /* #7402: points came back and none holds a number for any series (an idle server just after a restart: its one point has no rate yet).
+     Say what happened, in the read's own words when it has a message, instead of a chart with nothing on it. */
+  const drawable = (v) => v != null && v !== "" && Number.isFinite(Number(v));
+  if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,
