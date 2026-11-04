@@ -519,7 +519,7 @@ public static class DailySummarySql
         ),
         queries AS (
             /* One row per day. The rollup half and the raw half overlap on exactly one day, the partial one, and
-               a COUNT(DISTINCT) of two halves cannot be added. Each half is a count of hashes that really
+               two distinct counts of the halves cannot be added. Each half is a count of hashes that really
                appeared that day, so the larger is the closer: the rollup's when raw has lost part of the day
                (retention), raw's when the rollup has not caught up (#7505). */
             SELECT u.d, MAX(u.c) AS c

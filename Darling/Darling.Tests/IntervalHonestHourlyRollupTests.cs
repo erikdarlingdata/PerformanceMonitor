@@ -480,8 +480,10 @@ public sealed class IntervalHonestHourlyRollupTests
         /* The daily summary: the one-argument form is the legacy; the two-argument form swaps the queries CTE's
            relation — and, since #3653 A6, carries the successor's own WHERE into the not-carried member's
            source probe (the hole scan's rule: a day holding only restart rows is not a hole for an aggregate
-           that rejects them) — and nothing else; the daily tier ignores the argument. The expected text is
-           built from the legacy's by exactly those two edits, so a third difference reds here. */
+           that rejects them) — and, since #7505, carries it onto the raw half's partial ceiling day, so that day
+           is not read higher than the rollup will read it once it catches up — and nothing else; the daily tier
+           ignores the argument. The expected text is built from the legacy's by exactly those three edits, so a
+           fourth difference reds here. */
         Assert.Equal(DailySummarySql.RangeSqlFor(RetentionTier.Hourly), DailySummarySql.RangeSqlFor(RetentionTier.Hourly, legacy));
         var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(TimescaleSupport.CreateQueryStatsIntervalHourlySql);
         Assert.Equal("sample_interval_seconds IS DISTINCT FROM 0", successorFilter);
@@ -489,11 +491,14 @@ public sealed class IntervalHonestHourlyRollupTests
         const string SourceProbeTail = "AND s.collection_time < b.d + INTERVAL '1 day'";
         var legacyRouted = DailySummarySql.RangeSqlFor(RetentionTier.Hourly);
         Assert.Equal(1, legacyRouted.Split(SourceProbeTail).Length - 1);
+        const string RawHalfFloor = "AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2)";
+        Assert.Equal(1, legacyRouted.Split(RawHalfFloor).Length - 1);
         /* #3905: the probe now ends in its OFFSET 0 fence on the next line, so the filter is inserted after
            the tail itself — which the count above proves appears exactly once. */
         var expectedSuccessorRouted = legacyRouted
             .Replace($"FROM collect.{legacy}", $"FROM collect.{successor}", StringComparison.Ordinal)
-            .Replace(SourceProbeTail, SourceProbeTail + "\n          AND " + successorFilter, StringComparison.Ordinal);
+            .Replace(SourceProbeTail, SourceProbeTail + "\n          AND " + successorFilter, StringComparison.Ordinal)
+            .Replace(RawHalfFloor, RawHalfFloor + "\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR (" + successorFilter + "))", StringComparison.Ordinal);
         Assert.Equal(expectedSuccessorRouted, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor));
         Assert.Contains(successor, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.DoesNotContain(legacy, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
