@@ -49,6 +49,31 @@ public static class QueryStoreRegressionRules
         $"COALESCE(({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * 100.0 / NULLIF({alias}.base_cpu_ms, 0) > {CostGatePercent}"
         + $" AND ({alias}.recent_cpu_ms - {alias}.base_cpu_ms) * {alias}.recent_execs >= {CostMinAddedCpuMs}, false)";
 
+    /// <summary>
+    /// #7592: a cost row ranks LOW, whatever its percent, when it added less than this many milliseconds of duration over the
+    /// window (its recent runs times the rise in duration per run) AND less than <see cref="GradeMinAddedPerRunMs"/> per run. One
+    /// minute: 162 runs of a 13 ms query that was 5 ms (+168%) add 1.3 s, and read CRITICAL on a quiet server. The row stays listed,
+    /// because the percent is true. Spelled "1 minute" in the tools' text, by hand, as <see cref="CostMinAddedCpuMs"/> is.
+    /// </summary>
+    public const int GradeMinAddedDurationMs = 60_000;
+
+    /// <summary>
+    /// #7592: the per-run half of the grade floor. A row under <see cref="GradeMinAddedDurationMs"/> in total keeps its percent
+    /// bands when each run got at least this many milliseconds slower: 4 runs that went from 0.12 ms to 3,263 ms add 13 s in total
+    /// but are a real slowdown for whoever hit them. One second, spelled "1 second" in the tools' text.
+    /// </summary>
+    public const int GradeMinAddedPerRunMs = 1_000;
+
+    /// <summary>
+    /// #7592: true for a cost row too small to grade above LOW: under <see cref="GradeMinAddedDurationMs"/> of added duration over
+    /// the window AND under <see cref="GradeMinAddedPerRunMs"/> of added duration per run. One text for Darling's read and Lite's,
+    /// over a row with <c>base_dur_ms</c>, <c>recent_dur_ms</c> (ms per run) and <c>recent_execs</c> under <paramref name="alias"/>.
+    /// A NULL figure is false, so the percent bands decide, as they did before.
+    /// </summary>
+    public static string GradeFloorSql(string alias) =>
+        $"COALESCE(({alias}.recent_dur_ms - {alias}.base_dur_ms) * {alias}.recent_execs < {GradeMinAddedDurationMs}"
+        + $" AND ({alias}.recent_dur_ms - {alias}.base_dur_ms) < {GradeMinAddedPerRunMs}, false)";
+
     /// <summary>The closing sentence of the regressions read's <c>truncation_note</c> when the window starts at <c>baseline_start</c>
     /// and the store holds only part of the baseline. One definition for Darling's and Lite's reads, and the text the web page's
     /// <c>plain-text.js</c> rewrites, so a reword here breaks the web test instead of leaving a field name on the page (#6649).</summary>
