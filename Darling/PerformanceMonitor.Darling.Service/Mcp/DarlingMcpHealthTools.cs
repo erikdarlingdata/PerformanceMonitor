@@ -283,12 +283,13 @@ public sealed class DarlingMcpHealthTools
             ReadScope.NoteWindow(fromDate, toDate); // #5814: the whole days this range reads, ending on the anchor day
 
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
-               a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
+               a backdated as_of must clamp its own "today" against ITSELF, not the process clock. Only its date
+               counts, so that means the end of its date (#7504). */
             /* #4232 ruling item 5: only a read "as of now" (no as_of given) uses the closed-day cache — a
                caller who pinned an explicit end time gets an unmemoized read of exactly that moment every time. */
             var separatelyMonitored = await ResolveSeparatelyMonitoredAsync(postgres, resolved.ServerId, registryState, logger, cancellationToken);
             var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null,
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: McpHelpers.DayAnchorClock(as_of, windowEnd), asOfNow: as_of is null,
                 separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken);
             var rows = range.Rows;
 
