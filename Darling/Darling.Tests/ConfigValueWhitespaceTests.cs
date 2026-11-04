@@ -73,7 +73,7 @@ public sealed class ConfigValueWhitespaceTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped web script cannot be run.");
-            return;
+            throw; // not reached: Assert.Skip throws
         }
 
         using (proc)

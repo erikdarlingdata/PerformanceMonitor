@@ -939,6 +939,13 @@ function databaseProtectionChip(c) {
 /* A short non-color severity cue so severity isn't conveyed by border color alone (M2). */
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
+/* The service sends the remaining count as a digit string because an identity bigint does not fit a JSON number. Number() would round it above 2^53,
+   so group the digits themselves (BigInt keeps every digit and a leading minus, and groups in the reader's locale like fmtInt). */
+function groupDigits(v) {
+  const s = String(v).trim();
+  return /^-?\d+$/.test(s) ? BigInt(s).toLocaleString() : fmtInt(v);
+}
+
 /* #7416: the tile names the fullest column and its figures, and a click opens the Identity Capacity panel that lists every column. A service that
    sends no column (an older one) keeps the generic sentence. */
 export function identityCapacityDetail(ic) {
@@ -946,7 +953,7 @@ export function identityCapacityDetail(ic) {
   if (!ic.worst_column) return "At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is " + ic.worst_band + ".";
   const name = [ic.worst_database, ic.worst_table, ic.worst_column].filter(Boolean).join(".");
   const pct = ic.worst_percent_used == null ? "" : ": " + fmtNum(ic.worst_percent_used, ic.worst_percent_used >= 99.95 || ic.worst_percent_used === 0 ? 0 : 1) + "% used";
-  const left = ic.worst_values_remaining == null ? "" : ", " + fmtInt(ic.worst_values_remaining) + " left";
+  const left = ic.worst_values_remaining == null ? "" : ", " + groupDigits(ic.worst_values_remaining) + " left";
   return name + pct + left + (n > 1 ? ". The fullest of " + fmtInt(n) + " columns at 70% or more." : ".");
 }
 

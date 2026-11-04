@@ -114,6 +114,9 @@ try {
     server_name: "srv-a", display_name: "srv-a", is_online: true, database_protection_overdue: protectionOverdue,
     identity_capacity: { worst_band: "critical", columns_at_bar: 3, worst_database: "Sales", worst_table: "dbo.Orders", worst_column: "OrderId", worst_percent_used: 100, worst_values_remaining: "0" },
   };
+  /* A bigint remaining count above 2^53 arrives as a digit string and must print its exact digits (Number() would round them). */
+  const bigCard = { server_name: "srv-c", display_name: "srv-c", is_online: true, identity_capacity: { worst_band: "warning", columns_at_bar: 1, worst_database: "Sales", worst_table: "dbo.Orders", worst_column: "OrderId", worst_percent_used: 70, worst_values_remaining: "2767011611056432742" } };
+  const bigChip = findAll(fleet.metricBands(bigCard, null), (n) => hasClass(n, "metric-chip")).find((x) => x.textContent.startsWith("Identity capacity"));
   const bands = fleet.metricBands(card, null);
   const chips = findAll(bands, (n) => hasClass(n, "metric-chip"));
   const chipText = (label) => { const c = chips.find((x) => x.textContent.startsWith(label)); return c ? c.textContent : null; };
@@ -215,6 +218,7 @@ try {
     alertSetup, quietChips, sweepTiles, recommendations, pools, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
+    bigIdentityChip: bigChip ? bigChip.textContent : null,
     identityClickStopped: stopped,
     hashAfterClick: location.hash,
     scrolledTo: scrolled,

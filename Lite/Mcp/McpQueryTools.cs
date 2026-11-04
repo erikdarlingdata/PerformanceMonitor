@@ -1904,8 +1904,9 @@ public sealed class McpQueryTools
            `truncated` beside `effective_hours_back`; the literal stays a literal so that sweep can see it. */
         var windowTruncated = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
         envelope["window_truncated"] = windowTruncated;
-        /* #7416 item 21: the one reason a late head can be named, at the position Darling's TrendDisclosure.WriteTo writes it. */
-        var (startOlderThanStore, storeKeepsDays) = DescribeStoreReach(windowTruncated, startUtc, DateTime.UtcNow);
+        /* #7416 item 21: the one reason a late head can be named, at the position Darling's TrendDisclosure.WriteTo writes it. Measured from the window's own
+           end (the as_of anchor when one is given), never from the clock, so an anchored read answers as of its anchor. */
+        var (startOlderThanStore, storeKeepsDays) = DescribeStoreReach(windowTruncated, startUtc, windowEndUtc);
         envelope["start_older_than_tier"] = startOlderThanStore;
         envelope["tier_keeps_days"] = storeKeepsDays;
         envelope["bucket"] = grain.Bucket;

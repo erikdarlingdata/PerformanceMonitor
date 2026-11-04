@@ -28,8 +28,8 @@ public sealed class McpLongQueryTools
         [Description("Maximum rows to return, slowest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(QueryTagReadScope.ParameterDescription)] string? tag = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        [Description(IncludeMonitorDescription)] bool include_monitor = false)
+        [Description(IncludeMonitorDescription)] bool include_monitor = false,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;

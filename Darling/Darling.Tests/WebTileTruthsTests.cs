@@ -68,6 +68,16 @@ public sealed class WebTileTruthsTests
     }
 
     [Fact]
+    public void TheIdentityCapacityTile_PrintsEveryDigitOfARemainingCountAbove2Pow53()
+    {
+        // #7416: the service sends the bigint remaining count as digits because a JSON number rounds above 2^53. Number() on it printed 2,767,011,611,056,432,600.
+        var chip = Run().GetProperty("bigIdentityChip").GetString()!;
+        var digits = new string(chip.Where(char.IsDigit).ToArray());
+        Assert.Contains("2767011611056432742", digits, StringComparison.Ordinal);
+        Assert.Contains("left", chip, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheIdentityCapacityTile_NamesTheFullestColumn_AndAClickOpensThePanel()
     {
         var r = Run();
