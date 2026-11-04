@@ -2941,7 +2941,8 @@ internal static class DarlingDataReader
     /// The days of <c>[$2, $3)</c> that have a built summary row for server $1 AND were built by a V240-or-newer builder
     /// (#7169, <see cref="QueryStoreTopDaily.DayIsWeightedSql"/>). A day built before V240 has NULL weighted sums, which would
     /// sum to a wrong average beside a non-NULL execution count, so it counts as not built and is read from the wide table until
-    /// the service rebuilds it. $2 and $3 are dates.
+    /// the service rebuilds it. $2 and $3 are dates. The weighted test reads one probe row for each day, not every row of the day
+    /// (#7379), so a long window over days built before V240 does not read the wide summary.
     /// </summary>
     private const string QueryStoreTopBuiltDaysSql = """
         SELECT b.day
