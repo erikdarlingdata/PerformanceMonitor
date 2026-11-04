@@ -132,7 +132,9 @@ public sealed class McpAlertTools
                 return dismissedExcludedCount > 0
                     ? McpHelpers.Status(
                         "empty",
-                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.")
+                        $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.",
+                        /* #7410: the count as a field, at the path Darling's twin carries it (hints.dismissed_excluded_count), so the web page can say it in its own words. The window notice (WithWindowNotice) adds its keys to this hints object. */
+                        new { dismissed_excluded_count = dismissedExcludedCount })
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.");
             }
 
