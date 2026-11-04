@@ -25,7 +25,7 @@
  * el()/textContent.
  */
 
-import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
+import { storeHash, storeHeaders, el, mount, readTool, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The editable text scope/pattern fields, in form order, with their labels. `reason` and the expiry follow. */
@@ -302,7 +302,7 @@ async function refreshList(state) {
   if (res.kind === "error") return mount(state.listBox, errorStrip(res.message));
   if (res.kind === "empty") {
     state.rules = [];
-    return mount(state.listBox, emptyStrip(res.message || "No mute rules are configured."));
+    return mount(state.listBox, res.message ? plainEmptyStrip(res, "No mute rules are configured, so no alert is muted.") : emptyStrip("No mute rules are configured."));
   }
   state.rules = (res.data && res.data.mute_rules) || [];
   drawList(state);

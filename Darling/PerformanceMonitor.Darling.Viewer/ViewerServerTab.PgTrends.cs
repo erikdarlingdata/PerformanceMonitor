@@ -179,10 +179,11 @@ public partial class ViewerServerTab
             : await _dataService.GetPgWaitTrendAsync(_server.ServerId, startUtc, endUtc);
         var p = trend.Points;
 
-        PgWaitTrendNote.Text = p.Count == 0
-            ? PanelNote("pg_wait_sampling", 0,
+        ShowNote(PgWaitTrendNote, p.Count == 0
+            ? PanelNoteParts("pg_wait_sampling", 0,
+                "There are no wait samples to chart in this window.",
                 "No samples for a wait event in this window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.")
-            : $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.";
+            : new PanelNoteText($"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
         RenderPgTrendPanels(PgWaitTrendHost, new[]
         {
             new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]

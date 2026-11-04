@@ -20,7 +20,7 @@
  * KnownPatternsPageBehaviourTests. All entry text, the note above all, reaches the DOM through el()/textContent.
  */
 
-import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
+import { storeHeaders, el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, localTime, reportSessionExpired, networkErrorText, browserZoneOrBlank } from "../util.js";
 import * as api from "../alerts-api.js";
 
 /** The most characters a note holds (KnownPatternMatcher.MaxNoteLength). The server refuses more; the counter only warns early. */
@@ -200,7 +200,7 @@ async function refreshList(state) {
   if (res.kind === "error") return mount(state.listBox, errorStrip(res.message));
   if (res.kind === "empty") {
     state.entries = [];
-    return mount(state.listBox, emptyStrip(res.message || "No known patterns are recorded."));
+    return mount(state.listBox, res.message ? plainEmptyStrip(res, "No known patterns are recorded.") : emptyStrip("No known patterns are recorded."));
   }
   state.entries = (res.data && res.data.known_patterns) || [];
   drawList(state);

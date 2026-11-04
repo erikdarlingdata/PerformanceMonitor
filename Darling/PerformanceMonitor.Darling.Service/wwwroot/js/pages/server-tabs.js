@@ -742,7 +742,7 @@ export const SERVER_TABS = [
           viz: "stat",
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
-          emptyText: "No memory clerk figures in this window.",
+          /* #7410: no emptyText. When every tile is blank the note already says why (no capture, or outside the top 25), and an empty sentence under it said the same thing twice. */
         },
       ]),
       /* #2484, #6293: the Query Heatmap, drawn as the Viewer draws it: a colour grid of query counts by time and
@@ -753,8 +753,10 @@ export const SERVER_TABS = [
         hours: ctx.hours,
         label: ctx.label,
         columns: QUERY_HEATMAP_COLUMNS,
+        /* #7410: a true negative says this sentence, and the tool's text (it names the database_name filter and the second cycle) is behind "More detail". */
+        emptyLine: true,
         emptyText:
-          "No query executed in this window. Query stats are collected every cycle whether or not anything ran.",
+          "No query ran in this window. A quiet server looks like this, and so does a database filter that matches nothing.",
       }),
       tagFilteredCard("longqueries", (picker, redraw) => {
         /* #7416 item 11: the monitor's own statements are left out by default (on an idle server every long completion is

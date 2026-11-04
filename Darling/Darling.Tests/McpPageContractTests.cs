@@ -1605,6 +1605,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", CollectionIdGenerator.Next(), now, ServerId, 
             var allDismissed = await DarlingMcpAlertTools.GetAlertHistory(postgres, ServerName, 24, 50);
             Assert.Equal("empty", DarlingMcpTestData.StatusOf(allDismissed));
             Assert.Contains("5 dismissed alerts were excluded", allDismissed, StringComparison.Ordinal);
+            /* #7410: the count is also a field, read from the parsed JSON (never raw text) at hints.dismissed_excluded_count, which the web page reads. */
+            using (var dismissedDoc = System.Text.Json.JsonDocument.Parse(allDismissed))
+                Assert.Equal(5L, dismissedDoc.RootElement.GetProperty("hints").GetProperty("dismissed_excluded_count").GetInt64());
 
             bodySucceeded = true;
         }
