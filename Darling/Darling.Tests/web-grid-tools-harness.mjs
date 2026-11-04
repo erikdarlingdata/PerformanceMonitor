@@ -132,6 +132,17 @@ const scenarios = {
     btn(w, "Copy row").click(); await flush();
     out.texts = texts;
   },
+  async auditExport() {
+    /* #7410: the Logging Settings Audit folds Unit and Source into the Value cell and the cost into the remedy cell. The shipped column list exports them anyway. */
+    const { PG_LOGGING_AUDIT_COLUMNS } = await import(pathToFileURL(process.argv[2] + "/pages/server-tabs/pg-activity.js").href);
+    const arows = [{ setting: "log_min_duration_statement", verdict: "partial", value: "250", unit: "ms", source: "configuration file", change_needs: "reload", unlocks: "slow statements", recommended: "250", cost_note: "Costs log volume on a busy server.", remedy: "ALTER SYSTEM SET log_min_duration_statement = 250;" }];
+    const w = VIZ.table({ facets: arows }, { rowsKey: "facets", columns: PG_LOGGING_AUDIT_COLUMNS, title: "Logging Settings Audit" });
+    btn(w, "Export CSV").click();
+    out.csv = await csvOf();
+    out.headerClasses = ths(w).map((th) => String(th.className));
+    out.cellClasses = tbodyOf(w).children[0].children.map((td) => String(td.className));
+    out.labels = PG_LOGGING_AUDIT_COLUMNS.map((c) => c.label);
+  },
   async pickSurvivesRebuild() {
     const texts = [];
     setNav({ clipboard: { writeText: async (t) => { texts.push(t); } } });

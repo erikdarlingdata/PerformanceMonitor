@@ -55,6 +55,7 @@ public sealed partial class DarlingWorker
         bool managedUsedLastGoodConf,
         ManagedConfMigrationOutcome? managedConfVerification,
         Func<CancellationToken, Task>? reconcileNetworkAfterRoleProvisioning,
+        Func<string, CancellationToken, Task>? reconcileTelemetryJob,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -402,6 +403,15 @@ public sealed partial class DarlingWorker
             _timescaleAvailable = await TimescaleSupport.TryEnableAsync(timescaleConnection, _logger, stoppingToken);
             if (_timescaleAvailable)
             {
+                /* #7446: the managed store's telemetry job follows the level in force. The bootstrap's own pass runs
+                   before this point, so on a new store the extension did not exist yet and the job was left
+                   scheduled, to record a failed run each day until the next start. Run it again now that the
+                   extension exists. Never fails the start (the pass logs and returns). Null off the managed store. */
+                if (reconcileTelemetryJob is not null)
+                {
+                    await reconcileTelemetryJob(storeConnectionString, stoppingToken);
+                }
+
                 /* #3817: the store-object ensures that the start path and the hourly store-maintenance tick
                    BOTH run now come from ONE list (s_storeObjectConvergence), walked here segment by segment
                    so the three non-convergence steps interleaved below keep the positions their own issues
