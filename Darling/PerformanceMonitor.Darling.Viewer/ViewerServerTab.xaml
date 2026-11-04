@@ -3724,7 +3724,7 @@
                     <Grid>
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="8,8" Height="36">
-                            <TextBlock Text="Memory Broker (low physical memory)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
+                            <TextBlock Text="Memory Broker (target shrinks)" VerticalAlignment="Center" Margin="0,0,10,0" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                             <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="10,4" MinWidth="70"/>
                             <TextBlock x:Name="MemoryBrokerCountIndicator" Text="" Margin="12,0,0,0" VerticalAlignment="Center" FontStyle="Italic" Foreground="{DynamicResource AccentBrush}" FontWeight="SemiBold"/>
                         </StackPanel>
@@ -3746,7 +3746,7 @@
                                     <DataGridTextColumn Binding="{Binding PreviouslyAllocated, StringFormat=N0}" Width="125" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PreviouslyAllocated" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Prev Allocated" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
-                            <TextBlock x:Name="MemoryBrokerNoDataMessage" Style="{StaticResource EmptyHint}" Text="No low-physical-memory broker notifications (RESOURCE_MEMPHYSICAL_LOW) in the selected time window."/>
+                            <TextBlock x:Name="MemoryBrokerNoDataMessage" Style="{StaticResource EmptyHint}" Text="No memory broker SHRINK notifications in the selected time window."/>
                         </Grid>
                     </Grid>
                 </TabItem>

@@ -76,17 +76,22 @@ public sealed class DarlingMcpHealthParserToolsWindowNoticeLiveTests
         tool is HealthTool.SignificantWaits or HealthTool.MemoryNodeOom ? HealthTool.SevereErrors : HealthTool.MemoryNodeOom;
 
     /// <summary>A gate-passing event of <paramref name="tool"/>'s type at <paramref name="eventTime"/>, stored by a collection at <paramref name="collectedAt"/>.</summary>
-    private static Task SeedHealthEventAsync(NpgsqlConnection c, string scenario, HealthTool tool, DateTime eventTime, DateTime? collectedAt = null)
+    private static Task SeedHealthEventAsync(NpgsqlConnection c, string scenario, HealthTool tool, DateTime eventTime, DateTime? collectedAt = null, string? brokerNotification = null)
     {
         var (eventType, fixture, low) = SourceOf(tool);
         var xml = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", fixture));
         if (low)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
+            /* The memory-conditions fixture carries HIGH and the broker fixture STABLE; the gates keep LOW and SHRINK (#7466). */
+            xml = tool == HealthTool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">" + (brokerNotification ?? "SHRINK") + "<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_LOW", StringComparison.Ordinal);
         }
 
         /* The row's event time is the event's own timestamp, as a real capture has it; the read windows on the column. */
         xml = Regex.Replace(xml, "timestamp=\"[^\"]*\"", $"timestamp=\"{eventTime:yyyy-MM-dd'T'HH:mm:ss.fff}Z\"");
+        if (brokerNotification == "unparseable")
+            xml = "this is not xml";
         var name = HealthName(scenario);
         return DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
             @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
@@ -139,6 +144,34 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(tool, ds, "inside-" + tool, 168, end));
 
             AssertTruncatedAt(root, floor, end.AddHours(-168));
+        });
+
+    /* #7466: the broker tool shows what the SHRINK gate filtered out. The counts come from the tool's own JSON on its real path,
+       on the data reply and on the empty reply, and events_in_window is the raw number of stored broker events (a row that fails
+       to shred still counts) on both. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MemoryBroker_Reply_CarriesNotificationCounts_AndTheRawEventCount_7466_AgainstDevPostgres(bool withShrink) =>
+        await RunHealthAsync("brokercounts-" + withShrink, async (c, ds, end) =>
+        {
+            var scenario = "brokercounts-" + withShrink;
+            await SeedHealthServerAsync(c, scenario, end.AddDays(-30), end.AddDays(-8), end);
+            var minutes = 10;
+            foreach (var n in withShrink ? new[] { "STABLE", "GROW", "GROW", "SHRINK", "unparseable" } : new[] { "STABLE", "GROW", "GROW", "unparseable" })
+                await SeedHealthEventAsync(c, scenario, HealthTool.MemoryBroker, end.AddMinutes(-(minutes += 10)), brokerNotification: n);
+
+            var root = WindowFloorLiveHarness.Parse(await CallHealthAsync(HealthTool.MemoryBroker, ds, scenario, 168, end));
+
+            if (!withShrink)
+                Assert.Equal("empty", root.GetProperty("status").GetString());
+            Assert.Equal(withShrink ? 5 : 4, root.GetProperty("events_in_window").GetInt32());
+            var counts = root.GetProperty("notification_counts");
+            Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+            Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+            Assert.Equal(withShrink, counts.TryGetProperty("SHRINK", out var shrink) && shrink.GetInt32() == 1);
+            if (withShrink)
+                Assert.Equal(1, root.GetProperty("event_count").GetInt32());
         });
 
     [Theory]

@@ -140,7 +140,7 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
     public long? LastOsError => record.LastOsError;
 }
 
-/// <summary>One RESOURCE_MEMPHYSICAL_LOW memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
+/// <summary>One SHRINK memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
@@ -425,21 +425,33 @@ ORDER BY event_time DESC";
 
     // ── Memory Broker ──
 
-    /// <summary>Significant memory-broker ratio changes (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
-    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    /// <summary>Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first.</summary>
+    public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null) =>
+        (await GetMemoryBrokerWithCountsAsync(serverId, hoursBack, fromDate, toDate, asOfUtc)).Rows;
+
+    /// <summary>
+    /// The significant memory-broker rows plus how many broker events of each notification value (STABLE, GROW, SHRINK) the
+    /// window held before the gate (#7466), so the MCP read can show what the gate filtered out. One read of the window.
+    /// <c>RawEventCount</c> is the number of stored broker events read, parsed or not, which is what the empty reply's
+    /// <c>events_in_window</c> counts and what Darling reports, so a broker XML that fails to shred cannot make the two paths differ.
+    /// </summary>
+    public async Task<(List<MemoryBrokerRow> Rows, SortedDictionary<string, int> NotificationCounts, int RawEventCount)> GetMemoryBrokerWithCountsAsync(
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
-        var rows = new List<MemoryBrokerRow>();
+        var records = new List<MemoryBrokerRecord>();
         foreach (var xml in xmls)
         {
             var record = SystemHealthParser.ParseMemoryBroker(xml);
-            if (record != null && SystemHealthSignificance.IsSignificant(record))
-                rows.Add(new MemoryBrokerRow(record));
+            if (record != null)
+                records.Add(record);
         }
-        return rows;
+
+        var rows = records.Where(SystemHealthSignificance.IsSignificant).Select(r => new MemoryBrokerRow(r)).ToList();
+        return (rows, SystemHealthSignificance.CountBrokerNotifications(records), xmls.Count);
     }
 
     // ── Memory Node OOM ──

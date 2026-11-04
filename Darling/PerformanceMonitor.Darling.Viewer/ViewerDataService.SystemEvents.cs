@@ -130,7 +130,7 @@ public sealed class MemoryConditionsRow(MemoryConditionsRecord record)
     public long? LastOsError => record.LastOsError;
 }
 
-/// <summary>One RESOURCE_MEMPHYSICAL_LOW memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
+/// <summary>One SHRINK memory-broker ratio change (Memory Broker sub-tab). Mirrors <c>*_MemoryBroker</c>.</summary>
 public sealed class MemoryBrokerRow(MemoryBrokerRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
@@ -449,7 +449,7 @@ public sealed partial class ViewerDataService
 
     // ── Memory Broker ──
 
-    /// <summary>Significant memory-broker ratio changes (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
+    /// <summary>Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first.</summary>
     public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
