@@ -60,8 +60,8 @@ public sealed class QueryStoreClutterTests
     /// nothing about capture mode is a MEASURED one; a fixture about the pre-rung null passes null explicitly.</param>
     private static DarlingQueryStoreClutterReader.ConfigRow Config(
         string db, string actual = "READ_WRITE", int readonlyReason = 0, long current = 4096, long max = 8192, long maxPlans = 200,
-        string? captureMode = "AUTO") =>
-        new(1, db, actual, "READ_WRITE", readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0), captureMode);
+        string? captureMode = "AUTO", string desired = "READ_WRITE") =>
+        new(1, db, actual, desired, readonlyReason, current, max, "AUTO", 21, maxPlans, 60, new DateTime(2026, 9, 20, 11, 30, 0), captureMode);
 
     /* ─────────────────────────── the judgment ─────────────────────────── */
 
@@ -181,7 +181,7 @@ public sealed class QueryStoreClutterTests
     }
 
     [Fact]
-    public void Config_BandsStorageNearTheCap_AndAnOperatorReadOnlyAsCritical()
+    public void Config_BandsStorageNearTheCap_AndAStorageCapReadOnlyAsCritical()
     {
         var (v1, r1) = QueryStoreClutter.Judge(null, null, Config("db", current: 7373, max: 8192)); /* 90.0% */
         Assert.Equal(HealthSeverity.Warning, v1);
@@ -195,6 +195,56 @@ public sealed class QueryStoreClutterTests
         Assert.Equal(HealthSeverity.Critical, v3);
         Assert.Contains(QueryStoreClutter.ReasonQueryStoreReadOnly, r3);
         Assert.Contains(QueryStoreClutter.ReasonStorageNearCap, r3);
+    }
+
+    /* #7454: READ_ONLY is Critical only when a capacity bit is set. A database-state bit, or an operator's own
+       OPERATION_MODE = READ_ONLY (reason 0, desired READ_ONLY), is a reason with no band, as qs_off is. The
+       capacity bit decides when both kinds are set. */
+    [Theory]
+    [InlineData(65536, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(131072, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(262144, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(524288, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(65536 | 1, "READ_WRITE", HealthSeverity.Critical, QueryStoreClutter.ReasonQueryStoreReadOnly)]
+    [InlineData(1, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(2, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(4, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(1 | 2, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    [InlineData(0, "READ_ONLY", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyOperator)]
+    [InlineData(0, "READ_WRITE", HealthSeverity.Unknown, QueryStoreClutter.ReasonReadOnlyDatabaseState)]
+    public void ReadOnly_IsCriticalOnlyForACapacityBit(int readonlyReason, string desired, HealthSeverity expectedVerdict, string expectedReason)
+    {
+        var config = Config("db", "READ_ONLY", readonlyReason: readonlyReason, desired: desired);
+
+        var (verdict, reasons) = QueryStoreClutter.Judge(null, null, config);
+
+        Assert.Equal(expectedVerdict, verdict);
+        Assert.Equal(new[] { expectedReason }, reasons);
+    }
+
+    [Fact]
+    public void ReadOnlyForTheDatabaseState_StillLetsTheOtherArmsGrade_AndSaysItIsNotClutter()
+    {
+        var rows = QueryStoreClutter.Compose(
+            [],
+            [Churn("db", QueryStoreClutter.PlansPerQueryP95Critical)],
+            [Config("db", "READ_ONLY", readonlyReason: 1, current: 8192, max: 8192)]);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(HealthSeverity.Critical, row.Verdict); /* plan churn, not the read-only state */
+        Assert.Contains(QueryStoreClutter.ReasonReadOnlyDatabaseState, row.Reasons);
+        Assert.Contains(QueryStoreClutter.ReasonStorageNearCap, row.Reasons);
+        Assert.DoesNotContain(QueryStoreClutter.ReasonQueryStoreReadOnly, row.Reasons);
+
+        var text = string.Join(" ", QueryStoreClutter.Recommendations(row));
+        Assert.Contains("database is read-only", text, StringComparison.Ordinal);
+        Assert.Contains("not clutter", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminal state", text, StringComparison.Ordinal);
+
+        var capped = Assert.Single(QueryStoreClutter.Compose([], [], [Config("db", "READ_ONLY", readonlyReason: 65536)]));
+        var cappedText = string.Join(" ", QueryStoreClutter.Recommendations(capped));
+        Assert.Contains("storage cap reached", cappedText, StringComparison.Ordinal);
+        Assert.Contains("terminal state", cappedText, StringComparison.Ordinal);
     }
 
     [Fact]
