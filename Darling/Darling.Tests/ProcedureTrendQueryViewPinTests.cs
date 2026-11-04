@@ -44,7 +44,7 @@ public sealed class ProcedureTrendQueryViewPinTests
         var filtered = Normalize(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true));
 
         Assert.Equal(QueryStatsBucketedUnfilteredSha256, Sha256(unfiltered));
-        Assert.Equal(QueryStatsBucketedFilteredSha256, Sha256(filtered));
+        Assert.True(QueryStatsBucketedFilteredSha256 == Sha256(filtered), "filtered now " + Sha256(filtered));
         Assert.Equal(QueryStatsCollectionsCteUnfilteredSha256, Sha256(CollectionsCte(unfiltered)));
         Assert.Equal(QueryStatsCollectionsCteFilteredSha256, Sha256(CollectionsCte(filtered)));
     }

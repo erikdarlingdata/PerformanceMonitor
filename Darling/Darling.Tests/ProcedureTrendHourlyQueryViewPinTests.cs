@@ -61,6 +61,6 @@ public sealed class ProcedureTrendHourlyQueryViewPinTests
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
 
         Assert.True(Pins.TryGetValue(label, out var expected), $"no pin for {label}: {hash}");
-        Assert.Equal(expected, hash);
+        Assert.True(expected == hash, $"{label} now hashes to {hash}");
     }
 }

@@ -109,12 +109,12 @@ public sealed class ViewerTrendRoutingPortTests
         var viewerLines = Lf(viewer).Split('\n');
         /* #5414 round 2: the filter sits INSIDE the three sums (elapsed, executions, matched rows), never as a WHERE term, so an
            hour the chosen databases had no rollup row in is a measured 0 and not a missing point; the old WHERE line is gone. */
-        var filterLines = viewerLines.Where(l => l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray();
+        var filterLines = viewerLines.Where(l => l.Contains("$4::text[]", StringComparison.Ordinal) && !l.Contains("matched_rows > 0", StringComparison.Ordinal)).ToArray();
         Assert.Equal(3, filterLines.Length);
         Assert.All(filterLines, l => Assert.Contains("FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4))", l, StringComparison.Ordinal));
         Assert.DoesNotContain(viewerLines, l => l.Trim() == "AND   ($4::text[] IS NULL OR database_name = ANY($4))");
         /* Empty is one window-level test, never a per-hour HAVING. */
-        Assert.Contains("WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", Lf(viewer), StringComparison.Ordinal);
+        Assert.Contains("WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", Lf(viewer), StringComparison.Ordinal);
         Assert.DoesNotContain("HAVING", viewer, StringComparison.Ordinal);
 
         /* The rollup read, FROM through GROUP BY bucket: the viewer's IS the MCP's hourly CTE read, line for line (the filter

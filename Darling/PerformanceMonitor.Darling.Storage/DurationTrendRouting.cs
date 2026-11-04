@@ -256,7 +256,7 @@ public static class DurationTrendRouting
                     elapsed_time_sum / 1000.0 / {HourlyBucketSecondsSql} AS elapsed_ms_per_second,
                     CAST(execution_count_sum AS DOUBLE PRECISION) / {HourlyBucketSecondsSql} AS executions_per_second
                 FROM hourly
-                WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)
+                WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)
                 ORDER BY bucket
                 """;
         }
@@ -292,7 +292,7 @@ public static class DurationTrendRouting
             : "SUM(elapsed_time_sum) AS elapsed_time_sum,\n"
               + "                SUM(execution_count_sum) AS execution_count_sum";
         var windowHasRows = withDatabaseFilter
-            ? "\n            WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
+            ? "\n            WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
             : "";
 
         return $"""
@@ -408,7 +408,8 @@ public static class DurationTrendRouting
     /// <c>matched_rows</c> counts the rows that passed the filter; it decides ONE thing, whether the chosen databases had
     /// any row in the WHOLE window (the tool's <c>empty</c>), never which buckets exist (#5414 round 2: a per-bucket test
     /// dropped the buckets the databases were quiet in, so they read missing instead of 0 and the window read
-    /// truncated). Unfiltered, the text carries no FILTER and no <c>matched_rows</c>. Reads the BASE table (no text
+    /// truncated). That test is for a CHOSEN set only (#7526): with no database chosen ($4 NULL) the window is never dropped, so an idle window whose collector
+    /// runs are known stays measured 0 points, as Lite does (#5449). Unfiltered, the text carries no FILTER and no <c>matched_rows</c>. Reads the BASE table (no text
     /// columns are projected, so the payload-resolving <c>v_*</c> view is not needed). $1 server_id, $2/$3 window
     /// (naive UTC).</para>
     /// </summary>
@@ -706,7 +707,7 @@ stored AS
            and the window read truncated. */
         var matchedColumn = withDatabaseFilter ? ",\n                    matched_rows" : "";
         var windowHasRows = withDatabaseFilter
-            ? "\n            WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)"
+            ? "\n            WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)"
             : "";
 
         return $"""
@@ -777,7 +778,7 @@ stored AS
             : "SUM(elapsed_time_sum) / 1000.0 AS elapsed_ms,\n"
               + "                    SUM(execution_count_sum) AS executions";
         var windowHasRows = withDatabaseFilter
-            ? "\n            WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
+            ? "\n            WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)"
             : "";
         var widthParam = withProcedureFilter ? "$6" : withDatabaseFilter ? "$5" : "$4";
 

@@ -370,14 +370,14 @@ public sealed class DurationTrendDatabaseFilterLiveTests
         /* #5414 round 2: empty is decided once for the whole window, never per bucket (a per-bucket HAVING dropped the
            buckets the chosen databases were quiet in, so they read missing and the window read truncated). */
         Assert.DoesNotContain("HAVING", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
-        Assert.Contains("WHERE EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
+        Assert.Contains("WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM rated WHERE matched_rows > 0)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", DarlingTrendReader.QueryDurationTrendFilteredSql, StringComparison.Ordinal);
         /* Hourly: the rollup CTE, same numbering. */
         var hourly = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h", withDatabaseFilter: true);
         Assert.Equal(3, Count(hourly, filterPredicate4));
         Assert.Equal(0, Count(hourly, predicate4));
         Assert.DoesNotContain("HAVING", hourly, StringComparison.Ordinal);
-        Assert.Contains("WHERE EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", hourly, StringComparison.Ordinal);
+        Assert.Contains("WHERE $4::text[] IS NULL OR EXISTS (SELECT 1 FROM hourly WHERE matched_rows > 0)", hourly, StringComparison.Ordinal);
         Assert.Contains("CAST($5 AS integer)", hourly, StringComparison.Ordinal);
         /* Unfiltered text is untouched: no predicate, the width at $4, so the pinned constants keep their text. */
         var unfiltered = DurationTrendRouting.BuildBucketedHourlyTrendSql("collect.query_stats_interval_hourly AS h");
