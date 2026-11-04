@@ -58,7 +58,7 @@ internal static class McpEngineCapability
            The parameter is REQUIRED rather than defaulted so that decision is visible at the call site
            instead of being made by omission. awsRdsKind is required for the same reason (#6894). */
         var engineEnvelope = Envelope(serverName, engineEdition, collectorName, awsRdsKind);
-        if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction"))
+        if (engineEnvelope is not null || collectorName is not ("query_store" or "plan_correction" or "query_store_health"))
         {
             return engineEnvelope;
         }

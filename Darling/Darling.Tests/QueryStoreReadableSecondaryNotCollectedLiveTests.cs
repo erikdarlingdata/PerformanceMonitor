@@ -107,6 +107,30 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
         });
     }
 
+    /// <summary>#7584: the on-prem health capture always holds a tempdb row, so a readable secondary's snapshot is never empty. A snapshot of
+    /// only tempdb answers the readable-secondary text, and a primary with the same snapshot keeps its tempdb row.</summary>
+    [Fact]
+    public async Task SecondaryRole_QueryStoreHealth_WithOnlyTempdb_AnswersNotCollected_AndAPrimaryKeepsTheRow()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Secondary");
+            await SeedHealthAsync(c, ct, "tempdb", "OFF", 0);
+
+            var health = await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName, DatabaseFilter.All, ct);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(health));
+            Assert.Contains("readable secondary", Message(health));
+
+            /* A later role row wins (newest collection_time): the same tempdb-only snapshot on a primary keeps its row. */
+            await SeedRoleAsync(c, ct, "Primary");
+
+            var primary = await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName, DatabaseFilter.All, ct);
+            Assert.DoesNotContain("readable secondary", primary);
+            Assert.Contains("tempdb", primary);
+            return 0;
+        });
+    }
+
     [Fact]
     public async Task EveryDatabaseCarriesTheSecondaryBit_QueryStoreTopAnswersNotCollected_NotReadOnly()
     {
