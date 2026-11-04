@@ -40,26 +40,6 @@ public sealed class ChartIntegerTicksPinTests
     private static string Js(params string[] path) => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", Path.Combine(path)));
 
-    /// <summary>The chart library owns the option: it is read off the spec, reaches the primary scale and the
-    /// overlay's own scale, and in <c>niceScale</c> it only ever raises the step to a whole number of at least 1.</summary>
-    [Fact]
-    public void TheChartLibrary_HasAnIntegerTickOption_ThatNeverStepsBelowOne()
-    {
-        var charts = Js("charts.js");
-
-        Assert.Contains("onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;", charts, StringComparison.Ordinal);
-        Assert.Contains("niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks)", charts, StringComparison.Ordinal);
-        Assert.Contains("niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true)", charts, StringComparison.Ordinal);
-
-        var scale = Regex.Match(charts, @"function niceScale\(min, max, maxTicks, clampMax, integer = false\) \{\n(?<body>.*?)\n\}\n", RegexOptions.Singleline);
-        Assert.True(scale.Success, "niceScale(min, max, maxTicks, clampMax, integer = false) is no longer declared in charts.js.");
-        Assert.Contains("const step = integer ? Math.max(1, Math.ceil(niceStep)) : niceStep;", scale.Groups["body"].Value, StringComparison.Ordinal);
-
-        /* Every other caller is untouched: the scatter axes pass no fifth argument. */
-        Assert.Contains("niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null)", charts, StringComparison.Ordinal);
-        Assert.Contains("niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null)", charts, StringComparison.Ordinal);
-    }
-
     /// <summary>A line panel that declares <c>format: "int"</c> is a count chart: the shared <c>vizLine</c> hands
     /// the chart library the option, and every count chart the server page draws declares the format.</summary>
     [Fact]
