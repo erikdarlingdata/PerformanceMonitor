@@ -105,7 +105,7 @@ public partial class ServerTab : UserControl
         }
 
         PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        PlanCacheChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        PlanCacheChart.Plot.Axes.SetLimitsX(ChartXStart(PlanCacheChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         PlanCacheChart.Plot.YLabel("Plan Cache Size (MB)");
         SetChartYLimitsWithLegendPadding(PlanCacheChart, 0, globalMax > 0 ? globalMax : 10);

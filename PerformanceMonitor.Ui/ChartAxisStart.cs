@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using ScottPlot;
 
 namespace PerformanceMonitor.Ui
 {
@@ -62,6 +64,77 @@ namespace PerformanceMonitor.Ui
             var picked = DateTime.FromOADate(pickedStartOa);
             var start = XStart(picked, DateTime.FromOADate(pickedEndOa), dataStart);
             return start == picked ? pickedStartOa : start.ToOADate();
+        }
+
+        /// <summary>
+        /// The earliest X a chart actually drew, as an instant, or null when it drew nothing with a usable time. Read from the
+        /// plot's own plottables, so a series from a relation that reaches back further than the server's data start (an hourly tier,
+        /// a collector with its own longer retention) is seen no matter which reader fed it.
+        /// </summary>
+        public static DateTime? EarliestPlotted(Plot plot)
+        {
+            double earliest = double.NaN;
+            foreach (var plottable in plot.PlottableList)
+            {
+                var left = plottable.GetAxisLimits().Left;
+                if (double.IsFinite(left) && (double.IsNaN(earliest) || left < earliest))
+                {
+                    earliest = left;
+                }
+            }
+
+            /* Outside the OLE date range it is not a time (a placeholder, a categorical axis), so it claims nothing. */
+            return double.IsFinite(earliest) && earliest > MinOaDate && earliest < MaxOaDate ? DateTime.FromOADate(earliest) : null;
+        }
+
+        private const double MinOaDate = -657434;
+        private const double MaxOaDate = 2958465;
+
+        /// <summary>The data start a chart may use: the server's data start, or the earliest point the charts drew when that is
+        /// older (#7386). A chart never hides a point it plotted, whichever relation it read. Null stays null: with no claim from the
+        /// server the axis stays as picked.</summary>
+        public static DateTime? CoverPlotted(DateTime? dataStart, params Plot[] plots)
+        {
+            if (dataStart is not DateTime first)
+            {
+                return null;
+            }
+
+            foreach (var plot in plots)
+            {
+                if (EarliestPlotted(plot) is DateTime plotted && plotted < first)
+                {
+                    first = plotted;
+                }
+            }
+
+            return first;
+        }
+
+        /// <summary><see cref="XStart(double, double, DateTime?)"/> for a chart already drawn: the data start is moved back to the
+        /// earliest point on <paramref name="plots"/> when that is older, so the axis never starts after a plotted point. The picked
+        /// start stays the floor: points before the picked window were never shown.</summary>
+        public static double XStart(double pickedStartOa, double pickedEndOa, DateTime? dataStart, params Plot[] plots) =>
+            XStart(pickedStartOa, pickedEndOa, CoverPlotted(dataStart, plots));
+
+        /// <summary><see cref="XStart(double, double, DateTime?, Plot[])"/> as instants.</summary>
+        public static DateTime XStart(DateTime pickedStart, DateTime pickedEnd, DateTime? dataStart, params Plot[] plots) =>
+            XStart(pickedStart, pickedEnd, CoverPlotted(dataStart, plots));
+
+        /// <summary>For a chart a shared renderer drew with an axis start chosen before it plotted: moves the left edge back to the
+        /// start <see cref="XStart(double, double, DateTime?, Plot[])"/> gives now that the points are on the plot. Returns true when it
+        /// moved the axis, and the caller refreshes the chart.</summary>
+        public static bool WidenToPlotted(Plot plot, double pickedStartOa, double pickedEndOa, DateTime? dataStart)
+        {
+            var want = XStart(pickedStartOa, pickedEndOa, dataStart, plot);
+            var limits = plot.Axes.GetLimits();
+            if (want >= limits.Left)
+            {
+                return false;
+            }
+
+            plot.Axes.SetLimitsX(want, limits.Right);
+            return true;
         }
     }
 }

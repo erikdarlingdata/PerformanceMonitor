@@ -100,7 +100,7 @@ public partial class ViewerServerTab
                 }
             }
 
-            chart.Plot.Axes.SetLimitsX(ChartXStart(startUtc, endUtc), endUtc.ToOADate());
+            chart.Plot.Axes.SetLimitsX(ChartXStart(chart.Plot, startUtc, endUtc), endUtc.ToOADate());
             ReapplyAxisColors(chart);
             chart.Plot.YLabel(panel.YLabel);
             SetChartYLimitsWithLegendPadding(chart, 0, max > 0 ? max : 1);

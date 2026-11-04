@@ -287,7 +287,7 @@ public partial class ViewerServerTab
             var (startUtc, endUtc) = GetWindowUtc();
             /* #7386: the same start the render gave the chart, so a reset does not bring back the time before the server's data. */
             chart.Plot.Axes.SetLimitsX(
-                ChartXStart(startUtc, endUtc),
+                ChartXStart(chart.Plot, startUtc, endUtc),
                 endUtc.ToOADate());
             chart.Plot.Axes.AutoScaleY();
         }

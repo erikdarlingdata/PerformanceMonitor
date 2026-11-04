@@ -227,7 +227,7 @@ public partial class ViewerServerTab
             WaitStatsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             var rangeStart = startUtc;
             var rangeEnd = endUtc;
-            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
             WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
             SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);

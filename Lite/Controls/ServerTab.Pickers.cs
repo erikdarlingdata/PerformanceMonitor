@@ -210,7 +210,7 @@ public partial class ServerTab : UserControl
             {
                 (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
-            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            WaitStatsChart.Plot.Axes.SetLimitsX(ChartXStart(WaitStatsChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(WaitStatsChart);
             WaitStatsChart.Plot.YLabel(useAvgPerWait ? "Avg Wait Time (ms/wait)" : "Wait Time (ms/sec)");
             SetChartYLimitsWithLegendPadding(WaitStatsChart, 0, globalMax > 0 ? globalMax : 100);
@@ -335,7 +335,7 @@ public partial class ServerTab : UserControl
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
                 MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-                MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(xMin, xMax), xMax);
+                MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
                 return;
@@ -379,7 +379,7 @@ public partial class ServerTab : UserControl
             }
 
             MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-            MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(xMin, xMax), xMax);
+            MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(MemoryClerksChart.Plot, xMin, xMax), xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);
@@ -624,7 +624,7 @@ public partial class ServerTab : UserControl
             {
                 (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
             }
-            PerfmonChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            PerfmonChart.Plot.Axes.SetLimitsX(ChartXStart(PerfmonChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
             PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);

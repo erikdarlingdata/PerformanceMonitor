@@ -152,7 +152,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            CpuChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+            CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(CpuChart);
             CpuChart.Refresh();
             return;
@@ -181,7 +181,7 @@ public partial class ViewerServerTab : IDisposable
         _cpuHover?.Add(otherPlot, "Other");
 
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        CpuChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+        CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
@@ -202,7 +202,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+            TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbChart);
             TempDbChart.Refresh();
             return;
@@ -232,7 +232,7 @@ public partial class ViewerServerTab : IDisposable
         _tempDbHover?.Add(vsPlot, "Version Store");
 
         TempDbChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+        TempDbChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbChart);
         TempDbChart.Plot.YLabel("MB");
 
@@ -258,7 +258,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbSizeChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+            TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbSizeChart);
             TempDbSizeChart.Refresh();
             return;
@@ -277,7 +277,7 @@ public partial class ViewerServerTab : IDisposable
         ReapplyAxisColors(TempDbSizeChart);
         TempDbSizeChart.Plot.YLabel("Allocated MB");
         TempDbSizeChart.Plot.Axes.AutoScaleY();
-        TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+        TempDbSizeChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbSizeChart.Plot, rangeStart, rangeEnd), rangeEnd);
         TempDbSizeChart.Refresh();
     }
 
@@ -293,7 +293,7 @@ public partial class ViewerServerTab : IDisposable
         if (data.Count == 0)
         {
             TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+            TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(TempDbFileIoChart);
             TempDbFileIoChart.Refresh();
             return;
@@ -329,7 +329,7 @@ public partial class ViewerServerTab : IDisposable
         }
 
         TempDbFileIoChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
+        TempDbFileIoChart.Plot.Axes.SetLimitsX(ChartXStart(TempDbFileIoChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(TempDbFileIoChart);
         TempDbFileIoChart.Plot.YLabel("tempdb latency ms");
         SetChartYLimitsWithLegendPadding(TempDbFileIoChart, 0, maxLatency > 0 ? maxLatency : 10);

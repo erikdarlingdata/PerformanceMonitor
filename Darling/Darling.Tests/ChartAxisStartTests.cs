@@ -94,7 +94,7 @@ public sealed class ChartAxisStartTests
     }
 
     /// <summary>Draws the Viewer's CPU chart for the past day on the real tab and returns its X limits, optionally saving the render.</summary>
-    private static (double Left, double Right) CpuAxis(DateTime? dataStart, string? pngPath = null) =>
+    private static (double Left, double Right) CpuAxis(DateTime? dataStart, string? pngPath = null, List<CpuUtilizationSample>? samples = null) =>
         StaTestThread.Run(() =>
         {
             var app = Application.Current ?? new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -118,7 +118,7 @@ public sealed class ChartAxisStartTests
                 try
                 {
                     tab.ServerDataStartUtc = dataStart;
-                    tab.RenderCpuChart(ThreeHoursOfCpu(), DayAgo, End);
+                    tab.RenderCpuChart(samples ?? ThreeHoursOfCpu(), DayAgo, End);
                     var chart = (ScottPlot.WPF.WpfPlot)tab.FindName("CpuChart");
                     if (pngPath is not null)
                     {
@@ -186,5 +186,59 @@ public sealed class ChartAxisStartTests
         Assert.Single(shared);
         Assert.True(withoutStart < DateTime.UtcNow.AddHours(-23).ToOADate());
         Assert.True(shared.Single() > DateTime.UtcNow.AddHours(-4).ToOADate());
+    }
+
+    /// <summary>A chart never hides a point it plotted (#7386, part 1). The server's data start is the oldest wait_stats row, but a
+    /// chart may read a relation that reaches back further: an hourly tier, or a collector whose own retention is longer. The
+    /// Viewer's CPU chart is given a server whose data starts three hours ago and ten hours of samples: the axis must reach the
+    /// oldest sample, not stop at the data start.</summary>
+    [Fact]
+    public void ACpuChartWithAPointOlderThanTheServersDataStart_KeepsThatPointInsideTheAxis()
+    {
+        var samples = Enumerable.Range(0, 11)
+            .Select(h => new CpuUtilizationSample(End.AddHours(-10).AddHours(h), 30, 5))
+            .ToList();
+
+        var (left, _) = CpuAxis(End.AddHours(-3), samples: samples);
+
+        Assert.True(left <= End.AddHours(-10).ToOADate(), $"axis starts at {DateTime.FromOADate(left):u}, after the oldest plotted sample");
+        Assert.True(left >= DayAgo.ToOADate());
+    }
+
+    [Fact]
+    public void TheStartIsNeverLaterThanTheEarliestPlottedPoint_ButNeverBeforeThePickedStart()
+    {
+        var dataStart = End.AddHours(-3);
+
+        double Start(params DateTime[] points)
+        {
+            var plot = new ScottPlot.Plot();
+            if (points.Length > 0)
+            {
+                plot.Add.Scatter(points.Select(x => x.ToOADate()).ToArray(), points.Select(_ => 1.0).ToArray());
+            }
+
+            return ChartAxisStart.XStart(DayAgo.ToOADate(), End.ToOADate(), dataStart, plot);
+        }
+
+        Assert.True(Start(End.AddHours(-10), End.AddHours(-1)) <= End.AddHours(-10).ToOADate());
+        Assert.True(Start(End.AddHours(-2), End.AddHours(-1)) > End.AddHours(-3.2).ToOADate());
+        Assert.Equal(DayAgo.ToOADate(), Start(End.AddHours(-30), End.AddHours(-1)), precision: 6);
+        Assert.Equal(ChartAxisStart.XStart(DayAgo.ToOADate(), End.ToOADate(), dataStart), Start(), precision: 6);
+        Assert.Equal(DayAgo.ToOADate(), ChartAxisStart.XStart(DayAgo.ToOADate(), End.ToOADate(), null, new ScottPlot.Plot()), precision: 6);
+    }
+
+    [Fact]
+    public void WideningAChartDrawnByASharedRenderer_MovesItsLeftEdgeBackToTheOldestPoint()
+    {
+        var plot = new ScottPlot.Plot();
+        var oldest = End.AddHours(-8).ToOADate();
+        plot.Add.Scatter(new[] { oldest, End.AddHours(-1).ToOADate() }, new[] { 1.0, 2.0 });
+        plot.Axes.SetLimitsX(End.AddHours(-3.06).ToOADate(), End.ToOADate());
+
+        Assert.True(ChartAxisStart.WidenToPlotted(plot, DayAgo.ToOADate(), End.ToOADate(), End.AddHours(-3)));
+        Assert.True(plot.Axes.GetLimits().Left <= oldest);
+        Assert.Equal(End.ToOADate(), plot.Axes.GetLimits().Right, precision: 6);
+        Assert.False(ChartAxisStart.WidenToPlotted(plot, DayAgo.ToOADate(), End.ToOADate(), End.AddHours(-3)));
     }
 }

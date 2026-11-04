@@ -391,6 +391,23 @@ public partial class ViewerServerTab
     /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
     internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
 
+    /// <summary>The X axis start of a chart whose series are already on <paramref name="plot"/> (#7386): never later than the earliest
+    /// point it drew, whichever relation fed it (an hourly tier, a collector with its own retention), so no plotted point is hidden.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc, plot);
+
+    /// <summary><see cref="ChartXStart(ScottPlot.Plot, double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, DateTime startUtc, DateTime endUtc) => ChartXStart(plot, startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>For a chart a shared renderer drew with the axis start it was given up front: moves the left edge back when the
+    /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
+    internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
+    {
+        if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
+        {
+            chart.Refresh();
+        }
+    }
+
     /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so
     /// the visible tab (only it renders) drives the conversions with its own server's clock.</summary>
     internal void ApplyServerClockToHelper() => ViewerTimeHelper.ActiveServerClock = _serverClock;

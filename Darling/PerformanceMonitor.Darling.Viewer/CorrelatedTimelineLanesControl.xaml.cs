@@ -615,11 +615,13 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     {
         var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
-        /* #7386: all five lanes get the same start, so they keep one ruler. */
-        double xMin = ChartAxisStart.XStart(xStart, xEnd, ServerDataStartUtc).ToOADate();
+        var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
+
+        /* #7386: all five lanes get the same start, so they keep one ruler. It is never later than the earliest point any lane
+           drew, whichever relation fed that lane. */
+        double xMin = ChartAxisStart.XStart(xStart, xEnd, ServerDataStartUtc, charts.Select(c => c.Plot).ToArray()).ToOADate();
         double xMax = xEnd.ToOADate();
 
-        var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
         foreach (var chart in charts)
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
 

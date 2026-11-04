@@ -272,7 +272,7 @@ public partial class ViewerServerTab
             PerfmonChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             var rangeStart = startUtc;
             var rangeEnd = endUtc;
-            PerfmonChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+            PerfmonChart.Plot.Axes.SetLimitsX(ChartXStart(PerfmonChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(PerfmonChart);
             PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);

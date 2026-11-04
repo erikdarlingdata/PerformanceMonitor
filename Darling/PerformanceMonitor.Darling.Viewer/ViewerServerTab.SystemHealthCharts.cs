@@ -97,6 +97,15 @@ public partial class ViewerServerTab
         SysHealthRenderer.RenderSickSpinlocksChart(SickSpinlocksChart, _sickSpinlocksHover, data, xMin, xMax);
         SysHealthRenderer.RenderCpuComparisonChart(CpuComparisonChart, _cpuComparisonHover, data, xMin, xMax);
 
+        KeepPlottedInView(BadPagesChart, startUtc, endUtc);
+        KeepPlottedInView(DumpRequestsChart, startUtc, endUtc);
+        KeepPlottedInView(AccessViolationsChart, startUtc, endUtc);
+        KeepPlottedInView(WriteAccessViolationsChart, startUtc, endUtc);
+        KeepPlottedInView(NonYieldingTasksChart, startUtc, endUtc);
+        KeepPlottedInView(LatchWarningsChart, startUtc, endUtc);
+        KeepPlottedInView(SickSpinlocksChart, startUtc, endUtc);
+        KeepPlottedInView(CpuComparisonChart, startUtc, endUtc);
+
         ShowSystemHealthChartsNote();
     }
 

@@ -50,4 +50,21 @@ public sealed class ChartAxisStartLiteTests
         Assert.Single(lefts);
         Assert.True(lefts.Single() < DateTime.UtcNow.AddHours(-23).ToOADate());
     }
+
+    [Fact]
+    public void ALaneWithAPointOlderThanTheServersDataStart_KeepsItInsideTheSharedAxis()
+    {
+        var oldest = DateTime.UtcNow.AddHours(-10);
+        var (lefts, _) = StaTestThread.Run(() =>
+        {
+            var lanes = new CorrelatedTimelineLanesControl { ServerDataStartUtc = DateTime.UtcNow.AddHours(-3) };
+            lanes.MemoryChart.Plot.Add.Scatter(new[] { oldest.ToOADate(), DateTime.UtcNow.ToOADate() }, new[] { 1.0, 2.0 });
+            lanes.SyncXAxes(24, null, null);
+            var charts = new[] { lanes.CpuChart, lanes.WaitStatsChart, lanes.BlockingChart, lanes.MemoryChart, lanes.FileIoChart };
+            return (charts.Select(c => c.Plot.Axes.GetLimits().Left).ToHashSet(), 0.0);
+        });
+
+        Assert.Single(lefts);
+        Assert.True(lefts.Single() <= oldest.ToOADate());
+    }
 }

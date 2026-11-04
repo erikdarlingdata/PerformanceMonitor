@@ -92,6 +92,7 @@ public partial class ServerTab : UserControl
         }
 
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data, ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        KeepPlottedInView(CpuSchedulerChart, rangeStart, rangeEnd);
     }
 
     /// <summary>The CPU Scheduler tab's note on an Azure SQL Database, where the cpu_scheduler_stats collector does not

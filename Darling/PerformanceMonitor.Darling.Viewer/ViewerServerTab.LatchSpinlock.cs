@@ -96,6 +96,7 @@ public partial class ViewerServerTab
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
             "Latch Waits", "Wait Time (ms/sec)",
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
+        KeepPlottedInView(LatchStatsChart, startUtc, endUtc);
     }
 
     private void RenderSpinlockStatsChart(List<SpinlockStatsTrendPoint> data)
@@ -105,6 +106,7 @@ public partial class ViewerServerTab
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
             "Spinlock Collisions", "Collisions/sec",
             ChartXStart(startUtc, endUtc), endUtc.ToOADate());
+        KeepPlottedInView(SpinlockStatsChart, startUtc, endUtc);
     }
 
     /// <summary>Tears down the latch/spinlock hover helpers (mirrors the other tabs' dispose) so their
