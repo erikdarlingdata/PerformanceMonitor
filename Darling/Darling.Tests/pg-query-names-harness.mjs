@@ -80,6 +80,13 @@ const answers = {
       { queryid: "1247446479259998619", database_name: "db1", cpu_ms: 9, query_text: LONG_STATEMENT },
     ],
   },
+  get_pg_session_states: {
+    sessions: [
+      { pid: 101, last_query_id: "0", last_query_text: null },
+      { pid: 102, last_query_id: "1247446479259998619", last_query_text: LONG_STATEMENT },
+      { pid: 103, last_query_id: null, last_query_text: null },
+    ],
+  },
   get_pg_write_stats: { checkpoints_timed: 2, checkpoints_requested: null, buffers_checkpoint: null, buffers_backend: null, postmaster_restarted: true, buffers_backend_availability: "not_collected: PostgreSQL 17 removed buffers_backend from pg_stat_bgwriter" },
 };
 if (scenario === "plainWrite") {
@@ -158,5 +165,5 @@ const report = (root) => {
 };
 
 const out = {};
-for (const id of ["activity", "waits", "io"]) out[id] = report(await draw(id));
+for (const id of ["activity", "waits", "io", "vacuum"]) out[id] = report(await draw(id));
 console.log(JSON.stringify(out));

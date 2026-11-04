@@ -186,7 +186,7 @@ export const PG_SESSION_STATE_COLUMNS = [
   /* The leading SQL keyword, whitelisted at collection - NOT a truncation of the statement. No raw query
      text is stored anywhere: pg_stat_activity.query carries literal parameter values. */
   { key: "last_command_tag", label: "Command" },
-  { key: "last_query_id", label: "Query ID", mono: true, display: pgQueryIdText() },
+  { key: "last_query_id", label: "Query ID", mono: true, display: pgQueryIdText("last_query_id") },
   { key: "query_id_note", label: "Query ID Note", clamp: true },
   { key: "finding", label: "Finding", clamp: true },
   /* Instance context from this backend's most recent sample: two idle-in-transaction sessions out of six

@@ -143,6 +143,15 @@ public sealed class PgQueryNamesPageBehaviourTests
         Assert.Equal(new[] { "no statement", "1247446479259998619" }, kernel.Select(r => r["Query ID"]).ToArray());
     }
 
+    /// <summary>The session grid's id is under its own key, last_query_id, so its cell has to read that key and not the queryid the other grids use.</summary>
+    [Fact]
+    public void TheSessionGridsQueryIdColumn_ReadsItsOwnKey()
+    {
+        var sessions = Rows(Run("default"), "vacuum", "By Session");
+
+        Assert.Equal(new[] { "no statement", "1247446479259998619", "—" }, sessions.Select(r => r["Query ID"]).ToArray());
+    }
+
     [Fact]
     public void TheQueryColumn_ShowsTheStatementWhereThereIsOne_AndADashWhereThereIsNot()
     {
