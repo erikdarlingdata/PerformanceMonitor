@@ -129,7 +129,6 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal("unavailable", after.GetProperty("status").GetString());
     }
 
-    /// <summary>A server with no successful collection on record keeps the tools' own answers (never collected is not offline).</summary>
     /// <summary>#7459: "nothing collected in this window" says unavailable by itself, and on a server that has stopped being collected it still says why.</summary>
     [Fact]
     public async Task HeatmapWithNothingCollectedInTheWindow_OnAnOfflineServer_SaysItIsOffline()
@@ -146,6 +145,7 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.DoesNotContain("Widen hours_back", message, StringComparison.Ordinal);
     }
 
+    /// <summary>A server with no successful collection on record keeps the tools' own answers (never collected is not offline).</summary>
     [Fact]
     public async Task ServerNeverCollected_IsNotCalledOffline()
     {
