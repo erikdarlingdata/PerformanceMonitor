@@ -316,7 +316,7 @@ public static class FactAdvice
             "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
             "ANOMALY_MEMORY_PRESSURE" => ComposeAnomalyMemoryPressure(factsByKey),
             "ANOMALY_WAIT_PROFILE" => ComposeAnomalyWaitProfile(factsByKey),
-            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event", "blocked process report", BlockingSpikeUnitNote),
+            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event", "blocked process report", BlockingSpikeUnitNote, "blocking snapshot row", BlockingSpikeDmvUnitNote),
             "ANOMALY_DEADLOCK_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_DEADLOCK_SPIKE", "deadlock"),
             "ANOMALY_OBJECT_GROWTH" => ComposeAnomalyObjectGrowth(factsByKey),
             "ANOMALY_OBJECT_CONTENTION" => ComposeAnomalyObjectContention(factsByKey),
@@ -2151,8 +2151,19 @@ public static class FactAdvice
     private const string BlockingSpikeUnitNote =
         " This counts blocked process report rows, and the blocked process threshold fires again every interval a session " +
         "keeps waiting, so one long wait adds several. It is not the blocking event count, which counts each wait once; " +
-        "the two figures for the same window will differ. The baseline it is compared with is in report rows too. " +
-        "On a server that has no blocked process reports, the rows are blocking snapshots from the DMVs.";
+        "the two figures for the same window will differ. The baseline it is compared with is in report rows too.";
+
+    /// <summary>
+    /// #7537: the same figure when the detector took its DMV arm (the window holds no blocked process reports, as on
+    /// RDS and Azure), so the rows are blocking snapshots. The baseline is still built from report rows, so the
+    /// note says the two are different units instead of claiming they match.
+    /// </summary>
+    private const string BlockingSpikeDmvUnitNote =
+        " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports, and " +
+        "the snapshot job adds a row at every sample a session keeps waiting, so one long wait adds several. It is not " +
+        "the blocking event count, which counts each wait once; the two figures for the same window will differ. " +
+        "The baseline it is compared with is built from blocked process report rows, not snapshot rows, so it does " +
+        "not measure the same thing as this window's count.";
 
     /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
@@ -2167,11 +2178,17 @@ public static class FactAdvice
     /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
     /// </para>
     /// </summary>
-    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun, string? countNoun = null, string unitNote = "")
+    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun, string? countNoun = null, string unitNote = "", string? dmvCountNoun = null, string dmvUnitNote = "")
     {
         var fallback = _byKey[key];
         // #7537: what the number counts. The remediation still names the regular finding's threshold by `noun`.
         var counted = countNoun ?? noun;
+        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and the baseline is.
+        if (dmvCountNoun is not null && (FactMeta(facts, key, CountFamilyMetadata.FromDmvSnapshotsKey) ?? 0) >= 1)
+        {
+            counted = dmvCountNoun;
+            unitNote = dmvUnitNote;
+        }
         var current = FactMeta(facts, key, "current_count");
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
