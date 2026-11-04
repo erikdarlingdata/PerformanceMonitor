@@ -16,6 +16,7 @@
    The same person makes both presses. The server works out who is pressing from the sign-in, so the body sends nothing.
    Every value here is drawn as text. The agent's reason is labelled as the agent's, and a program or host name a client set is plain text. */
 
+import { showPageWhenSettled } from "../refresh-in-place.js";
 import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, apiGet, apiWrite, localTime } from "../util.js";
 
 /** The words for each server action kind. */
@@ -99,16 +100,20 @@ const pressing = new Set();
 const newestDraw = new Map();
 
 /** The page: the list, or one proposal. */
-export function renderProposals(main, proposalId) {
+export function renderProposals(main, proposalId, opts) {
   const mine = ++pageSeq;
   const body = el("div", {}, [loadingStrip(proposalId ? "Loading the proposal…" : "Loading proposals…")]);
-  mount(main, [
+  const nodes = [
     el("div", { class: "page-head" }, [el("h2", { text: proposalId ? "Proposal" : "Proposals" })]),
     el("div", { class: "muted", text: "Server actions an agent proposed on a route that needs approval. A person approves one in two presses: the first reads the facts again, the second confirms and runs it." }),
     body,
-  ]);
+  ];
   const isCurrent = () => mine === pageSeq;
-  return proposalId ? buildProposal(body, proposalId, isCurrent) : buildList(body, isCurrent);
+  const built = proposalId ? buildProposal(body, proposalId, isCurrent) : buildList(body, isCurrent);
+  /* #7393: a poll of the list leaves the list on screen and swaps the new one in once it has drawn, so a list the reader scrolled down
+     keeps its place. One proposal's page, and every other render, is put on the page at once. */
+  showPageWhenSettled(main, "proposals", nodes, !proposalId && !!(opts && opts.poll === true));
+  return built;
 }
 
 /** The list, newest first. */

@@ -538,6 +538,12 @@ a:hover { text-decoration: underline; }
 /* The grid's filter bar is above the table inside the box and scrolls away with the rows, so the header's own sticky top
    is the box's top edge. The inset shadow stands in for the bottom border, which does not travel with a sticky cell in a collapsed table. */
 .table-wrap table.data thead th { position: sticky; top: 0; z-index: 2; box-shadow: inset 0 -1px 0 var(--border); }
+/* On paper a scroll box cannot scroll, so a capped grid would print one box of rows and drop the rest. Print puts the whole grid back in the
+   flow, and the header repeats on each printed page by itself, so it does not need to stick. */
+@media print {
+  .table-wrap { max-height: none; overflow: visible; }
+  .table-wrap table.data thead th { position: static; }
+}
 table.data {
   width: 100%;
   border-collapse: collapse;

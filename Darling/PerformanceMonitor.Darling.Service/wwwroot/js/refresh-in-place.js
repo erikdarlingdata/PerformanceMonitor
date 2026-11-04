@@ -25,8 +25,39 @@ export function holdsPage(container, key, isPoll) {
 
 /** Draw `nodes` into `container` in one step, keeping the reader's scroll position, and remember them as page `key`. */
 export function showPage(container, key, nodes) {
+  cancelPending(container);
   keepScroll(() => mount(container, nodes));
   held.set(container, { key, first: container.firstChild });
+}
+
+/* #7393: the swap a poll has waiting for its reads, one per container. A newer render of the container drops it. */
+const pending = new WeakMap();
+
+function cancelPending(container) {
+  const cancel = pending.get(container);
+  if (cancel) cancel();
+  pending.delete(container);
+}
+
+/**
+ * showPage for a page that fills `nodes` from reads of its own (the loading strips it draws first). The first paint, a sub-tab click
+ * and a span change put `nodes` on the page at once. A poll over the same page (`holdsPage`) leaves the page on screen, so a grid the
+ * reader has scrolled down stays where it is, and swaps `nodes` in one step once none of them has a loading strip left, with the
+ * page's and every grid's scroll position put back (keepScroll). A newer render of `container` drops the waiting swap, and so does
+ * the reader going to another page. Returns a cancel function.
+ */
+export function showPageWhenSettled(container, key, nodes, isPoll) {
+  cancelPending(container);
+  if (!holdsPage(container, key, isPoll)) {
+    showPage(container, key, nodes);
+    return () => {};
+  }
+  const cancel = whenSettled(nodes, () => {
+    pending.delete(container);
+    if (holdsPage(container, key, true)) showPage(container, key, nodes);
+  });
+  pending.set(container, cancel);
+  return cancel;
 }
 
 /** The poll's page when the grid `keep` stays where it is: the other children are replaced by `before`, in one step, and `keep` is never detached. */

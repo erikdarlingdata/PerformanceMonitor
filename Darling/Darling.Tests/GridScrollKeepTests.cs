@@ -88,8 +88,44 @@ public sealed class GridScrollKeepTests
     {
         var r = Run("otherGridUntouched");
         Assert.Equal(500, Int(r, "swapped"));
-        Assert.Equal(0, Int(r, "other"));
+        Assert.Equal(300, Int(r, "other"));
         Assert.True(r.GetProperty("sameBox").GetBoolean());
+    }
+
+    [Fact]
+    public void A_same_name_grid_that_slides_into_the_replaced_slot_keeps_its_own_position()
+    {
+        var r = Run("neighbourSlidesIntoReplacedSlot");
+        Assert.Equal(300, Int(r, "b"));
+        Assert.True(r.GetProperty("sameBox").GetBoolean());
+        Assert.Equal(0, Int(r, "fresh"));
+    }
+
+    [Fact]
+    public void A_polled_page_stays_on_screen_until_its_reads_draw_then_keeps_the_grid_position()
+    {
+        var r = Run("pollWaitsThenKeepsPosition");
+        Assert.True(r.GetProperty("during").GetBoolean());
+        Assert.Equal(700, Int(r, "duringTop"));
+        Assert.True(r.GetProperty("replaced").GetBoolean());
+        Assert.Equal(700, Int(r, "top"));
+        Assert.Equal(1, Int(r, "wraps"));
+    }
+
+    [Fact]
+    public void A_polled_page_that_finishes_after_the_reader_left_is_not_drawn()
+    {
+        var r = Run("pollForAPageTheReaderLeftIsDropped");
+        Assert.Equal(0, Int(r, "wraps"));
+        Assert.True(r.GetProperty("stillOther").GetBoolean());
+    }
+
+    [Fact]
+    public void A_page_that_is_not_the_polls_own_is_shown_at_once()
+    {
+        var r = Run("aPageThatIsNotThePollsOwnShowsAtOnce");
+        Assert.True(r.GetProperty("shown").GetBoolean());
+        Assert.Equal(0, Int(r, "wraps"));
     }
 
     [Fact]

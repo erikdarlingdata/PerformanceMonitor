@@ -23,6 +23,7 @@
 
 import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
+import { showPageWhenSettled } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
 import { tab as utilization } from "./finops/utilization.js";
@@ -191,11 +192,13 @@ export function renderFinops(main, server, tabId, opts) {
     head.appendChild(el("div", { class: "spacer" }));
     head.appendChild(serverPicker(rows, chosen, active.id));
     setPanelSignal(controller.signal);
-    mount(main, [head, body]);
     mount(body, [
       tabBar(chosen, active),
       el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row) })]),
     ]);
+    /* #7393: the tab's panels read as they build. A poll over the same server and tab leaves the page on screen and swaps the new one
+       in once its reads have drawn, so a grid the reader scrolled down keeps its place. Anything else paints at once. */
+    showPageWhenSettled(main, "finops|" + chosen + "|" + active.id, [head, body], isPoll);
   };
 
   /* Every render, poll included, paints from the cache in the same tick: that rebuilds the tab's panels,

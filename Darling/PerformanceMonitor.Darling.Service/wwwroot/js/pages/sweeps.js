@@ -28,6 +28,7 @@ import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, loca
 import { gridTable } from "../panels.js";
 import { pageRangePicker, windowOfSpec } from "../page-range.js";
 import { relativeSpec } from "../time-range.js";
+import { showPageWhenSettled } from "../refresh-in-place.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -63,7 +64,7 @@ export async function renderSweeps(main, opts) {
   const storeHostBox = el("div", {});
   const cadenceMeta = el("div", { class: "meta", text: "" });
 
-  mount(main, [
+  const nodes = [
     el("div", { class: "page-head" }, [
       el("h2", { text: "Fleet Sweeps" }),
       el("div", { class: "spacer" }),
@@ -77,7 +78,7 @@ export async function renderSweeps(main, opts) {
     watchBox,
     el("h3", { class: "section-title", text: "Store host" }),
     storeHostBox,
-  ]);
+  ];
 
   /* Independent sections load in parallel; each degrades alone (the triage page's rule). */
   renderCadence(cadenceMeta);
@@ -85,6 +86,9 @@ export async function renderSweeps(main, opts) {
   renderTimeline(timelineBox, detailBox);
   renderWatchItems(watchBox);
   renderStoreHost(storeHostBox, opts);
+  /* #7393: the sections draw as their reads return. A poll leaves the page on screen and swaps this one in once every section has drawn,
+     so a grid the reader scrolled down keeps its place. */
+  showPageWhenSettled(main, "sweeps", nodes, !!(opts && opts.poll === true));
 }
 
 /* ─────────────────────────── the cadence display (read-only) ─────────────────────────── */

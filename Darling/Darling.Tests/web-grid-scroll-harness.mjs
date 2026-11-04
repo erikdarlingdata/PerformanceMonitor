@@ -37,13 +37,17 @@ globalThis.document = {
   querySelectorAll: (sel) => (sel === ".table-wrap" ? page.wraps() : []),
   documentElement: { offsetHeight: 0 },
 };
+/* A poll's staged page waits on MutationObserver (whenSettled): the stand-in runs its callback when the scenario says the reads returned. */
+const observers = [];
+globalThis.MutationObserver = class { constructor(cb) { this.cb = cb; this.off = false; observers.push(this); } observe() {} disconnect() { this.off = true; } };
+const readsReturned = () => observers.filter((o) => !o.off).forEach((o) => o.cb());
 globalThis.location = { hash: "#/server/a/queries" };
 globalThis.scrollY = 0;
 globalThis.scrollTo = () => {};
 
 const root = process.argv[2];
 const { VIZ } = await import(pathToFileURL(root + "/panels.js").href);
-const { keepScroll } = await import(pathToFileURL(root + "/refresh-in-place.js").href);
+const { keepScroll, showPageWhenSettled } = await import(pathToFileURL(root + "/refresh-in-place.js").href);
 
 const cols = [{ key: "name", label: "Name" }, { key: "n", label: "N", format: "int" }];
 const makeRows = (count) => Array.from({ length: count }, (_, i) => ({ name: "r" + i, n: i }));
@@ -75,9 +79,17 @@ const scenarios = {
   },
   otherGridUntouched() {
     const a = grid("waits", 100); const b = grid("other", 100); page.appendChild(a); page.appendChild(b);
-    wrapOf(a).scrollTop = 500; // b is at the top and is not swapped
+    wrapOf(a).scrollTop = 500; wrapOf(b).scrollTop = 300; // b is scrolled too and is not swapped: it has to stay at 300
     const fa = keepScrollSwap(a, 100, "waits");
     out.swapped = wrapOf(fa).scrollTop; out.other = wrapOf(b).scrollTop; out.sameBox = page.wraps()[1] === wrapOf(b);
+  },
+  neighbourSlidesIntoReplacedSlot() {
+    /* Two grids with one name, the first scrolled to 500 and the second to 300. The poll swaps the first for a grid with another name, so
+       the second one now stands in the first's place (waits|0) and must keep its own 300, not be handed the first's 500. */
+    const a = grid("waits", 100); const b = grid("waits", 100); page.appendChild(a); page.appendChild(b);
+    wrapOf(a).scrollTop = 500; wrapOf(b).scrollTop = 300;
+    const fresh = keepScrollSwap(a, 100, "io");
+    out.b = wrapOf(b).scrollTop; out.sameBox = page.wraps()[1] === wrapOf(b); out.fresh = wrapOf(fresh).scrollTop;
   },
   wrapRemovedAheadOfSameName() {
     /* Two panels draw grids with one name. The first one's poll returns no rows, so it draws a strip and has no wrap left: the
@@ -86,6 +98,37 @@ const scenarios = {
     wrapOf(a).scrollTop = 500; wrapOf(b).scrollTop = 200;
     keepScroll(() => { const strip = new FakeNode("div"); strip.className = "strip"; page.insertBefore(strip, a); page.removeChild(a); });
     out.wraps = page.wraps().length; out.b = wrapOf(b).scrollTop; out.sameBox = page.wraps()[0] === wrapOf(b);
+  },
+  /* A page whose grid fills from a read of its own (Finops, Fleet Sweeps, Proposals) and is polled: the page on screen stays until the
+     poll's reads have drawn, then the new page goes in with the grid back where the reader had it. */
+  pollWaitsThenKeepsPosition() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const live = page.wraps()[0]; live.scrollTop = 700;
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], true);
+    out.during = page.wraps()[0] === live; out.duringTop = live.scrollTop;
+    staged.removeChild(strip); staged.appendChild(grid("waits", 100));
+    readsReturned();
+    out.replaced = page.wraps()[0] !== live; out.top = page.wraps()[0].scrollTop; out.wraps = page.wraps().length;
+  },
+  pollForAPageTheReaderLeftIsDropped() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], true);
+    const other = new FakeNode("div"); other.className = "other-page";
+    showPageWhenSettled(page, "other", [other], false);
+    staged.removeChild(strip); staged.appendChild(grid("waits", 100));
+    readsReturned();
+    out.wraps = page.wraps().length; out.stillOther = page.children[0] === other;
+  },
+  aPageThatIsNotThePollsOwnShowsAtOnce() {
+    const first = new FakeNode("div"); first.appendChild(grid("waits", 100));
+    showPageWhenSettled(page, "k", [first], false);
+    const staged = new FakeNode("div"); const strip = new FakeNode("div"); strip.className = "strip loading"; staged.appendChild(strip);
+    showPageWhenSettled(page, "k", [staged], false); // a sub-tab click or span change, not the poll
+    out.shown = page.children[0] === staged; out.wraps = page.wraps().length;
   },
   topGridStaysTop() {
     const g = grid("waits", 100); page.appendChild(g);

@@ -293,7 +293,7 @@ function route(opts) {
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "investigations") renderInvestigations(main, r.request);
-  else if (r.name === "proposals") renderProposals(main, r.proposal);
+  else if (r.name === "proposals") renderProposals(main, r.proposal, opts);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
   else if (r.name === "admin") renderAdmin(main, r.tab);
