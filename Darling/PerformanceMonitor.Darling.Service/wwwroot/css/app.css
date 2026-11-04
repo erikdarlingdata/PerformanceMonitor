@@ -282,13 +282,13 @@ a:hover { text-decoration: underline; }
   gap: 1rem;
 }
 
-/* #2772 follow-up: the SERVER-CARD grids (fleet flat + tag-group) cap each track instead of stretching to 1fr.
-   auto-fit already stopped the empty-track SHRINK; without a max the surviving cards then stretched the other
-   way — two servers on an ultrawide gave two ~1000px cards, a lone server one full-width card, all whitespace
-   past what six small stat tiles want. A bounded max track (260-460px, ~the width the issue measured as reading
-   "correctly") keeps cards at a comfortable size, so the grid adds columns as it widens rather than fattening a
-   few cards. Both server-card grids start the cards at the left edge (#7402), so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
-   .grid is shared with the triage page, whose span-2 cards and notice strips want the full width. */
+/* #2772 follow-up: the SERVER-CARD grids (fleet flat + tag-group) get their own column rule instead of .grid's
+   stretch-to-1fr. auto-fit already stopped the empty-track SHRINK; without a limit the surviving cards then stretched the
+   other way, so two servers on an ultrawide gave two ~1000px cards. Now the columns fill the row, each at least 380px
+   (or the full width when the window is narrower), and a lone server does not stretch across the page. Both server-card
+   grids start the cards at the left edge (#7402), so grouped cards stay left-aligned under their header. Scoped to
+   .server-grid, NOT .grid, because .grid is shared with the triage page, whose span-2 cards and notice strips want the
+   full width. */
 .server-grid {
   /* #7402: the cards start at the left edge, under the Servers heading, instead of floating in the middle with a gutter on each side. */
   /* #7559: auto-fill with a 1fr max fills the row at every width. The old 260px-460px track counted columns by the 460px max, so a third
@@ -316,8 +316,8 @@ a:hover { text-decoration: underline; }
 .tag-group-header:focus-visible { outline: 2px solid var(--muted); outline-offset: 1px; }
 .tag-group-chevron { width: 0.9rem; flex: 0 0 auto; color: var(--muted); font-size: 0.7rem; }
 .tag-group-count { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
-/* #2772: keep .server-grid's width cap but override its centring — an indented group's cards left-align under
-   their (left-aligned) header rather than floating toward the middle of the indented box. */
+/* #2772: keep .server-grid's column rule (columns fill the row, each at least 380px) and add the indent margin. The cards
+   start at the left edge under the group's header, the same as the flat grid. */
 .tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }
 .group-control { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
 .group-control input { cursor: pointer; }
