@@ -289,4 +289,31 @@ public static class DarlingPgIndexUsageReader
 
         return new PgIndexUsageProbe(0, 0, 0);
     }
+
+    /// <summary>
+    /// How many distinct indexes the window held (#7551): the denominator the page's cut is stated against. The main read joins its
+    /// latest, earliest and samples sets one to one, so this is the number of rows it would return with no limit.
+    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string PgIndexUsageCountSql = """
+        SELECT count(*) FROM (
+            SELECT DISTINCT database_name, schema_name, table_name, index_name
+            FROM pg_index_usage_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        ) AS indexes
+        """;
+
+    public static async Task<long> CountPgIndexesInWindowAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(PgIndexUsageCountSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
+    }
 }

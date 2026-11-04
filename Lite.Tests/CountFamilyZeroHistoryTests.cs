@@ -112,4 +112,34 @@ public class CountFamilyZeroHistoryTests
         Assert.StartsWith("181 blocking events this window", block.Headline, StringComparison.Ordinal);
         Assert.Contains("Each is one wait", block.Investigation, StringComparison.Ordinal);
     }
+
+    // #7537: when the detector took its DMV arm the rows are blocking snapshots, not blocked process reports, and the
+    // baseline is still in report rows. The text names the right noun and says the units differ; the report arm is unchanged.
+    [Theory]
+    [InlineData("trusted")]
+    [InlineData("zero")]
+    [InlineData("thin")]
+    public void BlockingSpike_OnTheDmvArm_NamesSnapshotRows_AndSaysTheBaselineIsInReportRows(string shape)
+    {
+        var bucket = shape switch { "trusted" => Bucket(mean: 10, samples: 30, days: 30), "zero" => Bucket(mean: 0, samples: 30, days: 30), _ => Bucket(mean: 0, samples: 2, days: 2) };
+        var fact = CountFact("ANOMALY_BLOCKING_SPIKE", 291, perHour: 72.75, bucket);
+        var report = Compose(fact);
+        fact.Metadata[CountFamilyMetadata.FromDmvSnapshotsKey] = 1;
+        var dmv = Compose(fact);
+
+        Assert.StartsWith("291 blocking snapshot rows this window", dmv.Investigation, StringComparison.Ordinal);
+        Assert.Contains("counts blocking snapshot rows", dmv.Investigation, StringComparison.Ordinal);
+        Assert.Contains("built from blocked process report rows, not snapshot rows", dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocked process reports this window", dmv.Headline + dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("is in report rows too", dmv.Investigation, StringComparison.Ordinal);
+        if (shape == "trusted")
+            Assert.StartsWith("blocking snapshot row rate spiked", dmv.Headline, StringComparison.Ordinal);
+        else
+            Assert.StartsWith("291 blocking snapshot rows this window", dmv.Headline, StringComparison.Ordinal);
+
+        // The report arm keeps its wording, and the DMV sentence is gone from it.
+        Assert.StartsWith("291 blocked process reports this window", report.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The baseline it is compared with is in report rows too.", report.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot", report.Headline + report.Investigation, StringComparison.Ordinal);
+    }
 }

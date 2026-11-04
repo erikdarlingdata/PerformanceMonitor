@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -59,8 +60,9 @@ public sealed class DarlingMcpIdentityCapacityTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Maximum columns to list, fullest first. Default and most 200.")] int limit = MaxListed,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetIdentityCapacity(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), limit, cancellationToken);
+        GetIdentityCapacity(postgres, server_name, hours_back, as_of, DatabaseFilter.One(database_name), limit, logger, cancellationToken);
 
     /// <summary>
     /// <c>get_identity_capacity</c> over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the web server page's
@@ -68,7 +70,7 @@ public sealed class DarlingMcpIdentityCapacityTools
     /// </summary>
     public static async Task<string> GetIdentityCapacity(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, DatabaseFilter databases, int limit,
-        CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         if (limit < 1 || limit > MaxListed)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be 1-{MaxListed}.");
@@ -83,7 +85,7 @@ public sealed class DarlingMcpIdentityCapacityTools
         try
         {
             var read = await DarlingIdentityCapacityReader.ReadAsync(
-                postgres, resolved.ServerId, databases, start, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken: cancellationToken);
+                postgres, resolved.ServerId, databases, start, windowEnd, McpCommandDeadlines.ReadSeconds, logger: logger, cancellationToken: cancellationToken);
             ReadScope.NoteSource(ReadScope.SourceRaw);
 
             /* #7010: the window is a data window here (each column's rate runs from its oldest stored value in it), so a window that reaches past

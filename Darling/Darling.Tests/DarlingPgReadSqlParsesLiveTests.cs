@@ -84,6 +84,9 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #7551: the suppression rule as one boolean expression, spliced into PgTableBloatSql and PgTableBloatTotalsSql (both in
+           the parse-checked population). Not a statement, and verified where it is spliced. */
+        "DarlingPgTableBloatReader.UnpublishableConditionSql",
         /* #6836: the window's WAL aggregate, one CASE expression spliced into PgTopQueriesSql (in the parse-checked
            population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
            where it is spliced. */
