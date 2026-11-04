@@ -868,6 +868,24 @@ namespace PerformanceMonitor.Common
         }
 
         /// <summary>
+        /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
+        /// the last error (<see cref="UnreachableReason"/>), and when the service tries the connect next. A retry time already past reads
+        /// <c>due now</c>: the service has not stored the next attempt yet. No stored time says nothing about the retry.
+        /// </summary>
+        public static string WaitingOnConnectionText(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc)
+        {
+            var text = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. " + UnreachableReason(sinceUtc, lastError) + ".";
+            if (!nextAttemptUtc.HasValue)
+            {
+                return text;
+            }
+
+            return text + " Next retry " + (nextAttemptUtc.Value <= nowUtc
+                ? "is due now."
+                : "at " + nextAttemptUtc.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC.");
+        }
+
+        /// <summary>
         /// How a tile reads while its server is unreachable: the values are the last collected ones, and this says so with their age
         /// (<c>last known, 12 min ago</c>).
         /// </summary>

@@ -2056,10 +2056,10 @@ ORDER BY server_name";
         GetCollectionHealthCoreAsync(postgres, server_name, full_detail: false, uncutText: true, logger: null, cancellationToken);
 
     /// <summary>The registry read behind <c>server_connection</c> on <c>get_collection_health</c> (#7590).</summary>
-    internal const string ServerConnectionSql = "SELECT connect_down_since, last_connect_error FROM servers WHERE server_id = $1";
+    internal const string ServerConnectionSql = "SELECT connect_down_since, last_connect_error, next_connect_attempt FROM servers WHERE server_id = $1";
 
     /// <summary>The server-level connection answer for <c>get_collection_health</c>: null while the last connect succeeded, else an object saying
-    /// collection is waiting on the connection, since when, and the last connect error (#7590). A read that fails answers null: this block is
+    /// collection is waiting on the connection, since when, the last connect error and the next retry time (#7590). A read that fails answers null: this block is
     /// additive and must not take the collector rows down with it.</summary>
     internal static async Task<object?> ReadServerConnectionAsync(
         NpgsqlDataSource postgres, int serverId, DateTime nowUtc, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken)
@@ -2077,13 +2077,16 @@ ORDER BY server_name";
 
             var since = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified);
             var error = reader.IsDBNull(1) ? null : reader.GetString(1);
+            DateTime? next = reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Unspecified);
             return new
             {
                 status = "waiting_on_connection",
                 since = since.ToString("o"),
                 last_connect_error = error,
-                message = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. "
-                    + ServerHealthClassifier.UnreachableReason(since, error) + ". The collector rows are the last runs from before the connection failed.",
+                /* The service's backoff decision, UTC; null when none is stored (a service that wrote the failure before it had decided). */
+                next_connect_attempt = next?.ToString("o"),
+                message = ServerHealthClassifier.WaitingOnConnectionText(since, error, next, nowUtc)
+                    + " The collector rows are the last runs from before the connection failed.",
             };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

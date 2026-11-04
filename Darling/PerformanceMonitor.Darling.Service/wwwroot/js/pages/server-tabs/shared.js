@@ -936,6 +936,23 @@ export const SWEEP_STATS = [
    over, summed across the server's collectors. Zero is real (count 0, the other tiles dashes); the message tile is dropped
    when there is none rather than showing a dash. The Read tile says "ok", or "unavailable" when the read failed (every figure is
    then a dash, which is not the zero a real empty window reports). */
+/* #7590: the server-level answer get_collection_health carries while the service cannot connect (its `server_connection` block, absent
+   when the last connect succeeded, which the empty text says). One sentence with the since time, the last error and the next retry,
+   then the same facts as tiles. The collector rows beside it are not relabelled. */
+export const SERVER_CONNECTION_PANEL = {
+  title: "Server Connection",
+  subtitle: "the service's own connect",
+  viz: "stat",
+  emptyText: "Connected: the service's last connect to this server succeeded.",
+  stats: [
+    { key: "server_connection.message", label: "Connection", format: "text", sentence: true },
+    { key: "server_connection.status", label: "Collection", format: "status", small: true },
+    { key: "server_connection.since", label: "Unreachable since", format: "time", small: true },
+    { key: "server_connection.next_connect_attempt", label: "Next retry", format: "time", small: true },
+    { key: "server_connection.last_connect_error", label: "Last error", format: "text", small: true },
+  ],
+};
+
 export const SKIPPED_CYCLES_STATS = [
   { key: "skipped_cycles.status", label: "Read", format: "status", small: true },
   { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },

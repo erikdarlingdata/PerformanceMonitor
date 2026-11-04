@@ -59,15 +59,15 @@ CROSS JOIN LATERAL
 ) AS latest
 WHERE s.server_id <> 0";
 
-    /// <summary>The servers whose last connect failed (#7590): <c>connect_down_since</c> and the last connect error, from the registry the
+    /// <summary>The servers whose last connect failed (#7590): <c>connect_down_since</c>, the last connect error and the next retry time, from the registry the
     /// service writes on every connect attempt. Only servers with a failed connect are returned. A store older than the rung that adds the
     /// columns (the undefined column error) answers an empty map, so the dots band as they did before it.</summary>
-    public const string ServerConnectDownSql = "SELECT server_id, connect_down_since, last_connect_error FROM servers WHERE connect_down_since IS NOT NULL AND server_id <> 0";
+    public const string ServerConnectDownSql = "SELECT server_id, connect_down_since, last_connect_error, next_connect_attempt FROM servers WHERE connect_down_since IS NOT NULL AND server_id <> 0";
 
     /// <summary>Reads <see cref="ServerConnectDownSql"/>, keyed by server_id.</summary>
-    public async Task<Dictionary<int, (DateTime SinceUtc, string? Error)>> GetServerConnectDownAsync(CancellationToken cancellationToken = default)
+    public async Task<Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>> GetServerConnectDownAsync(CancellationToken cancellationToken = default)
     {
-        var result = new Dictionary<int, (DateTime SinceUtc, string? Error)>();
+        var result = new Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>();
         try
         {
             await using var command = _dataSource.CreateCommand(ServerConnectDownSql);
@@ -75,7 +75,8 @@ WHERE s.server_id <> 0";
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                result[reader.GetInt32(0)] = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), reader.IsDBNull(2) ? null : reader.GetString(2));
+                result[reader.GetInt32(0)] = (DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc), reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc));
             }
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)

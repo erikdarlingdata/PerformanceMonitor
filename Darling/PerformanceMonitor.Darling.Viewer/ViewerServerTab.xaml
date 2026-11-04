@@ -4038,6 +4038,9 @@
                     </StackPanel>
                     <TextBlock x:Name="CollectorRunIndicator" Text="" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"
                                Foreground="DarkGoldenrod" FontWeight="SemiBold" Visibility="Collapsed"/>
+                    <!-- #7590: while the service cannot connect to this server, says collection is waiting on the connection, since when, the last error and the next retry. -->
+                    <TextBlock x:Name="ServerConnectionLine" Text="" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"
+                               Foreground="DarkGoldenrod" FontWeight="SemiBold" Visibility="Collapsed"/>
                 </StackPanel>
                 <!-- #5735: the collection slots the loop stepped over in the last 24 h. Always shown, so a reader sees at once whether
                      collection has been falling behind; the all-clear says so plainly, and a failed read says it could not be read. -->
