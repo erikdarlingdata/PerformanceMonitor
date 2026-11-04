@@ -186,8 +186,7 @@ export async function runLayout({ config, baseUrl, outDir, only, settle, browser
           /* The wait the walk retries (smoke.mjs): one more load, and a retry that settles is printed, never hidden. A measured failure gets no retry. */
           await page.reload({ waitUntil: "domcontentloaded" });
           await settle(page);
-          console.log(`FLAKE ${tag}: did not settle once (${String(first && first.message ? first.message : first).split("
-")[0]}), settled on the retry`);
+          console.log(`FLAKE ${tag}: did not settle once (${String(first && first.message ? first.message : first).split("\n")[0]}), settled on the retry`);
         }
         /* A chart draws at the width its box has once it is on screen: let one animation frame pass before measuring. */
         await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
