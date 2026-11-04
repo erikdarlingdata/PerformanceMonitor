@@ -720,6 +720,24 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// The clock a whole-day read rates its last day against (#7504). Such a read keeps only the anchor's UTC date,
+    /// so its counts cover that whole date whatever time the anchor names. Rating them over the hours from midnight
+    /// to the anchor gave no rate at all for a bare date and too high a rate for a mid-day stamp. So the clock is the
+    /// end of the anchor's date, or now while that date is still running. A read with no anchor is already at now.
+    /// </summary>
+    public static DateTime DayAnchorClock(string? asOf, DateTime endUtc)
+    {
+        if (string.IsNullOrWhiteSpace(asOf))
+        {
+            return endUtc;
+        }
+
+        var dayEnd = DateTime.SpecifyKind(endUtc.Date.AddDays(1), DateTimeKind.Utc);
+        var now = DateTime.UtcNow;
+        return dayEnd < now ? dayEnd : now;
+    }
+
+    /// <summary>
     /// Validates top/limit parameter. Returns null if valid, the <see cref="Refusal"/> envelope if invalid
     /// (<c>hints.parameter</c> is <paramref name="paramName"/>, so a tool that calls this for <c>top</c> refuses
     /// <c>top</c> by name).

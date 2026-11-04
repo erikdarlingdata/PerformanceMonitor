@@ -157,6 +157,8 @@ public sealed class DarlingDailySummaryRangeTests
                 dataSource, ServerName, 1, tenDaysAgo.ToString("yyyy-MM-dd"))).RootElement;
             var anchoredDay = Assert.Single(anchored.GetProperty("days").EnumerateArray().ToArray());
             Assert.Equal(tenDaysAgo.ToString("yyyy-MM-dd"), anchoredDay.GetProperty("summary_date").GetString());
+            /* #7504: a bare date rates that whole date. Rated from midnight to the anchor, the window was empty and this was null. */
+            Assert.Equal(0d, anchoredDay.GetProperty("blocking_rate_per_hour").GetDouble());
 
             /* And the same one-day span unanchored answers about TODAY instead, so the anchor moved the
                range rather than widening it. */
