@@ -104,45 +104,84 @@ OPTION(RECOMPILE);";
     };
 
     /// <summary>
-    /// #7441: how far past the watermark a recomputed stamp may sit and still be the record the watermark
-    /// already holds. The query derives <c>sample_time</c> on every poll from <c>SYSUTCDATETIME()</c> minus
-    /// <c>ms_ticks - timestamp</c>, two clocks that run slightly apart, so re-reading the newest stored record
-    /// lands a few milliseconds ABOVE its stored stamp (1 to 18 ms between polls on a 5-minute interval),
-    /// clears a strict <c>&lt;= watermark</c> test and is stored again, once per poll for as long as the record
-    /// stays in the ring buffer. The store keeps no record id, so the watermark is the only memory.
-    /// This is the tolerance <see cref="CpuUtilizationCollector"/> got in #5644, with a smaller value: CPU
-    /// records are 60 s apart, these can be 1 ms apart, so 20 s is wrong here. 1 s must stay above the drift
-    /// between polls, and a longer poll interval drifts further.
-    /// The cost: a genuinely new record within 1 s of the newest stored one is dropped when a poll lands in the
-    /// middle of a burst. That is a small part of one burst and far less wrong than the repeats.
+    /// #7441: how far the record the watermark holds may sit from its stored stamp, as seen in one read, and
+    /// still be recognised as that record. The query derives <c>sample_time</c> on every poll from
+    /// <c>SYSUTCDATETIME()</c> minus <c>ms_ticks - timestamp</c>, two clocks that run slightly apart, so the
+    /// newest stored record comes back above its stored stamp (1 to 18 ms per 5-minute poll, about 60 ppm) and
+    /// a strict <c>&lt;= watermark</c> test stored it again on every poll. The store keeps no record id, so the
+    /// watermark is the only memory, and a fixed tolerance only delays the repeat: a skipped row never moves
+    /// the watermark, so its gap to the watermark is the skew since it was FIRST stored, and that grows on
+    /// every poll (a 1 s tolerance is passed after about 56 polls at 18 ms).
+    /// The skew does not matter within one read, where every row shares <c>@now</c> and <c>@ms_ticks</c> and the
+    /// spacing between rows is exact. So <see cref="ReadAsync"/> finds the row nearest the watermark and treats
+    /// it as the stored record, whatever the skew, as long as it is within this bound. 10 minutes is what 60 ppm
+    /// builds up in about 116 days, longer than a quiet server's newest record sits in the ring buffer. A step
+    /// past it (a suspended VM resumed, a clock set by hand) makes the held record look new once: it is stored
+    /// again with its new stamp, the watermark follows it and the skew starts from zero, so that is one repeat,
+    /// not a loop. The bound also stops the nearest row being taken for the held record after the held record
+    /// has aged out of the ring buffer and only newer rows remain: those are then kept. The cost is one
+    /// genuinely new record dropped when the held record aged out and the oldest remaining row is within 10
+    /// minutes of it. <see cref="CpuUtilizationCollector"/> keeps its own fixed tolerance (#5644) because its
+    /// records arrive every minute, so its watermark moves.
     /// </summary>
-    internal static readonly TimeSpan RingBufferResampleTolerance = TimeSpan.FromSeconds(1);
-
-    private static DateTime WithRingBufferTolerance(DateTime watermark) =>
-        watermark > DateTime.MaxValue - RingBufferResampleTolerance ? watermark : watermark + RingBufferResampleTolerance;
+    internal static readonly TimeSpan HeldRecordMaxSkew = TimeSpan.FromMinutes(10);
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
-        var rows = new List<Row>();
+        var all = new List<(Row Row, bool NullStamp)>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var sampleTime = reader.IsDBNull(0) ? DateTime.MinValue : reader.GetDateTime(0);
+            var nullStamp = reader.IsDBNull(0);
+            all.Add((new Row(
+                nullStamp ? DateTime.MinValue : reader.GetDateTime(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)), nullStamp));
+        }
 
-            /* Client-side dedup: computed sample_time can't be filtered server-side. The watermark and this
-               stamp are both UTC (the column is stored from SYSUTCDATETIME(), see @now above), so the
-               tolerance is added in the same frame. A skipped row is never stored, so the watermark the host
-               caches (the max stored sample_time) does not move. */
-            if (context.Watermark.HasValue && sampleTime <= WithRingBufferTolerance(context.Watermark.Value))
+        if (!context.Watermark.HasValue)
+        {
+            return all.ConvertAll(static r => r.Row);
+        }
+
+        /* Client-side dedup: computed sample_time can't be filtered server-side. A stamp at or before the
+           watermark is already stored. The record the watermark holds comes back with a skewed stamp (see
+           HeldRecordMaxSkew), so also find the row nearest the watermark and skip it and every earlier row.
+           The watermark and the stamps are both UTC (the column is stored from SYSUTCDATETIME(), see @now
+           above). A skipped row is never stored, so the watermark the host caches (the max stored
+           sample_time) does not move. A NULL stamp is skipped, as before. On a tie the earlier row is the held
+           one: that keeps a possibly new record rather than risk dropping it. */
+        var skipUpTo = context.Watermark.Value;
+        var nearestGap = TimeSpan.MaxValue;
+        var nearest = DateTime.MinValue;
+        foreach (var (row, nullStamp) in all)
+        {
+            if (nullStamp)
             {
                 continue;
             }
 
-            rows.Add(new Row(
-                sampleTime,
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+            var gap = (row.SampleTime - context.Watermark.Value).Duration();
+            if (gap < nearestGap || (gap == nearestGap && row.SampleTime < nearest))
+            {
+                nearestGap = gap;
+                nearest = row.SampleTime;
+            }
+        }
+
+        if (nearestGap <= HeldRecordMaxSkew && nearest > skipUpTo)
+        {
+            skipUpTo = nearest;
+        }
+
+        var rows = new List<Row>();
+        foreach (var (row, nullStamp) in all)
+        {
+            if (!nullStamp && row.SampleTime > skipUpTo)
+            {
+                rows.Add(row);
+            }
         }
 
         return rows;

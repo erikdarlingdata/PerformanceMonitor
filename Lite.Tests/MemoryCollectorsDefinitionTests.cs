@@ -226,42 +226,117 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     }
 
     /// <summary>
-    /// #7441: the ring buffer record that is already stored comes back on the next poll with a stamp a few
-    /// milliseconds ABOVE the stored one (SYSUTCDATETIME() and ms_ticks drift apart), which a strict
-    /// `&lt;= watermark` test stored again on every poll. The same record drifted 8 ms and 18 ms above the
-    /// watermark, and the watermark exactly, are dropped. A record 1.5 s later still lands.
+    /// #7441: the ring buffer record that is already stored comes back on every poll with a stamp ABOVE the
+    /// stored one (SYSUTCDATETIME() and ms_ticks drift apart). The host only stores kept rows, so the watermark
+    /// stays at the record's FIRST stored stamp and the gap to it is the skew since then, which grows on every
+    /// poll. The same record is replayed with a skew of 8 ms, 18 ms, 2 s, 30 s, 5 min and 9 min and is never
+    /// stored again, so a fixed tolerance (the first version of this fix, 1 s) would have failed from the 2 s
+    /// poll on.
     /// </summary>
-    [Fact]
-    public async Task ReadAsync_AlreadyStoredRecordWithDriftedStamp_IsNotStoredAgain()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(8)]
+    [InlineData(18)]
+    [InlineData(2_000)]
+    [InlineData(30_000)]
+    [InlineData(5 * 60_000)]
+    [InlineData(9 * 60_000)]
+    public async Task ReadAsync_HeldRecordReplayedWithGrowingSkew_IsNotStoredAgain(int skewMs)
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark, "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMilliseconds(8), "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMilliseconds(18), "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMilliseconds(1500), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+            new object[] { watermark.AddMilliseconds(skewMs), "RESOURCE_MEM_STEADY", 0, 0 });
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+        Assert.Empty(rows);
+    }
+
+    /// <summary>
+    /// #7441: the host's loop, replayed. Each poll re-reads the one record in the ring buffer 18 ms further from
+    /// its first stored stamp, and the watermark is the newest stamp the earlier polls stored. 3,000 polls is
+    /// 54 s of skew and 10 days of 5-minute polls, past both the 1 s and the 10 s a fixed tolerance would hold.
+    /// The record is stored by the first poll only.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OneRecordPolledManyTimes_IsStoredOnce()
+    {
+        var firstStamp = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        DateTime? watermark = null;
+        var stored = 0;
+        for (var poll = 0; poll < 3_000; poll++)
+        {
+            using var reader = new FakeCollectorDataReader(
+                new object[] { firstStamp.AddMilliseconds(18.0 * poll), "RESOURCE_MEM_STEADY", 0, 0 });
+
+            var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+                reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+            stored += rows.Count;
+            if (rows.Count > 0)
+            {
+                watermark = rows.Max(r => r.SampleTime);
+            }
+        }
+
+        Assert.Equal(1, stored);
+    }
+
+    /// <summary>
+    /// #7441: a record newer than the held one is kept whatever the skew on the held one, and the held record
+    /// (older rows in the read) is not. The new record is 4 minutes after the held one, the read carries a
+    /// 30 s skew.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_NewRecordAfterTheHeldOne_IsKeptUnderSkew()
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        var skew = TimeSpan.FromSeconds(30);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { watermark.AddMinutes(-9) + skew, "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark + skew, "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMinutes(4) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
-        Assert.Equal(watermark.AddMilliseconds(1500), row.SampleTime);
+        Assert.Equal(watermark.AddMinutes(4) + skew, row.SampleTime);
     }
 
     /// <summary>
-    /// #7441: the tolerance is 1 s and no wider. A record just past it lands, and so does one a minute later.
-    /// A NULL stamp (read as DateTime.MinValue) is still skipped under a watermark, as before.
+    /// #7441: two records 5 ms apart, the held one and a new one just after it, are told apart by identity.
+    /// A time tolerance wide enough to cover the held record's skew would drop the new one.
     /// </summary>
     [Fact]
-    public async Task ReadAsync_RecordPastTheTolerance_IsStored_AndNullStampStillSkipped()
+    public async Task ReadAsync_TwoCloseRecords_TheLaterOneNew_AreToldApart()
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        var skew = TimeSpan.FromSeconds(3);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { watermark + skew, "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMilliseconds(5) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
+    }
+
+    /// <summary>
+    /// #7441: the held record has aged out of the ring buffer and only rows much newer than the watermark
+    /// remain (all beyond the bound). None of them is the held record, so all are kept.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_HeldRecordAgedOut_NewerRowsAreKept()
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { DBNull.Value, "RESOURCE_MEM_STEADY", 3, 1 },
-            new object[] { watermark.AddMilliseconds(1000), "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMilliseconds(1001), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 },
-            new object[] { watermark.AddMinutes(1), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 });
+            new object[] { watermark.AddHours(3), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 },
+            new object[] { watermark.AddHours(3).AddSeconds(40), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 });
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
             reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
@@ -269,5 +344,26 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         Assert.Equal(
             new[] { "RESOURCE_MEMPHYSICAL_LOW", "RESOURCE_MEMPHYSICAL_HIGH" },
             rows.Select(r => r.MemoryNotification).ToArray());
+    }
+
+    /// <summary>
+    /// #7441: a skew past the bound (a suspended VM resumed) shows the held record as a new one once. It is
+    /// stored again, and that is the one repeat the bound accepts. An older row than the watermark is still
+    /// skipped, and so is a NULL stamp.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_SkewPastTheBound_StoresOnceAndOlderRowsAndNullStampStaySkipped()
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { DBNull.Value, "RESOURCE_MEM_STEADY", 3, 1 },
+            new object[] { watermark.AddMinutes(-30), "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMinutes(11), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
     }
 }
