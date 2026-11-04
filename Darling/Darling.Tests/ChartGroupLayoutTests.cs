@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using PerformanceMonitor.Ui;
 using ScottPlot;
@@ -42,9 +43,11 @@ public sealed class ChartGroupLayoutTests
         "Heap reads", "Index reads", "TOAST reads", "Temp reads",
     };
 
-    private static WpfPlot DataChart(double dpi, string yLabel, string caption, int series, double magnitude, bool longNames = false)
+    private static WpfPlot DataChart(double dpi, string yLabel, string caption, int series, double magnitude, bool longNames = false) =>
+        FillDataChart(new WpfPlot(), dpi, yLabel, caption, series, magnitude, longNames);
+
+    private static WpfPlot FillDataChart(WpfPlot chart, double dpi, string yLabel, string caption, int series, double magnitude, bool longNames = false)
     {
-        var chart = new WpfPlot();
         ChartDisplayScale.Apply(chart, dpi);
         ChartStyle.ApplyThemeToChart(chart);
         var t0 = new DateTime(2026, 11, 1).ToOADate();
@@ -62,9 +65,10 @@ public sealed class ChartGroupLayoutTests
         return chart;
     }
 
-    private static WpfPlot EmptyChart(double dpi)
+    private static WpfPlot EmptyChart(double dpi) => FillEmptyChart(new WpfPlot(), dpi);
+
+    private static WpfPlot FillEmptyChart(WpfPlot chart, double dpi)
     {
-        var chart = new WpfPlot();
         ChartDisplayScale.Apply(chart, dpi);
         ChartStyle.ApplyThemeToChart(chart);
         new ChartRenderHelper().RefreshEmptyChart(chart, "Execution Count", "Executions/sec");
@@ -119,7 +123,7 @@ public sealed class ChartGroupLayoutTests
 
     private static PixelRect Data(WpfPlot chart) => chart.Plot.RenderManager.LastRender.DataRect;
 
-    private static void MaybeSavePng(string name, ChartGridPanel panel, WpfPlot[] charts)
+    private static void MaybeSavePng(string name, FrameworkElement panel, WpfPlot[] charts)
     {
         var dir = Environment.GetEnvironmentVariable("CHART_LAYOUT_PNG_DIR");
         if (string.IsNullOrEmpty(dir)) return;
@@ -191,6 +195,71 @@ public sealed class ChartGroupLayoutTests
                 var figure = chart.ActualHeight; // the plot's units are DIP-sized ("scaled")
                 Assert.True(plot >= ChartLayout.MinPlotAreaHeight - 0.5, $"plot {plot:0.#} px of a {figure:0.#} px chart is under {ChartLayout.MinPlotAreaHeight}");
                 Assert.True(plot >= figure * 0.3, $"plot {plot:0.#} px is under 30% of the {figure:0.#} px chart");
+            }
+        });
+
+    // The shape of the tempdb, File I/O and Lock/Blocking blocks in both apps (a Grid of star rows with a floor, marked as a group, whose
+    // height is the viewport's), written the way the XAML writes it and loaded by the XAML parser, so the attached property, the
+    // ViewportHeight binding and the x:Static floor are the real ones. One chart has a long legend and caption, one is empty.
+    private const string StackedBlockXaml = """
+        <ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                      xmlns:ui="clr-namespace:PerformanceMonitor.Ui;assembly=PerformanceMonitor.Ui"
+                      xmlns:scottplot="clr-namespace:ScottPlot.WPF;assembly=ScottPlot.WPF"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Grid x:Name="Block" ui:ChartGroup.IsAligned="True"
+                  Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="450">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                </Grid.RowDefinitions>
+                <Border Grid.Row="0" Margin="0,0,0,4"><scottplot:WpfPlot x:Name="First"/></Border>
+                <Border Grid.Row="1" Margin="0,4,0,4"><scottplot:WpfPlot x:Name="Second"/></Border>
+                <Border Grid.Row="2" Margin="0,4,0,0"><scottplot:WpfPlot x:Name="Third"/></Border>
+            </Grid>
+        </ScrollViewer>
+        """;
+
+    [Theory]
+    [MemberData(nameof(Windows))]
+    public void AStackedXamlBlock_SharesOnePlotRectangle_AndFollowsTheWindow(int width, int height, double dpi) =>
+        StaTestThread.Run(() =>
+        {
+            var viewer = (ScrollViewer)XamlReader.Parse(StackedBlockXaml);
+            var block = (Grid)viewer.FindName("Block");
+            var charts = new[] { (WpfPlot)viewer.FindName("First"), (WpfPlot)viewer.FindName("Second"), (WpfPlot)viewer.FindName("Third") };
+            FillDataChart(charts[0], dpi, "Read Ops/sec", "Reads per second, by relation kind, raw samples (one point per collection) since the start of the window", 4, 120000);
+            FillDataChart(charts[1], dpi, "Write Ops/sec", "", 2, 0.4);
+            FillEmptyChart(charts[2], dpi);
+            var size = Viewport(width, height);
+            Layout(viewer, size);
+
+            // Render, let the group check run, render what changed, and let the chart chrome raise the row floors.
+            RenderAll(charts);
+            ChartGroupAligner.Check(block);
+            RenderAll(charts);
+            Layout(viewer, size);
+            RenderAll(charts);
+            ChartGroupAligner.Check(block);
+            RenderAll(charts);
+            ChartGroupAligner.Check(block);
+            RenderAll(charts);
+            MaybeSavePng($"stacked-{width}x{height}-x{dpi}", block, charts);
+
+            // The block fills the viewport when its floor allows, and is taller than it (so the tab scrolls) when it does not.
+            Assert.Equal(Math.Max(size.Height, block.MinHeight), block.ActualHeight, 1);
+            Assert.True(block.MinHeight >= 3 * ChartLayout.MinPlotHeight, $"the floor {block.MinHeight} is under three minimum rows");
+            if (height == 720) Assert.True(viewer.ScrollableHeight > 0, "a small window should scroll");
+            else Assert.True(viewer.ScrollableHeight < 1, $"a window of {height} should fit the block, scrolls by {viewer.ScrollableHeight}");
+
+            var first = Data(charts[0]);
+            foreach (var chart in charts)
+            {
+                var r = Data(chart);
+                Assert.True(Math.Abs(r.Left - first.Left) <= 1.5 && Math.Abs(r.Width - first.Width) <= 1.5 && Math.Abs(r.Height - first.Height) <= 5, // the middle row has 4 px more margin than the outer ones
+                    $"stacked plot rectangles differ: {first.Left:0.#},{first.Top:0.#} {first.Width:0.#}x{first.Height:0.#} vs {r.Left:0.#},{r.Top:0.#} {r.Width:0.#}x{r.Height:0.#}");
+                Assert.True(r.Height >= ChartLayout.MinPlotAreaHeight - 0.5, $"plot {r.Height:0.#} px is under {ChartLayout.MinPlotAreaHeight}");
             }
         });
 
