@@ -1546,6 +1546,154 @@ internal static class ToolRecommendations
             new("get_top_queries_by_cpu", "Find which queries account for the new batch volume"),
             new("get_active_queries", "See what's actually running at the elevated rate")
         ],
+        /* #7449: every root key whose advice the engine composes now has a next_tools row. Before, these arrived
+           with "next_tools":[] and the card named a tab or a read the agent could not reach from the reply. */
+        ["MEMORY_PRESSURE_EVENTS"] =
+        [
+            new("get_memory_pressure_events", "Pull the RING_BUFFER_RESOURCE_MONITOR notifications behind the finding: event times and the process and system indicators"),
+            new("get_memory_stats", "Compare target and total server memory and available physical memory around the event times"),
+            new("get_memory_clerks", "Find which clerks are holding the memory SQL Server is being asked to give back")
+        ],
+        ["MEMORY_CLERKS"] =
+        [
+            new("get_memory_clerks", "See the clerk sizes the finding is built from"),
+            new("get_memory_trend", "Track memory growth over time"),
+            new("get_memory_stats", "Check target vs total server memory")
+        ],
+        ["BLOCKING_CHAIN"] =
+        [
+            new("get_blocked_process_reports", "Get the blocking chains with lead blocker, victims and query text"),
+            new("get_blocking_trend", "Track blocking frequency over time"),
+            new("get_lock_wait_trend", "Track lock wait time over the window")
+        ],
+        ["LCK_RANGE"] =
+        [
+            new("get_blocked_process_reports", "Get the blocking reports that carry the range locks"),
+            new("get_object_locking", "See which objects the range locks sit on"),
+            new("get_lock_wait_trend", "Track range-lock wait time over the window")
+        ],
+        ["THREADPOOL_BLOCKING"] =
+        [
+            new("get_blocked_process_reports", "Find the lead blocker holding worker threads"),
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_blocking_trend", "Track blocking frequency over time")
+        ],
+        ["THREADPOOL_PARALLEL"] =
+        [
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("audit_config", "Check CTFP and MAXDOP settings"),
+            new("get_wait_trend", "Track the THREADPOOL wait over time", new() { ["wait_type"] = "THREADPOOL" })
+        ],
+        ["THREADPOOL_MIXED"] =
+        [
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("get_blocked_process_reports", "Check whether blocking is holding worker threads")
+        ],
+        ["RESOURCE_SEMAPHORE_QUERY_COMPILE"] =
+        [
+            new("get_memory_grants", "Check active and pending memory grants"),
+            new("get_resource_semaphore", "See the compile-gateway and grant semaphore state"),
+            new("get_wait_trend", "Track the compile wait over time", new() { ["wait_type"] = "RESOURCE_SEMAPHORE_QUERY_COMPILE" })
+        ],
+        ["RUNNABLE_TASKS"] =
+        [
+            new("get_cpu_scheduler_pressure", "See runnable-queue depth per scheduler"),
+            new("get_cpu_utilization", "See CPU trend over time"),
+            new("get_top_queries_by_cpu", "Find the queries consuming the CPU")
+        ],
+        ["PAGELATCH_EX"] =
+        [
+            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
+            new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
+        ],
+        ["PAGELATCH_UP"] =
+        [
+            new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
+            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
+        ],
+        ["MISSING_INDEX"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries the missing index would help"),
+            new("get_index_usage", "Check how the existing indexes on the table are used before adding another"),
+            new("get_table_index_sizes", "See the table and index sizes the new index would join")
+        ],
+        ["PLAN_WARNING"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries whose cached plans carry the warnings"),
+            new("analyze_plan_xml", "Examine the plan for the warnings: spills, implicit conversions, missing statistics")
+        ],
+        ["PLAN_CACHE_BLOAT"] =
+        [
+            new("get_plan_cache_bloat", "See single-use plan counts and size by database"),
+            new("get_memory_clerks", "See how much memory the plan cache clerks hold"),
+            new("audit_config", "Check the optimize for ad hoc workloads setting")
+        ],
+        ["CONFIG_MAXDOP"] =
+        [
+            new("audit_config", "Grade MAXDOP against the core count"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_CTFP"] =
+        [
+            new("audit_config", "Grade cost threshold for parallelism"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_MAX_MEMORY_MB"] =
+        [
+            new("audit_config", "Grade max server memory against physical RAM"),
+            new("get_memory_stats", "Check target vs total server memory and available physical memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_MIN_MAX_MEMORY_NARROW"] =
+        [
+            new("audit_config", "Grade min and max server memory"),
+            new("get_memory_stats", "Check target vs total server memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_LIGHTWEIGHT_POOLING"] =
+        [
+            new("audit_config", "Check the lightweight pooling setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_PRIORITY_BOOST"] =
+        [
+            new("audit_config", "Check the priority boost setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_IFI_DISABLED"] =
+        [
+            new("audit_config", "Check instant file initialization and the service account"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["CONFIG_LPIM_DISABLED"] =
+        [
+            new("audit_config", "Check lock pages in memory and the service account"),
+            new("get_memory_stats", "Check whether the OS is taking memory back from SQL Server"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["SERVER_MEMORY_DUMPS"] =
+        [
+            new("get_health_parser_severe_errors", "Look for severe errors logged near the dump times"),
+            new("get_default_trace_events", "Look for events recorded around the dump times")
+        ],
+        ["ANOMALY_OBJECT_GROWTH"] =
+        [
+            new("get_table_index_sizes", "See per-table and per-index sizes and which grew"),
+            new("get_database_sizes", "See per-file sizes and autogrowth settings")
+        ],
+        ["ANOMALY_OBJECT_CONTENTION"] =
+        [
+            new("get_object_locking", "See which objects the contention sits on"),
+            new("get_lock_wait_trend", "Track lock wait time over the window"),
+            new("get_blocked_process_reports", "Check whether the contention shows up as blocking")
+        ],
         ["BAD_ACTOR"] =
         [
             new("get_top_queries_by_cpu", "See full query stats for this query"),
