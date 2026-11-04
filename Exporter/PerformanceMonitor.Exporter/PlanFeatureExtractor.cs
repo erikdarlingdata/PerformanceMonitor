@@ -224,9 +224,9 @@ public static class PlanFeatureExtractor
         {
             plan = ShowPlanParser.Parse(xml);
             // The analyzer only, never PlanAnalysisPipeline.Run: scoring would fill max_benefit_percent and change the exported
-            // rows. A change of that kind is a feature_version bump, not a refactor. (The call is spelled with a space only
-            // because BenefitScorerWiringTests greps production files for the literal call text.)
-            PlanAnalyzer.Analyze (plan);
+            // rows. A change of that kind is a feature_version bump, not a refactor. BenefitScorerWiringTests lists this file
+            // as its one exception for that reason.
+            PlanAnalyzer.Analyze(plan);
         }
         catch
         {
