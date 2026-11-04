@@ -78,7 +78,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
             var totalSingleUse = rows.Sum(r => (long)r.SingleUsePlans);
             var totalSizeMb = rows.Sum(r => (long)r.TotalSizeMb);
             var singleUseSizeMb = rows.Sum(r => (long)r.SingleUseSizeMb);
-            var (bloatLevel, bloatRecommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(totalPlans, totalSingleUse);
+            var (bloatLevel, bloatRecommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(rows);
 
             return JsonSerializer.Serialize(new
             {

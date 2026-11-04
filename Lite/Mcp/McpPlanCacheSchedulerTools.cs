@@ -46,7 +46,7 @@ public sealed class McpPlanCacheSchedulerTools
                         ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range."),
                     dataService, QueryWindowRelation.PlanCacheStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "plan_cache_stats");
 
-            var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
+            var bloat = LocalDataService.ClassifyPlanCacheBloat(summary);
             var singleUsePercent = summary.TotalPlans > 0
                 ? Math.Round(100.0 * summary.SingleUsePlans / summary.TotalPlans, 1)
                 : 0;

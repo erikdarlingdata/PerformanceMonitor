@@ -123,9 +123,9 @@ public partial class ViewerServerTab
             return;
         }
 
-        /* Derived single-use bloat badge + forced-parameterization hint (install/47 report.plan_cache_bloat
-           parity): a pure client-side CASE on the single-use / total ratio Darling already reads. */
-        var bloat = ViewerDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
+        /* Derived single-use bloat badge and its recommendation (#7445): the shared PlanCacheBloatRule over
+           compiled plans, with a 100 MB single-use floor, from figures Darling already reads. */
+        var bloat = ViewerDataService.ClassifyPlanCacheBloat(summary);
         PlanCacheBloatLevelText.Text = bloat.Level;
         PlanCacheBloatLevelText.Foreground = BloatLevelBrush(bloat.Level);
         PlanCacheRecommendationText.Text = bloat.Recommendation;
