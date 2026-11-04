@@ -44,11 +44,10 @@ export const PG_WRAPAROUND_THRESHOLD_STATS = [
 export const PG_SESSION_STATE_STATS = [
   { key: "captures_in_window", label: "Captures", format: "int" },
   { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
-  { key: "sessions_returned", label: "Sessions returned", format: "int" },
   { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
   { key: "idle_in_transaction_pinning_nothing", label: "Idle in transaction, pinning nothing", format: "int" },
   { key: "redacted_row_count", label: "Redacted rows", format: "int" },
-  { key: "truncated", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: "The window held more sessions than the grid below lists.", label: "Truncated", format: "bool" },
 ];
 
 export const PG_AUTOVACUUM_COLUMNS = [

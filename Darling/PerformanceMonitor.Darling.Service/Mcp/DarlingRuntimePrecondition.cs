@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -161,7 +162,41 @@ ORDER BY database_name";
         var message = CollectorRuntimePrecondition.CollectionOutcomeMessage(
             serverName, collectorName, status, errorMessage, observedUtc);
 
-        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message);
+        return message is null ? null : McpHelpers.Status(CollectorRuntimePrecondition.StatusWord, message, StructuredReason(collectorName, status));
+    }
+
+    /// <summary>
+    /// #7410: the structured fields the web page builds its one plain sentence from, so it never has to read the tool's message. The
+    /// <c>message</c> beside them is unchanged. <c>reason</c> is <c>extension_missing</c> (with <c>extensions</c>, the names the
+    /// collector declares it needs, and <c>restart_required</c> when one of them has to be in shared_preload_libraries),
+    /// <c>source_unreadable</c> (the skip that is a refused grant or a source this server does not have) or <c>capture_session_missing</c>.
+    /// Null for any other status, which keeps the bare envelope.
+    /// </summary>
+    internal static object? StructuredReason(string collectorName, string? status)
+    {
+        if (string.Equals(status, CollectorRuntimePrecondition.ExtensionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            var required = CollectorCatalog.Find(collectorName)?.RequiredPgExtensions ?? Array.Empty<PgExtensionDependency>();
+            return new
+            {
+                reason = "extension_missing",
+                collector = collectorName,
+                extensions = required.Select(r => r.ExtensionName).ToArray(),
+                restart_required = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries),
+            };
+        }
+
+        if (string.Equals(status, CollectorRuntimePrecondition.DegradedStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "source_unreadable", collector = collectorName };
+        }
+
+        if (string.Equals(status, CollectorRuntimePrecondition.CaptureSessionMissingStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return new { reason = "capture_session_missing", collector = collectorName };
+        }
+
+        return null;
     }
 
     /// <summary>

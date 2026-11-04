@@ -14,24 +14,22 @@ import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfa
    `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
    whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
 export const PG_BLOAT_STATS = [
-  { key: "tables_returned", label: "Tables returned", format: "int" },
-  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mb" },
+  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mbfit" },
   { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
   { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
   { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
-  { key: "truncated", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: "The window held more tables than the grid below lists.", label: "Truncated", format: "bool" },
 ];
 
 /* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
    the field name survived review for saying what it is, and a label that renamed it would undo that where a
    reader actually looks. */
 export const PG_INDEX_USAGE_STATS = [
-  { key: "indexes_returned", label: "Indexes returned", format: "int" },
   { key: "unscanned_without_a_structural_blocker", label: "Unscanned, nothing blocking a drop", format: "int" },
-  { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mb" },
+  { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mbfit" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
-  { key: "truncated", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: "The window held more indexes than the grid below lists.", label: "Truncated", format: "bool" },
 ];
 
 /* #6154: a column whose read writes a paragraph per row. The cell shows the short word `word(text)` gives, sorts and filters on it, and the
@@ -45,10 +43,10 @@ export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
-  { key: "index_mb", label: "Size", format: "mb" },
+  { key: "index_mb", label: "Size", format: "mbfit" },
   { key: "avg_leaf_density", label: "Leaf Density %", format: "num1" },
   { key: "leaf_fragmentation", label: "Fragmentation %", format: "num1" },
-  { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mb" },
+  { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mbfit" },
   detailColumn("skipped_reason", "Not Measured", indexSkipWord,
     "Why no bloat figure could be estimated for this index. Blank means it was estimated. Click a reason for the full text."),
 ];
@@ -65,8 +63,8 @@ export const PG_BLOAT_COLUMNS = [
      "Unknown" rather than a severity, so it renders neutral - colouring it would assert the very thing the
      suppression denies. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "heap_mb", label: "Heap", format: "mb" },
-  { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mb" },
+  { key: "heap_mb", label: "Heap", format: "mbfit" },
+  { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mbfit" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
   { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
   { key: "estimate_suppression_reason", label: "Why Suppressed", clamp: true },
@@ -80,10 +78,10 @@ export const PG_BLOAT_COLUMNS = [
   { key: "last_analyzed", label: "Last Analyzed", format: "time" },
   { key: "fillfactor", label: "Fill Factor", format: "int" },
   detailColumn("fillfactor_note", "Fill Factor Note", fillfactorNoteWord, "Set when the table keeps free space on purpose for in-place updates. Click for how that affects the estimate."),
-  { key: "toast_bytes", label: "TOAST Bytes", format: "int" },
+  { key: "toast_bytes", label: "TOAST Size", format: "bytes" },
   detailColumn("toast_note", "TOAST", toastNoteWord, "Set when the table stores large values out of line. The bloat estimate covers the main table only. Click for details."),
-  { key: "index_bytes", label: "Index Bytes", format: "int" },
-  { key: "heap_bytes_growth_in_window", label: "Heap Growth", format: "int" },
+  { key: "index_bytes", label: "Index Size", format: "bytes" },
+  { key: "heap_bytes_growth_in_window", label: "Heap Growth", format: "bytes" },
   { key: "pgstattuple_available", label: "pgstattuple", format: "bool" },
   { key: "exact_measurement_command", label: "Measure It Exactly", clamp: true, mono: true },
   { key: "sample_count", label: "Samples", format: "int" },
@@ -101,7 +99,7 @@ export const PG_INDEX_USAGE_COLUMNS = [
      blocker is Warning, and an index we have not watched for two samples is Healthy rather than Warning -
      too-early-to-say must not look like a finding. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "index_mb", label: "Size", format: "mb" },
+  { key: "index_mb", label: "Size", format: "mbfit" },
   { key: "scans_in_window", label: "Scans in Window", format: "int" },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
   { key: "last_scan", label: "Last Scan", format: "time" },
