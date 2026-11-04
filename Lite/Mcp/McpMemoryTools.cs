@@ -203,14 +203,20 @@ public sealed class McpMemoryTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure notification events (memory_notification: RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR (sp_pressuredetector's source), over a sample_time window ending at as_of (default 24h), oldest first. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed). Process pressure: check get_memory_grants and get_memory_clerks. System pressure with process normal: check get_server_properties (likely another process on the box, not SQL Server).")]
+    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure events (memory_notification: RESOURCE_MEMPHYSICAL_LOW/_HIGH, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR, over a sample_time window ending at as_of (default 24h), oldest first. Newest 200 (limit); summary counts the window; read truncated. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed). Process pressure: check get_memory_grants and get_memory_clerks. System pressure with process normal: check get_server_properties (likely another process on the box, not SQL Server).")]
     public static async Task<string> GetMemoryPressureEvents(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Newest events to return, still oldest first. Default 200, max 1000. summary counts the whole window; read truncated.")] int limit = 200,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
+        /* limit is refused before the server is resolved, the same order as Darling, so a bad server name with a bad limit
+           gets the same refusal on both products. */
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
@@ -219,7 +225,8 @@ public sealed class McpMemoryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetMemoryPressureEventsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var page = await dataService.GetMemoryPressureEventsPageAsync(resolved.ServerId, hours_back, limit, asOfUtc: windowEnd);
+            var rows = page.Rows;
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "memory_pressure_events", awsRdsKind: AwsRdsKind.None)
@@ -246,6 +253,28 @@ public sealed class McpMemoryTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #7516: the cap, whether the window held more (observed from the extra row), and the whole window's counts. events_returned is the
+                   page's count; total_events is the window's. */
+                limit,
+                truncated = page.Truncated,
+                events_returned = rows.Count,
+                order = "oldest_first",
+                oldest_returned_at = McpHelpers.FormatEffectiveStart(rows[0].SampleTime),
+                newest_returned_at = McpHelpers.FormatEffectiveStart(rows[^1].SampleTime),
+                limit_note = page.Truncated
+                    ? $"Showing the newest {rows.Count} of {page.TotalEvents} events in the window (limit {limit}); the older {page.TotalEvents - rows.Count} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
+                    : null,
+                summary = new
+                {
+                    total_events = page.TotalEvents,
+                    medium_or_worse_events = page.MediumOrWorseEvents,
+                    by_notification = page.ByNotification.Select(n => new
+                    {
+                        memory_notification = n.MemoryNotification,
+                        events = n.Events,
+                        medium_or_worse_events = n.MediumOrWorseEvents
+                    })
+                },
                 events = rows.Select(r => new
                 {
                     sample_time = r.SampleTime.ToString("o"),
