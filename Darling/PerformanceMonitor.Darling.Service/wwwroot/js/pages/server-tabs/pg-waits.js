@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { codeDisclosure, pgQueryIdText } from "./shared.js";
 
 /* Density leads, not size: a huge index at 90% density is fine and a small one at 40% is the finding.
    skipped_reason is last and always present — a blank there is a measurement, a value there is an index
@@ -41,11 +42,14 @@ export function pgWaitTrendSpecs(ctx) {
 export const PG_WAIT_SAMPLING_COLUMNS = [
   { key: "event_type", label: "Type" },
   { key: "wait_event", label: "Event" },
-  { key: "queryid", label: "Query ID" },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "samples", label: "Samples", format: "int" },
   { key: "estimated_wait_ms", label: "Est. Wait", format: "ms" },
   { key: "backends", label: "Backends", format: "int" },
   { key: "pct_of_samples", label: "% of Samples", format: "num1" },
+  /* #7428: the statement behind the id, last like Top Query Shapes, so the numbers stay on the page. Null until the
+     hourly capture reaches the id, and always null for "no statement". */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 /* #2629: OS CPU per query shape. Total first because it is the ranking, then the user/system split, because
@@ -53,7 +57,7 @@ export const PG_WAIT_SAMPLING_COLUMNS = [
    Device bytes are labelled "Device" rather than "Read"/"Write" — they are not logical I/O, and a zero here
    means the page cache served it. */
 export const PG_KERNEL_COLUMNS = [
-  { key: "queryid", label: "Query ID" },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "database_name", label: "Database" },
   { key: "cpu_ms", label: "CPU", format: "ms" },
   { key: "user_cpu_ms", label: "User CPU", format: "ms" },
@@ -64,6 +68,8 @@ export const PG_KERNEL_COLUMNS = [
   { key: "device_read_mb", label: "Device Read", format: "mb" },
   { key: "device_write_mb", label: "Device Write", format: "mb" },
   { key: "major_faults", label: "Major Faults", format: "int" },
+  /* #7428: see PG_WAIT_SAMPLING_COLUMNS. */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 export const PG_WAIT_COLUMNS = [

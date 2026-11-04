@@ -354,6 +354,13 @@ public sealed class ViewerPostgresGridTimeTextTests
                 continue;
             }
 
+            /* #7428: text the display row derives from reader columns (the Query ID cell's words, the Statement column's
+               placeholder), so there is no reader property of the same name. */
+            if (property.Name is "QueryIdText" or "StatementText")
+            {
+                continue;
+            }
+
             var counterpart = readerType.GetProperty(property.Name, BindingFlags.Public | BindingFlags.Instance);
             Assert.True(counterpart != null, $"{displayType.Name}.{property.Name} is not a property of {readerType.Name}.");
             Assert.Equal(counterpart!.PropertyType, property.PropertyType);

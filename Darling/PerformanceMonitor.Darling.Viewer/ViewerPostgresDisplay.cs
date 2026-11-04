@@ -1572,6 +1572,10 @@ internal static class PgDisplay
         public string? Event { get; init; }
         /// <summary>Null is a target that does not report a query id (#6836): the grid shows the not-applicable dash, never 0.</summary>
         public long? QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, the dash for null, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0 and for a null id, which name no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public long SampleCount { get; init; }
         public long EstimatedWaitMs { get; init; }
         public int BackendCount { get; init; }
@@ -1580,6 +1584,11 @@ internal static class PgDisplay
         /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime CaptureTimeUtc { get; init; }
     }
+
+    /// <summary>#7428: the Query ID cell of a PostgreSQL grid. 0 is work belonging to no statement and reads "no statement", a bare 0 beside a real
+    /// 19-digit id would read as an id. Null is a target that does not report an id and reads as the dash. The number stays on the row for sorting.</summary>
+    internal static string QueryIdText(long? queryId) =>
+        queryId is null ? "—" : queryId == 0 ? "no statement" : queryId.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     internal static List<WaitSamplingRow> WaitSamplingRows(IReadOnlyList<DarlingPgWaitSamplingReader.PgWaitSamplingRow> rows)
     {
@@ -1593,6 +1602,8 @@ internal static class PgDisplay
         EventType = row.EventType,
         Event = row.Event,
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId is null or 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         SampleCount = row.SampleCount,
         EstimatedWaitMs = row.EstimatedWaitMs,
         BackendCount = row.BackendCount,
@@ -2031,6 +2042,10 @@ internal static class PgDisplay
     {
         public string DatabaseName { get; init; } = "";
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public double TotalCpuMs { get; init; }
         public double ExecUserTimeMs { get; init; }
         public double ExecSystemTimeMs { get; init; }
@@ -2048,6 +2063,8 @@ internal static class PgDisplay
     {
         DatabaseName = row.DatabaseName ?? "",
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         TotalCpuMs = Math.Round(row.TotalCpuMs, 1),
         ExecUserTimeMs = Math.Round(row.ExecUserTimeMs, 1),
         ExecSystemTimeMs = Math.Round(row.ExecSystemTimeMs, 1),

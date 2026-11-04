@@ -25,6 +25,20 @@ export function codeDisclosure(text) {
 }
 
 /**
+ * #7428: the Query ID cell of a PostgreSQL grid. 0 is work that belongs to no statement (a background process, or a
+ * statement the server did not attribute), which a bare "0" beside a real 19-digit id reads as an id; null is a target
+ * that does not report one, the dash every other absent value uses. The id stays the row's value for sort, filter and
+ * CSV export (the grid reads the key, not this text), so only the cell on screen and Copy carry the words.
+ */
+export function pgQueryIdText(key = "queryid") {
+  return (row) => {
+    const v = row[key];
+    if (v == null || v === "") return "—";
+    return String(v) === "0" ? "no statement" : String(v);
+  };
+}
+
+/**
  * An array-valued cell — a blocking chain's databases, a lock cycle's PIDs. The generic path stringifies an
  * array, which is nearly right for a populated one and renders an EMPTY one as a blank cell rather than as the
  * "—" every other absent value on the page uses, so the two absences would not look alike.

@@ -35,6 +35,9 @@ public static class DarlingPgKernelStatsReader
     /// <param name="CounterReset">The extension's counters were reset inside the window, so the figures
     /// cover only the time since. Detected from <c>stats_since</c> moving, or from a counter going
     /// backwards.</param>
+    /// <param name="QueryText">#7428: the statement text captured for <see cref="QueryId"/> in
+    /// <c>collect.pg_statement_text</c>, or null when the hourly capture has not reached that id yet (and for
+    /// id 0, which names no statement). Never an empty string standing in for "none".</param>
     public sealed record PgKernelStatRow(
         string? DatabaseName,
         long QueryId,
@@ -45,7 +48,8 @@ public static class DarlingPgKernelStatsReader
         long ExecWriteBytes,
         long MajorFaults,
         bool CounterReset,
-        DateTime CaptureTime);
+        DateTime CaptureTime,
+        string? QueryText = null);
 
     /// <summary>
     /// One page of per-query CPU plus the denominator its shares are taken over (#3541 A7).
@@ -76,7 +80,12 @@ public static class DarlingPgKernelStatsReader
        a dozen string assertions on this SQL passed throughout. An ORDER BY cannot name a select-list alias
        inside an expression either, so the CASEs are given names one layer down and the outer query sorts
        by `user_ms + system_ms` - which also lets the window aggregate reference them by name instead of
-       repeating both CASEs. */
+       repeating both CASEs.
+
+       #7428: the statement text is joined AFTER the cap, in a wrapper over the ranked page, so only the page's
+       rows look anything up. The text store is keyed on (server_id, queryid) with that pair as its PRIMARY KEY
+       (#2219), so the join is an index lookup per row on every store and cannot multiply a row, including when
+       one query id appears under two databases: both rows carry the same text. */
     public const string PgKernelStatsSql = """
         WITH newest AS (
             SELECT DISTINCT ON (database_name, query_id)
@@ -132,20 +141,32 @@ public static class DarlingPgKernelStatsReader
                 counter_reset,
                 collection_time
             FROM paired
+        ),
+        ranked AS (
+            SELECT
+                database_name,
+                query_id,
+                user_ms,
+                system_ms,
+                read_bytes,
+                write_bytes,
+                major_faults,
+                counter_reset,
+                collection_time,
+                SUM(user_ms + system_ms) OVER () AS window_total_cpu_ms
+            FROM differenced
+            ORDER BY user_ms + system_ms DESC, database_name, query_id
+            LIMIT $4
         )
         SELECT
-            database_name,
-            query_id,
-            user_ms,
-            system_ms,
-            read_bytes,
-            write_bytes,
-            major_faults,
-            counter_reset,
-            collection_time,
-            SUM(user_ms + system_ms) OVER () AS window_total_cpu_ms
-        FROM differenced
-        ORDER BY user_ms + system_ms DESC, database_name, query_id
+            r.database_name, r.query_id, r.user_ms, r.system_ms, r.read_bytes, r.write_bytes,
+            r.major_faults, r.counter_reset, r.collection_time, r.window_total_cpu_ms,
+            t.query_text
+        FROM ranked AS r
+        LEFT JOIN collect.pg_statement_text AS t
+               ON  t.server_id = $1
+               AND t.queryid   = r.query_id
+        ORDER BY r.user_ms + r.system_ms DESC, r.database_name, r.query_id
         LIMIT $4
         """;
 
@@ -197,7 +218,8 @@ public static class DarlingPgKernelStatsReader
                 CounterReset: !reader.IsDBNull(7) && reader.GetBoolean(7),
                 CaptureTime: reader.IsDBNull(8)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                QueryText: reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
 
         return new PgKernelStatsPage(rows, windowTotalCpuMs);

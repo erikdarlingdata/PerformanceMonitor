@@ -4851,7 +4851,7 @@
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Database" Binding="{Binding DatabaseName}" Width="150"/>
-                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
                                     <DataGridTextColumn Header="CPU (ms)" Binding="{Binding TotalCpuMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="User (ms)" Binding="{Binding ExecUserTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                                     <DataGridTextColumn Header="System (ms)" Binding="{Binding ExecSystemTimeMs}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
@@ -4860,7 +4860,15 @@
                                     <DataGridTextColumn Header="Disk Read" Binding="{Binding ExecReadBytes}" SortMemberPath="ExecReadBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Disk Write" Binding="{Binding ExecWriteBytes}" SortMemberPath="ExecWriteBytesSort" ElementStyle="{StaticResource NumericCell}" Width="140"/>
                                     <DataGridTextColumn Header="Major Faults" Binding="{Binding MajorFaults}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="*"/>
+                                    <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
+                                    <!-- #7428: the statement behind the id, last like the statement grid above, so the numbers stay in view. -->
+                                    <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <!-- #2566 captured plans. Under the statement grid because a plan only means
@@ -5206,9 +5214,17 @@
                         <!-- Zero means the wait belonged to no statement - a background process -
                              rather than an unknown query. Joins pg_statement_stats.queryid. A dash is a target that
                              does not report a query id (PostgreSQL 10 to 13, #6836). -->
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId, TargetNullValue='—'}" Width="180"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="180"/>
                         <DataGridTextColumn Header="Counter Reset" Binding="{Binding CounterReset}" Width="110"/>
-                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="*" SortMemberPath="CaptureTimeUtc"/>
+                        <DataGridTextColumn Header="Last Seen" Binding="{Binding CaptureTime}" Width="140" SortMemberPath="CaptureTimeUtc"/>
+                        <!-- #7428: the statement behind the id, last like the statement grid on the Queries tab. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid></ui:ViewportBox>
                 <!-- #6385: the web's Wait Trend, as a chart (ViewerServerTab.PgTrends.cs). -->
