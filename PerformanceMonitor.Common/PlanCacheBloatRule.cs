@@ -59,7 +59,7 @@ namespace PerformanceMonitor.Common
 
         /// <summary>
         /// Banded level and the paired recommendation. <paramref name="totalPlans"/> and
-        /// <paramref name="totalSizeMb"/> are the whole cache, used only to say how small it is. The other three
+        /// <paramref name="totalSizeMb"/> are the whole cache: they say whether the cache is too small to judge, and size the below-floor text. The other three
         /// are over compiled plans only. Above the floor: &gt; 50% CRITICAL, &gt; 30% HIGH, &gt; 20% MEDIUM, else
         /// NORMAL, and the recommendation names the low-risk first step, <c>optimize for ad hoc workloads</c>,
         /// before the database-wide Forced Parameterization.
@@ -69,10 +69,20 @@ namespace PerformanceMonitor.Common
         {
             if (compiledSingleUseSizeMb < SingleUseFloorMb)
             {
-                return ("NORMAL", string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Plan cache is too small to judge: {0} plans using {1} MB, with {2} MB in single-use compiled plans (the floor is {3} MB)",
-                    totalPlans, totalSizeMb, compiledSingleUseSizeMb, SingleUseFloorMb));
+                // Two different cases sit under the floor. A cache whose WHOLE size is under the floor could not
+                // reach it even if every plan were single use, so it is too small to judge. A big cache with little
+                // single-use memory is the normal state of a well-parameterized server (or an ad hoc stub cache), and
+                // it is judged: there is just nothing to act on. Calling it "too small" was wrong (#7445 review).
+                var text = totalSizeMb < SingleUseFloorMb
+                    ? string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Plan cache is too small to judge: {0:N0} plans using {1:N0} MB, with {2:N0} MB in single-use compiled plans (the floor is {3:N0} MB)",
+                        totalPlans, totalSizeMb, compiledSingleUseSizeMb, SingleUseFloorMb)
+                    : string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Single-use compiled plans take {0:N0} MB of the {1:N0} MB plan cache ({2:N0} plans), under the {3:N0} MB bloat floor, so no action is needed",
+                        compiledSingleUseSizeMb, totalSizeMb, totalPlans, SingleUseFloorMb);
+                return ("NORMAL", text);
             }
 
             double singleUsePercent = compiledPlans > 0 ? compiledSingleUsePlans * 100.0 / compiledPlans : 0.0;

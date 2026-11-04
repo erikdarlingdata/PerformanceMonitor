@@ -188,6 +188,19 @@ public sealed class ViewerPlanCacheBloatTests
         Assert.Contains("too small to judge", bloat.Recommendation, StringComparison.Ordinal);
         Assert.DoesNotContain("Forced Parameterization", bloat.Recommendation, StringComparison.Ordinal);
     }
+
+    /// <summary>#7445: 20,000 compiled plans in 3,000 MB with 50 MB single use is a well-parameterized server, not a small cache.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ALargeCacheUnderTheFloor_IsNotCalledTooSmallToJudge()
+    {
+        var bloat = ViewerDataService.ClassifyPlanCacheBloat(
+            new PlanCacheSummary(20000, 1000, null, null, TotalSizeMb: 3000, CompiledPlans: 20000, CompiledSingleUsePlans: 1000, CompiledSingleUseSizeMb: 50));
+        Assert.Equal("NORMAL", bloat.Level);
+        Assert.DoesNotContain("too small", bloat.Recommendation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("50 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("3,000 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("no action is needed", bloat.Recommendation, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>

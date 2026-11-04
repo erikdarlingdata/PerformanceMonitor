@@ -56,6 +56,24 @@ public sealed class LitePlanCacheBloatTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("49 plans using 11 MB", bloat.Recommendation, StringComparison.Ordinal);
     }
 
+    /// <summary>#7445: 20,000 compiled plans in 3,000 MB with 50 MB single use is the normal state of a well-parameterized
+    /// server. It is below the floor, but the cache is not small, so the text must not say it is too small to judge.</summary>
+    [Fact]
+    public async Task LargeCache_UnderTheFloor_IsNormal_AndIsNotCalledTooSmallToJudge()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var collected = DateTime.UtcNow.AddMinutes(-5);
+        await InsertGroupAsync(collected, "Compiled Plan", "Adhoc", totalPlans: 20000, totalMb: 3000, singlePlans: 1000, singleMb: 50, ct);
+
+        var bloat = LocalDataService.ClassifyPlanCacheBloat(await new LocalDataService(_duckDb).GetPlanCacheSummaryAsync(ServerId));
+
+        Assert.Equal("NORMAL", bloat.Level);
+        Assert.DoesNotContain("too small", bloat.Recommendation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("50 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("3,000 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("no action is needed", bloat.Recommendation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task LargeCache_OfSingleUseCompiledPlans_IsCritical_AndAdvisesAdHocWorkloadsFirst()
     {

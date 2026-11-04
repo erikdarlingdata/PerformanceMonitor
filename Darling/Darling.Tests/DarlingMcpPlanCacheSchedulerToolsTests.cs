@@ -190,6 +190,20 @@ public sealed class DarlingMcpPlanCacheSchedulerToolsSurfaceAndSqlTests
         Assert.DoesNotContain("Forced Parameterization", recommendation, StringComparison.Ordinal);
     }
 
+    /// <summary>#7445: 20,000 compiled plans in 3,000 MB with 50 MB single use is a well-parameterized server. It is below the
+    /// floor but the cache is not small, so the text must not say it is too small to judge.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ALargeCacheUnderTheFloor_IsNotCalledTooSmallToJudge()
+    {
+        var (level, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(
+            [Group("Compiled Plan", 20000, 3000, 1000, 50)]);
+        Assert.Equal("NORMAL", level);
+        Assert.DoesNotContain("too small", recommendation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("50 MB", recommendation, StringComparison.Ordinal);
+        Assert.Contains("3,000 MB", recommendation, StringComparison.Ordinal);
+        Assert.Contains("no action is needed", recommendation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ClassifyPlanCacheBloat_TheFloor_IsOneHundredMegabytesOfSingleUse()
     {
