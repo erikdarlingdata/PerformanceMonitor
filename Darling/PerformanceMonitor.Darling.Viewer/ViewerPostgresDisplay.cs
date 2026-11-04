@@ -1137,26 +1137,10 @@ internal static class PgDisplay
     // ── Session states ───────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The share of the samples that saw a session in which it must have been the oldest xmin holder
-    /// before the grid paints it as one.
-    ///
-    /// <para>Half, and it is a COPY of <c>DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare</c>
-    /// rather than a reference to it: the viewer does not reference the service project, so the constant
-    /// cannot be reached from here. The duplication is deliberate and pinned —
-    /// <c>ViewerPostgresTabsTests</c> asserts this projection's flags agree with the MCP's own severity
-    /// band on the same row, in the one assembly that references both — because the alternative is two
-    /// surfaces quietly disagreeing about whether a session is starving vacuum.</para>
-    ///
-    /// <para>The threshold itself is the argument from the read: every write transaction is momentarily
-    /// the oldest holder, so a single sighting proves only that the instance does writes. Sustained
-    /// holding is the finding.</para>
-    /// </summary>
-    internal const double SustainedHolderSampleShare = 0.5;
-
-    /// <summary>
     /// How long a session must have sat idle in transaction, while pinning NOTHING, before the grid says
     /// anything about it. Five minutes, the copy of
-    /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c> — see above for why it is a copy.
+    /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c>. The viewer does not reference the
+    /// service project, so it is a copy, and a test keeps the two equal.
     /// <para>It costs vacuum nothing, so the amber is not the vacuum argument: at five minutes it is holding
     /// a connection and whatever locks the transaction already took, which is a forgotten commit.</para>
     /// </summary>
@@ -1236,7 +1220,7 @@ internal static class PgDisplay
         public string Caveats { get; init; } = "";
 
         /// <summary>Sustained holder: the red. Only ever true for a session seen holding the oldest xmin
-        /// across at least <see cref="SustainedHolderSampleShare"/> of the samples that saw it, so a passing
+        /// across at least <see cref="DarlingPgSessionStatesReader.SustainedHolderSampleShare"/> of the samples that saw it, so a passing
         /// sighting — which every write transaction produces — is not painted as a cause.</summary>
         public bool IsSustainedHorizonHolder { get; init; }
 
@@ -1295,9 +1279,7 @@ internal static class PgDisplay
            derived from them would report an absent GRANT as an observation about the workload. */
         var unknown = r.StateWasRedacted;
 
-        var sustained = !unknown
-            && r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = !unknown && DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         /* Deliberately NOT gated on PeakHorizonAge < 0, and the gate that used to be here was a real
            cross-surface bug. is_horizon_holder means "the OLDEST holder on the instance", not "holds
