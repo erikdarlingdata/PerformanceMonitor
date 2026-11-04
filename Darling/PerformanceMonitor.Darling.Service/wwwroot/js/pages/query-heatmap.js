@@ -151,7 +151,7 @@ function metricPicker(onPick) {
  * The Query Heatmap card of the Queries tab: the metric picker under the title, the grid (or table) under it. A metric pick draws the card
  * again with the new `metric`, aborting the read before it. `columns` are the table view's columns, `hours` and `label` the tab's range.
  */
-export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
+export function queryHeatmapCard({ server, hours, label, columns, emptyText, emptyLine }) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   let drawing = null;
@@ -182,6 +182,7 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
       viz: "table",
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
+      emptyLine,
       span: 2,
       control,
     });

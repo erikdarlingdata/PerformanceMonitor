@@ -969,7 +969,7 @@ GROUP BY server_id, collector_name";
         var deadlockTiers = await ReadDeadlockRateThresholdsAsync(postgres, cancellationToken);
         /* #6927 (V228): the blocking band's tiers, read once per roll-up for the same reason. */
         var blockingTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
-        var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken);
+        var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken, logger);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -1060,7 +1060,7 @@ GROUP BY server_id, collector_name";
     /// </summary>
     internal const string FleetIdentityCapacitySql = $@"
 SELECT c.server_id, c.percent_used, c.database_name, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
-       c.last_value::text, c.seed_value::text, c.increment_value::text
+       c.last_value::text, c.seed_value::text, c.increment_value::text, c.collection_time
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -1082,34 +1082,45 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
     /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
-        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
         var counts = new Dictionary<int, (int Columns, bool Critical, IdentityColumnFact? Worst, double WorstPercent)>();
-        await using var command = postgres.CreateCommand(FleetIdentityCapacitySql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
+        await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
-            if (reader.IsDBNull(1))
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
-                continue;
-            }
+                if (reader.IsDBNull(1))
+                {
+                    continue;
+                }
 
-            var band = IdentityCapacityMath.Band(reader.GetDouble(1));
-            if (band == IdentityCapacityMath.BandOk)
-            {
-                continue;
-            }
+                var band = IdentityCapacityMath.Band(reader.GetDouble(1));
+                if (band == IdentityCapacityMath.BandOk)
+                {
+                    continue;
+                }
 
-            var serverId = reader.GetInt32(0);
+                var percent = reader.GetDouble(1);
+                rows.Add((reader.GetInt32(0), percent, band, ColumnOf(reader, percent, nowUtc), reader.GetDateTime(11)));
+            }
+        }
+
+        /* #7547: a column on a database the server no longer has stays in its last scan for the whole window, so it is left out here the way the
+           tool, the alert and the Viewer leave it out (DarlingIdentityCapacityReader). A server with no current database list keeps every row. */
+        rows = await CurrentDatabaseScope.OmitDroppedAsync(
+            postgres, rows, r => r.ServerId, r => r.Column.DatabaseName, DatabaseFilter.All, r => r.ScannedAt, logger: logger, cancellationToken: cancellationToken);
+        foreach (var (serverId, percent, band, column, _) in rows)
+        {
             counts.TryGetValue(serverId, out var seen);
-            var percent = reader.GetDouble(1);
             /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
             var isWorst = seen.Worst is null || percent > seen.WorstPercent;
             counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical,
-                isWorst ? ColumnOf(reader, percent, nowUtc) : seen.Worst, isWorst ? percent : seen.WorstPercent);
+                isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent);
         }
 
         return counts.ToDictionary(

@@ -151,12 +151,18 @@ public partial class AlertDetailWindow : Window
         CopyStatusText.Visibility = Visibility.Visible;
     }
 
-    /* #5847: close this modal window first, so the server's view it opens is not behind it. */
+    /// <summary>
+    /// #7554: the link's action, held back until the dialog is gone. Run right after <c>Close()</c> inside the dialog's click
+    /// handler, it selected the server tab and then lost the selection to the Alert History grid getting its keyboard focus back.
+    /// The caller runs it once <c>ShowDialog</c> has returned.
+    /// </summary>
+    internal Action? DeferredOpen { get; private set; }
+
+    /* #5847: close this modal window first, so the server's view it opens is not behind it. #7554: the open itself waits for the caller. */
     private void FullChainLink_Click(object sender, RoutedEventArgs e)
     {
-        var open = _openFullChain;
+        DeferredOpen = _openFullChain;
         Close();
-        open?.Invoke();
     }
 
     /* #5847: open at the size the user last left it, never below the window's minimum. */
