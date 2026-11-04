@@ -113,6 +113,15 @@ ORDER BY w.stmt_ms DESC";
     /// floor on the peak is <c>PgTargetScorer.BadActorShareConcerning</c> BY REFERENCE — the measured-routine line:
     /// a statement must at some point in the window have held at least the share that is routine for a TOP statement
     /// before its deviation is the story; a 10× jump from 0.5 % to 5 % is a statement nobody would call a bad actor.
+    /// <b>#7396 adds a third clause, on the WINDOW share:</b> the candidate must also hold at least that same line of the
+    /// window's total statement time. The peak and the unweighted mean count every collection the same however little ran
+    /// in it, so on a quiet target a tiny statement can reach peak 100 % and mean 30.6 % while holding 0.04 % of the
+    /// window. A candidate under the line is recorded as within its own normal. The trade, stated: a statement that
+    /// spiked to a large share of one quiet collection but held under a quarter of the whole window no longer fires;
+    /// its <c>PG_BAD_ACTOR_*</c> card is still raised on the absolute bars, and the deviation anomaly is for a statement
+    /// that took a quarter of the window's work or more. No calibration read placed a window-share cut for this
+    /// detector (the §D3A read counted peak-floored statement-hours, not window-floored ones), so the line is the
+    /// measured-routine one reused by reference, not a new number.
     /// The cutoffs are the shared defaults reused by name — <see cref="AnomalyThresholds.DefaultDeviationThreshold"/>
     /// classical, <see cref="AnomalyThresholds.ModifiedZThresholdFor"/>'s default robust cutoff — unmeasured for
     /// statement share; the fact carries <c>threshold_lineage = 0</c>.</para>
@@ -191,14 +200,9 @@ ORDER BY w.stmt_ms DESC";
                     continue;
                 }
 
-                /* unmeasured for statement share: the shared classical and robust cutoffs, reused by name;
-                   BadActorShareConcerning as the peak's magnitude floor is the measured-ROUTINE line (context, not the
-                   grade — see the summary); the fallback bar is unreachable by construction (trust checked above). */
-                var decision = AnomalyGate.EvaluateZScore(
-                    baseline, candidate.PeakShare, candidate.MeanShare,
-                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgStatementShare),
-                    PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, SigmaDisplayCap,
-                    window: context.TimeRangeEnd - context.TimeRangeStart);
+                var decision = EvaluateCandidate(
+                    baseline, candidate.WindowShare, candidate.PeakShare, candidate.MeanShare,
+                    context.TimeRangeEnd - context.TimeRangeStart);
 
                 if (!decision.Fire)
                 {
@@ -224,6 +228,9 @@ ORDER BY w.stmt_ms DESC";
             metadata["peak_share"] = peakShare;
             metadata["mean_share"] = meanShare;
             metadata["mean_sigma"] = verdict.MeanSigma ?? 0.0;
+            /* #7396: the robust dispersion the sigma was measured in when the bucket had one (0 when it fell back to the
+               classical frame), so the card's routine clause names the SAME frame as its "times its usual variation". */
+            metadata["baseline_robust_sigma"] = bucket.EffectiveRobustSigma;
             metadata["ratio"] = bucket.Mean > 0 ? windowShare / bucket.Mean : 0.0;
             metadata["candidates_evaluated"] = candidates.Count;
             metadata["candidates_fired"] = fired;
@@ -245,5 +252,30 @@ ORDER BY w.stmt_ms DESC";
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Bad-actor share anomaly detection failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>One candidate's verdict against its own normal (#7396): the pair gate on the peak and mean per-collection
+    /// share, then the window-share floor. Pulled out of the loop so a test can drive the arithmetic with the numbers a
+    /// quiet collection produces.
+    ///
+    /// <para>unmeasured for statement share: the shared classical and robust cutoffs, reused by name;
+    /// <c>BadActorShareConcerning</c> as the peak's magnitude floor is the measured-ROUTINE line (context, not the
+    /// grade — see the summary); the fallback bar is unreachable by construction (trust is checked by the caller).</para>
+    ///
+    /// <para>#7396: the candidate must ALSO hold at least <c>BadActorShareConcerning</c> of the WINDOW
+    /// (<paramref name="windowShare"/>, the weighted share: the statement's time over all statements' time). The peak and
+    /// the unweighted mean are per-collection and each collection counts the same however little ran in it, so in a
+    /// collection where almost nothing ran a tiny statement holds nearly all of a tiny total: peak 100 %, mean 30.6 %,
+    /// window share 0.04 % on the quiet PostgreSQL 18 target the issue came from, a Warning on 44 of 48 runs. A candidate
+    /// under the line is recorded as within its own normal (verdict 1), as a candidate that did not fire always is.</para></summary>
+    internal static AnomalyGate.ZDecision EvaluateCandidate(BaselineBucket baseline, double windowShare, double peakShare, double meanShare, TimeSpan window)
+    {
+        var decision = AnomalyGate.EvaluateZScore(
+            baseline, peakShare, meanShare,
+            DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgStatementShare),
+            PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, SigmaDisplayCap,
+            window: window);
+
+        return windowShare < PgTargetScorer.BadActorShareConcerning ? decision with { Fire = false } : decision;
     }
 }

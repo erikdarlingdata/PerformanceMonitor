@@ -107,11 +107,9 @@ public sealed class PgTargetQueriesTests
            it by name). */
         var bucket = new BaselineBucket { HourOfDay = 12, DayOfWeek = 2, Mean = mean, StdDev = stddev, Median = mean, Mad = 0.6745 * stddev, SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full };
         Assert.True(bucket.IsTrustworthy);
-        /* The detector's call, argument for argument (pinned on the source in TheDetector_… below). */
-        var decision = AnomalyGate.EvaluateZScore(
-            bucket, windowShare, windowShare,
-            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgStatementShare),
-            PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, AnomalyThresholds.SigmaDisplayCap);
+        /* The detector's own per-candidate verdict (#7396 pulled it out of the loop), window share, peak and mean all the one
+           number here, over the 4-hour reference window (where the peak's Sidak correction is a no-op). */
+        var decision = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare, windowShare, windowShare, TimeSpan.FromHours(4));
         if (!decision.Fire)
             return (null, decision, bucket);
 
@@ -126,6 +124,7 @@ public sealed class PgTargetQueriesTests
             {
                 ["baseline_mean"] = bucket.Mean,
                 ["baseline_stddev"] = bucket.EffectiveStdDev,
+                ["baseline_robust_sigma"] = bucket.EffectiveRobustSigma,
                 ["baseline_median"] = bucket.Median,
                 ["baseline_mad"] = bucket.Mad,
                 ["deviation_sigma"] = decision.Sigma,
@@ -150,6 +149,98 @@ public sealed class PgTargetQueriesTests
         foreach (var (otherId, verdict) in others)
             fact.Metadata[PgTargetAnomalyDetector.OwnNormalMetadataPrefix + otherId.ToString(CultureInfo.InvariantCulture)] = verdict;
         return (fact, decision, bucket);
+    }
+
+    /* ── #7396: a quiet collection must not make a vanishing statement a bad actor ── */
+
+    /// <summary>The bucket of the quiet PostgreSQL 18 target in #7396: a statement whose hour-of-week share is about zero
+    /// with a few spiky hours (classical stddev 25.4 %, MAD tiny), so a peak of 100 % and a mean of 30.6 % are far beyond it
+    /// in either frame.</summary>
+    private static BaselineBucket QuietTargetBucket() => new()
+    {
+        HourOfDay = 12, DayOfWeek = 2, Mean = 0.0004, StdDev = 0.254, Median = 0.0, Mad = 0.002,
+        SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full,
+    };
+
+    [Fact]
+    public void EvaluateCandidate_StaysSilent_ForAStatementHoldingAVanishingShareOfTheWindow_EvenWhenOneQuietCollectionMadeItThePeak()
+    {
+        var bucket = QuietTargetBucket();
+        Assert.True(bucket.IsTrustworthy);
+        var window = TimeSpan.FromHours(4);
+
+        /* The issue's numbers: peak 100 %, mean 30.6 %, but 0.04 % of the window's execution time. The pair gate alone
+           (what the detector asked before the window-share floor) fires on them at the display cap. */
+        var pairOnly = AnomalyGate.EvaluateZScore(
+            bucket, 1.0, 0.306, AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgStatementShare),
+            PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, AnomalyThresholds.SigmaDisplayCap, window: window);
+        Assert.True(pairOnly.Fire);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pairOnly.Sigma);
+
+        var quiet = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.0004, peakShare: 1.0, meanShare: 0.306, window);
+        Assert.False(quiet.Fire);
+    }
+
+    [Fact]
+    public void EvaluateCandidate_StillFires_ForAStatementWithARealWindowShare_AndTheFloorIsTheConcerningLineInclusive()
+    {
+        var bucket = QuietTargetBucket();
+        var window = TimeSpan.FromHours(4);
+
+        var real = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.45, peakShare: 1.0, meanShare: 0.306, window);
+        Assert.True(real.Fire);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, real.Sigma);
+
+        /* The floor is PgTargetScorer.BadActorShareConcerning by reference: at the line fires, a hair under does not. */
+        Assert.True(PgTargetAnomalyDetector.EvaluateCandidate(bucket, PgTargetScorer.BadActorShareConcerning, 1.0, 0.306, window).Fire);
+        Assert.False(PgTargetAnomalyDetector.EvaluateCandidate(bucket, PgTargetScorer.BadActorShareConcerning - 0.001, 1.0, 0.306, window).Fire);
+    }
+
+    [Fact]
+    public void ComposeBadActorShareAnomaly_NamesTheRoutineInTheSameFrameAsTheSigma_AndKeepsTheOldClauseForAFactWithoutTheRobustKey()
+    {
+        var bucket = QuietTargetBucket();
+        var decision = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.45, peakShare: 1.0, meanShare: 0.306, TimeSpan.FromHours(4));
+        Assert.True(decision.Fire);
+
+        Fact Anomaly(bool withRobustKey)
+        {
+            var fact = new Fact
+            {
+                Source = "anomaly",
+                Key = PgTargetFactKeys.AnomalyBadActorShare,
+                Value = 0.45,
+                ServerId = 1,
+                ObjectName = "42",
+                Metadata =
+                {
+                    ["baseline_mean"] = bucket.Mean,
+                    ["baseline_stddev"] = bucket.EffectiveStdDev,
+                    ["baseline_median"] = bucket.Median,
+                    ["baseline_mad"] = bucket.Mad,
+                    ["deviation_sigma"] = decision.Sigma,
+                    ["mean_sigma"] = decision.MeanSigma ?? 0,
+                    ["window_share"] = 0.45,
+                    ["peak_share"] = 1.0,
+                    ["mean_share"] = 0.306,
+                    ["candidates_evaluated"] = 1,
+                    ["candidates_fired"] = 1,
+                    [PgTargetAnomalyDetector.OwnNormalMetadataPrefix + "42"] = 2,
+                },
+            };
+            if (withRobustKey)
+                fact.Metadata["baseline_robust_sigma"] = bucket.EffectiveRobustSigma;
+            return fact;
+        }
+
+        /* The sigma was measured against the median and the MAD-derived sigma (about 0.3 %), so that is the routine named. */
+        var robust = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(Anomaly(withRobustKey: true)))!;
+        Assert.Contains("against its own routine of 0% ± 0.3% for this hour-of-week", robust.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("± 25.4%", robust.Investigation, StringComparison.Ordinal);
+
+        /* A fact written before the key existed reads exactly as it did. */
+        var legacy = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(Anomaly(withRobustKey: false)))!;
+        Assert.Contains("against its own routine of 0% ± 25.4% for this hour-of-week", legacy.Investigation, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
