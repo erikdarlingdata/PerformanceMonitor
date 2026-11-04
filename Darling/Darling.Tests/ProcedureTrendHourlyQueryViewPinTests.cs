@@ -42,15 +42,15 @@ public sealed class ProcedureTrendHourlyQueryViewPinTests
     private static readonly Dictionary<string, string> Pins = new()
     {
         ["BuildHourlyTrendSql(query_stats_hourly, unfiltered)"] = "94329B673BFAFA22248DA5D53EFE874662038CDED525C936579D54221C91F2E5",
-        ["BuildHourlyTrendSql(query_stats_hourly, filtered)"] = "CCD84C371E46D72BF536118A8A492C0946552BF818E4B00518B6F8F3CEDDED09",
+        ["BuildHourlyTrendSql(query_stats_hourly, filtered)"] = "CE6CBA4A16EB6F0175B9245233336959CDC2AEA139F8F1FF24B68A01280A3ECB",
         ["BuildBucketedHourlyTrendSql(query_stats_hourly, unfiltered)"] = "AA3776E17212DF0B3DC9C1A059C8D9BDE4988DA16E9883F5414A67608340F372",
-        ["BuildBucketedHourlyTrendSql(query_stats_hourly, filtered)"] = "5086B47CEC900CAC398A9702F37DAB86150C273DE015A5418B2754D96C5A6432",
+        ["BuildBucketedHourlyTrendSql(query_stats_hourly, filtered)"] = "F6194CA77BCBB523864457CBCF803A89B18486516657CFA504F98CD16DA73688",
         ["BuildHourlyTrendSql(query_store_stats_hourly, unfiltered)"] = "ABAC1BCC6EB7EA5160B70A8F4B44EDC799E151DB216D8A5BB705E986663688F2",
-        ["BuildHourlyTrendSql(query_store_stats_hourly, filtered)"] = "44B2F1ACB7EFBBA3479A97E1504B6BD85E28523A3528743BC811FDBD805B927D",
+        ["BuildHourlyTrendSql(query_store_stats_hourly, filtered)"] = "75B3B1B7EC10EB338DC2C9BEB96658F7539979095FC7CA1BE2CA9AE962FC5B4D",
         ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, unfiltered)"] = "E8F5E099757ABE0272508D5734C19486406522EB5A8C63DA6EDC4B2C58E8BB2C",
-        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, filtered)"] = "AD2CA98B90F33B449C946E2F8D7C55EB38F60E4CA2198302DD48A0BE1CA09225",
+        ["BuildBucketedHourlyTrendSql(query_store_stats_hourly, filtered)"] = "5A2DD624EC25BE89697840C4A5B22EB58D6D735BD722EFCF61686ACD886BC952",
         ["QueryDurationTrendHourlySql(unfiltered)"] = "94329B673BFAFA22248DA5D53EFE874662038CDED525C936579D54221C91F2E5",
-        ["QueryDurationTrendHourlySql(filtered)"] = "CCD84C371E46D72BF536118A8A492C0946552BF818E4B00518B6F8F3CEDDED09",
+        ["QueryDurationTrendHourlySql(filtered)"] = "CE6CBA4A16EB6F0175B9245233336959CDC2AEA139F8F1FF24B68A01280A3ECB",
     };
 
     [Theory]

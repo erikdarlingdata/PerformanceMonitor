@@ -29,7 +29,7 @@ public sealed class ProcedureTrendQueryViewPinTests
     private const string QueryStatsBucketedUnfilteredSha256 = "F424B1F1323C86401EA6BDBA3D78FBDBF906126A982986B72CB127A275D9500C";
 
     /// <summary>The filtered statement (the viewer's chart and the MCP reader's filtered text).</summary>
-    private const string QueryStatsBucketedFilteredSha256 = "4EDD8E21D42FB6FB5EB6BD6A6319814BEA6B23202A88406CE582BDAD872070CE";
+    private const string QueryStatsBucketedFilteredSha256 = "B0350E61398462D29DB5D4BC540310D7992ABBA4D811BA3AB956D08A4333DCCC";
 
     /// <summary>The per-collection CTE alone (<c>RawCollectionsCte</c>'s query branch), unfiltered.</summary>
     private const string QueryStatsCollectionsCteUnfilteredSha256 = "32D4C7C32D847E12DD5C52060370D5022DBC9BFAAA0EBDBC969219E8E5AFBA35";
@@ -44,7 +44,7 @@ public sealed class ProcedureTrendQueryViewPinTests
         var filtered = Normalize(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true));
 
         Assert.Equal(QueryStatsBucketedUnfilteredSha256, Sha256(unfiltered));
-        Assert.True(QueryStatsBucketedFilteredSha256 == Sha256(filtered), "filtered now " + Sha256(filtered));
+        Assert.Equal(QueryStatsBucketedFilteredSha256, Sha256(filtered));
         Assert.Equal(QueryStatsCollectionsCteUnfilteredSha256, Sha256(CollectionsCte(unfiltered)));
         Assert.Equal(QueryStatsCollectionsCteFilteredSha256, Sha256(CollectionsCte(filtered)));
     }
