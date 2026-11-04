@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -302,6 +303,16 @@ WHERE story_path_hash = $1 AND server_id = $2";
        hour named different jobs, and the labeler compares the name it recovers against this pass's, so a
        wrong pick labels nothing rather than the wrong job.
 
+       #7450: two more columns ride the same rows. chain_fired_hours is the number of distinct local hours of the
+       whole window the chain has a saved row in, and chain_span_hours the number of hours from the chain's first
+       saved row in the window to its last, both ends counted. A chain that fires in more than half of its own span
+       fires nearly all the time, however often a pass finds it, and its same-slot weeks say nothing about a
+       schedule; a weekly job fires in a handful of hours across a span of hundreds. The span is the chain's own,
+       so no record of "the server was analysed in that hour" is needed (the store keeps none: a pass that saved
+       nothing leaves no row, and the finding writers skip a story with no severity). Both come off local_rows,
+       the one scan of the window, which feeds the chain_hours CTE and the final select; no second read of the
+       range is made. Buckets are local hours, so a clock change moves the counts by at most one hour.
+
        Byte-identical to Lite's FindingStore.GetPriorOccurrencesSql: the server's clock is a separate
        one-row read (PgBaselineProvider.ServerClockSql here, BaselineProvider.ServerClockSql there), so nothing
        in this statement names a table the two products spell differently. A source pin in Darling.Tests holds
@@ -318,13 +329,25 @@ WITH local_rows AS
     WHERE f.server_id = $1
     AND   f.analysis_time >= $2
     AND   f.analysis_time <  $3
+),
+chain_hours AS
+(
+    SELECT
+        story_path_hash AS chain_hash,
+        COUNT(DISTINCT local_bucket) AS chain_fired_hours,
+        CAST(EXTRACT(EPOCH FROM (MAX(local_bucket) - MIN(local_bucket))) / 3600 AS INTEGER) + 1 AS chain_span_hours
+    FROM local_rows
+    GROUP BY story_path_hash
 )
 SELECT
     story_path_hash,
     root_fact_key,
     local_bucket,
-    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text
+    MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' THEN story_text END) AS job_story_text,
+    MAX(chain_fired_hours) AS chain_fired_hours,
+    MAX(chain_span_hours) AS chain_span_hours
 FROM local_rows
+JOIN chain_hours ON chain_hash = story_path_hash
 WHERE (EXTRACT(HOUR FROM local_bucket) = $7 AND EXTRACT(DOW FROM local_bucket) = $8)
 OR    root_fact_key = 'RUNNING_JOBS'
 GROUP BY story_path_hash, root_fact_key, local_bucket
@@ -613,7 +636,9 @@ ORDER BY local_bucket, story_path_hash";
                     reader.GetString(0),
                     reader.GetString(1),
                     reader.GetDateTime(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3)));
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture),
+                    Convert.ToInt32(reader.GetValue(5), CultureInfo.InvariantCulture)));
             }
 
             return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);

@@ -157,6 +157,82 @@ public class RecurrenceLabelerTests
         Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
     }
 
+    /* #7450: a chain that fires in most of its own span keeps no schedule, however many same-slot weeks it has. The
+       store reports the hours the chain fired in and the hours from its first saved row in the window to its last. */
+
+    private static PriorOccurrence InSlotWithHours(string hash, int weeksAgo, int firedHours, int spanHours) =>
+        new(hash, "X", SlotLocal.AddDays(-7 * weeksAgo), null, firedHours, spanHours);
+
+    [Fact]
+    public void AChainThatFiredInEveryHourOfItsSpan_GetsNoLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-always");
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], null, Read(InSlotWithHours("h-always", 1, 504, 504), InSlotWithHours("h-always", 2, 504, 504), InSlotWithHours("h-always", 3, 504, 504)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+        Assert.Null(story.RootFactMetadata);
+    }
+
+    [Fact]
+    public void AChainThatFiredOnlyInThisSlotForThreeWeeks_KeepsTheLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-weekly");
+
+        RecurrenceLabeler.Label([story], null, Read(InSlotWithHours("h-weekly", 1, 3, 337), InSlotWithHours("h-weekly", 2, 3, 337), InSlotWithHours("h-weekly", 3, 3, 337)));
+
+        Assert.Equal(4, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Theory]
+    [InlineData("DB_CONFIG")]
+    [InlineData("SERVER_CONFIG")]
+    [InlineData("CONFIG_MAXDOP")]
+    [InlineData("CONFIG_PG_SHARED_BUFFERS")]
+    [InlineData("CONFIG_PG_MAINT_WORK_MEM")] // evidence-gated, not in the root set, still a configuration fact
+    public void AChainRootedInAConfigurationFact_NeverGetsTheLabel(string rootKey)
+    {
+        var story = Story(rootKey, "h-config");
+        var before = story.StoryText;
+
+        // Few fired hours and no spread counts at all: only the root decides.
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-config", 1, rootKey), InSlot("h-config", 2, rootKey), InSlot("h-config", 3, rootKey)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Fact]
+    public void TheShareIsOfTheChainsOwnSpan_NotOfTheWholeWindow()
+    {
+        // Fired in 10 of the 20 hours between its first and last row: exactly half, so still labelled.
+        var half = Story("SOS_SCHEDULER_YIELD", "h-half");
+        RecurrenceLabeler.Label([half], null, Read(InSlotWithHours("h-half", 1, 10, 20), InSlotWithHours("h-half", 2, 10, 20)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(half.StoryText));
+
+        // Fired in 11 of 20: more than half. A server that was off for the rest of the window does not hide it:
+        // against the full 504 hours of the window the same 11 would be 2 percent.
+        var most = Story("SOS_SCHEDULER_YIELD", "h-most");
+        RecurrenceLabeler.Label([most], null, Read(InSlotWithHours("h-most", 1, 11, 20), InSlotWithHours("h-most", 2, 11, 20)));
+        Assert.Null(RecurrenceLabeler.TryReadLabel(most.StoryText));
+
+        var spread = Story("SOS_SCHEDULER_YIELD", "h-spread");
+        RecurrenceLabeler.Label([spread], null, Read(InSlotWithHours("h-spread", 1, 11, 504), InSlotWithHours("h-spread", 2, 11, 504)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(spread.StoryText));
+    }
+
+    [Fact]
+    public void AStoreThatReportsNoHourCounts_LabelsAsBefore()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-unknown");
+
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-unknown", 1), InSlot("h-unknown", 2)));
+
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
     [Fact]
     public void TwoWeeks_IsACoincidence_NoLabel()
     {

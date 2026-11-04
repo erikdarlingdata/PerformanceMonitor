@@ -229,6 +229,7 @@ export const tab = {
           viz: "stat",
           stats: MEMORY_STATS,
           noteKey: "memory_note",
+          noteShort: "On an Azure SQL Database these figures are the database's own memory limit, not the host's. Utilization near 100% is normal once the database has grown to that limit.",
           span: 2,
         }),
       ]),

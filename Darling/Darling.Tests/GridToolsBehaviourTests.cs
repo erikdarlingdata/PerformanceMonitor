@@ -170,6 +170,28 @@ public sealed class GridToolsBehaviourTests
     }
 
     [Fact]
+    public void TheLoggingAuditCsv_KeepsUnitSourceAndCost_ThatThePageFoldsIntoOtherCells()
+    {
+        var r = Run("auditExport");
+        var lines = Str(r, "csv").Split("\r\n");
+        var header = lines[0].Split(',');
+        // The fields the page does not draw as columns are still in the export, each under its own label.
+        Assert.Contains("Unit", header);
+        Assert.Contains("Source", header);
+        Assert.Contains("Cost", header);
+        Assert.Contains("Costs log volume on a busy server.", lines[1]);
+        Assert.Contains("configuration file", lines[1]);
+        // And the page does not draw them: the three trailing columns are hidden, the rest are not.
+        var headerClasses = r.GetProperty("headerClasses").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var cellClasses = r.GetProperty("cellClasses").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(new[] { "Unit", "Source", "Cost" }, r.GetProperty("labels").EnumerateArray().Select(e => e.GetString()!).TakeLast(3).ToArray());
+        Assert.All(headerClasses.TakeLast(3), c => Assert.Contains("export-only", c));
+        Assert.All(cellClasses.TakeLast(3), c => Assert.Contains("export-only", c));
+        Assert.All(headerClasses.SkipLast(3), c => Assert.DoesNotContain("export-only", c));
+        Assert.All(cellClasses.SkipLast(3), c => Assert.DoesNotContain("export-only", c));
+    }
+
+    [Fact]
     public void ThePickedCell_SurvivesARebuild_AndSaysSoWhenItsRowIsGone()
     {
         var r = Run("pickSurvivesRebuild");
