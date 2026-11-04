@@ -135,7 +135,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
         Assert.Equal("unavailable", StatusOf(boxWaits));
         Assert.Contains("system_health session is started", boxWaits, StringComparison.Ordinal);
 
-        Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
+        Assert.Equal("unavailable", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
         Assert.Equal("unavailable", StatusOf(await McpPlanCacheSchedulerTools.GetCpuSchedulerPressure(service, _serverManager, BoxServerName)));
 
@@ -161,7 +161,7 @@ public sealed class EngineCapabilityMissTests : IClassFixture<SharedDuckDbFixtur
            (#3541 A12), and the point here is that it is NOT "not_collected" — unknown is not never. */
         Assert.Equal("unavailable", StatusOf(await McpHealthParserTools.GetSystemHealth(service, _serverManager, BoxServerName)));
         Assert.Equal("empty", StatusOf(await McpDefaultTraceTools.GetDefaultTraceEvents(service, _serverManager, BoxServerName)));
-        Assert.Equal("empty", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
+        Assert.Equal("unavailable", StatusOf(await McpConfigTools.GetTraceFlags(service, _serverManager, BoxServerName)));
     }
 
     /// <summary>

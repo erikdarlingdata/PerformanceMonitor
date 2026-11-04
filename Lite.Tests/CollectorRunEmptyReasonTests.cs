@@ -126,6 +126,46 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         Assert.Contains("no successful run inside", Field(json, "message"), StringComparison.Ordinal);
     }
 
+    /// <summary>#7459: "empty" means somebody looked. A trace_flags collector with no successful run answers unavailable, not the old
+    /// "none enabled, or the config collector has not run yet" under an empty status.</summary>
+    [Fact]
+    public async Task TraceFlags_WithNoSuccessfulRun_IsUnavailable_NotEmpty()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        var json = await McpConfigTools.GetTraceFlags(service, _serverManager, ServerName);
+
+        Assert.Equal("unavailable", Field(json, "status"));
+        Assert.Contains("has not completed a run yet", Field(json, "message"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#7459, through the real tool: a good running_jobs run that found no job is empty and states that run's time. The old last
+    /// fallback answered empty and hedged that the collector may not have run.</summary>
+    [Fact]
+    public async Task RunningJobs_AfterAGoodRunWithNoRows_IsEmpty_AsOfThatRun()
+    {
+        await LogRunAsync("running_jobs", DateTime.UtcNow.AddMinutes(-1), 0);
+        var service = new LocalDataService(_duckDb);
+
+        var json = await McpJobTools.GetRunningJobs(service, _serverManager, ServerName);
+
+        Assert.Equal("empty", Field(json, "status"));
+        Assert.Contains("as of the running_jobs collector's latest successful run (", Field(json, "message"), StringComparison.Ordinal);
+        Assert.DoesNotContain("has not run yet", Field(json, "message"), StringComparison.Ordinal);
+    }
+
+    /// <summary>#7459: no running_jobs run on record means nobody looked, so unavailable.</summary>
+    [Fact]
+    public async Task RunningJobs_WithNoRunOnRecord_IsUnavailable_NotEmpty()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        var json = await McpJobTools.GetRunningJobs(service, _serverManager, ServerName);
+
+        Assert.Equal("unavailable", Field(json, "status"));
+        Assert.Contains("has not completed a run yet", Field(json, "message"), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TraceFlags_AfterARunThatFoundNone_SayNoFlagIsEnabled()
     {
