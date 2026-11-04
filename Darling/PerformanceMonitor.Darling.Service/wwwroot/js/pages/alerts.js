@@ -23,7 +23,7 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
-import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
+import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
@@ -880,6 +880,14 @@ async function refreshInvestigations(state) {
  * the new page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at
  * all. A changed window or server reconciles the same way: rows that left the window are removed, new ones land
  * in order. A reply that arrives after a newer request was made is dropped. */
+/* #7410: an empty alert list. When the default filter hid dismissed alerts, the reply carries their count in `hints`, and the page says
+   that in its own words (the tick box it names is on this page) with the tool's sentence behind "More detail". */
+export function emptyAlertsStrip(res) {
+  const n = res.hints && Number(res.hints.dismissed_excluded_count);
+  if (n > 0) return plainEmptyStrip(res, n + (n === 1 ? " alert in this range was dismissed, so it is hidden." : " alerts in this range were dismissed, so they are hidden.") + " Tick Show dismissed to see them.");
+  return emptyStrip(res.message);
+}
+
 async function refreshAlerts(state) {
   /* #5632 Phase A: an open Investigations panel is re-read with the alerts; a closed one is not read at all. */
   if (state.investigations && state.investigations.panel.open) await refreshInvestigations(state.investigations);
@@ -896,7 +904,7 @@ async function refreshAlerts(state) {
     state.truncated = false;
     /* The checked set survives a failed read; it is pruned only against a successful one. */
     updateDismissBar(state);
-    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
+    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyAlertsStrip(res));
     return;
   }
   state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);

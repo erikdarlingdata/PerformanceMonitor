@@ -162,7 +162,8 @@ public sealed partial class DarlingMcpAlertTools
                     ? McpHelpers.Status(
                         "empty",
                         $"No undismissed alerts found in the specified time range{filterSentence}, but {dismissedExcludedCount} dismissed {(dismissedExcludedCount == 1 ? "alert was" : "alerts were")} excluded by the default filter. Re-run with include_dismissed = true to see them — a dismissed alert still fired.",
-                        notice.AsHints())
+                        /* #7410: the count as a field, so the web page can say it in its own words instead of showing this sentence. */
+                        notice.IsUnavailable ? null : new { effective_start = notice.EffectiveStart, window_truncated = notice.WindowTruncated, truncation_note = notice.TruncationNote, dismissed_excluded_count = dismissedExcludedCount })
                     : McpHelpers.Status("empty", $"No alerts found in the specified time range{filterSentence}.", notice.AsHints()), notice);
                 /* #7167: a server-scoped read of an offline server is missing data, not a clean history. The fleet-wide read has no one server to judge. */
                 return serverId is { } scopedServer

@@ -425,6 +425,11 @@ export function plainText(text) {
   t = t.replace(/\blatest_memory_mb\b/g, "Latest MB");
   t = t.replace(/\bmemory_clerks capture\b/g, "memory clerk capture");
   t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
+  /* #7410: the Query Store Overhead note names the collector's constant for the sleep waits it drops. */
+  t = t.replace(/dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one/g, "dropped when they are collected, and dropped again here if one ever slipped through");
+  /* #7410: the Query Heatmap's empty text. */
+  t = t.replace(/\bdatabase_name filter\b/g, "database filter");
+  t = t.replace(/\ba SECOND cycle\b/g, "a second collection");
   /* The system-health "events were captured, none qualified" closing. */
   t = t.replace(/so this is the healthy answer for this read rather than missing data/g, "so this is a normal result, not missing data");
 
