@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -168,7 +168,7 @@ export function fanout(read, params, specs, intro = null) {
 
         applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -713,9 +713,18 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;
+  /* #7410: `noteShort` (the plain sentence over a long note) and `emptyLine` (the plain empty sentence), see panels.js. */
   /* #7428: further descriptor fields the positional list has no slot for, such as `noteFrom`. */
   if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
+}
+
+/**
+ * #7410: tablePanel() whose own empty sentence is the one the page says for a true negative (status "empty"). The tool's longer text for that
+ * answer stays behind "More detail". A reply that is not a true negative (unavailable, precondition) still shows the tool's text.
+ */
+export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2) {
+  return tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span, null, null, null, null, null, null, false, null, false, { emptyLine: true });
 }
 
 /**

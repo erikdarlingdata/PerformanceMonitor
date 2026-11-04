@@ -6,7 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { fmtMs, trendSubject } from "../../util.js";
+import { fmtMs, el, disclosure, trendSubject } from "../../util.js";
+import { detailColumn, firstSentence, spillWord, cacheWord, rollbackWord } from "../../pg-grid-text.js";
 import { codeDisclosure, listCell, pgQueryIdText } from "./shared.js";
 
 /**
@@ -254,11 +255,31 @@ export const PG_PLAN_COLUMNS = [
    remedy is the sentence somebody reads once they have found the row that is wrong, and it is the column
    this panel exists for — every other reader of these rows outside the Windows Viewer sees the facet name
    and its observed value and nothing about what to do. */
+/* #7410: the collector's facet names are stable, so the grid says what each one is in words (the raw name stays in the cell's tooltip and
+   in the Copy/CSV rows). A name this table does not know shows as the collector wrote it. `extension_available` is the one facet whose "no"
+   is not a fault: auto_explain is preload-only and never appears in pg_available_extensions, so an unconfirmed answer reads "Can't tell". */
+const PLAN_CAPTURE_FACET_LABELS = {
+  library_loaded: "auto_explain is loaded",
+  capture_threshold: "Capture threshold is set",
+  extension_available: "auto_explain is available",
+  plan_text_setting: "Plans are logged as JSON",
+  plan_attribution: "Plans carry a query id",
+  message_locale: "Log messages are in English",
+};
+const planFacetUnconfirmed = (row) => row.facet === "extension_available" && row.is_satisfied !== true;
+
 export const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
-  { key: "facet", label: "Facet" },
-  { key: "is_satisfied", label: "Satisfied", format: "bool" },
-  { key: "observed", label: "Observed", mono: true },
-  { key: "detail", label: "Consequence and Remedy" },
+  { key: "facet", label: "Facet", display: (row) => PLAN_CAPTURE_FACET_LABELS[row.facet] || String(row.facet ?? "—"), sortValue: (row) => PLAN_CAPTURE_FACET_LABELS[row.facet] || row.facet },
+  {
+    key: "is_satisfied",
+    label: "Ready",
+    display: (row) => (row.is_satisfied === true ? "yes" : row.is_satisfied === false ? (planFacetUnconfirmed(row) ? "can't tell" : "no") : "—"),
+    sortValue: (row) => (row.is_satisfied === true ? 2 : planFacetUnconfirmed(row) ? 1 : 0),
+  },
+  { key: "observed", label: "Observed", mono: true, display: (row) => (planFacetUnconfirmed(row) ? "not listed" : row.observed ?? "—"), sortValue: (row) => row.observed },
+  detailColumn("detail", "What it means and the fix", (text) => firstSentence(text, 110) || null,
+    "The first sentence of what this setting does to plan capture and how to change it. Click for the full text.",
+    { wrap: true, detailMax: 120, cellClass: () => "flow-cell" }),
   { key: "last_observed", label: "Last Seen", format: "time", small: true },
 ];
 
@@ -268,19 +289,47 @@ export const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
    for and is worded for the server's hosting flavour by the read, not by this file. */
 export const PG_LOGGING_AUDIT_COLUMNS = [
   { key: "setting", label: "Setting", mono: true },
-  { key: "verdict", label: "Verdict" },
-  { key: "value", label: "Value", mono: true },
-  { key: "unit", label: "Unit", small: true },
-  { key: "source", label: "Source", small: true },
+  { key: "verdict", label: "Verdict", hint: "Describes the log lines each setting writes. Partial means a threshold is filtering, which is the recommended state for log_min_duration_statement." },
+  /* #7410: the unit sits with its value and the source is its tooltip, so the long-text columns have the width. Unlocks and Recommended
+     wrap to the width the page has (`flow-cell`), and the cost and the remedy open on a click under one cell. */
+  {
+    key: "value",
+    label: "Value",
+    mono: true,
+    render: (row) => el("span", { title: row.source ? "From " + row.source : null }, [row.value == null || row.value === "" ? "—" : String(row.value) + (row.unit ? " " + row.unit : "")]),
+    sortValue: (row) => row.value,
+  },
   { key: "change_needs", label: "Change needs", small: true },
-  { key: "unlocks", label: "Unlocks", clamp: true },
-  { key: "recommended", label: "Recommended", clamp: true },
-  { key: "cost_note", label: "Cost", clamp: true },
-  { key: "remedy", label: "Remedy", clamp: true },
+  { key: "recommended", label: "Recommended", wrap: true, cellClass: () => "flow-cell flow-narrow" },
+  { key: "unlocks", label: "Unlocks", wrap: true, cellClass: () => "flow-cell flow-narrow" },
+  {
+    key: "remedy",
+    label: "Cost and remedy",
+    cellClass: () => "flow-cell",
+    sortable: false,
+    copyValue: (row) => row.remedy ?? "",
+    render: (row) => {
+      const parts = [];
+      if (row.remedy) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Remedy. "]), row.remedy]));
+      if (row.cost_note) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Cost. "]), row.cost_note]));
+      if (!parts.length) return document.createTextNode("—");
+      const box = disclosure(firstSentence(row.remedy || row.cost_note, 70), parts, { max: 70 });
+      box.classList.add("cell-detail");
+      return box;
+    },
+  },
+  /* #7410: not drawn, still in Copy and the CSV: the fields the Value cell and the remedy cell fold in. */
+  { key: "unit", label: "Unit", exportOnly: true },
+  { key: "source", label: "Source", exportOnly: true },
+  { key: "cost_note", label: "Cost", exportOnly: true },
 ];
 
+/* #7410: the query text is the second column, with room to read (`query-cell`), and not the last one cut off after a few characters. The
+   Query ID stays first. The three counters only some engines fill (temp blocks, WAL, peak memory) leave the grid when every row of the
+   reply holds 0 or nothing, which the reply says, so no engine name is tested. */
 export const PG_TOP_QUERY_COLUMNS = [
   { key: "queryid", label: "Query ID", mono: true },
+  { key: "query_text", label: "Query", wrap: true, valueList: false, cellClass: () => "query-cell", render: (row) => codeDisclosure(row.query_text) },
   { key: "calls", label: "Calls", format: "int" },
   { key: "total_exec_time_ms", label: "Total", format: "ms" },
   { key: "avg_exec_time_ms", label: "Avg", format: "ms" },
@@ -289,10 +338,9 @@ export const PG_TOP_QUERY_COLUMNS = [
   { key: "max_exec_time_ms", label: "Max (all time)", format: "ms" },
   { key: "pct_of_total_time", label: "% of Time", format: "num1" },
   { key: "rows_returned", label: "Rows", format: "int" },
-  { key: "temp_blks_written", label: "Temp Blocks Written", format: "int" },
-  { key: "wal_bytes", label: "WAL (bytes)", format: "int" },
-  { key: "max_exec_peakmem_bytes", label: "Peak Mem (bytes)", format: "int" },
-  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
+  { key: "temp_blks_written", label: "Temp Blocks Written", format: "int", hideWhenZero: true },
+  { key: "wal_bytes", label: "WAL", format: "bytes", hideWhenZero: true },
+  { key: "max_exec_peakmem_bytes", label: "Peak Mem", format: "bytes", hideWhenZero: true },
 ];
 
 export const PG_BLOCKING_CHAIN_COLUMNS = [
@@ -334,14 +382,16 @@ export const PG_DATABASE_COLUMNS = [
   { key: "temp_files", label: "Temp Files", format: "int" },
   { key: "temp_bytes", label: "Temp Bytes", format: "int" },
   { key: "avg_temp_file_bytes", label: "Avg Temp File (bytes)", format: "int" },
-  { key: "spill_finding", label: "Spills", clamp: true },
+  /* #7410: each row used to carry three paragraphs that read the same on every database. The cell shows the verdict word and the
+     paragraph opens on a click (the same pattern as the bloat grid), and the header tooltip says what the column means once. */
+  detailColumn("spill_finding", "Spills", spillWord, "Whether sorts and hashes spilled to temp files in this window, and how big the files were. Click a verdict for the cause and the usual fix."),
   { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
-  { key: "cache_finding", label: "Cache", clamp: true },
+  detailColumn("cache_finding", "Cache", cacheWord, "How the cache hit percentage compares with the usual 99% target. It is an upper bound on the problem, not a disk measurement. Click a verdict for more."),
   { key: "deadlocks", label: "Deadlocks", format: "int" },
   { key: "xact_commit", label: "Commits", format: "int" },
   { key: "xact_rollback", label: "Rollbacks", format: "int" },
   { key: "rollback_pct", label: "Rollback %", format: "num2" },
-  { key: "rollback_finding", label: "Rollbacks", clamp: true },
+  detailColumn("rollback_finding", "Rollback Share", rollbackWord, "Whether the share of transactions that rolled back is usual for a healthy application. Click a verdict for what counts as a rollback."),
   /* The reset evidence. Without it every total in the row is a lower bound and nothing on screen says so. */
   { key: "counters_were_reset", label: "Reset", format: "bool" },
   { key: "reset_note", label: "Reset Note", clamp: true },
