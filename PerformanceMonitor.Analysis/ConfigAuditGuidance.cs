@@ -44,7 +44,7 @@ public static class ConfigAuditGuidance
     /// </summary>
     public static MaxMemoryAudit AuditMaxMemory(int maxMemory, double totalMb)
     {
-        var inv = CultureInfo.CurrentCulture;
+        var culture = CultureInfo.CurrentCulture;
         if (maxMemory == FactRemediation.UnconfiguredMaxMemoryMb)
         {
             if (totalMb > 0)
@@ -53,8 +53,8 @@ public static class ConfigAuditGuidance
                 var suggested = SuggestedMaxMemoryMb(totalMb);
                 return new MaxMemoryAudit(suggested, "warning",
                     $"Max server memory is at the default (unlimited). SQL Server will consume all available RAM, " +
-                    $"starving the OS and other processes. With {totalMb.ToString("N0", inv)} MB physical RAM, set max server memory to " +
-                    $"~{suggested.ToString("N0", inv)} MB (leaving {reserve.ToString("N0", inv)} MB for the OS).");
+                    $"starving the OS and other processes. With {totalMb.ToString("N0", culture)} MB physical RAM, set max server memory to " +
+                    $"~{suggested.ToString("N0", culture)} MB (leaving {reserve.ToString("N0", culture)} MB for the OS).");
             }
             return new MaxMemoryAudit(maxMemory, "warning",
                 "Max server memory is at the default (unlimited). SQL Server will consume all available RAM. " +
@@ -62,41 +62,37 @@ public static class ConfigAuditGuidance
         }
 
         if (totalMb <= 0)
-            return new MaxMemoryAudit(maxMemory, "ok", $"Max server memory is set to {maxMemory.ToString("N0", inv)} MB.");
+            return new MaxMemoryAudit(maxMemory, "ok", $"Max server memory is set to {maxMemory.ToString("N0", culture)} MB.");
 
         var ratio = maxMemory / totalMb;
         var cap = SuggestedMaxMemoryMb(totalMb);
         if (ratio > 0.95)
         {
             return new MaxMemoryAudit(cap, "review",
-                $"Max server memory ({maxMemory.ToString("N0", inv)} MB) is {ratio.ToString("P0", inv)} of physical RAM ({totalMb.ToString("N0", inv)} MB). " +
-                $"Consider reducing to ~{cap.ToString("N0", inv)} MB to leave room for the OS.");
+                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is {ratio.ToString("P0", culture)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
+                $"Consider reducing to ~{cap.ToString("N0", culture)} MB to leave room for the OS.");
         }
         if (ratio < 0.50 && totalMb > 8192)
         {
             return new MaxMemoryAudit(cap, "review",
-                $"Max server memory ({maxMemory.ToString("N0", inv)} MB) is only {ratio.ToString("P0", inv)} of physical RAM ({totalMb.ToString("N0", inv)} MB). " +
-                $"SQL Server may be under-utilizing available memory. Consider raising to ~{cap.ToString("N0", inv)} MB unless other " +
+                $"Max server memory ({maxMemory.ToString("N0", culture)} MB) is only {ratio.ToString("P0", culture)} of physical RAM ({totalMb.ToString("N0", culture)} MB). " +
+                $"SQL Server may be under-utilizing available memory. Consider raising to ~{cap.ToString("N0", culture)} MB unless other " +
                 "applications need the remaining RAM.");
         }
         return new MaxMemoryAudit(maxMemory, "ok",
-            $"Max server memory ({maxMemory.ToString("N0", inv)} MB) looks reasonable for {totalMb.ToString("N0", inv)} MB physical RAM.");
+            $"Max server memory ({maxMemory.ToString("N0", culture)} MB) looks reasonable for {totalMb.ToString("N0", culture)} MB physical RAM.");
     }
-
-    /// <summary>What the recommended MAXDOP was taken from, as the audit words it: "this database's vCores" or "this server's cores-per-socket".</summary>
-    public static string MaxdopSource(FactRemediation.MaxdopBasis basis) =>
-        basis.FromVcores ? "this database's vCores" : "this server's cores-per-socket";
 
     /// <summary>The MAXDOP 0 warning: unlimited parallelism, and the figure to start with and where it came from.</summary>
     public static string MaxdopUnlimitedMessage(long recommended, FactRemediation.MaxdopBasis basis) =>
         $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
         $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
         $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-        $"Start with {recommended} ({MaxdopSource(basis)}, capped at 8) and adjust to the workload.";
+        $"Start with {recommended} ({basis.Source}, capped at 8) and adjust to the workload.";
 
-    /// <summary>The MAXDOP above-guidance review note. It names the figure it used (<see cref="MaxdopSource"/>), the same as <see cref="MaxdopUnlimitedMessage"/>.</summary>
+    /// <summary>The MAXDOP above-guidance review note. It names the figure it used (<see cref="FactRemediation.MaxdopBasis.Source"/>), the same as <see cref="MaxdopUnlimitedMessage"/>.</summary>
     public static string MaxdopAboveMessage(int maxdop, long recommended, FactRemediation.MaxdopBasis basis) =>
         $"MAXDOP {maxdop} is above the topology-based guidance of {recommended} " +
-        $"({MaxdopSource(basis)}, capped at 8). Review whether queries here genuinely " +
+        $"({basis.Source}, capped at 8). Review whether queries here genuinely " +
         $"benefit from the higher degree, or lower it to {recommended}.";
 }
