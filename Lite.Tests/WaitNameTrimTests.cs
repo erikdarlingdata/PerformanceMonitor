@@ -118,7 +118,7 @@ public sealed class WaitNameTrimTests
     public async Task WaitingTasks_ReadAsync_StoresTheTrimmedName()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)64, "EDC_DOPP_LOCK ", 1_000L, DBNull.Value, "SalesDb" });
+            new object[] { (short)64, "EDC_DOPP_LOCK ", 1_000L, DBNull.Value, "SalesDb", DBNull.Value });
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
         var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
@@ -134,10 +134,10 @@ public sealed class WaitNameTrimTests
     public async Task WaitingTasks_ReadAsync_WithTheShippedList_DropsTheHyperscaleTimers_AndStillCollectsRemoteBlockIo(bool useBundledJson)
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { (short)61, "SQP_STATS_REPORTING ", 240_000L, DBNull.Value, DBNull.Value },
-            new object[] { (short)62, "RBIO_COMM_RETRY", 900L, DBNull.Value, DBNull.Value },
-            new object[] { (short)63, "REMOTE_BLOCK_IO", 15L, DBNull.Value, "SalesDb" },
-            new object[] { (short)64, "EDC_DOPP_LOCK ", 1_000L, DBNull.Value, "SalesDb" });
+            new object[] { (short)61, "SQP_STATS_REPORTING ", 240_000L, DBNull.Value, DBNull.Value, DBNull.Value },
+            new object[] { (short)62, "RBIO_COMM_RETRY", 900L, DBNull.Value, DBNull.Value, DBNull.Value },
+            new object[] { (short)63, "REMOTE_BLOCK_IO", 15L, DBNull.Value, "SalesDb", DBNull.Value },
+            new object[] { (short)64, "EDC_DOPP_LOCK ", 1_000L, DBNull.Value, "SalesDb", DBNull.Value });
         var context = CollectorTestContext.Make(
             new RecordingCollectorDeltaCalculator(),
             ignored: useBundledJson ? LoadBundledIgnoreList() : IgnoredWaitDefaults.All);

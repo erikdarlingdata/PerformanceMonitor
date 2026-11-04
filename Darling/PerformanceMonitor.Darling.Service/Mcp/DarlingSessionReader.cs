@@ -469,6 +469,8 @@ internal static class DarlingSessionReader
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}
+        /* #7573: the monitor's own waits, left out unless $6 asks. The rows stay stored; a row stored before program_name existed has NULL and is never hidden. */
+        AND   ($6::boolean OR {{PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("program_name")}})
         GROUP BY collection_time, session_id, rtrim(wait_type), database_name
         ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC
         LIMIT $4
@@ -484,16 +486,19 @@ internal static class DarlingSessionReader
     /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
     /// database, otherwise only the named databases' waiting tasks are the population, and the cap applies to them.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool includeMonitor = false)
     {
+    #pragma warning restore CA1068
         var rows = new List<WaitingTaskRow>();
         await using var command = postgres.CreateCommand(WaitingTasksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
         command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddBoolean(command, includeMonitor);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

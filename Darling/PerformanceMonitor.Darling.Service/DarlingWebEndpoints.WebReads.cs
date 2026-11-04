@@ -80,7 +80,7 @@ public static partial class DarlingWebEndpoints
                 : DatabaseNamesRefusal(c),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c), c.RequestAborted),
             ["get_waiting_tasks"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), databases, AsOf(c), logger, c.RequestAborted)
+                ? DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), databases, AsOf(c), logger, c.RequestAborted, QueryBool(c, "include_monitor", false))
                 : DatabaseNamesRefusal(c),
 
             /* ── alerts / mute rules ── */

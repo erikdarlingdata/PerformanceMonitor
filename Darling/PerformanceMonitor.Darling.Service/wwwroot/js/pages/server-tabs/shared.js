@@ -770,8 +770,8 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
  * #7410: tablePanel() whose own empty sentence is the one the page says for a true negative (status "empty"). The tool's longer text for that
  * answer stays behind "More detail". A reply that is not a true negative (unavailable, precondition) still shows the tool's text.
  */
-export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2) {
-  return tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span, null, null, null, null, null, null, false, null, false, { emptyLine: true });
+export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, control = null) {
+  return tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span, null, null, null, control, null, null, false, null, false, { emptyLine: true });
 }
 
 /**
