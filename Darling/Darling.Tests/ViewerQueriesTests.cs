@@ -1328,7 +1328,8 @@ public sealed class ViewerQueriesLivePostgresTests
 
             var r = Assert.Single(rows);                    /* only query 100: 200 below gate, 300 no baseline ever, 400 baseline outside the 7-day bound */
             Assert.Equal(100, r.QueryId);
-            Assert.Equal("CRITICAL", r.Severity);
+            /* +200% is the CRITICAL band by percent, but 2 s added and 4 ms a run is under the #7592 grade floor, so LOW. */
+            Assert.Equal("LOW", r.Severity);
             Assert.Equal(2.0, r.BaselineDurationMs, 3);
             Assert.Equal(6.0, r.RecentDurationMs, 3);
             Assert.Equal(200.0, r.DurationRegressionPercent, 1);
