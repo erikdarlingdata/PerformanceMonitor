@@ -801,11 +801,12 @@ LIMIT 6";
                overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
             cmd.CommandText = (@"
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"{SCOPE})) AS current_blocking,
-    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks,
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev) AS bpr_count) AS b")
                 .Replace("{SCOPE}", rowScope);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -814,12 +815,14 @@ SELECT
             SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
             long currentBlocking;
+            bool blockingFromDmv;
             long currentDeadlocks;
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
                 if (!await reader.ReadAsync(context.CancellationToken)) return;
                 currentBlocking = Convert.ToInt64(reader.GetValue(0));
                 currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
             }
 
             if (scoped)
@@ -854,7 +857,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact

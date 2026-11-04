@@ -47,6 +47,17 @@ public static class DarlingPgTableBloatReader
         int SampleCount);
 
     /// <summary>
+    /// The suppression rule as SQL, over a <c>l</c> alias: the one copy that both the page's ORDER BY and the whole-window tally splice in
+    /// (a raw string cannot call C#). It is the twin of <see cref="EstimateIsUnpublishable"/>, and the two agree on every NULL (#7551):
+    /// the page reader maps a NULL <c>mods_since_analyze</c> to 0 (the COALESCE below), and a NULL <c>estimate_unavailable</c> or
+    /// <c>live_tuples</c> to "unpublishable", which is what the outer <c>COALESCE(..., TRUE)</c> gives any NULL the other disjuncts leave open.
+    /// A NULL <c>last_analyzed</c> is unpublishable on both sides.
+    /// </summary>
+    public const string UnpublishableConditionSql =
+        "COALESCE(l.estimate_unavailable OR l.live_tuples < 0 OR l.last_analyzed IS NULL "
+        + "OR (l.live_tuples >= 0 AND COALESCE(l.mods_since_analyze, 0) > l.live_tuples * 0.2), TRUE)";
+
+    /// <summary>
     /// Latest state per table, joined to that table's earliest reading in the window.
     ///
     /// <para><b>The estimate is not filtered or ranked on here beyond ordering</b> — the decision about
@@ -69,7 +80,7 @@ public static class DarlingPgTableBloatReader
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
-    public const string PgTableBloatSql = """
+    public const string PgTableBloatSql = $"""
         WITH latest AS (
             SELECT DISTINCT ON (database_name, schema_name, table_name)
                 database_name, schema_name, table_name, collection_time,
@@ -151,19 +162,73 @@ public static class DarlingPgTableBloatReader
            cannot call into C#. TheSortKeyCoversEverySuppressionReason pins the two together by asserting
            each condition appears here, so dropping one goes red rather than quietly re-ranking. */
         ORDER BY
-            (   l.estimate_unavailable
-             OR l.live_tuples < 0
-             OR l.last_analyzed IS NULL
-             OR (l.live_tuples >= 0 AND l.mods_since_analyze > l.live_tuples * 0.2)
-            ) ASC,
+            ({UnpublishableConditionSql}) ASC,
             l.bloat_bytes_estimate DESC,
             l.heap_bytes DESC
         LIMIT $4
         """;
 
     /// <summary>
-    /// The churn ratio as it is WRITTEN INTO the ORDER BY above. A raw string literal cannot be spliced,
-    /// so the number is inlined there and this names what it must equal;
+    /// The whole window's tally of published and suppressed estimates (#7551), over the same latest-row-per-table
+    /// the page read walks and with the same suppression rule as its ORDER BY. The page tallies cannot stand in:
+    /// the page is cut at the caller's limit and suppressed rows sort last, so a full page of suppressed rows
+    /// counted "25 suppressed" for a server that held more tables than that, and a page with no published row
+    /// summed to 0 bytes, which reads as no bloat when it means no estimate.
+    /// The grant hint's count (<c>estimate_unavailable</c>, a NULL flag counting as set, as the page reader maps it) and the
+    /// pgstattuple flag come from the same read for the same reason: a cut page drops the unavailable rows first.
+    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string PgTableBloatTotalsSql = $"""
+        WITH latest AS (
+            SELECT DISTINCT ON (database_name, schema_name, table_name)
+                database_name, schema_name, table_name,
+                bloat_bytes_estimate, estimate_unavailable, live_tuples, last_analyzed, mods_since_analyze, pgstattuple_available
+            FROM pg_table_bloat_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            ORDER BY database_name, schema_name, table_name, collection_time DESC
+        )
+        SELECT
+            count(*) AS table_count,
+            count(*) FILTER (WHERE NOT ({UnpublishableConditionSql})) AS trusted_count,
+            COALESCE(sum(GREATEST(COALESCE(bloat_bytes_estimate, 0), 0))
+                     FILTER (WHERE NOT ({UnpublishableConditionSql})), 0) AS trusted_bytes,
+            count(*) FILTER (WHERE l.estimate_unavailable IS NOT FALSE) AS estimate_unavailable_count,
+            COALESCE(bool_or(l.pgstattuple_available), FALSE) AS pgstattuple_available_anywhere
+        FROM latest AS l
+        """;
+
+    /// <summary>
+    /// The whole window's tally behind <see cref="PgTableBloatTotalsSql"/>. Trusted plus suppressed is the table count.
+    /// </summary>
+    public sealed record PgTableBloatTotals(
+        long TableCount, long TrustedCount, long TrustedBloatBytes, long EstimateUnavailableCount, bool PgstattupleAvailableAnywhere)
+    {
+        public long SuppressedCount => TableCount - TrustedCount;
+    }
+
+    public static async Task<PgTableBloatTotals> GetPgTableBloatTotalsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(PgTableBloatTotalsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new PgTableBloatTotals(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetBoolean(4));
+        }
+
+        return new PgTableBloatTotals(0, 0, 0, 0, false);
+    }
+
+    /// <summary>
+    /// The churn ratio as it is WRITTEN INTO <see cref="UnpublishableConditionSql"/>. That condition is spliced into the
+    /// queries, but the number inside it is a literal, so this names what it must equal;
     /// <c>TheSortKeyUsesTheSharedChurnRatio</c> asserts the SQL actually contains it, which is what stops
     /// the two drifting after somebody tunes <see cref="StaleStatisticsChurnRatio"/> and misses the query.
     /// </summary>
