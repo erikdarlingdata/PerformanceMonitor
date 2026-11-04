@@ -1702,6 +1702,8 @@ public sealed partial class DarlingMcpAlertTools
         "(server_name or server_id alone). get_mute_rules shows the schedule, in_window_now and the next window's start. With a claim (Level 2, agent_action) " +
         "a mute is a one-off: the schedule and the action are refused. An agent token WITHOUT agent_action (#7414) may create any mute or digest rule, one server or all servers and any metric (action 'digest' allowed), " +
         "but reason and expires_at are required, expires_at must be in the future and at most 7 days ahead, and the schedule and starts_at are refused; each write adds one agent change journal row. " +
+        "That path needs a metric (a rule that matches every alert is an operator's), refuses a rule with the same metric, server and action as one an agent made in the last 7 days even if it was deleted or expired, " +
+        "limits each text field to 256 characters and allows 20 writes an hour; an operator can turn it off with mcp.allowAgentMuteRules. " +
         "ACTION (#7083, optional): 'mute' (the default) records a matching alert as muted and sends nothing. 'digest' holds a matching alert back from " +
         "paging inside the rule's window and records it as a digest row for the daily digest, such as blocking from a nightly delete job; outside the " +
         "window it pages as usual, and a mute rule that also matches wins.")]
@@ -2331,7 +2333,7 @@ public sealed partial class DarlingMcpAlertTools
         "checked as a whole after your changes: start and end go together and differ, and days or a zone need times. " +
         "{\"recur_start\":null,\"recur_end\":null} clears the whole schedule (days and zone with it); the rule then applies at all times again. " +
         "Changing a schedule moves the rule to a different window, so a rule that repeated on weekdays stops muting on weekends. With a claim or without one (Level 2) " +
-        "the schedule and starts_at cannot be set or changed. An agent token WITHOUT agent_action (#7414) may edit any mute or digest rule, but the changes must carry reason and an expires_at_utc in the future and at most 7 days ahead (action 'digest' allowed), and the rule it leaves behind must satisfy that bound; each write adds one agent change journal row. enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
+        "the schedule and starts_at cannot be set or changed. An agent token WITHOUT agent_action (#7414) may edit any mute or digest rule, but the changes must carry reason and an expires_at_utc in the future and at most 7 days ahead (action 'digest' allowed), and the rule it leaves behind must satisfy that bound and must not match every alert; an expiry can be shortened but never moved later than 7 days after the rule was created (an operator can extend it); each write adds one agent change journal row. enabled is NOT editable here — use set_mute_rule_enabled, the dedicated reversible verb. USE THIS " +
         "rather than delete_mute_rule followed by create_mute_rule: a re-created rule is a NEW rule with a new " +
         "id and a new creation date, and the Stale Mute Rules self-alert ages a rule from its creation date — so " +
         "a rule re-created on every edit never becomes stale and is never reported, while an edited one is " +

@@ -189,11 +189,11 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
     private static Task<string?> JournalCountAsync(Ctx c) => ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE event LIKE 'action_%'");
 
     /// <summary>A rule an operator wrote straight into the table: no claim, no journal, and whatever expiry the test gives it.</summary>
-    private static async Task<string> SeedAsync(Ctx c, bool enabled, DateTime? expiresUtc, int? serverId = 7, string metric = "High CPU", string action = "mute")
+    private static async Task<string> SeedAsync(Ctx c, bool enabled, DateTime? expiresUtc, int? serverId = 7, string metric = "High CPU", string action = "mute", DateTime? createdUtc = null)
     {
         var id = Guid.NewGuid().ToString();
         await ExecAsync(c.Connection, $@"INSERT INTO config_mute_rules (id, enabled, created_at_utc, server_id, server_name, metric_name, reason, expires_at_utc, action)
-VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serverId is null ? "NULL" : serverId.ToString())},
+VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, {(createdUtc is null ? "now() AT TIME ZONE 'utc'" : $"'{Iso(createdUtc.Value)}'")}, {(serverId is null ? "NULL" : serverId.ToString())},
 {(serverId is null ? "NULL" : $"'srv-{serverId}'")}, '{metric}', 'operator rule', {(expiresUtc is null ? "NULL" : $"'{Iso(expiresUtc.Value)}'")}, '{action}')", c.Ct);
         return id;
     }
@@ -475,6 +475,158 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
             var deleteFailed = await DarlingMcpAlertTools.DeleteMuteRule(c.Source, seeded, agentSeat: Named, reason: "x");
             Assert.Equal("error", (string?)Parse(deleteFailed)["status"]);
             Assert.Equal("1", await RuleCountAsync(c));
+        });
+    }
+
+    private static readonly DarlingAgentActionSeat SwitchedOff = new(new DarlingMcpWritePolicy.Effective(false, false, Investigations: true, TokenName: "agent-a"),
+        agentMuteRulesAllowed: false);
+
+    [Fact]
+    public async Task ARuleWithNoMetricAndNoServer_IsRefusedOnCreateAndUpdate_NamingAnOperator_AndWritesNothing()
+    {
+        await RunAsync(async c =>
+        {
+            var create = Parse(await Create(c, Named, metric: null, serverId: null, action: "digest"));
+            var created = Parse(await Create(c, Named, metric: "High CPU", serverId: 7, action: "mute"));
+            var id = (string)created["mute_rule"]!["id"]!;
+            var journal = await JournalCountAsync(c);
+            var update = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, id,
+                "{\"reason\":\"widen\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddDays(1)) + "\",\"metric_name\":null,\"server_id\":null,\"server_name\":null}", agentSeat: Named));
+
+            Assert.True(DarlingMcpAgentMuteDirect.AllAlertsCode == (string?)create["reason"], create.ToJsonString());
+            Assert.Contains("An operator can make a rule that matches every alert", (string?)create["message"], StringComparison.Ordinal);
+            Assert.True(DarlingMcpAgentMuteDirect.AllAlertsCode == (string?)update["reason"], update.ToJsonString());
+            Assert.Equal("1", await RuleCountAsync(c));
+            Assert.Equal("High CPU", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{id}'"));
+            Assert.Equal(journal, await JournalCountAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task AnUpdate_CannotMoveTheExpiryPastCreationPlusSevenDays_ButMayShortenIt_EvenOnAnOlderOperatorRule()
+    {
+        await RunAsync(async c =>
+        {
+            /* Made 5 days ago, expiring tomorrow: it may live until created + 7 days, which is 2 days from now. */
+            var aging = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1), createdUtc: DateTime.UtcNow.AddDays(-5));
+            var refused = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging, Changes(Iso(DateTime.UtcNow.AddDays(4))), agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode, (string?)refused["reason"]);
+            Assert.Contains("An operator can extend it", (string?)refused["message"], StringComparison.Ordinal);
+            Assert.Contains(DateTime.UtcNow.AddDays(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), (string?)refused["message"], StringComparison.Ordinal);
+            Assert.Equal("0", await JournalCountAsync(c));
+
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging, Changes(Iso(DateTime.UtcNow.AddDays(1.5))), agentSeat: Named))["status"]);
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging, Changes(Iso(DateTime.UtcNow.AddHours(6))), agentSeat: Named))["status"]);
+
+            /* An operator's old rule with no expiry: an agent can only cut it short, and never move it out again. */
+            var old = await SeedAsync(c, enabled: true, expiresUtc: null, createdUtc: DateTime.UtcNow.AddDays(-30));
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, old, Changes(Iso(DateTime.UtcNow.AddDays(1))), agentSeat: Named))["status"]);
+            Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode,
+                (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, old, Changes(Iso(DateTime.UtcNow.AddDays(2))), agentSeat: Named))["reason"]);
+
+            /* An agent's own new rule: it can renew inside creation + 7 days, and not past it. */
+            var made = (string)Parse(await Create(c, Named, metric: "High CPU", serverId: 7, action: "mute", expires: Iso(DateTime.UtcNow.AddDays(1))))["mute_rule"]!["id"]!;
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, made, Changes(Iso(DateTime.UtcNow.AddDays(3))), agentSeat: Named))["status"]);
+            await ExecAsync(c.Connection, $"UPDATE config_mute_rules SET created_at_utc = now() AT TIME ZONE 'utc' - interval '6 days' WHERE id = '{made}'", c.Ct);
+            Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode,
+                (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, made, Changes(Iso(DateTime.UtcNow.AddDays(3))), agentSeat: Named))["reason"]);
+        });
+    }
+
+    [Fact]
+    public async Task AMatchAnAgentMadeInTheLastSevenDays_IsNotMadeAgain_EvenAfterItWasDeleted_ButADifferentMatchIs()
+    {
+        await RunAsync(async c =>
+        {
+            var first = Parse(await Create(c, Named));
+            var id = (string)first["mute_rule"]!["id"]!;
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, id, agentSeat: Named, reason: "storm over"))["status"]);
+            var journal = await JournalCountAsync(c);
+
+            var again = Parse(await Create(c, Legacy));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)again["reason"]);
+            Assert.Contains("operator", (string?)again["message"], StringComparison.Ordinal);
+            Assert.Equal("0", await RuleCountAsync(c));
+            Assert.Equal(journal, await JournalCountAsync(c));
+
+            /* Not the same match: another action, another server, another metric. */
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, action: "mute"))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, serverId: 7))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU"))["status"]);
+
+            /* Past the seven days it is allowed again. */
+            await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '8 days'", c.Ct);
+            await ExecAsync(c.Connection, "DELETE FROM config_mute_rules", c.Ct);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named))["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task WithTheSettingOff_EveryVerbRefuses_NamingTheSetting_AndWritesNothing()
+    {
+        await RunAsync(async c =>
+        {
+            var rule = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1));
+            var answers = new[]
+            {
+                await Create(c, SwitchedOff),
+                await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule, Changes(Iso(DateTime.UtcNow.AddHours(5))), agentSeat: SwitchedOff),
+                await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, rule, false, agentSeat: SwitchedOff, reason: "off"),
+                await DarlingMcpAlertTools.DeleteMuteRule(c.Source, rule, agentSeat: SwitchedOff, reason: "gone"),
+            };
+
+            foreach (var answer in answers)
+            {
+                Assert.Equal(DarlingMcpAgentMuteDirect.OffCode, (string?)Parse(answer)["reason"]);
+                Assert.Contains("mcp.allowAgentMuteRules", answer, StringComparison.Ordinal);
+            }
+
+            Assert.Equal("1", await RuleCountAsync(c));
+            Assert.Equal("True", await ScalarAsync(c, $"SELECT enabled FROM config_mute_rules WHERE id = '{rule}'"));
+            Assert.Equal("0", await JournalCountAsync(c));
+
+            /* The claim path is not this setting's: a call that carries agent_action still reaches the gate. */
+            var claim = Parse(await DarlingMcpAlertTools.CreateMuteRule(c.Source, metric_name: "High CPU", server_id: 7, reason: "storm", agent_action: "{}", agentSeat: SwitchedOff));
+            Assert.Equal("agent_action_invalid", (string?)claim["reason"]);
+        });
+    }
+
+    [Fact]
+    public async Task FieldsAreCapped_AndAHourlyCountOfWritesStopsARunawayAgent_NothingWrittenOnRefusal()
+    {
+        await RunAsync(async c =>
+        {
+            var long256 = new string('m', DarlingMcpAgentMuteDirect.MaxFieldChars + 1);
+            var tooLongMetric = Parse(await Create(c, Named, metric: long256));
+            var tooLongPattern = Parse(await DarlingMcpAlertTools.CreateMuteRule(c.Source, metric_name: "High CPU", query_text_pattern: long256, reason: "storm",
+                expires_at: Iso(DateTime.UtcNow.AddDays(1)), agentSeat: Named));
+            var rule = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1));
+            var tooLongChange = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule,
+                "{\"reason\":\"x\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddHours(5)) + "\",\"database_pattern\":\"" + long256 + "\"}", agentSeat: Named));
+            var tooBigBody = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule,
+                "{\"reason\":\"x\",\"pad\":\"" + new string('p', DarlingMcpAgentMuteDirect.MaxChangesChars) + "\"}", agentSeat: Named));
+            foreach (var answer in new[] { tooLongMetric, tooLongPattern, tooLongChange, tooBigBody })
+            {
+                Assert.Equal(DarlingMcpAgentMuteDirect.SizeCode, (string?)answer["reason"]);
+                Assert.Contains(answer == tooBigBody ? "8192" : "256", (string?)answer["message"] ?? "", StringComparison.Ordinal);
+            }
+
+            Assert.Equal("1", await RuleCountAsync(c));
+            Assert.Equal("0", await JournalCountAsync(c));
+
+            /* The limit is a count of direct writes in the journal in the last hour, across tokens. 19 old-enough rows leave room for one, 20 do not. */
+            for (var i = 0; i < DarlingMcpAgentMuteDirect.MaxWritesPerHour - 1; i++)
+                await ExecAsync(c.Connection, "INSERT INTO config.investigation_journal (event_time, request_id, server_id, event, actor, reason, detail) " +
+                    "VALUES (now(), NULL, NULL, 'action_called', 'agent:other', 'x', '{}'::jsonb)", c.Ct);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named))["status"]);
+            var rateRefused = Parse(await Create(c, Named, metric: "High CPU", serverId: 8, action: "mute"));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RateCode, (string?)rateRefused["reason"]);
+            Assert.Contains("20", (string?)rateRefused["message"], StringComparison.Ordinal);
+            Assert.Equal("2", await RuleCountAsync(c));
+
+            /* Rows older than an hour do not count. */
+            await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '2 hours'", c.Ct);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU", serverId: 8, action: "mute"))["status"]);
         });
     }
 }

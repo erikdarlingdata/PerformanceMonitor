@@ -19,6 +19,9 @@ using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
+/// <summary>The served value of <c>mcp.allowAgentMuteRules</c> (#7414), registered by the host and read by the agent seat.</summary>
+internal sealed record AgentMuteRulesSetting(bool Allowed);
+
 /// <summary>
 /// #7414: an agent token writes a mute or digest rule with no investigation claim. The rule may name one server or all servers and any
 /// metric, the same scope an operator has. The price is a bound on what the rule can do: the rule left behind must expire in the future
@@ -38,6 +41,61 @@ internal static class DarlingMcpAgentMuteDirect
 
     internal const string ExpiryCode = "agent_mute_expiry";
     internal const string ReasonCode = "agent_mute_reason";
+    internal const string LifetimeCode = "agent_mute_lifetime";
+    internal const string AllAlertsCode = "agent_mute_all_alerts";
+    internal const string RepeatCode = "agent_mute_repeat";
+    internal const string SizeCode = "agent_mute_size";
+    internal const string RateCode = "agent_mute_rate";
+    internal const string OffCode = "agent_mute_rules_off";
+
+    /// <summary>The darling.json key that turns this path off (default on). Levels 2 and 3 are not affected by it.</summary>
+    internal const string SettingName = "mcp.allowAgentMuteRules";
+
+    /// <summary>The longest any text field an agent supplies may be (a metric, server name, pattern, source or app name). Neither the operator's path nor the
+    /// store limits these, so this is a sensible bound: the longest real alert metric name and wait type are well under it.</summary>
+    internal const int MaxFieldChars = 256;
+
+    /// <summary>The longest <c>changes_json</c> an update may carry.</summary>
+    internal const int MaxChangesChars = 8192;
+
+    /// <summary>
+    /// Direct-path writes per service per hour. A real storm needs a few rules: say three create calls, a couple of updates to narrow
+    /// them and a delete when it ends, about ten writes, and a rule made twice because the first guess was wrong stays far under this.
+    /// Twenty leaves that headroom twice over and still holds a runaway loop to 20 rows an hour, so a change an operator may want to
+    /// undo stays on the 200 row Agent changes list for ten hours of the worst case instead of falling off it in minutes.
+    /// </summary>
+    internal const int MaxWritesPerHour = 20;
+
+    private static readonly System.Text.RegularExpressions.Regex AgentSuffix = new(
+        @"\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\]\s*$",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>True when the rule's reason ends with an agent attribution suffix (either path's), so an agent made or last changed it.</summary>
+    internal static bool IsAgentMade(MuteRule rule) => rule.Reason is { } r && AgentSuffix.IsMatch(r);
+
+    internal static AgentActionRefusal MatchesEveryAlertRefusal() => new(AllAlertsCode,
+        "A rule with no metric and no server would silence every alert, including the service's own health alerts and the daily report. " +
+        "Name a metric (any server or one server). An operator can make a rule that matches every alert. Nothing was written.");
+
+    /// <summary>
+    /// The renewal bound (#7414): 7 days is a lifetime, counted from the rule's <c>created_at_utc</c>, not a window that slides. An agent's
+    /// update may shorten the expiry, or leave it, but may not move it later than the creation time plus <see cref="MaxExpiryDays"/> days (or
+    /// remove it). Shortening is judged against the stored expiry, so an operator's older or open-ended rule can be cut short but never
+    /// extended by an agent. Null when the update is allowed.
+    /// </summary>
+    internal static AgentActionRefusal? LifetimeRefusal(MuteRule before, MuteRule after)
+    {
+        var created = DateTime.SpecifyKind(before.CreatedAtUtc, DateTimeKind.Utc);
+        var cap = created.AddDays(MaxExpiryDays);
+        var unchanged = after.ExpiresAtUtc == before.ExpiresAtUtc;
+        var shortens = after.ExpiresAtUtc is { } now && (before.ExpiresAtUtc is not { } was || now <= was);
+        var insideLifetime = after.ExpiresAtUtc is { } e && DateTime.SpecifyKind(e, DateTimeKind.Utc) <= cap;
+        if (unchanged || shortens || insideLifetime)
+            return null;
+        return new AgentActionRefusal(LifetimeCode,
+            $"This rule was created {created.ToString("o", CultureInfo.InvariantCulture)}. An agent's rule lives at most {MaxExpiryDays} days from then, " +
+            $"so its expiry cannot be moved later than {cap.ToString("o", CultureInfo.InvariantCulture)}. An agent can shorten it. An operator can extend it. Nothing was written.");
+    }
 
     /// <summary>True for a call this class serves: the investigations arm (not the writes arm) and no <c>agent_action</c> at all. The absent test is
     /// <see cref="InvestigationToolCore.ParseAgentAction"/>'s own, so a malformed argument still goes to the claim path and is refused there.</summary>
@@ -65,6 +123,17 @@ internal static class DarlingMcpAgentMuteDirect
             ? new AgentActionRefusal(ExpiryCode,
                 $"expires_at ({expiry.ToString("o", CultureInfo.InvariantCulture)}) must be in the future and at most {MaxExpiryDays} days ahead (no later than {latestText}). Nothing was written.")
             : null;
+    }
+
+    private static AgentActionRefusal SizeRefusal(string field, int limit) => new(SizeCode,
+        $"{field} is longer than the {limit} characters an agent's rule may use. Nothing was written.");
+
+    internal static AgentActionRefusal? CreateFieldsRefusal(params (string Name, string? Value)[] fields)
+    {
+        foreach (var (name, value) in fields)
+            if (value is { } v && v.Length > MaxFieldChars)
+                return SizeRefusal(name, MaxFieldChars);
+        return null;
     }
 
     private static AgentActionRefusal? ReasonRefusal(string? reason) =>
@@ -105,12 +174,20 @@ internal static class DarlingMcpAgentMuteDirect
         string reason, DateTime now, Func<NpgsqlConnection, NpgsqlTransaction, Task<(string Answer, MuteRule? Before, MuteRule? After)>> body,
         string changedStatus, CancellationToken ct)
     {
+        if (!seat.AgentMuteRulesAllowed)
+            return Refusal(new AgentActionRefusal(OffCode,
+                $"An agent token may not write mute or digest rules without a claim on this service: {SettingName} is false in darling.json. Nothing was written."));
         try
         {
             await using var connection = await (seat.Owner?.Read() ?? postgres).OpenConnectionAsync(ct);
             await using var transaction = await connection.BeginTransactionAsync(ct);
+            /* The switch read takes the service row FOR NO KEY UPDATE, so every direct write waits its turn here: the hourly count and the
+               same-match check below read the journal as the write before them left it, and two calls cannot both see room. */
             if (await InvestigationRequestStore.DirectChangeSwitchRefusalAsync(connection, transaction, ct) is { } off)
                 return Refusal(off);
+            if (await WriteCountInLastHourAsync(connection, transaction, now, ct) >= MaxWritesPerHour)
+                return Refusal(new AgentActionRefusal(RateCode,
+                    $"This service allows {MaxWritesPerHour} agent mute rule writes an hour and that many were made in the last hour. Wait, or ask an operator. Nothing was written."));
 
             var (answer, before, after) = await body(connection, transaction);
             if (!string.Equals(StatusOf(answer), changedStatus, StringComparison.Ordinal))
@@ -126,6 +203,41 @@ internal static class DarlingMcpAgentMuteDirect
         {
             return McpHelpers.FormatError(tool, ex);
         }
+    }
+
+    private static async Task<long> WriteCountInLastHourAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT count(*) FROM config.investigation_journal WHERE event = 'action_called' AND request_id IS NULL AND actor LIKE 'agent:%' AND event_time > $1 - interval '1 hour'",
+            connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        return (long)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>
+    /// Whether an agent made a rule with this match (server, metric, action) in the last <see cref="MaxExpiryDays"/> days, read from the
+    /// agent change journal so a rule since deleted or expired still counts. Without it, delete then create again gives the same match a fresh
+    /// 7 days every time. It does NOT stop a different match (another metric, a server instead of all servers, or digest instead of mute),
+    /// nor an operator re-creating the rule: each of those is a different rule, still bounded, journaled and rate limited.
+    /// </summary>
+    private static async Task<bool> MadeRecentlyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, MuteRule rule, DateTime now, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT EXISTS (
+  SELECT 1 FROM config.investigation_journal c
+  JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
+  CROSS JOIN LATERAL (SELECT COALESCE(d.detail->'after'->'mute_rule', d.detail->'after') AS r) x
+  WHERE c.event = 'action_called' AND c.actor LIKE 'agent:%' AND c.detail->>'tool' = 'create_mute_rule'
+    AND c.event_time > $1 - make_interval(days => $2)
+    AND (x.r->>'server_id') IS NOT DISTINCT FROM $3
+    AND lower(x.r->>'metric_name') IS NOT DISTINCT FROM lower($4)
+    AND COALESCE(x.r->>'action', 'mute') = $5)", connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = MaxExpiryDays });
+        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.ServerId?.ToString(CultureInfo.InvariantCulture), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.MetricName, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = MuteRuleActions.Normalize(rule.Action) });
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task<(MuteRule? Rule, string? NotFound)> LockAndReadAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
@@ -151,6 +263,10 @@ internal static class DarlingMcpAgentMuteDirect
             return DarlingMcpAlertTools.Outcome("invalid", DarlingMcpAgentActions.StartsAtRefusal);
         if (ReasonRefusal(reason) is { } noReason)
             return Refusal(noReason);
+        if (CreateFieldsRefusal(("server_name", server_name), ("metric_name", metric_name), ("database_pattern", database_pattern),
+                ("query_text_pattern", query_text_pattern), ("wait_type_pattern", wait_type_pattern), ("job_name_pattern", job_name_pattern),
+                ("client_app_pattern", client_app_pattern), ("external_source", external_source), ("expires_at", expires_at)) is { } tooLong)
+            return Refusal(tooLong);
 
         /* One clock, the service's UTC clock, taken once: the bound and the create's own past-expiry check read the same instant. */
         var now = DateTime.UtcNow;
@@ -177,6 +293,13 @@ internal static class DarlingMcpAgentMuteDirect
             {
                 var stored = JsonNode.Parse(answer)!["mute_rule"]!;
                 created = await DarlingMcpAlertTools.FindRuleAsync(new PgMuteRuleStore(connection, transaction), (string)stored["id"]!);
+                /* Judged on the rule as the store holds it. A refusal here is not "created", so nothing commits. */
+                if (created is { MatchesEveryAlert: true })
+                    return (Refusal(MatchesEveryAlertRefusal()), null, null);
+                if (created is not null && await MadeRecentlyAsync(connection, transaction, created, now, ct))
+                    return (Refusal(new AgentActionRefusal(RepeatCode,
+                        $"An agent already made a rule with this metric, server and action in the last {MaxExpiryDays} days (it may since have been deleted or expired). " +
+                        $"A rule's {MaxExpiryDays} days are not renewed by making it again. An operator can make or extend it. Nothing was written.")), null, null);
             }
 
             return (answer, null, created);
@@ -209,6 +332,11 @@ internal static class DarlingMcpAgentMuteDirect
             sentValue.TryGetValue(out reason);
         if (ReasonRefusal(reason) is { } noReason)
             return Refusal(noReason);
+        if (changes_json.Length > MaxChangesChars)
+            return Refusal(SizeRefusal("changes_json", MaxChangesChars));
+        foreach (var (key, value) in body)
+            if (value is JsonValue jv && jv.TryGetValue(out string? text) && text.Length > (key == "reason" ? InvestigationToolCore.MaxActionReasonChars : MaxFieldChars))
+                return Refusal(SizeRefusal(key, MaxFieldChars));
 
         /* The write must carry the expiry itself, not lean on whatever the rule holds: an update that leaves it out or clears it is refused here,
            and the rule it would leave is judged below as well, so a value that parses to nothing (or the other spelling) cannot slip past. */
@@ -229,6 +357,10 @@ internal static class DarlingMcpAgentMuteDirect
                 return (DarlingMcpAlertTools.Outcome("invalid", error ?? "changes_json is invalid."), null, null);
             if (ExpiryRefusal(after.ExpiresAtUtc, now) is { } badExpiry)
                 return (Refusal(badExpiry), null, null);
+            if (after.MatchesEveryAlert)
+                return (Refusal(MatchesEveryAlertRefusal()), null, null);
+            if (LifetimeRefusal(before, after) is { } lifetime)
+                return (Refusal(lifetime), null, null);
 
             var answer = await DarlingMcpAlertTools.UpdateMuteRuleCore(new PgMuteRuleStore(connection, transaction), rule_id, body.ToJsonString(),
                 id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id));

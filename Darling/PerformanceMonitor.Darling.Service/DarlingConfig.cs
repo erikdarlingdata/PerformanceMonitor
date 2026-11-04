@@ -1551,6 +1551,15 @@ public sealed class McpConfig
     public bool AllowInvestigations { get; set; }
 
     /// <summary>
+    /// Default ON (#7414). Under <see cref="AllowInvestigations"/> an agent token may create, change, enable, disable and delete a mute or digest
+    /// rule with no investigation claim, for one server or all servers and a named metric, each rule expiring within 7 days of its creation, with a
+    /// reason, and journaled. Set false to refuse that path (the refusal names this setting) and write nothing. It does not touch the claim-based
+    /// Level 2 and 3 tools. Has no effect unless <see cref="AllowInvestigations"/> serves the agent. File-only and restart-only, like it.
+    /// </summary>
+    [JsonPropertyName("allowAgentMuteRules")]
+    public bool AllowAgentMuteRules { get; set; } = true;
+
+    /// <summary>
     /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients

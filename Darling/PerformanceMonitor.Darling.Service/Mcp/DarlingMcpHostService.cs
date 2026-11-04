@@ -923,6 +923,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             var serviceDataDetail = ResolveDataDetail(config.Mcp.DataDetail, _logger);
             RegisterDataDetail(builder.Services, serviceDataDetail);
 
+            /* #7414: mcp.allowAgentMuteRules (default on), read once per start; the seat reads it per request. */
+            builder.Services.AddSingleton(new AgentMuteRulesSetting(config.Mcp.AllowAgentMuteRules));
+
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
                 builder.Services, declaredPeers, _readLatency, _logger, _slowReads, writes,
@@ -1320,9 +1323,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
         if (perRequest)
-            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>(), tokens!.AgentNames));
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>(), tokens!.AgentNames,
+                sp.GetService<AgentMuteRulesSetting>()?.Allowed ?? true));
         else
-            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>()));
+            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>(), null,
+                sp.GetService<AgentMuteRulesSetting>()?.Allowed ?? true));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an

@@ -601,6 +601,33 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
         await ScalarAsync(c.Connection, $"SELECT {select} FROM config.investigation_journal WHERE request_id = '{c.Request}' AND event LIKE 'action_%'", c.Ct);
 
     [Fact]
+    public async Task AClaimUpdate_CannotClearTheExpiryOfADigestRule_OrExtendAnAgentRulePastItsSevenDays()
+    {
+        await RunAsync(async c =>
+        {
+            var digest = Guid.NewGuid().ToString();
+            await ExecAsync(c.Connection, $@"INSERT INTO config_mute_rules (id, enabled, created_at_utc, server_id, server_name, metric_name, reason, expires_at_utc, action)
+VALUES ('{digest}', TRUE, now() AT TIME ZONE 'utc', 7, 'srv-7', 'Blocking Detected', 'storm [agent:agent-a]', now() AT TIME ZONE 'utc' + interval '1 day', 'digest')", c.Ct);
+            var aging = Guid.NewGuid().ToString();
+            await ExecAsync(c.Connection, $@"INSERT INTO config_mute_rules (id, enabled, created_at_utc, server_id, server_name, metric_name, reason, expires_at_utc, action)
+VALUES ('{aging}', TRUE, now() AT TIME ZONE 'utc' - interval '5 days', 7, 'srv-7', 'Blocking Detected', 'storm [agent:agent-a]', now() AT TIME ZONE 'utc' + interval '1 day', 'mute')", c.Ct);
+
+            var clear = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, digest, "{\"expires_at_utc\":null}", c.Arg, AgentSeat));
+            var extend = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging,
+                "{\"expires_at_utc\":\"" + DateTime.UtcNow.AddDays(4).ToString("o", CultureInfo.InvariantCulture) + "\"}", c.Arg, AgentSeat));
+
+            Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode, (string?)clear["reason"]);
+            Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode, (string?)extend["reason"]);
+            Assert.Equal("False", await ScalarAsync(c.Connection, $"SELECT expires_at_utc IS NULL FROM config_mute_rules WHERE id = '{digest}'", c.Ct));
+            Assert.Equal("False", await ScalarAsync(c.Connection, $"SELECT expires_at_utc > now() AT TIME ZONE 'utc' + interval '3 days' FROM config_mute_rules WHERE id = '{aging}'", c.Ct));
+
+            /* Inside its lifetime, a claim update of an agent's mute rule still works. */
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging,
+                "{\"expires_at_utc\":\"" + DateTime.UtcNow.AddDays(1.5).ToString("o", CultureInfo.InvariantCulture) + "\"}", c.Arg, AgentSeat))["status"]);
+        });
+    }
+
+    [Fact]
     public async Task ASecondUpdate_NeverStacksTheAttributionSuffix_WhetherTheReasonIsOmittedOrSentBackWhole()
     {
         await RunAsync(async c =>

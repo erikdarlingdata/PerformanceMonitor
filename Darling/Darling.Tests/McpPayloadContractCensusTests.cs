@@ -1433,6 +1433,8 @@ public sealed class McpPayloadContractCensusTests
         "DarlingMcpAlertTools.cs CreateMuteRuleOver",
         /* #6231: set_quiet_window's end and start, parsed under invariant UTC styles like create_mute_rule's expires_at. */
         "DarlingMcpQuietWindowTools.cs TryParseUtc",
+        /* #7414: the claim-free agent create parses expires_at itself, under the same invariant UTC styles, to judge the 7 day bound. */
+        "DarlingMcpAgentMuteDirect.cs CreateAsync",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(
