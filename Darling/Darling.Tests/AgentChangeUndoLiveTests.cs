@@ -149,6 +149,46 @@ public sealed class AgentChangeUndoLiveTests
         });
     }
 
+    /// <summary>#7414: the purge and a delete look the same from the table, so undo of a rule that is gone and past the agent's expiry says so.
+    /// A delete the journal records (here an agent's) refuses and names who and when, and the rule stays gone. When nothing records a delete
+    /// the rule is put back and the reply says it was missing and may have been deleted on purpose, so the admin can delete it again.</summary>
+    [Fact]
+    public async Task ARuleThatIsGoneAfterItsExpiry_IsPutBackWithAWarning_UnlessTheJournalRecordsItsDelete()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var expired = DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture);
+            var purged = await JournalChangeAsync(connection, "mute", "g1", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("agent shortened it", expired, "mute"), ct: ct);
+            var back = await undo.UndoAsync(purged, Login, ct);
+            Assert.True(back.Undone, back.Code + " " + back.Words);
+            Assert.Contains("missing from the store", back.Words, StringComparison.Ordinal);
+            Assert.Contains("deleted it on purpose", back.Words, StringComparison.Ordinal);
+            Assert.Contains("delete it again", back.Words, StringComparison.Ordinal);
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'g1'", ct));
+
+            /* An undo of a row that is there and unchanged says nothing of the kind. */
+            var later = DateTime.UtcNow.AddHours(3).ToString("o", CultureInfo.InvariantCulture);
+            await ExecAsync(connection, $"UPDATE config.config_mute_rules SET expires_at_utc = '{later}' WHERE id = 'g1'", ct);
+            var present = await JournalChangeAsync(connection, "mute", "g1", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("operator's permanent rule", later, "mute"), ct: ct);
+            var plain = await undo.UndoAsync(present, Login, ct);
+            Assert.True(plain.Undone, plain.Code + " " + plain.Words);
+            Assert.DoesNotContain("missing", plain.Words, StringComparison.Ordinal);
+
+            /* The agent changed the rule, then deleted it: the journal records the delete, so the expiry did not remove it. */
+            var changed = await JournalChangeAsync(connection, "mute", "g2", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("agent shortened it", expired, "mute"), ct: ct);
+            await JournalChangeAsync(connection, "mute", "g2", 7, TimedRule("agent shortened it", expired, "mute"), null, ct: ct, ageHours: 0, tool: "delete_mute_rule");
+            var refused = await undo.UndoAsync(changed, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Contains("was deleted", refused.Words, StringComparison.Ordinal);
+            Assert.Contains("agent:a", refused.Words, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'g2'", ct));
+        });
+    }
+
     /// <summary>The mute image with the four repeating-schedule fields (#7040): days as names, times as HH:mm, the IANA zone.</summary>
     private static string ScheduledMute(string reason, string[]? days, string? start, string? end, string? zone) =>
         new JsonObject
@@ -406,7 +446,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
 
     /// <summary>Writes the journal's called row, and its result row when asked: <c>done</c> (default), <c>failed</c> or <c>none</c>.</summary>
     private static async Task<long> JournalChangeAsync(NpgsqlConnection connection, string kind, string targetId, int serverId,
-        string? before, string? after, string result = "done", string? database = null, CancellationToken ct = default, int ageHours = 1)
+        string? before, string? after, string result = "done", string? database = null, CancellationToken ct = default, int ageHours = 1, string? tool = null)
     {
         var request = Guid.NewGuid();
         /* The journal carries what the tools write (#5917): the shared kind names, and on the done row the tool's answer, which for a
@@ -421,7 +461,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
         kind = journaledKind;
         var detail = new JsonObject
         {
-            ["tool"] = kind + "_tool", ["kind"] = kind, ["claim_no"] = 1,
+            ["tool"] = tool ?? kind + "_tool", ["kind"] = kind, ["claim_no"] = 1,
             ["target"] = new JsonObject { ["id"] = targetId, ["server_id"] = serverId, ["database"] = database },
             ["evidence"] = new JsonArray(), ["before"] = before is null ? null : JsonNode.Parse(before),
         }.ToJsonString();

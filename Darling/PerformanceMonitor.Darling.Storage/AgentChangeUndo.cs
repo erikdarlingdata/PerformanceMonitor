@@ -105,6 +105,7 @@ public sealed record MutedAlertRow(DateTime AlertTimeUtc, int ServerId, string S
 public sealed record AgentUndoResult(bool Undone, string? Code, string Words)
 {
     internal static AgentUndoResult Ok(string kind) => new(true, null, "Undone: the " + kind + " is back to what it was before the agent's change.");
+    internal static AgentUndoResult Ok(string kind, string note) => new(true, null, Ok(kind).Words + " " + note);
     internal static AgentUndoResult Refused(string code, string message) => new(false, code, message);
 }
 
@@ -557,6 +558,10 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
            due to be gone is not "changed since": the before image goes back. A row that is gone with an unexpired after image was deleted
            by someone else and still refuses. */
         var purgedAfterExpiry = current is null && before is not null && kind == AgentChangeKinds.Mute && after is not null && ExpiredAtOrBefore(after, Now());
+        /* The purge and a delete look the same from the table. A delete the journal records (an agent's) is named and refuses; a person's
+           delete of a mute rule is recorded nowhere, so for that case the reply below says the rule was missing and may have been deleted on purpose. */
+        if (purgedAfterExpiry && await RecordedDeleteAsync(connection, transaction, targetId!, calledId, cancellationToken) is { } deletedBy)
+            return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} was deleted after the agent's change ({deletedBy}), so it is not put back. Make it again by hand if you still want it.");
         if (!purgedAfterExpiry && !Equal(spec, current, after))
             return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} changed since the agent's change, so its current settings are kept. Review it and change it by hand if you still want it back.");
 
@@ -598,7 +603,26 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 ["replaced"] = after?.DeepClone(),
             }.ToJsonString(), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return AgentUndoResult.Ok(label);
+        return purgedAfterExpiry
+            ? AgentUndoResult.Ok(label, $"The {label} was missing from the store and has been put back. The agent had set it to expire, so the expired rule purge most likely removed it, but nothing records who deleted it and a person may have deleted it on purpose. If so, delete it again.")
+            : AgentUndoResult.Ok(label);
+    }
+
+    /// <summary>
+    /// A later, completed <c>delete_mute_rule</c> the journal holds for this rule (any actor), as text naming who and when, or null when none. A person's
+    /// delete through the web page, the Viewer or an operator token journals nothing, so null does not prove the expired rule purge removed the row.
+    /// </summary>
+    private static async Task<string?> RecordedDeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId, long calledId, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, @"
+SELECT c.actor, c.event_time FROM config.investigation_journal c
+JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
+WHERE c.event = 'action_called' AND c.detail->>'tool' = 'delete_mute_rule' AND c.detail->'target'->>'id' = $1 AND c.journal_id > $2
+ORDER BY c.journal_id DESC LIMIT 1", PText(ruleId), P(calledId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? $"by {reader.GetString(0)} at {Utc(reader.GetDateTime(1)).ToString("u", CultureInfo.InvariantCulture)}"
+            : null;
     }
 
     // ---- the per-kind row access ----

@@ -534,7 +534,7 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
     }
 
     [Fact]
-    public async Task AMatchAnAgentMadeInTheLastSevenDays_IsNotMadeAgain_EvenAfterItWasDeleted_ButADifferentMatchIs()
+    public async Task AMatchAnAgentMadeInTheLastFourteenDays_IsNotMadeAgain_EvenAfterItWasDeleted_ButADifferentMatchIs()
     {
         await RunAsync(async c =>
         {
@@ -554,10 +554,127 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
             Assert.Equal("created", (string?)Parse(await Create(c, Named, serverId: 7))["status"]);
             Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "High CPU"))["status"]);
 
-            /* Past the seven days it is allowed again. */
+            /* The look-back is twice the 7 day lifetime: a match is off as long as it was on. At 8 days (the old rule's end) it is still refused,
+               and the refusal says an operator can make a longer rule. Past 14 days it is allowed again. */
             await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '8 days'", c.Ct);
             await ExecAsync(c.Connection, "DELETE FROM config_mute_rules", c.Ct);
+            var eightDays = Parse(await Create(c, Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)eightDays["reason"]);
+            Assert.Contains("14 days", (string?)eightDays["message"], StringComparison.Ordinal);
+            Assert.Contains("operator can make", (string?)eightDays["message"], StringComparison.Ordinal);
+            Assert.Equal("0", await RuleCountAsync(c));
+
+            await ExecAsync(c.Connection, "UPDATE config.investigation_journal SET event_time = event_time - interval '7 days'", c.Ct);
             Assert.Equal("created", (string?)Parse(await Create(c, Named))["status"]);
+        });
+    }
+
+    private static string Move(string field, string value) =>
+        "{\"reason\":\"moving the rule\",\"expires_at_utc\":\"" + Iso(DateTime.UtcNow.AddDays(1)) + "\",\"" + field + "\":" + value + "}";
+
+    [Fact]
+    public async Task AnUpdate_ThatMovesARuleOntoAMatchAnAgentMadeInTheLastFourteenDays_IsRefused_AndAMoveOntoAFreshMatchIsRememberedLikeACreate()
+    {
+        await RunAsync(async c =>
+        {
+            /* An agent made a rule on the metric, then deleted it. Its journal rows stay. */
+            var storm = (string)Parse(await Create(c, Named, metric: "Collector Cost Regression"))["mute_rule"]!["id"]!;
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, storm, agentSeat: Named, reason: "storm over"))["status"]);
+
+            var other = (string)Parse(await Create(c, Named, metric: "Long Running Query"))["mute_rule"]!["id"]!;
+            var journal = await JournalCountAsync(c);
+
+            /* The rule is not allowed onto that match, by metric, and nothing is written. */
+            var metric = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, other, Move("metric_name", "\"Collector Cost Regression\""), agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)metric["reason"]);
+            Assert.Equal("Long Running Query", await ScalarAsync(c, $"SELECT metric_name FROM config_mute_rules WHERE id = '{other}'"));
+            Assert.Equal(journal, await JournalCountAsync(c));
+
+            /* A rule made on one server is not allowed onto another server where the agent already made it, by server. */
+            var onSeven = (string)Parse(await Create(c, Named, metric: "Blocking Chain", serverId: 7))["mute_rule"]!["id"]!;
+            var onEight = (string)Parse(await Create(c, Named, metric: "Blocking Chain", serverId: 8))["mute_rule"]!["id"]!;
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, onEight, agentSeat: Named, reason: "storm over"))["status"]);
+            var server = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, onSeven, Move("server_id", "8"), agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)server["reason"]);
+            Assert.Equal("7", await ScalarAsync(c, $"SELECT server_id FROM config_mute_rules WHERE id = '{onSeven}'"));
+
+            /* By action. */
+            var mute = (string)Parse(await Create(c, Named, metric: "Deadlocks", action: "mute"))["mute_rule"]!["id"]!;
+            Assert.Equal("deleted", (string?)Parse(await DarlingMcpAlertTools.DeleteMuteRule(c.Source, mute, agentSeat: Named, reason: "storm over"))["status"]);
+            var digest = (string)Parse(await Create(c, Named, metric: "Deadlocks", action: "digest"))["mute_rule"]!["id"]!;
+            var action = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, digest, Move("action", "\"mute\""), agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)action["reason"]);
+
+            /* A move onto a match nobody made is allowed, and the move counts as a rule made on it: a create there is refused afterwards. */
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, other, Move("metric_name", "\"Tempdb Space\""), agentSeat: Named))["status"]);
+            var created = Parse(await Create(c, Named, metric: "Tempdb Space"));
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)created["reason"]);
+
+            /* An update that leaves the match alone is not held to the look-back. */
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, other, Changes(Iso(DateTime.UtcNow.AddHours(5))), agentSeat: Named))["status"]);
+        });
+    }
+
+    private static Task<string> CreateNamed(Ctx c, DarlingAgentActionSeat seat, string serverName, string metric) =>
+        DarlingMcpAlertTools.CreateMuteRule(c.Source, server_name: serverName, metric_name: metric, reason: "alert storm after the collector change",
+            expires_at: Iso(DateTime.UtcNow.AddDays(1)), action: "digest", agentSeat: seat);
+
+    [Fact]
+    public async Task OneServerNamedByIdAndByName_IsOneMatch_InBothDirections_ButAllServersIsAnother()
+    {
+        await RunAsync(async c =>
+        {
+            /* By id, then by name (the display name). */
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "Blocking Chain", serverId: 7))["status"]);
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)Parse(await CreateNamed(c, Named, "SRV-7", "Blocking Chain"))["reason"]);
+
+            /* By name, then by id. */
+            Assert.Equal("created", (string?)Parse(await CreateNamed(c, Named, "srv-8", "Deadlocks"))["status"]);
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)Parse(await Create(c, Named, metric: "Deadlocks", serverId: 8))["reason"]);
+
+            /* A name no server has still matches itself. */
+            Assert.Equal("created", (string?)Parse(await CreateNamed(c, Named, "ghost", "Tempdb Space"))["status"]);
+            Assert.Equal(DarlingMcpAgentMuteDirect.RepeatCode, (string?)Parse(await CreateNamed(c, Named, "Ghost", "Tempdb Space"))["reason"]);
+
+            /* Another server, and all servers, are other matches: a name-keyed rule is not "all servers". */
+            Assert.Equal("created", (string?)Parse(await CreateNamed(c, Named, "srv-8", "Blocking Chain"))["status"]);
+            Assert.Equal("created", (string?)Parse(await Create(c, Named, metric: "Deadlocks"))["status"]);
+            Assert.Equal("5", await RuleCountAsync(c));
+        });
+    }
+
+    [Fact]
+    public async Task AnEnable_OfARuleThatMatchesEveryAlert_IsRefused_ButItsDisableIsNot()
+    {
+        await RunAsync(async c =>
+        {
+            var id = Guid.NewGuid().ToString();
+            await ExecAsync(c.Connection, $@"INSERT INTO config_mute_rules (id, enabled, created_at_utc, reason, expires_at_utc, action)
+VALUES ('{id}', FALSE, now() AT TIME ZONE 'utc', 'operator rule', '{Iso(DateTime.UtcNow.AddDays(2))}', 'mute')", c.Ct);
+
+            var refused = Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, id, true, agentSeat: Named, reason: "turn it on"));
+            Assert.Equal(DarlingMcpAgentMuteDirect.AllAlertsCode, (string?)refused["reason"]);
+            Assert.Contains("An operator can make a rule that matches every alert", (string?)refused["message"], StringComparison.Ordinal);
+            Assert.Equal("False", await ScalarAsync(c, $"SELECT enabled FROM config_mute_rules WHERE id = '{id}'"));
+            Assert.Equal("0", await JournalCountAsync(c));
+
+            await ExecAsync(c.Connection, $"UPDATE config_mute_rules SET enabled = TRUE WHERE id = '{id}'", c.Ct);
+            Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.SetMuteRuleEnabled(c.Source, id, false, agentSeat: Named, reason: "storm over"))["status"]);
+            Assert.Equal("False", await ScalarAsync(c, $"SELECT enabled FROM config_mute_rules WHERE id = '{id}'"));
+        });
+    }
+
+    [Fact]
+    public async Task AChangesDocumentOverTheLimit_IsRefusedForItsSize_WhateverItHolds_AndWritesNothing()
+    {
+        await RunAsync(async c =>
+        {
+            var rule = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1));
+            /* Not JSON at all: the size is judged first, so it is a size refusal and not an invalid-document answer. */
+            var garbage = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, rule, new string('x', DarlingMcpAgentMuteDirect.MaxChangesChars + 1), agentSeat: Named));
+            Assert.Equal(DarlingMcpAgentMuteDirect.SizeCode, (string?)garbage["reason"]);
+            Assert.Contains("8192", (string?)garbage["message"], StringComparison.Ordinal);
+            Assert.Equal("0", await JournalCountAsync(c));
         });
     }
 

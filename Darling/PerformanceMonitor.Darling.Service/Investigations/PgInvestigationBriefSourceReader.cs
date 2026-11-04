@@ -212,6 +212,13 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
     /// they cannot fill the recent changes section's budget, so an operator's change is never cut for them.</summary>
     public const int MaxAgentMuteRules = 3;
 
+    /// <summary>#7414: the control characters, line breaks and line or paragraph separators an agent-written reason may carry. Each run is replaced
+    /// with one space before the reason is cut, so the brief shows the reason as one line, as the digest hold line does (<c>MuteRule.OneLine</c>).</summary>
+    internal const string AgentReasonControlPattern = @"[\x01-\x1f\x7f-\x9f\u2028\u2029]+";
+
+    /// <summary>The agent-written reason with its attribution suffix cut, its control characters turned into spaces and its ends trimmed, before it is cut to length.</summary>
+    private const string AgentReasonOneLineSql = @"btrim(regexp_replace(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''), '" + AgentReasonControlPattern + @"', ' ', 'g'))";
+
     internal static readonly string ChangesSql = @"
 SELECT at, kind, text, pattern
 FROM (
@@ -222,8 +229,8 @@ FROM (
                      CASE WHEN m.recur_start_time IS NOT NULL THEN 'repeating window ' || to_char(m.recur_start_time, 'HH24:MI') || '-' || to_char(m.recur_end_time, 'HH24:MI') || ' ' || m.recur_time_zone END,
                      CASE WHEN m.reason IS NULL THEN NULL
                           WHEN m.agent_written
-                          THEN 'agent-written reason: ' || left(btrim(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', '')), " + AgentReasonChars + @")
-                               || CASE WHEN length(btrim(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''))) > " + AgentReasonChars + @" THEN '...' ELSE '' END
+                          THEN 'agent-written reason: ' || left(" + AgentReasonOneLineSql + @", " + AgentReasonChars + @")
+                               || CASE WHEN length(" + AgentReasonOneLineSql + @") > " + AgentReasonChars + @" THEN '...' ELSE '' END
                           ELSE 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
     FROM (SELECT r.*, (r.reason ~ '" + AgentReasonSuffixPattern + @"') AS agent_written,

@@ -39,6 +39,13 @@ internal static class DarlingMcpAgentMuteDirect
     /// <summary>The furthest ahead an agent's rule may expire, in days.</summary>
     internal const int MaxExpiryDays = 7;
 
+    /// <summary>
+    /// How far back the same-match check looks (#7414): twice the lifetime, so a match an agent made is off for as long as it was on and the
+    /// same match cannot be made again the moment the old one expires. An agent gets at most <see cref="MaxExpiryDays"/> days on and
+    /// <see cref="MaxExpiryDays"/> days off per match. An operator can make a longer rule.
+    /// </summary>
+    internal const int RepeatLookbackDays = MaxExpiryDays * 2;
+
     internal const string ExpiryCode = "agent_mute_expiry";
     internal const string ReasonCode = "agent_mute_reason";
     internal const string LifetimeCode = "agent_mute_lifetime";
@@ -214,29 +221,83 @@ internal static class DarlingMcpAgentMuteDirect
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
+    /// <summary>The refusal for a match an agent made, or moved a rule onto, inside <see cref="RepeatLookbackDays"/> days.</summary>
+    internal static AgentActionRefusal RepeatRefusal() => new(RepeatCode,
+        $"An agent already made a rule with this metric, server and action, or changed a rule to have them, in the last {RepeatLookbackDays} days (it may since have been deleted or expired). " +
+        $"An agent's rule is on for at most {MaxExpiryDays} days and then off for {MaxExpiryDays} days before the same match can be made again. An operator can make or extend a longer rule. Nothing was written.");
+
+    /// <summary>True when an update moves the rule onto another server, metric or action. A server is the store id when the rule has one (its name is only a label then), else the name.</summary>
+    internal static bool MatchChanged(MuteRule before, MuteRule after)
+    {
+        static string? Clean(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        return before.ServerId != after.ServerId
+            || (after.ServerId is null && !string.Equals(Clean(before.ServerName), Clean(after.ServerName), StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(Clean(before.MetricName), Clean(after.MetricName), StringComparison.OrdinalIgnoreCase)
+            || MuteRuleActions.Normalize(before.Action) != MuteRuleActions.Normalize(after.Action);
+    }
+
     /// <summary>
-    /// Whether an agent made a rule with this match (server, metric, action) in the last <see cref="MaxExpiryDays"/> days, read from the
-    /// agent change journal so a rule since deleted or expired still counts. Without it, delete then create again gives the same match a fresh
-    /// 7 days every time. It does NOT stop a different match (another metric, a server instead of all servers, or digest instead of mute),
-    /// nor an operator re-creating the rule: each of those is a different rule, still bounded, journaled and rate limited.
+    /// The store ids and lower-cased display names that stand for the rule's server, so one server named by id and then by name is one match.
+    /// An id-keyed rule gives its id and that server's display name. A name-keyed rule gives its name and the ids of every server with that display
+    /// name (the name an alert's server is matched by). Both are empty for a rule on all servers.
+    /// </summary>
+    private static async Task<(string[] Ids, string[] Names)> ServerIdentityAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        MuteRule rule, CancellationToken ct)
+    {
+        var ids = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        var names = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        if (rule.ServerId is { } serverId)
+            ids.Add(serverId.ToString(CultureInfo.InvariantCulture));
+        else if (!string.IsNullOrWhiteSpace(rule.ServerName))
+            names.Add(rule.ServerName.Trim().ToLowerInvariant());
+        else
+            return ([], []);
+
+        await using var command = new NpgsqlCommand(
+            "SELECT server_id, lower(COALESCE(display_name, server_name)) FROM collect.servers WHERE server_id = $1 OR lower(COALESCE(display_name, server_name)) = lower($2)",
+            connection, transaction);
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = rule.ServerId, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.ServerId is null ? rule.ServerName!.Trim() : null, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ids.Add(reader.GetInt32(0).ToString(CultureInfo.InvariantCulture));
+            names.Add(reader.GetString(1));
+        }
+
+        return ([.. ids], [.. names]);
+    }
+
+    /// <summary>
+    /// Whether an agent made a rule with this match (server, metric, action) in the last <see cref="RepeatLookbackDays"/> days, or changed a rule
+    /// onto it, read from the agent change journal so a rule since deleted or expired still counts. A create row counts by its after image, and
+    /// so does an update row, so a rule moved onto a match counts as a rule made on that match. Without it, delete then create again, or
+    /// making a rule on one metric and updating it onto another, gives the same match a fresh 7 days every time. One server by id and by name is
+    /// one match (<see cref="ServerIdentityAsync"/>). It does NOT stop a different match (another metric, a server instead of all servers, or
+    /// digest instead of mute), nor an operator re-creating the rule: each of those is a different rule, still bounded, journaled and rate limited.
     /// </summary>
     private static async Task<bool> MadeRecentlyAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, MuteRule rule, DateTime now, CancellationToken ct)
     {
+        var (ids, names) = await ServerIdentityAsync(connection, transaction, rule, ct);
+        var allServers = rule.ServerId is null && string.IsNullOrWhiteSpace(rule.ServerName);
         await using var command = new NpgsqlCommand(@"
 SELECT EXISTS (
   SELECT 1 FROM config.investigation_journal c
   JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
   CROSS JOIN LATERAL (SELECT COALESCE(d.detail->'after'->'mute_rule', d.detail->'after') AS r) x
-  WHERE c.event = 'action_called' AND c.actor LIKE 'agent:%' AND c.detail->>'tool' = 'create_mute_rule'
+  WHERE c.event = 'action_called' AND c.actor LIKE 'agent:%' AND c.detail->>'tool' IN ('create_mute_rule', 'update_mute_rule')
     AND c.event_time > $1 - make_interval(days => $2)
-    AND (x.r->>'server_id') IS NOT DISTINCT FROM $3
     AND lower(x.r->>'metric_name') IS NOT DISTINCT FROM lower($4)
-    AND COALESCE(x.r->>'action', 'mute') = $5)", connection, transaction);
+    AND COALESCE(x.r->>'action', 'mute') = $5
+    AND CASE WHEN $6 THEN (x.r->>'server_id') IS NULL AND nullif(btrim(x.r->>'server_name'), '') IS NULL
+             ELSE (x.r->>'server_id') = ANY($3) OR ((x.r->>'server_id') IS NULL AND lower(x.r->>'server_name') = ANY($7)) END)", connection, transaction);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = MaxExpiryDays });
-        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.ServerId?.ToString(CultureInfo.InvariantCulture), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = RepeatLookbackDays });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = ids, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
         command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = rule.MetricName, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = MuteRuleActions.Normalize(rule.Action) });
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = allServers });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = names, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
         return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
@@ -297,9 +358,7 @@ SELECT EXISTS (
                 if (created is { MatchesEveryAlert: true })
                     return (Refusal(MatchesEveryAlertRefusal()), null, null);
                 if (created is not null && await MadeRecentlyAsync(connection, transaction, created, now, ct))
-                    return (Refusal(new AgentActionRefusal(RepeatCode,
-                        $"An agent already made a rule with this metric, server and action in the last {MaxExpiryDays} days (it may since have been deleted or expired). " +
-                        $"A rule's {MaxExpiryDays} days are not renewed by making it again. An operator can make or extend it. Nothing was written.")), null, null);
+                    return (Refusal(RepeatRefusal()), null, null);
             }
 
             return (answer, null, created);
@@ -310,6 +369,9 @@ SELECT EXISTS (
         CancellationToken ct = default)
     {
         const string tool = "update_mute_rule";
+        /* The length check comes before the parse: a refusal is not counted against the hourly cap, so a huge document must not cost a parse. */
+        if (changes_json.Length > MaxChangesChars)
+            return Refusal(SizeRefusal("changes_json", MaxChangesChars));
         JsonObject? body;
         try
         {
@@ -332,8 +394,6 @@ SELECT EXISTS (
             sentValue.TryGetValue(out reason);
         if (ReasonRefusal(reason) is { } noReason)
             return Refusal(noReason);
-        if (changes_json.Length > MaxChangesChars)
-            return Refusal(SizeRefusal("changes_json", MaxChangesChars));
         foreach (var (key, value) in body)
             if (value is JsonValue jv && jv.TryGetValue(out string? text) && text.Length > (key == "reason" ? InvestigationToolCore.MaxActionReasonChars : MaxFieldChars))
                 return Refusal(SizeRefusal(key, MaxFieldChars));
@@ -361,6 +421,10 @@ SELECT EXISTS (
                 return (Refusal(MatchesEveryAlertRefusal()), null, null);
             if (LifetimeRefusal(before, after) is { } lifetime)
                 return (Refusal(lifetime), null, null);
+            /* An update that moves the rule onto another server, metric or action is a rule made on that match, so it is held to the same
+               look-back a create is. The journal read counts update after images, so the move itself is remembered. */
+            if (MatchChanged(before, after) && await MadeRecentlyAsync(connection, transaction, after, now, ct))
+                return (Refusal(RepeatRefusal()), null, null);
 
             var answer = await DarlingMcpAlertTools.UpdateMuteRuleCore(new PgMuteRuleStore(connection, transaction), rule_id, body.ToJsonString(),
                 id => DarlingMcpAlertTools.MonitoredServerDisplayNameAsync(postgres, id));
@@ -385,6 +449,9 @@ SELECT EXISTS (
                bound cannot be put in force by an agent. Turning it off is always allowed: it can only make the operator hear more. */
             if (enabled && ExpiryRefusal(before.ExpiresAtUtc, now) is { } badExpiry)
                 return (Refusal(badExpiry), null, null);
+            /* The same rule as create and update: an operator's disabled rule that matches every alert is not put in force by an agent. */
+            if (enabled && before.MatchesEveryAlert)
+                return (Refusal(MatchesEveryAlertRefusal()), null, null);
 
             var answer = await DarlingMcpAlertTools.SetMuteRuleEnabledCore(new PgMuteRuleStore(connection, transaction), rule_id, enabled);
             return (answer, before, null);
