@@ -290,7 +290,9 @@ WITH activity AS
     /* Nor any other connection this service holds open (#7381). The wait sampler runs its 30 second batch
        on a second connection, inside a transaction with a snapshot, so pg_sleep sat here as a Critical
        'horizon holder'. Excluded by application_name, the same two names the sampler uses for the same
-       reason (PgWaitSamplingCollector.SamplerSnapshotSql). */
+       reason (PgWaitSamplingCollector.SamplerSnapshotSql). The client sets this name, so an application
+       that names itself the same way drops out as well. The sampler accepts the same risk, and a check on
+       the login would not cover a remediation login that differs from the collection login. */
     AND   coalesce(a.application_name, '') NOT IN ('{PgWaitSamplingCollector.ServiceApplicationName}', '{PgWaitSamplingCollector.ServiceRemediationApplicationName}')
     /* Parallel workers are not independent sessions. They share the leader's transaction, so including them
        would report one long transaction as N rows with identical durations and inflate every count here by
@@ -341,7 +343,8 @@ totals AS
            transaction can be the oldest holder, and calling a filtered survivor 'the holder' would name the
            wrong session precisely when the real one fell below the floor. It is not the instance-wide oldest:
            when a service connection is older, the next-oldest session is marked. That session is younger
-           than the sampler's 30 second batch, and the 2-sample floor keeps it out of Critical. */
+           than the service connection's own work: the sampler's 30 second batch, or another collector's
+           command timeout. The 2-sample floor keeps it out of Critical. */
         max(horizon_age) FILTER (WHERE horizon_age >= 0)                    AS oldest_horizon_age
     FROM activity
 ),
