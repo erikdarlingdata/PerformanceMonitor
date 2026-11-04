@@ -200,7 +200,19 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
        #5632: config.service_version keeps one row per host (the version and start of its latest run), so a start inside
        the window is all it can give: an upgrade shows as a start on the new version, and the version before is not kept.
        Alert thresholds give nothing here: config_alert_settings keeps no change time. */
-    internal const string ChangesSql = @"
+    /* #7414: a reason an agent wrote ends in the suffix the write path appends: [agent:<id>] (a direct write) or
+       [agent:<id> request <uuid>] (a claimed one), more than once if two agents updated the rule. */
+    internal const string AgentReasonSuffixPattern = @"(\s*\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\])+\s*$";
+
+    /// <summary>#7414: how many characters of an agent-written rule reason a brief carries. The agent's text goes into every investigation
+    /// request's brief for the whole change window, so it is kept short and labelled; the full reason stays in the rule and the journal.</summary>
+    public const int AgentReasonChars = 100;
+
+    /// <summary>#7414: how many agent-written mute rules a brief names at most (the newest). Together with <see cref="AgentReasonChars"/>
+    /// they cannot fill the recent changes section's budget, so an operator's change is never cut for them.</summary>
+    public const int MaxAgentMuteRules = 3;
+
+    internal static readonly string ChangesSql = @"
 SELECT at, kind, text, pattern
 FROM (
     SELECT m.created_at_utc AS at, 'mute_rule' AS kind,
@@ -208,11 +220,18 @@ FROM (
                      'for ' || coalesce(m.metric_name, 'every metric'),
                      CASE WHEN m.expires_at_utc IS NOT NULL THEN 'until ' || to_char(m.expires_at_utc, 'YYYY-MM-DD""T""HH24:MI:SS""Z""') END,
                      CASE WHEN m.recur_start_time IS NOT NULL THEN 'repeating window ' || to_char(m.recur_start_time, 'HH24:MI') || '-' || to_char(m.recur_end_time, 'HH24:MI') || ' ' || m.recur_time_zone END,
-                     CASE WHEN m.reason IS NOT NULL THEN 'reason: ' || m.reason END) AS text,
+                     CASE WHEN m.reason IS NULL THEN NULL
+                          WHEN m.agent_written
+                          THEN 'agent-written reason: ' || left(btrim(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', '')), " + AgentReasonChars + @")
+                               || CASE WHEN length(btrim(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''))) > " + AgentReasonChars + @" THEN '...' ELSE '' END
+                          ELSE 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
-    FROM config_mute_rules AS m
-    WHERE (m.server_name IS NULL OR m.server_name = $2)
-      AND m.created_at_utc >= $3
+    FROM (SELECT r.*, (r.reason ~ '" + AgentReasonSuffixPattern + @"') AS agent_written,
+                 row_number() OVER (PARTITION BY (r.reason ~ '" + AgentReasonSuffixPattern + @"') ORDER BY r.created_at_utc DESC) AS recency
+          FROM config_mute_rules AS r
+          WHERE (r.server_name IS NULL OR r.server_name = $2)
+            AND r.created_at_utc >= $3) AS m
+    WHERE NOT m.agent_written OR m.recency <= " + MaxAgentMuteRules + @"
     UNION ALL
     SELECT am.muted_date, 'analysis_mute',
            concat_ws(' ', 'analysis finding muted:', am.story_path, CASE WHEN am.reason IS NOT NULL THEN 'reason: ' || am.reason END),

@@ -1720,7 +1720,7 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Optional server_id (from get_fleet_overview) to key the rule on that one server.")] int? server_id = null,
         [Description("Case-insensitive substring of the alert's client application name (e.g. 'Management Studio'). Omit for any.")] string? client_app_pattern = null,
         [Description("Optional external alert source name (lower case, e.g. 'nagios'): mute only that source's alerts. Omit for any source.")] string? external_source = null,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Optional ISO-8601 UTC start (e.g. 2027-08-01T00:00:00Z): the rule is stored now but mutes nothing until this moment. Must be before expires_at. Omit for a rule that applies at once.")] string? starts_at = null,
@@ -1730,16 +1730,16 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Optional time zone for recur_start and recur_end: an IANA id (America/New_York) or a Windows id. Omit for the service host's own zone.")] string? recur_time_zone = null,
         [Description("Optional action (#7083): 'mute' (the default) mutes a matching alert, 'digest' sends it to the daily digest instead of paging.")] string? action = null) =>
         DarlingMcpAgentMuteDirect.Applies(agentSeat, agent_action)
-            ? DarlingMcpAgentMuteDirect.CreateAsync(agentSeat!, postgres, server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern,
+            ? WithCreateGateAsync(() => DarlingMcpAgentMuteDirect.CreateAsync(agentSeat!, postgres, server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern,
                 job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at,
-                recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null, action)
+                recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null, action))
         : DarlingAgentActionSeat.IsGated(agentSeat)
             ? (recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null || action is not null)
                 ? Task.FromResult(Outcome("invalid", recur_days is not null || recur_start is not null || recur_end is not null || recur_time_zone is not null
                     ? DarlingMcpAgentActions.RecurrenceRefusal
                     : DarlingMcpAgentActions.ActionRefusal))
-                : DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
-                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at)
+                : WithCreateGateAsync(() => DarlingMcpAgentActions.CreateMuteAsync(agentSeat!, postgres, logger, agent_action, server_name, metric_name, database_pattern,
+                query_text_pattern, wait_type_pattern, job_name_pattern, reason, expires_at, server_id, client_app_pattern, external_source, starts_at))
             : CreateMuteRuleOver(new PgMuteRuleStore(postgres), server_name, metric_name, database_pattern, query_text_pattern,
             wait_type_pattern, job_name_pattern, reason, expires_at, server_id, id => MonitoredServerDisplayNameAsync(postgres, id), client_app_pattern, external_source, starts_at, recur_days: recur_days, recur_start: recur_start, recur_end: recur_end, recur_time_zone: recur_time_zone, action: action);
 
@@ -2092,7 +2092,7 @@ public sealed partial class DarlingMcpAlertTools
     public static Task<string> DeleteMuteRule(
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to delete (from get_mute_rules or create_mute_rule).")] string rule_id,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Agent token without agent_action (#7414): required, 1 to 2000 characters saying why the rule is deleted. It is kept in the agent change journal. Ignored otherwise.")] string? reason = null) =>
@@ -2219,7 +2219,7 @@ public sealed partial class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to enable or disable (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("true to put the rule back in force, false to stop it suppressing while keeping the rule.")] bool enabled,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null,
         [Description("Agent token without agent_action (#7414): required, 1 to 2000 characters saying why the rule is turned on or off. It is kept in the agent change journal. Ignored otherwise.")] string? reason = null) =>
@@ -2353,7 +2353,7 @@ public sealed partial class DarlingMcpAlertTools
         NpgsqlDataSource postgres,
         [Description("The id of the mute rule to edit (from get_mute_rules or create_mute_rule).")] string rule_id,
         [Description("A JSON object with ONLY the mute-rule fields to change, in the shape get_mute_rules returns (e.g. {\"reason\":\"root cause found\"}). An explicit null clears a field; a field not sent does not change.")] string changes_json,
-        [Description("Level 2 only: under mcp.allowInvestigations this change needs agent_action (request_id, claim_id, agent_id, reason, evidence); see the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
+        [Description("Agent tokens only (mcp.allowInvestigations): send agent_action (request_id, claim_id, agent_id, reason, evidence) to make this change under a claim, or omit it to make it directly: a reason is then required and the rule left behind must expire within 7 days (#7414). See the tool guide. Ignored when mcp.allowWrites is on.")] string? agent_action = null,
         DarlingAgentActionSeat? agentSeat = null,
         ILogger? logger = null) =>
         DarlingMcpAgentMuteDirect.Applies(agentSeat, agent_action)
@@ -3003,7 +3003,10 @@ public sealed partial class DarlingMcpAlertTools
     /// </summary>
     internal static async Task<MuteRule?> InsertUnlessDuplicateAsync(IMuteRuleStore store, MuteRule rule, DateTime? nowUtc = null)
     {
-        await s_createGate.WaitAsync();
+        /* #7414: a caller that took the gate before it locked the agent switch row (WithCreateGateAsync) already holds it. */
+        var held = s_createGateHeld.Value;
+        if (!held)
+            await s_createGate.WaitAsync();
         try
         {
             var existing = FindDuplicate(await store.LoadAllAsync(), rule, nowUtc ?? DateTime.UtcNow);
@@ -3017,6 +3020,32 @@ public sealed partial class DarlingMcpAlertTools
         }
         finally
         {
+            if (!held)
+                s_createGate.Release();
+        }
+    }
+
+    /// <summary>True inside <see cref="WithCreateGateAsync"/>, whose caller holds <see cref="s_createGate"/> already.</summary>
+    private static readonly AsyncLocal<bool> s_createGateHeld = new();
+
+    /// <summary>
+    /// #7414: runs an agent's mute create with <see cref="s_createGate"/> taken BEFORE the write locks the agent switch row. An operator's
+    /// create takes the gate first and its insert then waits on that row (a trigger reads it), so an agent that held the row and then waited
+    /// on the gate would wait on an operator who waits on the agent. PostgreSQL cannot see the gate, so nothing breaks the wait but the
+    /// operator's 10 second timeout. Gate first, row second, on both sides, leaves no cycle. <see cref="InsertUnlessDuplicateAsync"/> skips
+    /// its own wait while this holds the gate.
+    /// </summary>
+    internal static async Task<string> WithCreateGateAsync(Func<Task<string>> body)
+    {
+        await s_createGate.WaitAsync();
+        s_createGateHeld.Value = true;
+        try
+        {
+            return await body();
+        }
+        finally
+        {
+            s_createGateHeld.Value = false;
             s_createGate.Release();
         }
     }
