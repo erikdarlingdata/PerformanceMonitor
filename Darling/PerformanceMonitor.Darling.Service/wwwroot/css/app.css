@@ -1366,9 +1366,17 @@ pre.code {
 .server-reason.band-Warning { color: var(--warn); }
 .server-reason.band-Offline { color: var(--err); }
 .server-reason.band-Healthy { color: var(--ok); }
-.server-why .metric-bands { max-width: 900px; }
+/* #7395: the tiles use the page's width instead of stopping at a fixed one. The column count follows the width the page has (a
+   tile is never narrower than 13rem), and auto-fit hands a row's spare width to the tiles instead of leaving blank columns. */
+.server-why .metric-bands { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
 /* The server page has room to show the whole sentence, so the tile detail wraps instead of truncating (#6901). */
 .server-why .metric-chip .detail { white-space: normal; overflow-wrap: anywhere; }
+/* #7395: a detail that is still long (clampTileDetails in util.js) stops at about three lines and opens on demand like .clamp-text. */
+.server-why .metric-chip .detail.clamp-lines { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.server-why .metric-chip .detail.clamp-lines[role="button"] { cursor: pointer; }
+.server-why .metric-chip .detail.clamp-lines.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
+/* An opened tile takes a row of its own, so the whole text reads in a few wide lines and the other tiles do not stretch to its height. */
+.server-why .metric-bands > .metric-chip:has(.detail.clamp-lines.open) { grid-column: 1 / -1; }
 
 /* ─────────────────────────── Fleet Sweeps (#3466 lane 3) ─────────────────────────── */
 
