@@ -147,7 +147,7 @@ GROUP BY
 OPTION(RECOMPILE);
 
 /* Usage counters (one scan of dm_db_index_usage_stats for this database) */
-SELECT /* us */
+SELECT /* PerformanceMonitorLite */
     us.object_id,
     us.index_id,
     us.user_seeks,

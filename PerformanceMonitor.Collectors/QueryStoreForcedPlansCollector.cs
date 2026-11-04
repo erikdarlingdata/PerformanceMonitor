@@ -220,7 +220,7 @@ SELECT TOP ({MaxRowsPerDatabase})
 INTO #pm_forced_plans
 FROM sys.query_store_plan AS PerformanceMonitorLite
 WHERE PerformanceMonitorLite.is_forced_plan = 1
-ORDER BY qsp.plan_id
+ORDER BY PerformanceMonitorLite.plan_id
 OPTION(RECOMPILE);
 
 /* #6221: the object id comes from sys.query_store_query in a SECOND statement, joined to the few forced rows in the temp table. On a
