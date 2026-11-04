@@ -354,6 +354,43 @@ public partial class ViewerServerTab
         RefreshRangePicker();
     }
 
+    /// <summary>When the server was first collected (#7386), the start the charts' X axis may not go before. Null until the first
+    /// read, or when the server has no row yet.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
+    private DateTime _serverDataStartReadUtc = DateTime.MinValue;
+
+    /// <summary>How long a read of the server's data start stands. The start only moves later, when old rows are purged, so the
+    /// charts re-read it with the normal refresh at most this often, not once per chart.</summary>
+    internal static readonly TimeSpan ServerDataStartMaxAge = TimeSpan.FromMinutes(10);
+
+    /// <summary>Reads the server's data start for the charts (#7386), one read for the whole tab, at most once per
+    /// <see cref="ServerDataStartMaxAge"/>. A failed read keeps the start the tab has (null means the axis stays as picked).</summary>
+    internal async Task RefreshServerDataStartAsync()
+    {
+        if (DateTime.UtcNow - _serverDataStartReadUtc < ServerDataStartMaxAge)
+        {
+            return;
+        }
+
+        try
+        {
+            ServerDataStartUtc = await _dataService.GetServerDataStartAsync(_server.ServerId, _server.IsPostgres);
+            _serverDataStartReadUtc = DateTime.UtcNow;
+            OverviewLanes.ServerDataStartUtc = ServerDataStartUtc;
+        }
+        catch
+        {
+            /* The start only trims empty width off a chart; a read that failed costs nothing but that. */
+        }
+    }
+
+    /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
+    internal double ChartXStart(double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc);
+
+    /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
+
     /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so
     /// the visible tab (only it renders) drives the conversions with its own server's clock.</summary>
     internal void ApplyServerClockToHelper() => ViewerTimeHelper.ActiveServerClock = _serverClock;

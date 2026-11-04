@@ -76,7 +76,7 @@ public partial class ViewerServerTab
         var (startUtc, endUtc) = GetWindowUtc();
         var data = await _dataService.GetSystemHealthAsync(_server.ServerId, startUtc, endUtc);
 
-        double xMin = startUtc.ToOADate();
+        double xMin = ChartXStart(startUtc, endUtc);
         double xMax = endUtc.ToOADate();
 
         // Corruption Events (2x2).

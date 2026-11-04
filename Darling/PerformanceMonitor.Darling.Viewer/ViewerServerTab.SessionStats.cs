@@ -73,7 +73,7 @@ public partial class ViewerServerTab
     private void RenderSessionStatsChart(List<SessionStatsPoint> data)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        double xMin = startUtc.ToOADate();
+        double xMin = ChartXStart(startUtc, endUtc);
         double xMax = endUtc.ToOADate();
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, xMin, xMax);

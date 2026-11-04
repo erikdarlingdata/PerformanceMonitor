@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Windows.Controls;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -99,6 +100,35 @@ public partial class ServerTab : UserControl
             AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server clock read failed, keeping the current clock: {ex.Message}");
         }
     }
+
+    /// <summary>When the server was first collected (#7386): the start the charts' X axis may not go before. Null when it is not
+    /// known, and then the axis stays as picked.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
+    /// <summary>Reads the server's data start for the charts (#7386), once for the whole tab, with the refresh that is about to
+    /// draw them. The read is kept per server for <see cref="LocalDataService.ServerDataStartMaxAge"/> and never opens the Parquet
+    /// archive (<see cref="LocalDataService.GetServerDataStartAsync"/>). A failed read leaves the axis as picked.</summary>
+    private async System.Threading.Tasks.Task RefreshServerDataStartAsync(int hoursBack, DateTime? fromDate)
+    {
+        try
+        {
+            var windowStartUtc = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+            ServerDataStartUtc = await Task.Run(() => _dataService.GetServerDataStartAsync(_serverId, windowStartUtc));
+            CorrelatedLanes.ServerDataStartUtc = ServerDataStartUtc;
+        }
+        catch (Exception ex)
+        {
+            ServerDataStartUtc = null;
+            CorrelatedLanes.ServerDataStartUtc = null;
+            AppLogger.Debug("ServerTab", $"[{_server.DisplayName}] server data start read failed, the charts keep the picked range: {ex.Message}");
+        }
+    }
+
+    /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
+    internal double ChartXStart(double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc);
+
+    /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
 
     /// <summary>Shows the shared note above a master target's Blocking or Deadlocks list when it has separately monitored
     /// sibling databases; the lists keep master's server-wide rows while the counts skip them. Hidden otherwise.</summary>
@@ -281,6 +311,7 @@ public partial class ServerTab : UserControl
     private async System.Threading.Tasks.Task RefreshVisibleTabAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, bool subTabOnly = false, CancellationToken ct = default)
     {
         await RefreshEngineEditionAsync();
+        await RefreshServerDataStartAsync(hoursBack, fromDate);
 
         /* #5371: the token is the pass's "a newer request superseded me" signal. The tab loaders below take none, so the
            stage boundaries are where a superseded pass stops: it does not start a read for a tab nobody is looking at. */

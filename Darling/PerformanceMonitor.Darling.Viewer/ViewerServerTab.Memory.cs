@@ -222,7 +222,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
         {
             MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(MemoryChart);
             MemoryChart.Refresh();
             return;
@@ -272,7 +272,7 @@ public partial class ViewerServerTab
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
         MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        MemoryChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
 
@@ -306,7 +306,7 @@ public partial class ViewerServerTab
             foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
             {
                 c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+                c.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
             }
@@ -353,7 +353,7 @@ public partial class ViewerServerTab
         }
 
         MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        MemoryGrantSizingChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        MemoryGrantSizingChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
         SetChartYLimitsWithLegendPadding(MemoryGrantSizingChart, 0, sizingMax > 0 ? sizingMax : 100);
@@ -391,7 +391,7 @@ public partial class ViewerServerTab
         }
 
         MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        MemoryGrantActivityChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        MemoryGrantActivityChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
         SetChartYLimitsWithLegendPadding(MemoryGrantActivityChart, 0, activityMax > 0 ? activityMax : 10);
@@ -497,7 +497,7 @@ public partial class ViewerServerTab
         }
 
         MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
+        MemoryPressureEventsChart.Plot.Axes.SetLimitsX(ChartXStart(xMin, xMax), xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
         SetChartYLimitsWithLegendPadding(MemoryPressureEventsChart, 0, Math.Max(maxBarCount, 5));
@@ -652,7 +652,7 @@ public partial class ViewerServerTab
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
                 MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
+                MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(xMin, xMax), xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
                 return;
@@ -697,7 +697,7 @@ public partial class ViewerServerTab
             }
 
             MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
+            MemoryClerksChart.Plot.Axes.SetLimitsX(ChartXStart(xMin, xMax), xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");
             SetChartYLimitsWithLegendPadding(MemoryClerksChart, 0, globalMax > 0 ? globalMax : 100);

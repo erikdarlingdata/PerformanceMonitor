@@ -326,7 +326,9 @@ public sealed class ViewerTrendRoutingPortTests
         var truncated = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
         Assert.StartsWith("Source: hourly rollup (one point per hour). Data begins ", truncated, StringComparison.Ordinal);
         Assert.Contains(ViewerTimeHelper.ForDisplay(head).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture), truncated, StringComparison.Ordinal);
-        Assert.EndsWith(" because the store no longer holds the rest of this window at this tier.", truncated, StringComparison.Ordinal);
+        /* #7386: what is known, not why: a server that was off or added late never held the rest of the window. */
+        Assert.EndsWith(". The store holds nothing earlier in this window at this tier.", truncated, StringComparison.Ordinal);
+        Assert.DoesNotContain("because", truncated, StringComparison.Ordinal);
 
         /* The word the chart leads with is the word the tool publishes. */
         foreach (var tier in new[] { RetentionTier.Raw, RetentionTier.Hourly })
@@ -372,11 +374,12 @@ public sealed class ViewerTrendRoutingPortTests
         Assert.EndsWith(" because the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it).", unserved, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer holds", unserved, StringComparison.Ordinal);
 
-        /* Same sentence shape as the siblings — "Source: {served}. Data begins yyyy-MM-dd HH:mm because {why}." — because
-           both go through one composer; the two slots differ, the frame does not. */
+        /* Same frame as the siblings — "Source: {served}. Data begins yyyy-MM-dd HH:mm" — because both go through one
+           composer; the siblings now state what is known (#7386), this route still has its own reason. */
         var sibling = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
         var frame = new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+\. Data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2} because [^;—]+\.$");
-        Assert.Matches(frame, sibling);
+        var siblingFrame = new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+\. Data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2}\. The store holds nothing earlier in this window at this tier\.$");
+        Assert.Matches(siblingFrame, sibling);
         Assert.Matches(frame, unserved);
         Assert.Matches(new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+$"), served);
 

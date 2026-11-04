@@ -101,7 +101,7 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
             d => d.CollectionTime, d => d.LatchClass, d => d.WaitTimeMsPerSecond,
-            "Latch Waits", "Wait Time (ms/sec)", rangeStart.ToOADate(), rangeEnd.ToOADate());
+            "Latch Waits", "Wait Time (ms/sec)", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
     }
 
     /// <summary>The spinlock collisions trend: one collisions/sec series per top-5 spinlock (heaviest
@@ -122,7 +122,7 @@ public partial class ServerTab : UserControl
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,
             d => d.CollectionTime, d => d.SpinlockName, d => d.CollisionsPerSecond,
-            "Spinlock Collisions", "Collisions/sec", rangeStart.ToOADate(), rangeEnd.ToOADate());
+            "Spinlock Collisions", "Collisions/sec", ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
     }
 
     /// <summary>Tears down the latch/spinlock hover helpers (mirrors the other tabs' dispose) so their

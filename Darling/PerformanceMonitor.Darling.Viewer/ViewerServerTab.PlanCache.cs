@@ -100,7 +100,7 @@ public partial class ViewerServerTab
         PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         var rangeStart = startUtc;
         var rangeEnd = endUtc;
-        PlanCacheChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        PlanCacheChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         SetChartYLimitsWithLegendPadding(PlanCacheChart, 0, globalMax > 0 ? globalMax : 10);
         ShowChartLegend(PlanCacheChart);

@@ -87,7 +87,7 @@ public partial class ServerTab : UserControl
             (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
-        double xMin = rangeStart.ToOADate();
+        double xMin = ChartXStart(rangeStart, rangeEnd);
         double xMax = rangeEnd.ToOADate();
 
         // Corruption Events (2x2).

@@ -703,14 +703,19 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow) =>
         TimeWindows.ChartAxis(hoursBack, fromDate, toDate, utcNow);
 
+    /// <summary>When the server was first collected (#7386), set by the server tab from its own read. The lanes' shared X axis does
+    /// not start before it. Null leaves the axis as picked.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
     /// <summary>
     /// Sets identical X-axis limits across all lanes.
     /// </summary>
-    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
-        double xMin = xStart.ToOADate();
+        /* #7386: all five lanes get the same start, so they keep one ruler. */
+        double xMin = ChartAxisStart.XStart(xStart, xEnd, ServerDataStartUtc).ToOADate();
         double xMax = xEnd.ToOADate();
 
         var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };

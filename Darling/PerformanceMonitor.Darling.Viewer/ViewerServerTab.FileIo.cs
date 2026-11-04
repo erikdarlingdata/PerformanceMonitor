@@ -113,7 +113,7 @@ public partial class ViewerServerTab
             foreach (var c in new[] { FileIoReadChart, FileIoWriteChart })
             {
                 c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+                c.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
             }
@@ -202,7 +202,7 @@ public partial class ViewerServerTab
         }
 
         FileIoReadChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoReadChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoReadChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadChart);
         FileIoReadChart.Plot.YLabel("Read Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoReadChart, 0, readMax > 0 ? readMax : 10);
@@ -210,7 +210,7 @@ public partial class ViewerServerTab
         FileIoReadChart.Refresh();
 
         FileIoWriteChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoWriteChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoWriteChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteChart);
         FileIoWriteChart.Plot.YLabel("Write Latency (ms)");
         SetChartYLimitsWithLegendPadding(FileIoWriteChart, 0, writeMax > 0 ? writeMax : 10);
@@ -235,7 +235,7 @@ public partial class ViewerServerTab
             foreach (var c in new[] { FileIoReadThroughputChart, FileIoWriteThroughputChart })
             {
                 c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-                c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+                c.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
             }
@@ -283,7 +283,7 @@ public partial class ViewerServerTab
         }
 
         FileIoReadThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoReadThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoReadThroughputChart);
         FileIoReadThroughputChart.Plot.YLabel("Read Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoReadThroughputChart, 0, readMax > 0 ? readMax : 1);
@@ -291,7 +291,7 @@ public partial class ViewerServerTab
         FileIoReadThroughputChart.Refresh();
 
         FileIoWriteThroughputChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        FileIoWriteThroughputChart.Plot.Axes.SetLimitsX(ChartXStart(rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(FileIoWriteThroughputChart);
         FileIoWriteThroughputChart.Plot.YLabel("Write Throughput (MB/s)");
         SetChartYLimitsWithLegendPadding(FileIoWriteThroughputChart, 0, writeMax > 0 ? writeMax : 1);
