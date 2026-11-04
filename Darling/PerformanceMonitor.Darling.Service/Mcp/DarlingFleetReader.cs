@@ -3220,9 +3220,10 @@ public sealed class FleetServerCard
            percent-of-allocated — a card contradicting itself, and a routine scale-up ranked as maxed out. */
         CapacityUtilizationPercent = AcuUtilizationPercent,
         CpuSource = CpuSource,
-        /* Re-derived from IsPostgres rather than read back off the published counts, because those are
-           deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
-           card's own severity says it does not have. */
+        /* Re-derived from IsPostgres rather than read back off the published fields. On PostgreSQL the four
+           memory fields are published as null (#7560) and HasMemoryPressure is already null on the card, so this
+           guard is a safety net: the ranking must never get a memory measurement the card says it does not have.
+           The blocking count below is still a structural zero on PostgreSQL (#3017), hence DmvSourced. */
         HasMemoryPressure = IsPostgres ? null : HasMemoryPressure,
         /* The wait count the card shows and banded on (#7028). */
         BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
