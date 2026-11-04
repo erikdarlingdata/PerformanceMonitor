@@ -2068,7 +2068,8 @@ ORDER BY server_name";
     /// collection is waiting on the connection, since when, the last connect error and the next retry time (#7590). A read that fails answers null: this block is
     /// additive and must not take the collector rows down with it.</summary>
     internal static async Task<object?> ReadServerConnectionAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken,
+        bool hasCollectorRows = true)
     {
         try
         {
@@ -2092,7 +2093,7 @@ ORDER BY server_name";
                 /* The service's backoff decision, UTC; null when none is stored (a service that wrote the failure before it had decided). */
                 next_connect_attempt = next?.ToString("o"),
                 message = ServerHealthClassifier.WaitingOnConnectionText(since, error, next, nowUtc)
-                    + " The collector rows are the last runs from before the connection failed.",
+                    + (hasCollectorRows ? " The collector rows are the last runs from before the connection failed." : ""),
             };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2140,7 +2141,23 @@ ORDER BY server_name";
             var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(
                 postgres, resolved.ServerId, windowStartUtc, nowUtc, cancellationToken);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No collection health data available.");
+            {
+                /* #7590: a server whose connect is failing may have no collector rows in the window (the outage outlasted it, or retention
+                   dropped them), and that is exactly when the reason matters most. The word stays unavailable, as it is without a failed
+                   connect, and the connection block and its sentence are there whatever the log holds. */
+                var downConnection = await ReadServerConnectionAsync(postgres, resolved.ServerId, DateTime.UtcNow, logger, cancellationToken, hasCollectorRows: false);
+                if (downConnection is null)
+                    return McpHelpers.Status("unavailable", "No collection health data available.");
+
+                var downMessage = JsonSerializer.SerializeToElement(downConnection, McpHelpers.JsonOptions).GetProperty("message").GetString();
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unavailable",
+                    message = "No collection health data available. " + downMessage,
+                    server = resolved.DisplayName,
+                    server_connection = downConnection,
+                }, McpHelpers.JsonOptions);
+            }
 
             /* #4938: a collector's run time, read fresh and AFTER the memo. The rows above are held for a minute and
                the run time is an operator setting, so a time that was just set shows on the next call. It is never an

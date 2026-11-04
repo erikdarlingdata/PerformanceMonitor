@@ -84,7 +84,30 @@ internal static class DarlingServerOfflineNote
             return null;
         }
 
-        return LeadFor(displayName, last, registered, nowUtc);
+        /* #7590: a stored failed connect is Offline whatever the collection age, and the note says so instead of the age. */
+        var (connectDownSince, lastConnectError) = await ReadConnectDownAsync(postgres, serverId, cancellationToken);
+        return LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError);
+    }
+
+    /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded
+    /// or when the read fails (a diagnostic never turns a finding into an error).</summary>
+    internal static async Task<(DateTime? Since, string? Error)> ReadConnectDownAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand("SELECT connect_down_since, last_connect_error FROM servers WHERE server_id = $1");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+                ? (reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1))
+                : (null, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, null);
+        }
     }
 
     /// <summary>
@@ -114,11 +137,20 @@ internal static class DarlingServerOfflineNote
     }
 
     /// <summary>The pure half of <see cref="LeadAsync"/>, over an already-read freshness probe.</summary>
-    internal static string? LeadFor(string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc)
+    internal static string? LeadFor(
+        string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc,
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
-        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc) != "Offline")
+        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) != "Offline")
         {
             return null;
+        }
+
+        if (connectDownSinceUtc is { } downSince)
+        {
+            return $"{displayName} is offline: the service cannot connect to it. "
+                + ServerHealthClassifier.UnreachableReason(downSince, lastConnectError).TrimEnd('.')
+                + ". Nothing is arriving to read, whatever the collectors would otherwise report.";
         }
 
         return lastCollectionUtc is { } last
