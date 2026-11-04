@@ -116,6 +116,7 @@ public partial class ViewerServerTab
         {
             PlanCacheTotalPlansText.Text = "--";
             PlanCacheOldestPlanText.Text = "--";
+            PlanCacheCompiledSingleUseText.Text = "--";
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
@@ -129,6 +130,12 @@ public partial class ViewerServerTab
         PlanCacheBloatLevelText.Text = bloat.Level;
         PlanCacheBloatLevelText.Foreground = BloatLevelBrush(bloat.Level);
         PlanCacheRecommendationText.Text = bloat.Recommendation;
+        /* The figure the badge is judged on, so a Normal badge beside a busy cache is explained: single-use
+           COMPILED plans as a share of compiled plans, and the MB they take (the badge's floor is on that). */
+        PlanCacheCompiledSingleUseText.Text = summary.CompiledPlans > 0
+            ? string.Format(CultureInfo.CurrentCulture, "{0:0.0}% ({1:N0} MB)",
+                summary.CompiledSingleUsePlans * 100.0 / summary.CompiledPlans, summary.CompiledSingleUseSizeMb)
+            : "--";
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0", CultureInfo.CurrentCulture);
         /* #4966: the totals are one snapshot (the newest in the window); say when it was collected. */

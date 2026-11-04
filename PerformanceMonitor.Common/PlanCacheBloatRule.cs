@@ -20,6 +20,10 @@ namespace PerformanceMonitor.Common
     /// <para>Two rules fix that. The ratio is over COMPILED plans only: parse trees and extended procedures are
     /// not plans a query compiled, and a single-use parse tree is not ad-hoc plan bloat. And single-use plans
     /// that together take under <see cref="SingleUseFloorMb"/> are not bloat at all, whatever the ratio.</para>
+    ///
+    /// <para>The analysis engine's PLAN_CACHE_BLOAT card uses the same floor and bands: both fact collectors sum
+    /// compiled plans only, and <c>FactScorer</c> reads <see cref="SingleUseFloorMb"/> and
+    /// <see cref="LevelFor"/>, so the card and the badge cannot disagree on one snapshot.</para>
     /// </summary>
     public static class PlanCacheBloatRule
     {
@@ -45,6 +49,14 @@ namespace PerformanceMonitor.Common
             !string.Equals(cacheObjType, "Parse Tree", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(cacheObjType, "Extended Proc", StringComparison.OrdinalIgnoreCase);
 
+        /// <summary>The band for a compiled single-use percentage, once the floor is met: &gt; 50 CRITICAL,
+        /// &gt; 30 HIGH, &gt; 20 MEDIUM, else NORMAL.</summary>
+        public static string LevelFor(double compiledSingleUsePercent) =>
+            compiledSingleUsePercent > 50 ? "CRITICAL" :
+            compiledSingleUsePercent > 30 ? "HIGH" :
+            compiledSingleUsePercent > 20 ? "MEDIUM" :
+            "NORMAL";
+
         /// <summary>
         /// Banded level and the paired recommendation. <paramref name="totalPlans"/> and
         /// <paramref name="totalSizeMb"/> are the whole cache, used only to say how small it is. The other three
@@ -65,11 +77,7 @@ namespace PerformanceMonitor.Common
 
             double singleUsePercent = compiledPlans > 0 ? compiledSingleUsePlans * 100.0 / compiledPlans : 0.0;
 
-            var level =
-                singleUsePercent > 50 ? "CRITICAL" :
-                singleUsePercent > 30 ? "HIGH" :
-                singleUsePercent > 20 ? "MEDIUM" :
-                "NORMAL";
+            var level = LevelFor(singleUsePercent);
 
             var recommendation = singleUsePercent > 20
                 ? "Optimize for ad hoc workloads is the low-risk first step: the server then caches only a small stub for a plan's first execution. "

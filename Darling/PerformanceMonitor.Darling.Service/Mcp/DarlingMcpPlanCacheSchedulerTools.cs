@@ -74,14 +74,8 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
 
-            var totalPlans = rows.Sum(r => (long)r.TotalPlans);
-            var totalSingleUse = rows.Sum(r => (long)r.SingleUsePlans);
-            var totalSizeMb = rows.Sum(r => (long)r.TotalSizeMb);
-            var singleUseSizeMb = rows.Sum(r => (long)r.SingleUseSizeMb);
-            var (bloatLevel, bloatRecommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(rows);
-            var compiled = rows.Where(r => PlanCacheBloatRule.IsCompiled(r.CacheObjType)).ToList();
-            var compiledPlans = compiled.Sum(r => (long)r.TotalPlans);
-            var compiledSingleUse = compiled.Sum(r => (long)r.SingleUsePlans);
+            var figures = DarlingPlanCacheSchedulerReader.SumPlanCache(rows);
+            var (bloatLevel, bloatRecommendation) = DarlingPlanCacheSchedulerReader.ClassifyPlanCacheBloat(figures);
 
             return JsonSerializer.Serialize(new
             {
@@ -90,16 +84,16 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
                 age_seconds = LatestSnapshotStamp.AgeSeconds(rows[0].CollectionTime, now),
                 summary = new
                 {
-                    total_plans = totalPlans,
-                    single_use_plans = totalSingleUse,
-                    single_use_percent = totalPlans > 0 ? Math.Round(100.0 * totalSingleUse / totalPlans, 1) : 0,
-                    total_size_mb = totalSizeMb,
-                    single_use_size_mb = singleUseSizeMb,
-                    wasted_percent = totalSizeMb > 0 ? Math.Round(100.0 * singleUseSizeMb / totalSizeMb, 1) : 0,
-                    compiled_plans = compiledPlans,
-                    compiled_single_use_plans = compiledSingleUse,
-                    compiled_single_use_percent = compiledPlans > 0 ? Math.Round(100.0 * compiledSingleUse / compiledPlans, 1) : 0,
-                    compiled_single_use_size_mb = compiled.Sum(r => (long)r.SingleUseSizeMb),
+                    total_plans = figures.TotalPlans,
+                    single_use_plans = figures.SingleUsePlans,
+                    single_use_percent = figures.TotalPlans > 0 ? Math.Round(100.0 * figures.SingleUsePlans / figures.TotalPlans, 1) : 0,
+                    total_size_mb = figures.TotalSizeMb,
+                    single_use_size_mb = figures.SingleUseSizeMb,
+                    wasted_percent = figures.TotalSizeMb > 0 ? Math.Round(100.0 * figures.SingleUseSizeMb / figures.TotalSizeMb, 1) : 0,
+                    compiled_plans = figures.CompiledPlans,
+                    compiled_single_use_plans = figures.CompiledSingleUsePlans,
+                    compiled_single_use_percent = figures.CompiledPlans > 0 ? Math.Round(100.0 * figures.CompiledSingleUsePlans / figures.CompiledPlans, 1) : 0,
+                    compiled_single_use_size_mb = figures.CompiledSingleUseSizeMb,
                     bloat_level = bloatLevel,
                     bloat_recommendation = bloatRecommendation
                 },

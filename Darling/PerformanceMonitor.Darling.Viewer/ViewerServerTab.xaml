@@ -2474,6 +2474,9 @@
                                 <TextBlock x:Name="PlanCacheTotalPlansText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
                                 <TextBlock Text="Oldest Plan Age:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                 <TextBlock x:Name="PlanCacheOldestPlanText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
+                                <!-- #7445: the compiled single-use figure that decides Bloat Level (parse trees left out). -->
+                                <TextBlock Text="Compiled Single-Use:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <TextBlock x:Name="PlanCacheCompiledSingleUseText" Text="--" VerticalAlignment="Center" Margin="0,0,20,0"/>
                                 <!-- Derived single-use bloat badge + forced-parameterization hint (install/47
                                      report.plan_cache_bloat parity): a client-side CASE on single-use/total plans. -->
                                 <TextBlock Text="Bloat Level:" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundDimBrush}" VerticalAlignment="Center" Margin="0,0,5,0"/>

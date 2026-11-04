@@ -343,6 +343,76 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
     }
 
     /// <summary>
+    /// #7445: 1,000 compiled plans (100 single use, 150 MB) beside 4,000 single-use parse trees (40 MB). The tool
+    /// serves the compiled figures beside the all-types ones, and they are the figures that decided the level. The
+    /// analysis card reads the same population: it used to sum every cache type, 4,100 of 5,000 = 82% on 190 MB,
+    /// and scored a full PLAN_CACHE_BLOAT card while the badge read NORMAL.
+    /// </summary>
+    [Fact]
+    public async Task GetPlanCacheBloat_ParseTreesAreNotPlans_ToolAndAnalysisCardAgree()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache/scheduler-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            foreach (var (cacheType, objType, total, totalMb, single, singleMb) in new[]
+            {
+                ("Compiled Plan", "Adhoc", 1_000, 500, 100, 150),
+                ("Parse Tree", "View", 4_000, 40, 4_000, 40)
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO plan_cache_stats (collection_id, collection_time, server_id, server_name, cacheobjtype, objtype, total_plans, total_size_mb, single_use_plans, single_use_size_mb, multi_use_plans, multi_use_size_mb, avg_use_count, avg_size_kb, oldest_plan_create_time)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, cacheType, objType, total, totalMb, single, singleMb, total - single, totalMb - singleMb, 3.5m, 64, t);
+            }
+
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpPlanCacheSchedulerTools.GetPlanCacheBloat(postgres, ServerName));
+            var summary = doc.RootElement.GetProperty("summary");
+            Assert.Equal(5_000, summary.GetProperty("total_plans").GetInt64());
+            Assert.Equal(4_100, summary.GetProperty("single_use_plans").GetInt64());
+            Assert.Equal(1_000, summary.GetProperty("compiled_plans").GetInt64());
+            Assert.Equal(100, summary.GetProperty("compiled_single_use_plans").GetInt64());
+            Assert.Equal(10.0, summary.GetProperty("compiled_single_use_percent").GetDouble());
+            Assert.Equal(150, summary.GetProperty("compiled_single_use_size_mb").GetInt64());
+            Assert.Equal("NORMAL", summary.GetProperty("bloat_level").GetString());
+
+            var context = new PerformanceMonitor.Analysis.AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = t.AddHours(-4),
+                TimeRangeEnd = t.AddMinutes(2),
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var facts = (await new PerformanceMonitor.Darling.Analysis.PgFactCollector(postgres).CollectFactsAsync(context)).ToList();
+            new PerformanceMonitor.Analysis.FactScorer().ScoreAll(facts);
+            var card = facts.Single(f => f.Key == "PLAN_CACHE_BLOAT");
+            Assert.Equal(10.0, card.Value, precision: 6);
+            Assert.Equal(0.0, card.Severity, precision: 4);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #5710: a collection written before the collector fix can be split across several cpu_scheduler_stats rows that
     /// share one collection_time and each cover some of the schedulers (every row still says scheduler_count = 4). The
     /// pressure read combines them: the runnable total is the SUM, the per-scheduler average is that total over

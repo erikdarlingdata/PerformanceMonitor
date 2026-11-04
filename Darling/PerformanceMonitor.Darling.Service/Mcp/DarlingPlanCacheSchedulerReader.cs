@@ -66,16 +66,31 @@ internal static class DarlingPlanCacheSchedulerReader
     /// Viewer also use: a ratio over compiled plans only (no parse trees or extended procedures), and no bloat
     /// below a 100 MB single-use floor. An empty cache is NORMAL.
     /// </summary>
-    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(IReadOnlyCollection<PlanCacheGroupRow> groups)
+    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(IReadOnlyCollection<PlanCacheGroupRow> groups) =>
+        ClassifyPlanCacheBloat(SumPlanCache(groups));
+
+    /// <summary>Classifies from the summed figures, so a caller that also serves those figures (the tool's reply)
+    /// serves the same numbers that decided the level.</summary>
+    public static (string Level, string Recommendation) ClassifyPlanCacheBloat(PlanCacheFigures figures) =>
+        PlanCacheBloatRule.Classify(
+            figures.TotalPlans, figures.TotalSizeMb, figures.CompiledPlans, figures.CompiledSingleUsePlans, figures.CompiledSingleUseSizeMb);
+
+    /// <summary>The whole-cache and compiled-only sums of the latest snapshot's groups: the one place they are
+    /// computed (#7445), for both the bloat level and the tool's <c>compiled_*</c> reply fields.</summary>
+    public static PlanCacheFigures SumPlanCache(IReadOnlyCollection<PlanCacheGroupRow> groups)
     {
         var compiled = groups.Where(g => PlanCacheBloatRule.IsCompiled(g.CacheObjType)).ToList();
-        return PlanCacheBloatRule.Classify(
-            groups.Sum(g => (long)g.TotalPlans),
-            groups.Sum(g => (long)g.TotalSizeMb),
-            compiled.Sum(g => (long)g.TotalPlans),
-            compiled.Sum(g => (long)g.SingleUsePlans),
-            compiled.Sum(g => (long)g.SingleUseSizeMb));
+        return new PlanCacheFigures(
+            groups.Sum(g => (long)g.TotalPlans), groups.Sum(g => (long)g.TotalSizeMb),
+            groups.Sum(g => (long)g.SingleUsePlans), groups.Sum(g => (long)g.SingleUseSizeMb),
+            compiled.Sum(g => (long)g.TotalPlans), compiled.Sum(g => (long)g.SingleUsePlans), compiled.Sum(g => (long)g.SingleUseSizeMb));
     }
+
+    /// <summary>Plan-cache sums over every cache type, and over compiled plans only (parse trees and extended
+    /// procedures left out).</summary>
+    public sealed record PlanCacheFigures(
+        long TotalPlans, long TotalSizeMb, long SingleUsePlans, long SingleUseSizeMb,
+        long CompiledPlans, long CompiledSingleUsePlans, long CompiledSingleUseSizeMb);
 
     /* ─────────────────────────── cpu scheduler (latest snapshot) ─────────────────────────── */
 
