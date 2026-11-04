@@ -1025,6 +1025,18 @@ public partial class ViewerServerTab
         BlockingStatsDeadlockWaitText.Text = totalDeadlocks > 0 ? ViewerDataService.FormatWaitTime(totalDeadlockWait) : "--";
     }
 
+    /// <summary>
+    /// #7571: the Waiting Tasks chart's bars. The read returns one row per collection time and wait type, so each time
+    /// gets one bar position with the wait types stacked on it; a line per wait type joined moments hours apart into a
+    /// ramp. Returns the tallest stack for the Y limit. Static so a test can draw it without the control.
+    /// </summary>
+    internal static double AddWaitingTaskBars(ScottPlot.Plot plot, ChartHoverHelper? hover, List<WaitingTaskTrendPoint> data, double windowStartOa, double windowEndOa)
+        => StackedBarTrend.Add(plot, hover, data, d => d.CollectionTime, d => d.WaitType, d => d.TotalWaitMs, windowStartOa, windowEndOa);
+
+    /// <summary>#7571: the Blocked Sessions chart's bars, one stack per collection time with the databases stacked on it (see <see cref="AddWaitingTaskBars"/>).</summary>
+    internal static double AddBlockedSessionBars(ScottPlot.Plot plot, ChartHoverHelper? hover, List<BlockedSessionTrendPoint> data, double windowStartOa, double windowEndOa)
+        => StackedBarTrend.Add(plot, hover, data, d => d.CollectionTime, d => d.DatabaseName, d => d.BlockedCount, windowStartOa, windowEndOa);
+
     private void RenderCurrentWaitsDurationChart(List<WaitingTaskTrendPoint> data)
     {
         ClearChart(CurrentWaitsDurationChart);
@@ -1053,24 +1065,8 @@ public partial class ViewerServerTab
             return;
         }
 
-        var grouped = data.GroupBy(d => d.WaitType).OrderBy(g => g.Key).ToList();
-        double globalMax = 0;
-
-        for (int i = 0; i < grouped.Count; i++)
-        {
-            var group = grouped[i];
-            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
-            var values = ordered.Select(t => (double)t.TotalWaitMs).ToArray();
-
-            var plot = CurrentWaitsDurationChart.Plot.Add.TimeSeries(times, values);
-            plot.LegendText = group.Key;
-            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-            ChartStyle.StyleScatter(plot);
-            _currentWaitsDurationHover?.Add(plot, group.Key);
-
-            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-        }
+        /* #7571: a bar at each collection time, stacked by wait type. A line per key joined moments hours apart into a ramp. */
+        double globalMax = AddWaitingTaskBars(CurrentWaitsDurationChart.Plot, _currentWaitsDurationHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
 
         CurrentWaitsDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsDurationChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
@@ -1109,24 +1105,8 @@ public partial class ViewerServerTab
             return;
         }
 
-        var grouped = data.GroupBy(d => d.DatabaseName).OrderBy(g => g.Key).ToList();
-        double globalMax = 0;
-
-        for (int i = 0; i < grouped.Count; i++)
-        {
-            var group = grouped[i];
-            var ordered = group.OrderBy(t => t.CollectionTime).ToList();
-            var times = ordered.Select(t => t.CollectionTime.ToOADate()).ToArray();
-            var values = ordered.Select(t => (double)t.BlockedCount).ToArray();
-
-            var plot = CurrentWaitsBlockedChart.Plot.Add.TimeSeries(times, values);
-            plot.LegendText = group.Key;
-            plot.Color = ScottPlot.Color.FromHex(SeriesColors[i % SeriesColors.Length]);
-            ChartStyle.StyleScatter(plot);
-            _currentWaitsBlockedHover?.Add(plot, group.Key);
-
-            if (values.Length > 0) globalMax = Math.Max(globalMax, values.Max());
-        }
+        /* #7571: a bar at each collection time, stacked by database. A line per key joined moments hours apart into a ramp. */
+        double globalMax = AddBlockedSessionBars(CurrentWaitsBlockedChart.Plot, _currentWaitsBlockedHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
 
         CurrentWaitsBlockedChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
