@@ -115,26 +115,42 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(24.0, neverRoot.GetProperty("effective_hours_back").GetDouble());
     }
 
-    /// <summary>#7498: a window whose points all read zero answers <c>empty</c>, as Darling does. A lone unrated collection stays a
-    /// series, and one point where something ran keeps the whole trend.</summary>
+    /// <summary>#7498: idle runs with no stored row in the window answer <c>empty</c>, as Darling does. A stored row keeps the
+    /// series, even one of zero work: a store from before #5449 holds those, and Darling serves them as a series too.</summary>
     [Fact]
-    public async Task AWindowWhereNothingRan_AnswersEmpty_ButOnePointThatRanKeepsTheTrend()
+    public async Task IdleRunsWithNoStoredRow_AnswerEmpty_AndAStoredRowKeepsTheSeries()
     {
         var service = new LocalDataService(_duckDb);
         var baseNow = Truncate(DateTime.UtcNow);
 
-        await SeedProcedureAsync(baseNow.AddMinutes(-30), executions: 0, elapsedUs: 0);
-        var lone = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
-        Assert.Equal(1, lone.GetProperty("trend").GetArrayLength());
+        await SeedProcedureAsync(baseNow.AddHours(-48), executions: 5, elapsedUs: 1_000_000);
+        await SeedProcedureRunsAsync(baseNow.AddMinutes(-30), baseNow.AddMinutes(-25), baseNow.AddMinutes(-20));
 
-        await SeedProcedureAsync(baseNow.AddMinutes(-25), executions: 0, elapsedUs: 0);
-        await SeedProcedureAsync(baseNow.AddMinutes(-20), executions: 0, elapsedUs: 0);
-        var quiet = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
-        Assert.Equal("empty", quiet.GetProperty("status").GetString());
+        var idle = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.Equal("empty", idle.GetProperty("status").GetString());
 
-        await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 2, elapsedUs: 600_000);
-        var busy = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
-        Assert.Equal(4, busy.GetProperty("trend").GetArrayLength());
+        await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 0, elapsedUs: 0);
+        var stored = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.False(stored.TryGetProperty("status", out _));
+        Assert.NotEqual(0, stored.GetProperty("trend").GetArrayLength());
+    }
+
+    private async Task SeedProcedureRunsAsync(params DateTime[] times)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        foreach (var at in times)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                VALUES ($1, $2, $3, 'procedure_stats', $4, 12, 'SUCCESS', 0)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+            cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = at });
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
     }
 
     [Fact]

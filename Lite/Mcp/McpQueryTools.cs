@@ -1276,7 +1276,9 @@ public sealed class McpQueryTools
             var startUtc = windowEnd.AddHours(-hours_back);
             var points = await dataService.GetBucketedProcedureDurationTrendAsync(
                 resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes, database == null ? null : new[] { database });
-            if (points.Count == 0 || NothingRan(points))
+            /* #7498: with no database filter the read plots each idle run as a 0, so a window with no stored row is
+               asked about here, the question Darling's read answers itself. A filtered read already returns no points. */
+            if (points.Count == 0 || (database == null && !await dataService.HasProcedureStatInWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd)))
             {
                 var gated = McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None), database);
                 if (gated != null)
@@ -1303,15 +1305,6 @@ public sealed class McpQueryTools
             return McpHelpers.FormatError("get_procedure_duration_trend", ex);
         }
     }
-
-    /// <summary>
-    /// #7498: Lite stores a procedure row even when nothing ran, so a quiet window has points that all read zero. That is the same
-    /// answer as no points, and Darling gives it as <c>empty</c>. At least one point must be rated: a lone collection has no rate to
-    /// read, says nothing about whether anything ran, and stays a series (#3541 A12).
-    /// </summary>
-    private static bool NothingRan(List<QueryTrendPoint> points) =>
-        points.Exists(p => p.ExecutionsPerSecond is not null)
-        && points.TrueForAll(p => p.ExecutionsPerSecond is null or 0d && p.Value is null or 0d);
 
     [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). Only a point that stored no interval end and has no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. Each point is a rate over its own stored interval, its end minus its start. A point with no stored end (a row collected before the end was recorded) falls back to the gap since the PREVIOUS point, so only such a point, when it is the window's first collection and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
