@@ -330,4 +330,42 @@ public sealed class WebChartLegendIsolateBehaviourTests
         Assert.Empty(Off(shrunk));
         Assert.False(shrunk.GetProperty("showAll").GetBoolean());
     }
+
+    [Fact]
+    public void TheSeriesPalette_HasTenDistinctColors_AndEveryChartKindUsesTheSameList()
+    {
+        var palette = S(Run(), "palette");
+        var series = palette.GetProperty("series").EnumerateArray().Select(e => e.GetString()!.ToLowerInvariant()).ToArray();
+        Assert.True(series.Length >= 10, "the palette has " + series.Length + " colors");
+        Assert.Equal(series.Length, series.Distinct().Count());
+        Assert.Equal(series, palette.GetProperty("categorical").EnumerateArray().Select(e => e.GetString()!.ToLowerInvariant()).ToArray());
+    }
+
+    [Fact]
+    public void ASixSeriesChart_GivesEverySeriesItsOwnColor()
+    {
+        var six = S(Run(), "six");
+        var colors = six.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!.Split('|')[0]).ToArray();
+        Assert.Equal(6, colors.Length);
+        Assert.Equal(6, colors.Distinct().Count());
+        Assert.All(six.GetProperty("lines").EnumerateArray(), e => Assert.EndsWith("|", e.GetString()!));
+    }
+
+    [Fact]
+    public void ATwelveSeriesChart_GivesNoTwoLegendEntriesTheSameLook_AndEachLineMatchesItsEntry()
+    {
+        var twelve = S(Run(), "twelve");
+        var legend = twelve.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var lines = twelve.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(12, legend.Length);
+        Assert.Equal(12, legend.Distinct().Count());
+        Assert.Equal(12, lines.Distinct().Count());
+        // Every repeated color is dashed, in the legend swatch as well as on the line, so the key says which line is which.
+        for (var i = 0; i < 12; i++)
+        {
+            var dashed = lines[i].EndsWith('|') == false;
+            Assert.Equal(dashed, legend[i].Contains("repeating-linear-gradient"));
+        }
+        Assert.Equal(2, lines.Count(l => !l.EndsWith('|')));
+    }
 }

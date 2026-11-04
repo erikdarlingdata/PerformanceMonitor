@@ -318,5 +318,22 @@ const shrunk = specFor();
 shrunk.series = shrunk.series.filter((x) => x.key !== "mid");
 out.shrunk = state(charts.zoomableLineChart(shrunk, "c7", scope));
 
+// 13. more series than the palette has colors (#7401): each series is colored as panels.js does, and no two legend entries may look alike
+const manySpec = (n) => ({
+  ...specFor(),
+  points: points.map((p, i) => ({ t: p.t, ...Object.fromEntries(Array.from({ length: n }, (_, k) => ["s" + k, 10 * (k + 1) + (i % 4)])) })),
+  series: Array.from({ length: n }, (_, k) => ({ key: "s" + k, label: "Series " + k, color: charts.SERIES_COLORS[k % charts.SERIES_COLORS.length] })),
+});
+const looks = (n) => {
+  const host = charts.zoomableLineChart(manySpec(n), "many" + n, scope);
+  return {
+    legend: legendItems(host).map((e) => e.children[0].attrs.style),
+    lines: find(host, (x) => x.tag === "polyline" && cls(x).includes("series-line")).map((x) => x.attrs.stroke + "|" + (x.attrs["stroke-dasharray"] || "")),
+  };
+};
+out.palette = { series: charts.SERIES_COLORS, categorical: charts.CATEGORICAL_COLORS };
+out.six = looks(6);
+out.twelve = looks(12);
+
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(JSON.stringify(out));
