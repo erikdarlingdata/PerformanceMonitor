@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -82,22 +83,21 @@ internal static class WebBlockedReportFold
         payload["reports_returned"] = reports.Count;
         payload["reports_with_xml"] = served;
 
-        string? oldest = null;
-        DateTime oldestAt = default;
+        DateTime? oldestAt = null;
         foreach (var row in reports)
         {
             if (row?["event_time"] is JsonValue v && v.TryGetValue<string>(out var text)
                 && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
-                && (oldest is null || at < oldestAt))
+                && (oldestAt is null || at < oldestAt))
             {
-                oldest = text;
                 oldestAt = at;
             }
         }
 
-        if (oldest is not null)
+        /* #5015: the tool writes this key in the UTC round-trip form, so the fold does too: the row's own text can be naive. */
+        if (oldestAt is DateTime oldestUtc)
         {
-            payload["oldest_returned_event_time"] = oldest;
+            payload["oldest_returned_event_time"] = McpHelpers.FormatEffectiveStart(oldestUtc);
         }
 
         /* The tool's truncated is "more reports than the page, or some left out for size". With the left-out ones listed, only the

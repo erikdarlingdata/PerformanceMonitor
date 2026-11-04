@@ -133,16 +133,33 @@ public sealed class WebBlockingSaveXmlBehaviourTests
         Assert.DoesNotContain("<other-report/>", downloads);
     }
 
-    /* #7545: only another report comes back (the row's own was left out again, or is gone). The row says so, attaches nothing and
-       Save XML writes no file for it. */
+    /* #7545: only another report comes back (the row's own is gone). The row says it could not be read and to try again, attaches
+       nothing and Save XML writes no file for it. */
     [Fact]
     public void LoadXml_WhenOnlyAnotherReportComesBack_SaysSoAndAttachesNothing()
     {
         var r = Run("nomatch");
         Assert.False(r.GetProperty("otherShown").GetBoolean());
         Assert.True(r.GetProperty("errorShown").GetBoolean());
+        Assert.True(r.GetProperty("tryAgainShown").GetBoolean());
+        Assert.False(r.GetProperty("shareTimeShown").GetBoolean());
         Assert.Equal(1, r.GetProperty("loadButtonsAfter").GetInt32());
         /* The first row has its own XML and saves it; the row with none writes no file, and the other report is nowhere. */
+        var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
+        Assert.Equal(new[] { "<blocked-process-report/>" }, downloads);
+    }
+
+    /* #7545: the row's own report is left out again. The page gets the web fold's output, not the tool's: the other report with its XML
+       and the row's own with xml_left_out true and no XML, and no left_out_reports key. The row says other reports share its time (a retry
+       cannot help) and not "Try again"; Save XML writes no file for it. Fails on a page that looks for left_out_reports. */
+    [Fact]
+    public void LoadXml_WhenTheRowsOwnReportIsLeftOutAgain_SaysOtherReportsShareItsTime()
+    {
+        var r = Run("leftagain");
+        Assert.False(r.GetProperty("otherShown").GetBoolean());
+        Assert.True(r.GetProperty("shareTimeShown").GetBoolean());
+        Assert.False(r.GetProperty("tryAgainShown").GetBoolean());
+        Assert.Equal(1, r.GetProperty("loadButtonsAfter").GetInt32());
         var downloads = r.GetProperty("downloads").EnumerateArray().Select(d => d.GetProperty("text").GetString()).ToArray();
         Assert.Equal(new[] { "<blocked-process-report/>" }, downloads);
     }

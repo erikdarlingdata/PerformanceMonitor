@@ -309,7 +309,8 @@ export function loadReportXml(row) {
       const found = reports.find((r) => sameReport(r, row));
       const xml = found && found.blocked_process_report_xml;
       if (!xml) {
-        const again = data && Array.isArray(data.left_out_reports) && data.left_out_reports.some((r) => sameReport(r, row));
+        /* The web read folds a left-out report into reports as a row with no XML and xml_left_out true, and removes left_out_reports. */
+        const again = (found && found.xml_left_out === true) || (data && Array.isArray(data.left_out_reports) && data.left_out_reports.some((r) => sameReport(r, row)));
         throw new Error(
           again
             ? "This report could not be read here: other reports share its time and the reply is too large to hold them all."

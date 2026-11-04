@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -59,6 +60,21 @@ public sealed class WebBlockedReportFoldTests
         Assert.Null(folded["left_out_reports"]);
         Assert.Null(folded["size_note"]);
         Assert.Equal(0, folded["left_out_count"]!.GetValue<int>());
+    }
+
+    /* #5015: the tool writes oldest_returned_event_time in the UTC round-trip form. The fold's value comes from a row whose own
+       event_time text can be naive (no Z), and must still come out in that one form, parseable as UTC. */
+    [Fact]
+    public void TheOldestReturnedEventTime_IsWrittenInTheUtcForm_EvenWhenTheRowTextIsNaive()
+    {
+        var naive = SizeCutAnswer.Replace("2026-01-02T16:00:00.0000000Z", "2026-01-02 16:00:00");
+        var folded = Assert.IsType<JsonObject>(JsonNode.Parse(WebBlockedReportFold.Fold(naive)));
+
+        var text = folded["oldest_returned_event_time"]!.GetValue<string>();
+        Assert.EndsWith("Z", text);
+        Assert.Equal("2026-01-02T16:00:00.0000000Z", text);
+        var parsed = DateTime.Parse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Equal(DateTimeKind.Utc, parsed.Kind);
     }
 
     [Fact]
