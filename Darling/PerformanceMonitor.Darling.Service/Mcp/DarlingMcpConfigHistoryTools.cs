@@ -389,6 +389,14 @@ public sealed class DarlingMcpConfigHistoryTools
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
+            /* #7584: the on-prem health capture always holds a tempdb row (its database list is database_id > 4 OR = 2), so on a
+               readable secondary the snapshot is never empty and the miss path above never runs. A snapshot of only tempdb has no
+               database Query Store is read for, so it gets the same readable-secondary answer; a server that is not a readable
+               secondary answers null here and keeps showing the rows as before. */
+            if (snapshot.Rows.All(r => string.Equals(r.DatabaseName, "tempdb", StringComparison.OrdinalIgnoreCase))
+                && await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) is { } secondaryStatus)
+                return secondaryStatus;
+
             IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = snapshot.Rows;
             filtered = MatchesDatabases(filtered, databases, r => r.DatabaseName);
 

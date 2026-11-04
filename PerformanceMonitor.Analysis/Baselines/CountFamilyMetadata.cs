@@ -45,6 +45,13 @@ namespace PerformanceMonitor.Analysis.Baselines;
 public static class CountFamilyMetadata
 {
     /// <summary>
+    /// #7537: the metadata key ANOMALY_BLOCKING_SPIKE carries (1) when its current count came from the DMV
+    /// blocking snapshots, the arm the detector falls back to when the window holds no blocked process reports
+    /// (RDS, Azure). One name for both products' detectors and for <c>FactAdvice</c>.
+    /// </summary>
+    public const string FromDmvSnapshotsKey = "from_dmv_snapshots";
+
+    /// <summary>
     /// The count-family keys for one fired fact: <c>current_count</c>, <c>baseline_rate</c>, <c>ratio</c>,
     /// <c>is_new</c>, <c>baseline_zero_history</c> and <c>baseline_samples</c>. The caller adds the shared
     /// baseline context (hour, day of week, tier, robust frame, confidence, distinct days) with its own
@@ -54,10 +61,12 @@ public static class CountFamilyMetadata
     /// <param name="currentPerHour"><paramref name="currentCount"/> divided by the window's length in hours.</param>
     /// <param name="baselineRate">The bucket's mean events per hour, or 0 when the bucket holds no samples.</param>
     /// <param name="baseline">The bucket the fact was judged against.</param>
-    public static Dictionary<string, double> Build(long currentCount, double currentPerHour, double baselineRate, BaselineBucket baseline)
+    /// <param name="fromDmvSnapshots">#7537: the blocking count came from the DMV snapshot arm. Stamps
+    /// <see cref="FromDmvSnapshotsKey"/> = 1 and nothing else; the key is absent otherwise, so no other fact changes.</param>
+    public static Dictionary<string, double> Build(long currentCount, double currentPerHour, double baselineRate, BaselineBucket baseline, bool fromDmvSnapshots = false)
     {
         var isNew = !baseline.IsTrustworthy;
-        return new Dictionary<string, double>
+        var metadata = new Dictionary<string, double>
         {
             ["current_count"] = currentCount,
             ["baseline_rate"] = baselineRate,
@@ -68,5 +77,8 @@ public static class CountFamilyMetadata
             ["baseline_zero_history"] = baseline.IsZeroHistory ? 1 : 0,
             ["baseline_samples"] = baseline.SampleCount
         };
+        if (fromDmvSnapshots)
+            metadata[FromDmvSnapshotsKey] = 1;
+        return metadata;
     }
 }

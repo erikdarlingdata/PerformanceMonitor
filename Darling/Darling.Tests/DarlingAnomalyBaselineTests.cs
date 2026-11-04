@@ -180,7 +180,7 @@ public sealed class DarlingAnomalyBaselineTests
 
             Assert.Equal(2, Regex.Matches(body, @"CountFamilyMetadata\.Build\(").Count);
             Assert.Matches(
-                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
+                @"CountFamilyMetadata\.Build\(\s*currentBlocking,\s*currentBlockingPerHour,\s*baselineBlockingRate,\s*blockingBaseline(?:,\s*blockingFromDmv)?\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*blockingBaseline\s*\)",
                 body);
             Assert.Matches(
                 @"CountFamilyMetadata\.Build\(\s*currentDeadlocks,\s*currentDeadlocksPerHour,\s*baselineDeadlockRate,\s*deadlockBaseline\s*\)\s*;\s*AddBaselineContext\(\s*metadata,\s*deadlockBaseline\s*\)",

@@ -163,7 +163,7 @@ public static partial class DarlingWebEndpoints
             ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
             ["get_database_protection"] = (c, pg, an) => DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(pg, Server(c), Hours(c, 24), AsOf(c), QueryBool(c, "overdue_only", false), c.RequestAborted),
             ["get_identity_capacity"] = (c, pg, an) => DatabaseNames(c) is { } databases
-                ? DarlingMcpIdentityCapacityTools.GetIdentityCapacity(pg, Server(c), Hours(c, DarlingMcpIdentityCapacityTools.DefaultHoursBack), AsOf(c), databases, Rows(c, "limit", DarlingMcpIdentityCapacityTools.MaxListed), c.RequestAborted)
+                ? DarlingMcpIdentityCapacityTools.GetIdentityCapacity(pg, Server(c), Hours(c, DarlingMcpIdentityCapacityTools.DefaultHoursBack), AsOf(c), databases, Rows(c, "limit", DarlingMcpIdentityCapacityTools.MaxListed), logger, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
             ["get_database_config_changes"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), databases, AsOf(c), null, c.RequestAborted)

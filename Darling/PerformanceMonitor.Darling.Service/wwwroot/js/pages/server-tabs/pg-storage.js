@@ -8,17 +8,25 @@
 
 import { detailColumn, bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
 
+/* The sentence under a panel whose grid was cut at its row limit (#7551). It names the count when the read gave one, and falls back to the plain sentence when it did not. */
+function pageCutLine(noun, shown, total, tilesNote) {
+  const head = Number.isFinite(shown) && Number.isFinite(total) && total > shown
+    ? "The grid below lists " + shown + " of the " + total + " " + noun + " the window held."
+    : "The window held more " + noun + " than the grid below lists.";
+  return head + " " + tilesNote;
+}
+
 /* The suppression count is a first-class tile rather than a per-row detail, because the usual cause is one
    instance-wide permissions gap: pg_stats is filtered by SELECT privilege and pg_monitor does not grant it,
    so either every row is publishable or almost none are. Naming it here is what gets it fixed.
    `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
    whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
 export const PG_BLOAT_STATS = [
-  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mbfit" },
+  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mbfit", nullKey: "estimated_bloat_state" },
   { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
   { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
   { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
-  { key: "truncated", pageCut: "The window held more tables than the grid below lists.", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: (d) => pageCutLine("tables", d.tables_returned, d.tables_in_window, "The counts and the estimated total above cover every table in the window."), label: "Truncated", format: "bool" },
 ];
 
 /* "unscanned_without_a_structural_blocker" is deliberately not shortened to "droppable" on the tile either:
@@ -29,7 +37,7 @@ export const PG_INDEX_USAGE_STATS = [
   { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mbfit" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
-  { key: "truncated", pageCut: "The window held more indexes than the grid below lists.", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: (d) => pageCutLine("indexes", d.indexes_returned, d.indexes_in_window, "The tiles above count only the indexes listed."), label: "Truncated", format: "bool" },
 ];
 
 export const PG_INDEX_BLOAT_COLUMNS = [
@@ -40,6 +48,9 @@ export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "avg_leaf_density", label: "Leaf Density %", format: "num1" },
   { key: "leaf_fragmentation", label: "Fragmentation %", format: "num1" },
   { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mbfit" },
+  /* #7551: a reclaimable figure with nothing beside it reads as a measured 0 B. An estimated row has no leaf density to show (nothing walked its pages), so the figure it comes from and its basis sit here. */
+  { key: "est_bloat_pct", label: "Est. Bloat %", format: "num1", hint: "The estimated share of the index that is free space. Blank when no estimate could be made." },
+  { key: "measurement_kind", label: "Basis", display: (row) => (row.measurement_kind === "estimated" ? "Estimated" : row.measurement_kind === "measured" ? "Measured" : "—"), hint: "Estimated: worked out from catalog statistics, so no leaf density or fragmentation exists. Measured: an older exact reading from pgstatindex." },
   detailColumn("skipped_reason", "Not Measured", indexSkipWord,
     "Why no bloat figure could be estimated for this index. Blank means it was estimated. Click a reason for the full text."),
 ];
