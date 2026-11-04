@@ -1473,6 +1473,7 @@ function vizStat(data, desc) {
    total fold into "(other)" so the stack's height at each time is still the whole figure the grid beside it adds up to. */
 const MAX_GROUP_SERIES = 8;
 const OTHER_GROUP = "(other)";
+const GROUP_KEY_PREFIX = "g:";
 export function groupedPoints(rows, xKey, groupKey, valueKey) {
   const totals = new Map();
   for (const r of rows) {
@@ -1490,14 +1491,20 @@ export function groupedPoints(rows, xKey, groupKey, valueKey) {
     const g = kept.includes(g0) ? g0 : OTHER_GROUP;
     const v = Number(r[valueKey]);
     if (!Number.isFinite(v)) continue;
-    if (!byTime.has(r[xKey])) byTime.set(r[xKey], { [xKey]: r[xKey] });
+    /* A group is a database or wait type NAME, so it is data: the point holds no prototype (a database named __proto__ is an ordinary
+       key) and each group's key carries a prefix (a database named like xKey, collection_time, does not overwrite the point's time). */
+    if (!byTime.has(r[xKey])) {
+      const first = Object.create(null);
+      first[xKey] = r[xKey];
+      byTime.set(r[xKey], first);
+    }
     const pt = byTime.get(r[xKey]);
-    pt[g] = (pt[g] || 0) + v;
+    pt[GROUP_KEY_PREFIX + g] = (pt[GROUP_KEY_PREFIX + g] || 0) + v;
   }
   const names = folded ? [...kept, OTHER_GROUP] : kept;
   return {
     points: [...byTime.values()].sort((a, b) => String(a[xKey]).localeCompare(String(b[xKey]))),
-    series: names.map((n, i) => ({ key: n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] })),
+    series: names.map((n, i) => ({ key: GROUP_KEY_PREFIX + n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] })),
   };
 }
 

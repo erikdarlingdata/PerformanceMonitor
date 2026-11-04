@@ -132,6 +132,34 @@ public sealed class WaitingTasksBarsBehaviourTests
     }
 
     [Fact]
+    public void BlockedSessions_DatabasesNamedLikeTheTimeColumnAndThePrototype_AreSegmentsOfTheirOwn()
+    {
+        // A database is data: one named collection_time must not overwrite the bar's time, and one named __proto__ must not be
+        // assigned to the point's prototype. At the first time Sales has 1 blocked session, collection_time 2 and __proto__ 3.
+        var blocked = Run("names").GetProperty("blocked");
+        var run = Run("names");
+
+        Assert.Equal(2, blocked.GetProperty("barColumns").GetInt32());
+        Assert.Equal(new[] { 3, 1 }, Ints(blocked, "segmentsPerColumn"));
+        // Segment heights are proportional to the counts: 1 : 2 : 3, smallest first (Sales, collection_time, __proto__).
+        var heights = blocked.GetProperty("heights").EnumerateArray().Select(e => e.GetDouble()).ToArray();
+        Assert.Equal(3, heights.Length);
+        Assert.Equal(2.0, heights[1] / heights[0], 2);
+        Assert.Equal(3.0, heights[2] / heights[0], 2);
+        // The legend names each database as it is spelled.
+        Assert.Contains("collection_time", Text(blocked));
+        Assert.Contains("__proto__", Text(blocked));
+        Assert.Contains("Sales", Text(blocked));
+        // Hovering the first bar names its real time and gives each database its own count.
+        Assert.Equal(run.GetProperty("expectedTime").GetString(), run.GetProperty("tooltipTime").GetString());
+        var rows = run.GetProperty("tooltipRows").EnumerateArray()
+            .Select(r => r.EnumerateArray().Select(e => e.GetString()).ToArray()).ToDictionary(r => r[0]!, r => r[1]);
+        Assert.Equal("2", rows["collection_time"]);
+        Assert.Equal("3", rows["__proto__"]);
+        Assert.Equal("1", rows["Sales"]);
+    }
+
+    [Fact]
     public void WaitingTasksGrid_ShowsThreadCount_BesideTheDuration()
     {
         var run = Run("grid");

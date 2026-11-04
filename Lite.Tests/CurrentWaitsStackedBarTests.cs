@@ -158,4 +158,39 @@ public sealed class CurrentWaitsStackedBarTests
         Assert.Equal("LATCH_EX", lines[0]);
         Assert.Equal("100 ms", lines[1]);
     }
+
+    [Fact]
+    public void MemoryPressureEventsShape_HoverInsideTheSevereSegment_NamesSevere_AndTheOsBarBesideIt()
+    {
+        /* The Memory pressure events chart (ServerTab.UpdateMemoryPressureEventsChart) stacks severe on medium at x - offset (SQL Server)
+           and x + offset (Operating System), and registers each plot with ChartHoverHelper.Add. This draws that same shape through the
+           same helper, so the inside-the-segment rule that serves it is tested here. */
+        var (sqlSevere, sqlMedium, osMedium) = StaTestThread.Run(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            var hover = new ChartHoverHelper(chart, "events", displayZone: () => TimeZoneInfo.Utc);
+            double hour = 1.0 / 24.0, size = hour * 0.4, offset = hour * 0.22, x = Oa(T0);
+            ScottPlot.Bar B(double pos, double lo, double hi) => new() { Position = pos, ValueBase = lo, Value = hi, Size = size, LineWidth = 0 };
+            foreach (var (bars, label) in new[]
+            {
+                (new[] { B(x - offset, 0, 2) }, "SQL Server (medium)"),
+                (new[] { B(x - offset, 2, 10) }, "SQL Server (severe)"),
+                (new[] { B(x + offset, 0, 3) }, "Operating System (medium)"),
+            })
+                hover.Add(chart.Plot.Add.Bars(bars), label);
+            chart.Plot.Axes.SetLimitsX(Oa(T0.AddHours(-1)), Oa(T0.AddHours(2)));
+            chart.Plot.Axes.SetLimitsY(0, 12);
+            using var render = chart.Plot.GetImage(1000, 400);
+
+            /* 3 events up the SQL Server bar: inside the severe segment (2 to 10), only 1 above the medium top, 7 below the severe top. */
+            return (hover.HoverTextAt(chart.Plot.GetPixel(new ScottPlot.Coordinates(x - offset, 3))),
+                hover.HoverTextAt(chart.Plot.GetPixel(new ScottPlot.Coordinates(x - offset, 1))),
+                hover.HoverTextAt(chart.Plot.GetPixel(new ScottPlot.Coordinates(x + offset, 1.5))));
+        });
+
+        Assert.Equal("SQL Server (severe)", sqlSevere!.Split('\n')[0]);
+        Assert.Equal("8 events", sqlSevere.Split('\n')[1]);
+        Assert.Equal("SQL Server (medium)", sqlMedium!.Split('\n')[0]);
+        Assert.Equal("Operating System (medium)", osMedium!.Split('\n')[0]);
+    }
 }

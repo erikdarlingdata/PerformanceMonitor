@@ -31,6 +31,7 @@ class FakeNode {
     this.className = "";
   }
   get parentNode() { return this.parent; }
+  getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 300 }; }
   closest(tag) { for (let n = this; n; n = n.parent) if (n.tag === tag) return n; return null; }
   get firstChild() { return this.children[0] || null; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
@@ -85,9 +86,18 @@ const closeWaits = [
 const loneWaits = [{ collection_time: ago(3), wait_type: "CXCONSUMER", total_wait_ms: 40 }];
 const manyWaits = Array.from({ length: 10 }, (_, i) => ({ collection_time: ago(3), wait_type: "W" + i, total_wait_ms: 100 - i }));
 
+/* Databases named like the chart's own fields: one named for the time column and one that is the prototype's key. Each is a segment of
+   its own at 01:11 (2, 3 and 1 sessions) and the time column survives (a second bar, later, is Sales alone). */
+const nameBlocked = [
+  { collection_time: ago(3), database_name: "collection_time", blocked_count: 2 },
+  { collection_time: ago(3), database_name: "__proto__", blocked_count: 3 },
+  { collection_time: ago(3), database_name: "Sales", blocked_count: 1 },
+  { collection_time: ago(1), database_name: "Sales", blocked_count: 4 },
+];
+
 const answerFor = (name) => {
   if (name === "get_current_waits_trend") {
-    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : scenario === "lone" ? loneWaits : WAITS, blocked_sessions: BLOCKED };
+    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : scenario === "lone" ? loneWaits : WAITS, blocked_sessions: scenario === "names" ? nameBlocked : BLOCKED };
   }
   if (name === "get_waiting_tasks") return { server: "a", tasks: TASKS };
   return {};
@@ -138,10 +148,24 @@ const chartReport = (panel) => {
 };
 
 const out = {};
-if (scenario === "default" || scenario === "many" || scenario === "close" || scenario === "lone") {
+if (scenario === "default" || scenario === "many" || scenario === "close" || scenario === "lone" || scenario === "names") {
   const root = await draw("blocking");
   out.waiting = chartReport(panelOf(root, "Waiting Tasks"));
   out.blocked = chartReport(panelOf(root, "Blocked Sessions"));
+  if (scenario === "names") {
+    /* Point at the first bar (the one at 01:11) and read what the hover tooltip names: its time and a row per segment. */
+    const panel = panelOf(root, "Blocked Sessions");
+    const bars = all(panel).filter((n) => /\bseries-bar\b/.test(n.attrs.class || ""));
+    const firstX = Math.min(...bars.map((b) => Number(b.attrs.x)));
+    const first = bars.filter((b) => Number(b.attrs.x) === firstX);
+    out.blocked.heights = first.map((b) => Number(b.attrs.height)).sort((a, b) => a - b);
+    const overlay = all(panel).find((n) => n.listeners.mousemove);
+    overlay.fire("mousemove", { clientX: firstX + Number(first[0].attrs.width) / 2 });
+    const tip = all(panel).find((n) => /\bchart-tooltip\b/.test(n.className));
+    out.tooltipTime = all(tip).find((n) => /\bt-time\b/.test(n.className)).textContent;
+    out.expectedTime = new Date(Date.parse(ago(3) + "Z")).toLocaleString();
+    out.tooltipRows = all(tip).filter((n) => /\bt-row\b/.test(n.className)).map((r) => r.children.slice(1).map((c) => c.textContent));
+  }
 } else if (scenario === "grid") {
   const root = await draw("waits");
   const panel = panelOf(root, "Waiting Tasks");
