@@ -282,10 +282,11 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         if (!hasInWindow)
         {
-            return McpHelpers.Status(
-                "empty",
+            /* #7459: this answer says unavailable now, which the caller's EmptyAsync leaves as it is, so the offline check is asked here. */
+            return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
+                "unavailable",
                 $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
-                notice.AsHints());
+                notice.AsHints()), cancellationToken);
         }
 
         return McpHelpers.Status(

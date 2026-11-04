@@ -272,6 +272,24 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
         });
     }
 
+    /// <summary>#7459: no row and no run in the window is the unavailable word, and its hints must not call the window covered beside it.</summary>
+    [Fact]
+    public async Task AnIoStatsUnavailableAnswer_WithNoRowAndNoRun_DoesNotClaimTheWindowWasCovered_AgainstDevPostgres()
+    {
+        var t = Of("get_pg_io_stats");
+        await RunAsync(t, "unavailable", async (c, ds, end, name) =>
+        {
+            await SeedServerAsync(c, t, name, end.AddDays(-30), null, end);
+
+            var root = WindowFloorLiveHarness.Parse(await t.Call(ds, name, 1, end));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean(), root.ToString());
+            Assert.Equal(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+        });
+    }
+
     [Fact]
     public async Task ADatabaseStatsEmptyAnswer_WithTwoQuietSamples_CarriesHintsBesideItsOwn_AgainstDevPostgres()
     {

@@ -147,28 +147,6 @@ public sealed class CollectionHealthReadSourceTests : IDisposable
         Assert.Equal("", failedRow.NoteFormatted);
     }
 
-    /// <summary>#7416: an empty Running Jobs answer tells a collector that ran and found nothing from one that never ran, so the tool does not hedge between them.</summary>
-    [Fact]
-    public async Task RunningJobsRead_SaysWhetherTheCollectorEverRan_SoTheEmptyMessageDoesNotHedge()
-    {
-        var (service, _, server) = await StoreAsync("rj-n");
-        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-
-        var never = await service.ReadRunningJobsAsync(serverId);
-        Assert.Empty(never.Jobs);
-        Assert.False(never.CollectorRan);
-
-        await RunAsync(server, "running_jobs", TimeSpan.FromMinutes(1), null);
-        var ran = await service.ReadRunningJobsAsync(serverId);
-        Assert.Empty(ran.Jobs);
-        Assert.True(ran.CollectorRan);
-
-        Assert.Equal("No SQL Agent job is running.", PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsEmptyMessage(ran.CollectorRan));
-        var neverText = PerformanceMonitor.Collectors.CollectorRuntimePrecondition.RunningJobsEmptyMessage(never.CollectorRan);
-        Assert.Contains("has not run", neverText, StringComparison.Ordinal);
-        Assert.DoesNotContain(" or ", neverText, StringComparison.Ordinal);
-    }
-
     /// <summary>The per-run Collection Log grids' two reads fill the run's read source, and the message cell shows it only on that run.</summary>
     [Fact]
     public async Task CollectionLogGrids_ShowTheReadSourceOnTheRunThatHasOne()

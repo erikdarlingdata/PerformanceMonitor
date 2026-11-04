@@ -129,6 +129,22 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal("unavailable", after.GetProperty("status").GetString());
     }
 
+    /// <summary>#7459: "nothing collected in this window" says unavailable by itself, and on a server that has stopped being collected it still says why.</summary>
+    [Fact]
+    public async Task HeatmapWithNothingCollectedInTheWindow_OnAnOfflineServer_SaysItIsOffline()
+    {
+        await SeedAsync(DateTime.UtcNow.AddDays(-3));
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 1)).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith(ServerName + " is offline: ", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Widen hours_back", message, StringComparison.Ordinal);
+    }
+
     /// <summary>A server with no successful collection on record keeps the tools' own answers (never collected is not offline).</summary>
     [Fact]
     public async Task ServerNeverCollected_IsNotCalledOffline()

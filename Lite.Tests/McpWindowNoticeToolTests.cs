@@ -995,7 +995,9 @@ public sealed class McpWindowNoticeToolTests : IDisposable
         var root = Root(await McpQueryTools.GetQueryHeatmap(Service(), _serverManager, ServerName, hours_back: 168));
 
         Assert.Contains("nothing collected IN the last 168 hour(s)", root.GetProperty("message").GetString(), StringComparison.Ordinal);
-        AssertNothingHeld(EmptyHints(root), "query_stats");
+        /* #7459: nothing in the window while older rows exist is a collector that may have stopped, which is unavailable and not a true negative. */
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        AssertNothingHeld(root.GetProperty("hints"), "query_stats");
     }
 
     /* ───────────────────────── assertions ───────────────────────── */

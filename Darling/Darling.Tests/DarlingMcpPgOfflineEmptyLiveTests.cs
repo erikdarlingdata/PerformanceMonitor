@@ -32,6 +32,7 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
     {
         "get_pg_autovacuum_health" => DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(ds, name, 1, as_of: asOf),
         "get_pg_replication_slots" => DarlingMcpPgSlotTools.GetPgReplicationSlots(ds, name, 1, asOf),
+        "get_pg_io_stats" => DarlingMcpPgIoTools.GetPgIoStats(ds, name, 1, as_of: asOf),
         _ => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(ds, name, 1, as_of: asOf),
     };
 
@@ -68,6 +69,7 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
     [InlineData("get_pg_autovacuum_health")]
     [InlineData("get_pg_replication_slots")]
     [InlineData("get_pg_replication_stats")]
+    [InlineData("get_pg_io_stats")]
     public async Task AnEmptyRead_FromAnOfflineServer_IsUnavailable_WithTheOfflineLeadFirst_AgainstDevPostgres(string read)
     {
         const string Name = "pg6155-offline.example:appdb:pg";
