@@ -46,6 +46,15 @@ public class AmplifierRootBarTests
     private static Fact Memory(string key, double value) =>
         new() { Source = "memory", Key = key, Value = value, Metadata = new() };
 
+    private static Fact MemoryAnomaly() =>
+        new()
+        {
+            Source = "anomaly",
+            Key = "ANOMALY_MEMORY_PRESSURE",
+            Value = 95,
+            Metadata = new() { ["deviation_sigma"] = 3.0 }
+        };
+
     private static Fact DbConfig(double rcsiOff, double autoShrink) =>
         new()
         {
@@ -118,6 +127,7 @@ public class AmplifierRootBarTests
         ["plan_regression_cpu_spike"] = new(
             () => Query("PLAN_REGRESSION", 4),
             "CPU spike present",
+            // The trace half is defensive: neither collector emits CPU_SPIKE below max CPU 80, so no live run emits this fact at this level.
             () => [Cpu("CPU_SPIKE", 10)],
             () => [Cpu("CPU_SPIKE", 90)]),
         ["cpu_spike_sos"] = new(
@@ -128,6 +138,11 @@ public class AmplifierRootBarTests
         ["memory_grant_semaphore"] = new(
             () => Memory("MEMORY_GRANT_PENDING", 3),
             "RESOURCE_SEMAPHORE waits present — memory grant pressure",
+            () => [Wait("RESOURCE_SEMAPHORE", 0.0001)],
+            () => [Wait("RESOURCE_SEMAPHORE", 0.02)]),
+        ["memory_anomaly_semaphore"] = new(
+            MemoryAnomaly,
+            "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
             () => [Wait("RESOURCE_SEMAPHORE", 0.0001)],
             () => [Wait("RESOURCE_SEMAPHORE", 0.02)]),
         ["spills_semaphore"] = new(
@@ -227,6 +242,7 @@ public class AmplifierRootBarTests
             () => [TempDb(0.000673, 2.75)], () => [TempDb(0.80, 4000)]),
         ["regression_to_cpu_percent"] = new("PLAN_REGRESSION", "CPU_SQL_PERCENT",
             () => [Cpu("CPU_SQL_PERCENT", 1)], () => [Cpu("CPU_SQL_PERCENT", 80)]),
+        // The trace half is defensive: neither collector emits CPU_SPIKE below max CPU 80, so no live run emits this fact at this level.
         ["regression_to_cpu_spike"] = new("PLAN_REGRESSION", "CPU_SPIKE",
             () => [Cpu("CPU_SPIKE", 10)], () => [Cpu("CPU_SPIKE", 90)]),
     };
