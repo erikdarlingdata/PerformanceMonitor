@@ -76,15 +76,24 @@ public static class QueryTagUsageView
 
     /// <summary>
     /// #7374: the servers whose engine cannot run the collectors every section here reads (a PostgreSQL target has none of the six SQL Server
-    /// sources), each with the engine reason. It is the question <c>get_resource_use_by_tag</c> asks through the same
-    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/>, so the two surfaces read the same words. A server it can run on is left out.
+    /// sources), each with the engine reason. It is asked AFTER the read, and only of a server the read found no rows for in any section (a Query
+    /// Store section the interval-table gate refused counts as none), as <c>get_resource_use_by_tag</c> does through the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/>: a server whose registry row says PostgreSQL but that holds SQL Server rows in
+    /// the window (a re-registration, a restored database) keeps its data, the contract <c>DarlingEngineCapability</c> states. A server the
+    /// engine can serve is left out.
     /// </summary>
-    public static Dictionary<int, string> NotCollectedReasons(IEnumerable<DarlingServer> servers)
+    public static Dictionary<int, string> NotCollectedReasons(IEnumerable<DarlingServer> servers, QueryTagRollupData data)
     {
+        var withRows = ServersWithRows(data);
         var reasons = new Dictionary<int, string>();
         foreach (var server in servers)
         {
-            var reason = CollectorEngineCapability.NotCollectedMessage(server.DisplayName, server.EngineEdition, server.EngineKind, "query_stats", server.AwsRdsKind);
+            if (withRows.Contains(server.ServerId))
+            {
+                continue;
+            }
+
+            var reason =CollectorEngineCapability.NotCollectedMessage(server.DisplayName, server.EngineEdition, server.EngineKind, "query_stats", server.AwsRdsKind);
             if (reason is not null)
             {
                 reasons[server.ServerId] = reason;
@@ -94,7 +103,27 @@ public static class QueryTagUsageView
         return reasons;
     }
 
-    /// <param name="notCollected">#7374: servers in <paramref name="scope"/> that were not read because their engine collects none of these sources (see <see cref="NotCollectedReasons"/>): each reads not_collected in every table, with the engine reason.</param>
+    /// <summary>The servers with at least one row in any of the six sections (before any tag filter).</summary>
+    public static HashSet<int> ServersWithRows(QueryTagRollupData data)
+    {
+        var ids = new HashSet<int>();
+        foreach (var facts in data.Sections.Values)
+        {
+            foreach (var fact in facts)
+            {
+                ids.Add(fact.ServerId);
+            }
+        }
+
+        foreach (var deadlock in data.Deadlocks)
+        {
+            ids.Add(deadlock.ServerId);
+        }
+
+        return ids;
+    }
+
+    /// <param name="notCollected">#7374: servers in <paramref name="scope"/> that the read found no rows for and whose engine collects none of these sources (see <see cref="NotCollectedReasons"/>): each reads not_collected in every table, with the engine reason.</param>
     public static QueryTagUsageResult Build(
         QueryTagRollupData data, IReadOnlyList<(int Id, string Name)> scope, bool allServers, int? tagFilter, int limit = 200,
         IReadOnlyDictionary<int, string>? notCollected = null)
@@ -112,6 +141,12 @@ public static class QueryTagUsageView
             anyUnfiltered |= facts.Count > 0;
             anyData |= tagFilter is null ? facts.Count > 0 : facts.Any(f => f.TagId is int id && IsUnder(id, tagFilter.Value, data.Tags));
             data.Unavailable.TryGetValue(section.Name, out var why);
+            if (why is not null && section == QueryTagRollupSection.QueryStore && notCollected is { Count: > 0 } && data.Refused.Count > 0)
+            {
+                /* #7374: the gate's refusal of a server that reads not_collected is no reason Query Store is unserved: say only what the others were refused for. */
+                why = QueryTagUsageNotes.QueryStoreNotReadable(data.Refused.Where(r => !notCollected.ContainsKey(r.Key)).Select(r => r.Value));
+            }
+
             if (why is not null)
             {
                 notServed.Add($"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)} is unavailable: {why}");
@@ -126,6 +161,12 @@ public static class QueryTagUsageView
                 {
                     foreach (var server in perServer.OfType<Dictionary<string, object?>>())
                     {
+                        /* #7374: a section note says how the read reached the window, which says nothing about a server the engine never collects for. */
+                        if (server.GetValueOrDefault("status") as string == "not_collected")
+                        {
+                            continue;
+                        }
+
                         server["note"] = note;
                     }
                 }

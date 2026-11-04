@@ -516,6 +516,54 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#7374: the engine question is asked after the read, as the one-server form does (DarlingEngineCapability's contract). A
+    /// server whose registry row says PostgreSQL but that holds SQL Server rows in the window (a re-registration, a restored database) keeps
+    /// its data in the fleet form, in every section, and is never answered not_collected.</summary>
+    [Fact]
+    public async Task AFleetRead_KeepsTheDataOfAServerWhoseRegistryRowSaysPostgres_ButHasSqlServerRows()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.False(doc.RootElement.TryGetProperty("status", out var top) && top.GetString() == "not_collected");
+            foreach (var section in doc.RootElement.GetProperty("sections").EnumerateArray())
+            {
+                var two = section.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-two");
+                Assert.NotEqual("not_collected", two.GetProperty("status").GetString());
+            }
+
+            var plan = Section(doc, "plan_cache");
+            Assert.Equal("ok", plan.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-two").GetProperty("status").GetString());
+            Assert.Equal(3_000, Figure(plan.GetProperty("fleet_total"), "cpu_ms"));
+        });
+    }
+
+    /// <summary>#7374: with every server registered as PostgreSQL, the one that holds rows keeps them and the answer is data, not the whole
+    /// answer not_collected. The other, with no rows anywhere, reads not_collected.</summary>
+    [Fact]
+    public async Task AFleetOfRegistryPostgresServers_AnswersNotCollectedOnlyForTheOnesWithNoRows()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres'", c.Ct);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.False(doc.RootElement.TryGetProperty("status", out var top) && top.GetString() == "not_collected");
+            var plan = Section(doc, "plan_cache");
+            var servers = plan.GetProperty("servers").EnumerateArray().ToDictionary(s => s.GetProperty("server").GetString()!);
+            Assert.Equal("ok", servers["srv-one"].GetProperty("status").GetString());
+            Assert.Equal("not_collected", servers["srv-two"].GetProperty("status").GetString());
+        });
+    }
+
     [Fact]
     public async Task TheFleetViewListsEachServer_AndTotalsAcrossThem()
     {

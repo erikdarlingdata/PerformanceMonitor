@@ -88,18 +88,8 @@ public sealed class QueryTagUsageWindow : Window
             var hours = _hours.SelectedIndex switch { 0 => 1, 2 => 168, _ => 24 };
             var servers = allServers ? await _fleet() : [_here];
             var scope = servers.Select(s => (Id: s.ServerId, Name: s.DisplayName)).ToList();
-            /* #7374: a PostgreSQL server has none of these SQL Server sources, so it is not read (and never reaches the Query Store gate). It reads not_collected. */
-            var notCollected = QueryTagUsageView.NotCollectedReasons(servers);
-            var readable = scope.Where(s => !notCollected.ContainsKey(s.Id)).Select(s => s.Id).ToList();
-            if (readable.Count == 0 && notCollected.Count > 0)
-            {
-                _message.Text = notCollected[scope[0].Id];
-                _tables.Children.Clear();
-                return;
-            }
-
             var end = DateTime.UtcNow;
-            var data = await _data.GetQueryTagRollupDataAsync(readable, end.AddHours(-hours), end);
+            var data = await _data.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), end.AddHours(-hours), end);
 
             if (_tag.Items.Count <= 1)
             {
@@ -107,6 +97,17 @@ public sealed class QueryTagUsageWindow : Window
                 var choices = QueryTagUsageView.Choices(_tags);
                 _tag.ItemsSource = choices;
                 _tag.SelectedItem = QueryTagUsageView.AllChoice;
+            }
+
+            /* #7374: every server is read first, in both scopes (a server whose registry row says PostgreSQL but that holds SQL Server rows keeps
+               them). Only a server the read found no rows for is asked the engine question: a PostgreSQL server has none of these sources, so it
+               reads not_collected with the engine reason. If every server in scope is such a server, the reason is the whole answer. */
+            var notCollected = QueryTagUsageView.NotCollectedReasons(servers, data);
+            if (notCollected.Count == scope.Count)
+            {
+                _message.Text = notCollected[scope[0].Id];
+                _tables.Children.Clear();
+                return;
             }
 
             var filter = QueryTagUsageView.FilterFor(data.Tags, _tag.SelectedItem as string);

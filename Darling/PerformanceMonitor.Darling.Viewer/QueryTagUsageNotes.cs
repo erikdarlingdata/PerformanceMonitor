@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Darling.Storage;
 
@@ -83,6 +84,14 @@ public static class QueryTagUsageNotes
 
     /// <summary>"This store has no query stats data yet.": the section's source is missing, said in the words Lite uses (#6850), never the table's name.</summary>
     public static string Missing(string sectionName) => QueryTagSourceWords.Missing(sectionName);
+
+    /// <summary>Query Store is read from the composed interval table only, and the gate refused every server read: the reasons it gave, or "no server was read" when none are left (#7374 shares it with the view).</summary>
+    public static string QueryStoreNotReadable(IEnumerable<string> reasons)
+    {
+        var distinct = reasons.Distinct().ToList();
+        return "Query Store is read from the composed interval table only, and it is not readable here: "
+            + (distinct.Count == 0 ? "no server was read" : string.Join("; ", distinct)) + ".";
+    }
 
     private static List<string> EdgeSentences(
         DateTime? startDroppedFrom, DateTime servedStart, DateTime? materializedTo, bool endCountedWhole, DateTime? servedEnd, Func<DateTime, string> at)

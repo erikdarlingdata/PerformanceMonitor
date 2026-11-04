@@ -122,8 +122,7 @@ public sealed partial class ViewerDataService
 
             if (qs.Allowed.Count == 0)
             {
-                unavailable[QueryTagRollupSection.QueryStore.Name] = "Query Store is read from the composed interval table only, and it is not readable here: "
-                    + (qs.Refused.Count == 0 ? "no server was read" : string.Join("; ", qs.Refused.Values.Distinct())) + ".";
+                unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(qs.Refused.Values);
             }
         }
 
