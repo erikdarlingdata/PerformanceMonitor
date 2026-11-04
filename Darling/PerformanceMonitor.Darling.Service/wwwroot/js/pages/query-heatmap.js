@@ -182,6 +182,8 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
       viz: "table",
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
+      /* #7410: a plain sentence for an idle range, and the tool's own paragraph (which names a filter parameter and a collection cycle) one click away. */
+      emptyLine: "No query ran in this range, or the chosen databases ran none. A server that was up and idle looks the same.",
       span: 2,
       control,
     });

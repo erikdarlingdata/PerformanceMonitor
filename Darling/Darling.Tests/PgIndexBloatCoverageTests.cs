@@ -999,7 +999,7 @@ public sealed class PgIndexBloatCoverageTests
 
         /* The hook exists, is fed from the READ's own response, and renders as a notice. */
         Assert.Contains("desc.noteKey", renderer, StringComparison.Ordinal);
-        Assert.Contains("noticeStrip(note)", renderer, StringComparison.Ordinal);
+        Assert.Contains("noteStrip(desc, note)", renderer, StringComparison.Ordinal);
         Assert.Contains("noticeStrip,", renderer, StringComparison.Ordinal);
 
         /* ON THE POPULATED PATH. The empty and error branches return before the viz runs, so a note read

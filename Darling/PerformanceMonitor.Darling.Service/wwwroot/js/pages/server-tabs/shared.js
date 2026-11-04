@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -146,7 +146,7 @@ export function fanout(read, params, specs, intro = null) {
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
         markPartialSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }

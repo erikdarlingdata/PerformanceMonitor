@@ -723,6 +723,7 @@ export const SERVER_TABS = [
           floorKey: "window",
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           noteKey: "qs_overhead.wait_stats.excluded_note",
+          noteShort: "Query Store's idle sleep waits are left out of this table on purpose. It lists only the waits that cost something, and it is not the whole of Query Store's cost.",
           emptyText:
             "No non-sleep QDS_* wait deltas in this window. Query Store's four sleep waits are dropped at " +
             "collection on purpose, so their absence here is the filter working, not a quiet server.",
@@ -735,8 +736,7 @@ export const SERVER_TABS = [
           viz: "stat",
           stats: QS_CLERK_STATS,
           noteKey: "qs_overhead.memory_clerk.note",
-          emptyText:
-            "The Query Store memory clerk was not among the top 25 clerks over 1 MB in any capture in this window, so this is a rank, not a zero.",
+          emptyText: "No memory clerk figures in this window.",
         },
       ]),
       /* #2484, #6293: the Query Heatmap, drawn as the Viewer draws it: a colour grid of query counts by time and

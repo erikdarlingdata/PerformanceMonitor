@@ -568,7 +568,7 @@ table.data td.flow-cell { min-width: 12rem; max-width: none; overflow-wrap: anyw
 table.data td.flow-cell .disclosure { max-width: none; }
 table.data td.flow-cell .disclosure > .disc-summary { white-space: normal; overflow: visible; text-overflow: clip; }
 /* The query text of Top Query Shapes keeps room to read: its closed summary is one line, and without a floor the auto layout squeezes it to a few characters. */
-table.data td.query-cell { min-width: 18rem; }
+table.data td.query-cell { min-width: 16rem; }
 table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }

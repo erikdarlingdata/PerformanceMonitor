@@ -316,20 +316,14 @@ export function noticeStripWithDetail(short, full) {
   ]);
 }
 
-/** A note longer than this many characters shows its first sentence and keeps the rest behind "More detail" (#7410). */
-const LONG_NOTE_CHARS = 300;
-
 /**
- * #7410: the strip a read's `note` draws above a grid that has rows. A panel that names `noteShort` shows that sentence. Any other note
- * longer than LONG_NOTE_CHARS shows its first sentence and the rest one click away, so a tool's paragraph is never a wall above the rows.
- * A short note is drawn as it always was.
+ * #7410: the strip a read's `note` draws above a grid that has rows. A panel that names `noteShort` shows that plain sentence and keeps
+ * the tool's note one click away. Any other note is drawn as it always was: a caveat about the data (a cut window, a floor) is not
+ * shortened by a rule, only by a sentence somebody wrote for that panel.
  */
 export function noteStrip(desc, note) {
   if (desc && typeof desc.noteShort === "string" && desc.noteShort) return noticeStripWithDetail(desc.noteShort, note);
-  const text = plainText(note);
-  if (text.length <= LONG_NOTE_CHARS) return noticeStrip(note);
-  const m = /^(.{20,240}?[.!?])(\s|$)/s.exec(text);
-  return noticeStripWithDetail(m ? m[1] : text.slice(0, 200).trimEnd() + "…", note);
+  return noticeStrip(note);
 }
 
 /** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
