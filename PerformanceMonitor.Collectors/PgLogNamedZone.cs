@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
@@ -108,20 +109,33 @@ public static class PgLogNamedZone
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{3})?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The batched check. Statement one pins the session zone to the setting and returns a row only when the setting
-    /// is a name in <c>pg_timezone_names</c> (a POSIX offset string such as <c>-03</c> and an unknown name return
-    /// none, and the reader refuses as before). Statement two returns, per distinct pair, how many candidate instants
-    /// rendered back as the line's text and the earliest of them. The candidate offsets are the zone's offsets at
-    /// every whole hour from 14 hours before to 12 hours after the stamp read as UTC, which covers every instant a
-    /// local time can come from, since no offset is outside -12 to +14. A candidate that is not the instant of a real
-    /// transition simply fails the render check.
+    /// The batched check, first time for a server and setting. Statement one pins the session zone to the setting and
+    /// returns a row only when the setting is a name in <c>pg_timezone_names</c> (a POSIX offset string such as
+    /// <c>-03</c> and an unknown name return none, and the reader refuses as before). That view reads every time zone
+    /// file each time it is evaluated (580 ms on average, 4.5 s at worst on a PostgreSQL 18 target, #7397), so
+    /// <see cref="ResolveAsync"/> runs this statement once per server and setting and keeps the answer
+    /// (<see cref="ResolveKnownZoneSql"/> runs every read after). Statement two returns, per distinct pair, how many
+    /// candidate instants rendered back as the line's text and the earliest of them. The candidate offsets are the
+    /// zone's offsets at every whole hour from 14 hours before to 12 hours after the stamp read as UTC, which covers
+    /// every instant a local time can come from, since no offset is outside -12 to +14. A candidate that is not the
+    /// instant of a real transition simply fails the render check.
     /// </summary>
-    public const string ResolveSql = @"
+    public const string ResolveSql = ZoneLookupSql + MatchSql;
+
+    /// <summary>The batched check once <see cref="ResolveSql"/> has found <c>@zone</c> to be a named zone (#7397): the
+    /// same statement two, and statement one pins the session zone to that name without reading the view.</summary>
+    public const string ResolveKnownZoneSql = ZoneSetSql + MatchSql;
+
+    private const string ZoneLookupSql = @"
 SELECT pg_catalog.set_config('TimeZone', n.name, true)
 FROM pg_catalog.pg_timezone_names AS n
 WHERE pg_catalog.lower(n.name) = pg_catalog.lower(@zone)
-LIMIT 1;
+LIMIT 1;";
 
+    private const string ZoneSetSql = @"
+SELECT pg_catalog.set_config('TimeZone', @zone, true);";
+
+    private const string MatchSql = @"
 SELECT m.stamp, m.zone, pg_catalog.count(*)::integer AS matches, pg_catalog.min(m.utc) AS utc
 FROM (
     SELECT p.stamp,
@@ -240,6 +254,16 @@ GROUP BY m.stamp, m.zone;";
 
         var askable = pairs.Where(p => IsAskable(p.Stamp)).Distinct().ToList();
 
+        /* The answer to "is this setting a named zone" does not change between reads, and finding it scans every zone
+           file on the target (#7397). A setting already found not to be one is refused with no round trip at all. */
+        var key = ZoneKey(connection, logTimezoneSetting);
+        var known = s_zoneNames.TryGetValue(key, out var cachedName);
+
+        if (known && cachedName is null)
+        {
+            return null;
+        }
+
         /* An explicit transaction, so the local session zone set by statement one holds for statement two whatever the
            driver does about implicit transactions across a multi-statement command. Rolled back on dispose: it reads only. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -247,8 +271,8 @@ GROUP BY m.stamp, m.zone;";
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandTimeout = commandTimeoutSeconds;
-        command.CommandText = ResolveSql;
-        AddParameter(command, "zone", logTimezoneSetting.Trim());
+        command.CommandText = known ? ResolveKnownZoneSql : ResolveSql;
+        AddParameter(command, "zone", known ? cachedName! : logTimezoneSetting.Trim());
         AddParameter(command, "stamps", askable.Select(p => p.Stamp).ToArray());
         AddParameter(command, "zones", askable.Select(p => p.Zone).ToArray());
 
@@ -256,8 +280,11 @@ GROUP BY m.stamp, m.zone;";
 
         if (!await reader.ReadAsync(cancellationToken))
         {
+            s_zoneNames[key] = null;
             return null;
         }
+
+        s_zoneNames[key] = reader.GetString(0);
 
         await reader.NextResultAsync(cancellationToken);
 
@@ -270,6 +297,17 @@ GROUP BY m.stamp, m.zone;";
 
         return PgLogZoneMap.FromMatches(rows);
     }
+
+    /* The name each (server, setting) resolved to, or null where the setting is not a named zone (a POSIX offset string,
+       an unknown name). Kept for the life of the process: a value is only ever written after the server answered, so a
+       read that failed asks again, and a new log_timezone setting is a new key. */
+    private static readonly ConcurrentDictionary<string, string?> s_zoneNames = new(StringComparer.Ordinal);
+
+    private static string ZoneKey(DbConnection connection, string setting) =>
+        string.Join('|', connection.DataSource, connection.Database, setting.Trim().ToLowerInvariant());
+
+    /// <summary>Forgets what <see cref="ResolveAsync"/> kept about each setting, so the next read looks it up again.</summary>
+    internal static void ForgetZoneNames() => s_zoneNames.Clear();
 
     private static void AddParameter(DbCommand command, string name, object value)
     {

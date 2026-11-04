@@ -91,6 +91,13 @@ function panelMemoryKey(read, params, spec) {
   return read + "|" + JSON.stringify(params || {}) + "|" + spec.title;
 }
 function hidesPanel(spec, res, shell, key) {
+  /* #7409: a spec that says `hideWhenNotCollected` is not drawn when the read answers "not collected" (it does not apply to this
+     kind of server), the same switch tablePanel and the Instance CPU panel use. Any other answer draws it again. */
+  if (spec.hideWhenNotCollected) {
+    const gone = res.kind === "empty" && res.status === "not_collected";
+    shell.panel.style.display = gone ? "none" : "";
+    if (gone) return true;
+  }
   if (!spec.hideWhenNoRows) return false;
   /* A failed read is not "no rows": hiding the card would leave a problem list that could not load looking like a clean server.
      The card stays (or comes back) and shows the read's error (release walk, W12). */
@@ -698,9 +705,11 @@ export function renderInto(body, render) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, extra = null) {
+export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, hideWhenNotCollected = false, extra = null) {
   if (!emptyText) throw new Error("tablePanel(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
+  /* #7409: the panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
+  if (hideWhenNotCollected) desc.hideWhenNotCollected = true;
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;

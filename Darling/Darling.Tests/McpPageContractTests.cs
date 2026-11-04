@@ -829,12 +829,12 @@ public sealed class McpPageContractTests
     public void PgServerConfig_CountsTheSnapshotOnTheRowStatement_AndFiltersInTheQuery()
     {
         var sql = DarlingPgServerConfigReader.CurrentConfigSql;
-        Assert.Contains("COUNT(*) FILTER (WHERE coalesce(c.source, 'default') <> 'default') OVER ()::int AS snapshot_non_default_count", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) FILTER (WHERE " + DarlingPgServerConfigReader.DiffersFromDefaultSql + ") OVER ()::int AS snapshot_non_default_count", sql, StringComparison.Ordinal);
         Assert.True(sql.IndexOf("OVER ()", StringComparison.Ordinal) < sql.LastIndexOf("ORDER BY", StringComparison.Ordinal),
             "the snapshot count must be computed above the ordering and the cap, or it counts the page");
         /* The FILTER's predicate is the SAME expression the row's is_default column is read from, so the
            count is provably of the very flag the rows report. */
-        Assert.Contains("(coalesce(c.source, 'default') = 'default') AS is_default", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT " + DarlingPgServerConfigReader.DiffersFromDefaultSql + " AS is_default", sql, StringComparison.Ordinal);
         /* include_defaults is the statement's, and a pending-restart row survives the default view. */
         Assert.Contains("($2::boolean", sql, StringComparison.Ordinal);
         Assert.Contains("OR coalesce(c.pending_restart, false))", sql, StringComparison.Ordinal);

@@ -387,9 +387,10 @@ public static class DarlingPgLoggingAudit
         /* PostgreSQL 15 moved the default from -1 to 600000 (ten minutes). A server sitting on that default
            at a positive threshold is the shape worth naming: it sees only the outlier runs. The judgment is
            PostgreSQL's OWN - source = 'default' is the server saying nobody set it - and not a text
-           comparison against boot_val, for the reason DarlingPgServerConfigReader.CurrentConfigSql gives:
-           an administrator who writes 600000 into postgresql.conf has made a choice that happens to equal
-           the boot value, and calling that choice a default would attribute it to inaction. */
+           comparison against boot_val. An administrator who writes 600000 into postgresql.conf has made a
+           choice that happens to equal the boot value, and calling that choice a default would attribute it
+           to inaction. get_pg_server_config asks a different question (what differs from the default, #7409)
+           and so answers differently for that row. */
         var atDefault = row is not null && threshold > 0
             && string.Equals(row.Source, "default", StringComparison.Ordinal);
 

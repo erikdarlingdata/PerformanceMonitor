@@ -120,6 +120,8 @@ public static class DarlingPgWaitSamplingReader
             ORDER BY event_type, event, query_id, collection_time ASC
         ),
         ranked AS (
+        SELECT *
+        FROM (
         SELECT
             n.event_type,
             n.event,
@@ -141,7 +143,12 @@ public static class DarlingPgWaitSamplingReader
           ON  o.event_type IS NOT DISTINCT FROM n.event_type
           AND o.event      IS NOT DISTINCT FROM n.event
           AND o.query_id   IS NOT DISTINCT FROM n.query_id
-        ORDER BY 4 DESC, n.event_type, n.event
+        ) AS moved
+        /* #7409: a series whose samples did not move across the window is not a wait that happened in it, and listed
+           with 0 samples, 0 ms and 0.0% it read as one. The total above is unchanged by the filter (a zero adds
+           nothing), so the shares of the series that did move still divide by the same denominator. */
+        WHERE sample_count > 0
+        ORDER BY 4 DESC, event_type, event
         LIMIT $4
         )
         SELECT

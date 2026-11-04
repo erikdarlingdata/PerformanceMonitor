@@ -1326,8 +1326,8 @@ export const POSTGRES_TABS = [
        the reader clicks. Saying it here rather than only in the panel matters more on THIS tab than on
        Waits, because the rest of the tab does fill, so a reader could reasonably read one empty grid among
        three as a fault. */
-    note: "The blocking panels cover every PostgreSQL target. Top Query Shapes needs Amazon Aurora and stays empty elsewhere.",
-    noteInfo: "Top Query Shapes comes from aurora_stat_statements(), which core PostgreSQL does not have. The blocking panels above it work everywhere, standbys included.",
+    note: "The blocking panels cover every PostgreSQL target. Top Query Shapes needs the pg_stat_statements extension (Amazon Aurora uses aurora_stat_statements() instead).",
+    noteInfo: "Top Query Shapes fills wherever pg_stat_statements is installed, and the panel says so when it is not. Amazon Aurora adds I/O source, peak memory and WAL columns that are blank elsewhere. The blocking panels work everywhere, standbys included.",
     build: (server, ctx) => [
       /* One read, three panels, and the FIRST of them is the denominator. get_pg_blocking is a periodic SAMPLE,
          not an event log: PostgreSQL records nothing unless asked, so "no chains" is ambiguous between a quiet
@@ -1662,8 +1662,8 @@ export const POSTGRES_TABS = [
        were. Hiding it would buy a tidier stock-PostgreSQL page at the price of a tab set that changes shape
        between two PostgreSQL servers in one fleet, and of making the one Aurora-specific capability we have
        invisible to the operator best placed to want it. */
-    note: "Wait-event sampling needs Amazon Aurora. On other PostgreSQL targets this tab stays empty.",
-    noteInfo: "It comes from aurora_stat_system_waits(), which core PostgreSQL does not have.",
+    note: "Wait Events needs Amazon Aurora and is left off other targets. Sampled Waits and Wait Trend fill on any other PostgreSQL target, from the pg_wait_sampling extension when it is installed and from the service's own once-a-second sampler (a floor that undercounts short waits) when it is not.",
+    noteInfo: "Wait Events comes from aurora_stat_system_waits(), which core PostgreSQL does not have. Sampled Waits says which instrument fed it (instrument). On Amazon Aurora the two sampled panels do not apply and are left off.",
     build: (server, ctx) => [
       tablePanel(
         "Wait Events",
@@ -1672,7 +1672,10 @@ export const POSTGRES_TABS = [
         "waits",
         PG_WAIT_COLUMNS,
         ctx.label + ", background-worker and client-idle waits already excluded by the collector",
-        "No wait events in this window."
+        "No wait events in this window.",
+        2, null, null, null, null, null, null, false, null,
+        /* #7409: Aurora only. Not drawn on a target that answers "not collected" instead of leading the tab with a panel that cannot fill. */
+        true
       ),
       /* #2629: the same tab carries the stock-PostgreSQL answer, so the two are read TOGETHER rather than
          one being a consolation for the other's blank. Exactly one of them fills on any given target — the
@@ -1688,6 +1691,8 @@ export const POSTGRES_TABS = [
         ctx.label + ", sample counts from a periodic profiler; event type CPU means running, not waiting",
         "No sampled waits in this window.",
         2, null, null, null, null, null, null, false, null,
+        /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
+        true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
         { noteFrom: pgWaitSamplingBackendsNote }
       ),
@@ -1942,7 +1947,7 @@ export const POSTGRES_TABS = [
         { server },
         "settings",
         PG_SERVER_CONFIG_COLUMNS,
-        "non-default first; pending restart means the file and the running server disagree",
+        "settings that differ from the default first, then ones pinned in a file at the default; pending restart means the file and the running server disagree",
         "No configuration snapshot has been collected yet. This collector runs hourly unless its schedule was changed, so a server registered within the last collection interval has not reached its first collection."
       ),
     ],
