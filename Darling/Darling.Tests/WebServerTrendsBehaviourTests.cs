@@ -67,7 +67,7 @@ public sealed class WebServerTrendsBehaviourTests
     };
 
     [Fact]
-    public void TheCpuSchedulerTrend_DrawsRunnableBlockedAndQueued_FromOneAbortableRead_WithTheDiscontinuityNotice()
+    public void TheCpuSchedulerTrend_DrawsRunnableBlockedAndQueued_FromOneAbortableRead_WithNoRestartNoticeForALevel()
     {
         var r = Run("cpu");
         Assert.Equal(new[] { "Runnable Tasks", "Blocked Tasks", "Queued Requests" }, Strings(r.GetProperty("chart").GetProperty("labels")));
@@ -76,7 +76,8 @@ public sealed class WebServerTrendsBehaviourTests
         Assert.Equal("cpu_scheduler", read.GetProperty("metric").GetString());
         Assert.Equal("24", read.GetProperty("hours").GetString());
         Assert.True(r.GetProperty("signals")[0].GetBoolean());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        // #7416: scheduler task counts are levels, so a restart in the window draws no restart notice on them.
+        Assert.Empty(Strings(r.GetProperty("notices")));
     }
 
     [Fact]

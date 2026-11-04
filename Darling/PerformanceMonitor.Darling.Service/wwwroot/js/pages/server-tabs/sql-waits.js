@@ -10,7 +10,7 @@ import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityNotes, withWaitLink, withPanelSignal } from "./shared.js";
+import { panelShell, discontinuityStrip, withWaitLink, withPanelSignal } from "./shared.js";
 
 /** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
 const MAX_WAITS_CHARTED = 10;
@@ -89,7 +89,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
   const notes = [];
   const kept = [];
   let keptHours = 0;
-  const seenNotes = new Set();
+  const seenSteps = new Map();
   let failed = 0;
   results.forEach((trend, i) => {
     const waitType = waitTypes[i];
@@ -105,7 +105,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the chart whose step a restart or
        failover most directly manufactures; the payload's discontinuities render as a notice above it. They are
        about the server, not the wait, so the same sentence from two waits shows once. */
-    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+    for (const d of trend.data.discontinuities || []) seenSteps.set(d.at + "|" + d.reason, d);
     drawn.push({ key: "w" + i, label: waitType, rows: trend.data.trend || [], color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] });
   });
 
@@ -121,7 +121,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
   const metricLabel = (WAIT_METRICS.find((m) => m.value === metric) || WAIT_METRICS[0]).label;
   mount(slot, [
     kept.length ? keptWindowStrip(kept[0]) : null,
-    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    discontinuityStrip({ discontinuities: [...seenSteps.values()] }),
     ...failures,
     zoomableLineChart({
       atTime: { server, item: "wait" },
@@ -287,10 +287,9 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
   }));
   if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No " + spec.noun + " samples in this window.")]);
   /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-  const notes = discontinuityNotes(trend.data);
   mount(slot, [
     keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    discontinuityStrip(trend.data),
     missingStrip(trend.data),
     zoomableLineChart({
       atTime: { server },

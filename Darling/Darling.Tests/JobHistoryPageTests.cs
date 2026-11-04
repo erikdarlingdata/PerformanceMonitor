@@ -250,7 +250,7 @@ public sealed class JobHistoryPageTests
         var notices = run.GetProperty("notices");
         Assert.Equal(2, notices.GetProperty("noticeCount").GetInt32());
         var text = notices.GetProperty("text").GetString()!;
-        Assert.Contains("partial window: the store keeps job history from ", text);
+        Assert.Contains("Partial window: the store keeps job history from ", text);
         Assert.Contains("Showing the newest 2 runs; more matched.", text);
         Assert.Equal(0, run.GetProperty("quiet").GetProperty("noticeCount").GetInt32());
     }
@@ -315,7 +315,7 @@ public sealed class JobHistoryPageTests
     {
         var empty = Run().GetProperty("emptyPartial");
         Assert.Equal(1, empty.GetProperty("noticeCount").GetInt32());
-        Assert.Contains("partial window: the store keeps job history from ", empty.GetProperty("text").GetString());
+        Assert.Contains("Partial window: the store keeps job history from ", empty.GetProperty("text").GetString());
     }
 
     [Fact]
