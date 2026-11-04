@@ -273,7 +273,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Null(read.Columns.Single(f => f.TableName == "Warm").Exhaustion);
             Assert.Equal("ok", read.Columns.Single(f => f.TableName == "Orders").Band);
 
-            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             var summary = root.GetProperty("summary");
             Assert.Equal(3, summary.GetProperty("databases_scanned").GetInt32());
             Assert.Equal(5, summary.GetProperty("columns_above_10_percent").GetInt32());
@@ -291,17 +291,17 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(JsonValueKind.Null, root.GetProperty("columns").EnumerateArray().Single(x => x.GetProperty("table").GetString() == "Warm").GetProperty("days_to_exhaustion").ValueKind);
 
             /* A database that was never scanned reads as not scanned, with its name in the answer. */
-            var unscanned = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Unscanned", 200, ct));
+            var unscanned = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Unscanned", 200, null, ct));
             Assert.Equal("unavailable", unscanned.GetProperty("status").GetString());
             Assert.Contains("'Unscanned'", unscanned.GetProperty("message").GetString());
 
             /* A server whose databases are all clean. */
-            var clean = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, CleanServer, 168, null, null, 200, ct));
+            var clean = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, CleanServer, 168, null, null, 200, null, ct));
             Assert.Equal("empty", clean.GetProperty("status").GetString());
             Assert.Equal(1, clean.GetProperty("summary").GetProperty("databases_scanned").GetInt32());
 
             /* A server with no capture yet. */
-            var empty = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, EmptyServer, 168, null, null, 200, ct));
+            var empty = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, EmptyServer, 168, null, null, 200, null, ct));
             Assert.Equal("unavailable", empty.GetProperty("status").GetString());
             Assert.Contains("identity_capacity", empty.GetProperty("message").GetString());
         });
@@ -396,7 +396,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
                 read.Skipped.Select(d => d.DatabaseName + ":" + d.Reason).ToArray());
             Assert.Equal("not scanned: readable secondary", read.Skipped.Single(d => d.DatabaseName == "Mirror").Text);
 
-            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             Assert.False(root.TryGetProperty("status", out _), "skipped databases are not an empty (clean) answer");
             var summary = root.GetProperty("summary");
             Assert.Equal(2, summary.GetProperty("databases_scanned").GetInt32());
@@ -410,7 +410,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(JsonValueKind.Null, databases["Sales"].GetProperty("skip_reason").ValueKind);
 
             /* Only skipped databases in the filter: still not clean. */
-            var onlySkipped = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Snap", 200, ct));
+            var onlySkipped = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Snap", 200, null, ct));
             Assert.Equal("unavailable", onlySkipped.GetProperty("status").GetString());
             Assert.Contains("Snap - not scanned: database snapshot", onlySkipped.GetProperty("message").GetString());
 
@@ -463,7 +463,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(new[] { "Fresh" }, one.Unscanned.Select(d => d.DatabaseName).ToArray());
             Assert.Empty(one.Databases);
 
-            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             Assert.False(root.TryGetProperty("status", out _), "a server with a database not yet scanned is not an empty (clean) answer");
             Assert.Equal(1, root.GetProperty("summary").GetProperty("databases_scanned").GetInt32());
             Assert.Equal(2, root.GetProperty("summary").GetProperty("databases_not_yet_scanned").GetInt32());
@@ -476,7 +476,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
                 || databases.ContainsKey("master") || databases.ContainsKey("PerformanceMonitor"));
 
             /* No scan in the window at all, but databases waiting: unavailable, naming them. */
-            var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, ct));
+            var none = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, "Fresh", 200, null, ct));
             Assert.Equal("unavailable", none.GetProperty("status").GetString());
             Assert.Contains("1 database(s) not yet scanned (Fresh)", none.GetProperty("message").GetString());
         });
@@ -518,7 +518,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal(new[] { "Alpha", "Beta" }, await Waiting());
 
             /* The tool agrees: Gamma is in neither list. */
-            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, ct));
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             Assert.Contains("2 database(s) not yet scanned (Alpha, Beta)", root.GetProperty("message").GetString());
             Assert.DoesNotContain("Gamma", root.GetProperty("message").GetString());
@@ -615,13 +615,57 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             Assert.Equal("Parked", fleet[DataId].WorstDatabase);
 
             /* The tool's databases_scanned. */
-            var tool = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, DatabaseFilter.All, 200, ct));
+            var tool = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, DatabaseFilter.All, 200, null, ct));
             Assert.Equal(3, tool.GetProperty("summary").GetProperty("databases_scanned").GetInt32());
 
             /* A caller that names the database asks about its history and gets it. */
             var named = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.One("Gone"), start, now, 30, cancellationToken: ct);
             Assert.Equal(new[] { "Gone" }, named.Databases.Select(d => d.DatabaseName).ToArray());
             Assert.Single(named.Columns);
+        });
+    }
+
+    /// <summary>#7547 review: the listing of databases waiting or skipped keeps a database that a config capture newer than the database snapshot
+    /// names, the way a marker newer than the snapshot is kept: it may have been created since the snapshot was taken.</summary>
+    [Fact]
+    public async Task ADatabaseOnlyAConfigCaptureNewerThanTheSnapshotNames_StaysListed_AsNotYetScanned()
+    {
+        var now = DateTime.UtcNow;
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await State(c, ct, "Sales", "ONLINE", now.AddMinutes(-10));
+            await ConfigRow(c, ct, "Sales", "ONLINE", now.AddMinutes(-5));
+            await ConfigRow(c, ct, "Created", "ONLINE", now.AddMinutes(-5));
+        }, async (postgres, ct) =>
+        {
+            var read = await DarlingIdentityCapacityReader.ReadAsync(postgres, DataId, DatabaseFilter.All, now.AddHours(-168), now, 30, cancellationToken: ct);
+            Assert.Equal(new[] { "Created", "Sales" }, read.Unscanned.Select(d => d.DatabaseName).ToArray());
+        });
+    }
+
+    /// <summary>#7547 review: a fleet read anchored in the past judges the database snapshot at or before that time, so a database dropped
+    /// after it still counts, the way the reader's own read at the same end counts it.</summary>
+    [Fact]
+    public async Task AFleetReadAtAPastTime_KeepsADatabaseDroppedAfterIt()
+    {
+        var now = DateTime.UtcNow;
+        var past = now.AddDays(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Gone", past.AddHours(-2));
+            await Column(c, ct, "Gone", "Full", "int", 10, "2147483647", "1", "1", 100.0, past.AddHours(-2));
+            await Marker(c, ct, DataId, DataServer, "Sales", past.AddHours(-2));
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1600000000", "1", "1", 74.5, past.AddHours(-2));
+            /* At the past time the server had both; since then it dropped Gone. */
+            await State(c, ct, "Gone", "ONLINE", past.AddHours(-1));
+            await State(c, ct, "Sales", "ONLINE", past.AddHours(-1));
+            await State(c, ct, "Sales", "ONLINE", now.AddMinutes(-10));
+        }, async (postgres, ct) =>
+        {
+            var then = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, past, ct);
+            Assert.Equal(2, then[DataId].ColumnsAtBar);
+            var today = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
+            Assert.Equal(1, today[DataId].ColumnsAtBar);
         });
     }
 

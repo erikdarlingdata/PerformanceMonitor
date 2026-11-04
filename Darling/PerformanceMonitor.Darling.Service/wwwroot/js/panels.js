@@ -1430,8 +1430,8 @@ function vizStat(data, desc) {
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
   const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
   /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
-     so when it is true the panel says so in words (the stat's `pageCut` sentence) under the tiles. */
-  const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(s.pageCut));
+     so when it is true the panel says so in words (the stat's `pageCut` sentence, or what its `pageCut(data)` returns when the sentence carries a count, #7551) under the tiles. */
+  const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(typeof s.pageCut === "function" ? s.pageCut(data) : s.pageCut));
   const tile = (s) => {
     const sev = s.sev || s.severity;
     /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */

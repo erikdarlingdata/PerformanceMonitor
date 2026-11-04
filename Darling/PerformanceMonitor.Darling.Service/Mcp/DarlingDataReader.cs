@@ -4765,8 +4765,10 @@ FROM config.config_collector_schedules";
 
     /// <summary>
     /// Blocked-session count per database per collection, for one server over an explicit window.
-    /// <para>blocking_session_id > 0 is the blocked-ness test, so this counts sessions WAITING ON another
-    /// session rather than every waiting task. The optional database filter is kept from the viewer's read
+    /// <para>A session is blocked when a waiting task of it has <c>blocking_session_id > 0</c> AND
+    /// <c>blocking_session_id &lt;> session_id</c>: a parallel query's exchange threads wait on their OWN session
+    /// (<c>intra_query_parallelism</c>), which is not blocking (#7577). The count is DISTINCT sessions, not tasks, so a
+    /// session with several blocked threads is one blocked session. The optional database filter is kept from the viewer's read
     /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
     /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
     /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 the databases as one <c>text[]</c> (#5244): SQL NULL
@@ -4777,10 +4779,11 @@ FROM config.config_collector_schedules";
         SELECT
             collection_time,
             database_name,
-            COUNT(*) AS blocked_count
+            COUNT(DISTINCT session_id) AS blocked_count
         FROM waiting_tasks
         WHERE server_id = $1
         AND   blocking_session_id > 0
+        AND   blocking_session_id <> session_id
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
