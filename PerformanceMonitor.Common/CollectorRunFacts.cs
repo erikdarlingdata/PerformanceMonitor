@@ -27,11 +27,15 @@ namespace PerformanceMonitor.Common;
 /// <param name="LastSuccessUtc">The newest successful run, or null when there is none.</param>
 /// <param name="LastSuccessRows"><c>rows_collected</c> of that newest successful run, or null when it was not
 /// recorded (an older log row).</param>
+/// <param name="FirstSuccessInWindowUtc">The earliest successful run inside the read's window (#7442), or null when the store
+/// did not ask or there is none. A run in the window does not show when collection began: this is the instant a window note
+/// measures coverage from, the way an empty answer's floor does when rows exist.</param>
 public sealed record CollectorRunFacts(
     long SuccessfulRuns,
     long? SuccessfulRunsInWindow,
     DateTime? LastSuccessUtc,
-    long? LastSuccessRows)
+    long? LastSuccessRows,
+    DateTime? FirstSuccessInWindowUtc = null)
 {
     /// <summary>The count <see cref="SuccessfulRuns"/> stops at: the reads only need "none, one, or two or more".</summary>
     public const int RunsCap = 2;
