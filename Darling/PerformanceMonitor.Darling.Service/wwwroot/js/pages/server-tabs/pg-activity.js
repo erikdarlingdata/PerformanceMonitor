@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { fmtMs } from "../../util.js";
+import { fmtMs, trendSubject } from "../../util.js";
 import { codeDisclosure, listCell } from "./shared.js";
 
 /**
@@ -52,13 +52,12 @@ export const PG_BLOCKING_STATS = [
    is OBSERVED by the read (a limit + 1 fetch), not inferred from the cap. */
 export const PG_DATABASE_STATS = [
   { key: "database_count", label: "Databases active", format: "int" },
-  { key: "databases_returned", label: "Databases returned", format: "int" },
   { key: "total_temp_files", label: "Temp files", format: "int" },
   { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
   { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
   { key: "total_deadlocks", label: "Deadlocks", format: "int" },
   { key: "cache_hit_pct", label: "Cache hit %", format: "num2" },
-  { key: "truncated", label: "Window held more", format: "bool" },
+  { key: "truncated", pageCut: "The window held more databases than the grid below lists.", label: "Truncated", format: "bool" },
   /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
      and a reader has to see that before drawing a conclusion from any of them. */
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
@@ -76,6 +75,11 @@ export function pgQueryDurationTrendSpecs(ctx) {
       ...common,
       title: "Query Duration Trend",
       subtitle: ctx.label + ", the statement with the most execution time in this window; a step that persists is a plan or index change",
+      /* #7428: names the statement the read followed. */
+      subtitleFrom: (data) => {
+        const subject = trendSubject(data && data.queryid ? "query ID " + data.queryid : null, data && data.queryid_source);
+        return subject ? ctx.label + ", " + subject + "; a step that persists is a plan or index change" : null;
+      },
       series: [
         { key: "mean_exec_ms", label: "Mean ms/exec" },
         /* #3960: a point is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
@@ -90,6 +94,7 @@ export function pgQueryDurationTrendSpecs(ctx) {
       hideWhenNoRows: true,
       title: "Statement Calls per Second",
       subtitle: ctx.label + ", the same statement",
+      subtitleFrom: (data) => (data && data.queryid ? ctx.label + ", query ID " + data.queryid : null),
       series: [{ key: "calls_per_second", label: "Calls/sec" }],
       format: "num2",
       unit: "calls/s",
@@ -114,6 +119,11 @@ export function pgDatabaseTrendSpecs(ctx) {
       ...common,
       title: "Database Trend",
       subtitle: ctx.label + ", the biggest temp-file spiller in this window, or the busiest by block access when nothing spilled; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
+      /* #7428: names the database the read followed. */
+      subtitleFrom: (data) => {
+        const subject = trendSubject(data && data.database, data && data.database_source);
+        return subject ? ctx.label + ", " + subject + "; each point's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval" : null;
+      },
       series: [
         { key: "cache_hit_pct", label: "Cache Hit %" },
         /* #3897: a point is a bucket of intervals; the cliff this chart exists to show is its worst one. */

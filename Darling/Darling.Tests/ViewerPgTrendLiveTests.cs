@@ -160,7 +160,8 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 var v = read.Points[i];
                 Assert.Equal(Stamp(v.CollectionTimeUtc), Stamp(w.GetProperty("collection_time")));
                 Assert.Equal(w.GetProperty("sample_count").GetInt64(), v.SampleCount);
-                Assert.Equal(w.GetProperty("backend_count").GetInt32(), v.BackendCount);
+                var webBackends = w.GetProperty("backend_count");
+                Assert.Equal(webBackends.ValueKind == JsonValueKind.Null ? (int?)null : webBackends.GetInt32(), v.BackendCount);
                 Near(w.GetProperty("estimated_wait_ms_per_second"), v.EstimatedWaitMsPerSecond, 3);
             }
         });

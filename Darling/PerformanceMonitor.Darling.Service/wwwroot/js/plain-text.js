@@ -491,3 +491,35 @@ const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/
     source) says "not a permanent engine capability gap": matching the bare phrase turned that fixable state into "does not
     apply to this kind of server" (release walk, PG18 OS CPU by Query). */
 const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
+
+/**
+ * #7410: the one plain sentence a panel shows for an empty reply that names a setup step, built from the reply's structured
+ * `hints` (`reason`, and for a missing extension its `extensions` and `restart_required`) and never from the message text, which
+ * is written for an MCP client and stays one click away. `extensionLine` is a panel's own sentence for a missing extension,
+ * for the panel that can say what is not collected. Null when the reply carries no reason this knows, so the caller keeps the
+ * message it was given.
+ */
+export function shortEmptyLine(res, extensionLine) {
+  const h = res && res.hints && typeof res.hints === "object" ? res.hints : null;
+  if (!h || typeof h.reason !== "string") return null;
+  if (h.reason === "extension_missing") {
+    if (extensionLine) return extensionLine;
+    const names = Array.isArray(h.extensions) ? h.extensions.filter((n) => typeof n === "string" && n) : [];
+    if (!names.length) return null;
+    const many = names.length > 1;
+    return names.join(" and ") + (many ? " are" : " is") + " not installed on this server, so this panel has nothing to show. Install " +
+      (many ? "them" : "the extension") + (h.restart_required === true ? " (it needs shared_preload_libraries and a restart)" : "") + " to fill this panel.";
+  }
+  if (h.reason === "source_unreadable") {
+    return "The monitoring login could not read the source for this panel on this server. It needs a grant, or this server does not have that feature.";
+  }
+  if (h.reason === "capture_session_missing") {
+    return "The Extended Events session this panel reads is not running on this server. It is created again within the hour, and the monitoring login needs ALTER ANY EVENT SESSION for that.";
+  }
+  if (h.reason === "plan_capture_not_ready") {
+    const n = typeof h.unsatisfied_count === "number" && h.unsatisfied_count > 0 ? h.unsatisfied_count : 0;
+    return (n === 1 ? "One setting that plan capture needs is" : n > 1 ? n + " settings that plan capture needs are" : "Plan capture is") +
+      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix.";
+  }
+  return null;
+}

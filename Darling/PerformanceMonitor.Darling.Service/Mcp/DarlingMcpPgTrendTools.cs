@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgTrendTools
 {
-    [McpServerTool(Name = "get_pg_wait_trend"), Description("Gets a time series for ONE PostgreSQL wait event: how much the server waited on it in each collection interval, normalised per second. Use get_pg_wait_sampling first to find which events dominate, then this to see whether one is growing. Summed across the queries that waited, because this answers a question about the SERVER - per-query attribution for a single window is what get_pg_wait_sampling already gives. The figures are estimates from a sampling profiler (samples x profile period), not measured durations, so treat the SHAPE as the finding rather than the absolute number. An interval where pg_wait_sampling's profile was reset - by pg_wait_sampling_reset_profile() or a server restart - is flagged, and reports everything since the reset rather than a misleadingly quiet interval.")]
+    [McpServerTool(Name = "get_pg_wait_trend"), Description("Gets a time series for ONE PostgreSQL wait event: how much the server waited on it in each collection interval, normalised per second. Use get_pg_wait_sampling first to find which events dominate, then this to see whether one is growing. Summed across the queries that waited, because this answers a question about the SERVER - per-query attribution for a single window is what get_pg_wait_sampling already gives. The figures are estimates from a sampling profiler (samples x profile period), not measured durations, so treat the SHAPE as the finding rather than the absolute number. backend_count is null on a point with no samples, and where it is given it counts the distinct backends the profiler has recorded for the event: since the profile last started on the pg_wait_sampling extension (a running total that only rises until a reset, not the backends that waited in that interval), and in the last window on the service's own sampler. An interval where pg_wait_sampling's profile was reset - by pg_wait_sampling_reset_profile() or a server restart - is flagged, and reports everything since the reset rather than a misleadingly quiet interval.")]
     public static async Task<string> GetPgWaitTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -108,7 +108,11 @@ public sealed class DarlingMcpPgTrendTools
                      + "length - an estimate from a sampling profiler, not a measured duration, so the shape "
                      + "over time is the finding rather than the absolute value. Per SECOND because "
                      + "collection intervals are not uniform: a restart or a slow cycle stretches one, and a "
-                     + "per-interval total would render that as a spike."
+                     + "per-interval total would render that as a spike. backend_count is null on a point with no samples, "
+                     + "because no backend waited on the event in that interval. On a point with samples it is the number of "
+                     + "distinct backends the profiler has recorded for this event: since the profile last started on the "
+                     + "pg_wait_sampling extension, a running total that only rises until a reset and is NOT how many waited in "
+                     + "the interval, and in the last window on the service's own sampler."
                      + (resets > 0
                          ? $"  {resets} interval(s) span a profile RESET - pg_wait_sampling_reset_profile() "
                            + "or a server restart - and report everything since the reset rather than a "
@@ -122,6 +126,7 @@ public sealed class DarlingMcpPgTrendTools
                        statement's own guard keeps that unreachable today, and the key is nullable so the
                        day it is not, the point says unknowable rather than idle. */
                     estimated_wait_ms_per_second = p.EstimatedWaitMsPerSecond is { } wait ? Math.Round(wait, 3) : (double?)null,
+                    /* #7428: null on a point with no samples, never a count from an interval where nothing waited. */
                     backend_count = p.BackendCount,
                     counter_reset = p.CounterReset,
                 }),

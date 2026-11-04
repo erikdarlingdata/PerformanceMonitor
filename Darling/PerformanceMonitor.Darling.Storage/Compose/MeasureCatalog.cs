@@ -2129,7 +2129,7 @@ public static class MeasureCatalog
         },
         new ComposeMeasure
         {
-            Key = "pg_waitsample_backend_count", DisplayName = "Backends sampled waiting", Category = CatPgWaits, SourceTable = "pg_wait_sampling",
+            Key = "pg_waitsample_backend_count", DisplayName = "Backends seen waiting (extension: since profile start)", Category = CatPgWaits, SourceTable = "pg_wait_sampling",
             Archetype = MeasureArchetype.Gauge, Column = "backend_count",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Max, ValidAggs = GaugeAggs, AllowedDimensions = PgWaitSamplingDims,

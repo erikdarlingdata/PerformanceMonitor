@@ -19,7 +19,7 @@
  */
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
-import { plainText } from "./plain-text.js";
+import { plainText, shortEmptyLine } from "./plain-text.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -245,6 +245,20 @@ export function errorStrip(message) {
 }
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
+}
+/**
+ * #7410: an empty reply as the page shows it. When the reply names a setup step in its structured `hints` (shortEmptyLine) the strip
+ * says one plain sentence and the tool's full text sits behind a click ("More detail", the native disclosure above). A reply with no
+ * such field shows its text as emptyStrip always did. `line` (optional) is the sentence to use in place of the one built from `hints`.
+ */
+export function plainEmptyStrip(res, line) {
+  const short = line === undefined ? shortEmptyLine(res) : line;
+  if (!short) return emptyStrip(res.message);
+  const nodes = [localizeIsoText(short)];
+  if (typeof res.message === "string" && res.message && res.message !== short) {
+    nodes.push(disclosure("More detail", localizeIsoText(res.message), { title: "What the read said, in full" }));
+  }
+  return el("div", { class: "strip empty plain-empty" }, nodes);
 }
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
@@ -576,10 +590,9 @@ export function partialWindowSubtitle(data, desc) {
   return capped ? "newest rows only, back to " + localTime(capped.oldest) : null;
 }
 
-/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
-export function markPartialSubtitle(panel, data, desc) {
-  const text = partialWindowSubtitle(data, desc);
-  if (!text || !panel) return;
+/** The heading's `.panel-sub` span of a panel node, or null. */
+function panelSubNode(panel) {
+  if (!panel) return null;
   const find = (node) => {
     for (const c of Array.from(node.children || [])) {
       const k = c.className || (typeof c.getAttribute === "function" ? c.getAttribute("class") : null);
@@ -590,8 +603,42 @@ export function markPartialSubtitle(panel, data, desc) {
     return null;
   };
   const head = Array.from(panel.children || [])[0];
-  const sub = head ? find(head) : null;
+  return head ? find(head) : null;
+}
+
+/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
+export function markPartialSubtitle(panel, data, desc) {
+  const text = partialWindowSubtitle(data, desc);
+  if (!text) return;
+  const sub = panelSubNode(panel);
   if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * A subtitle that depends on the answer (#7428). A panel's subtitle is written before its read, so it cannot name what the
+ * read chose (the wait event, the backend and context, the statement, the database a trend follows). A descriptor that
+ * carries `subtitleFrom(data)` gets its heading's `.panel-sub` span replaced with the string that returns once the answer is
+ * in. A function that returns anything but a non-empty string leaves the static subtitle as it was.
+ */
+export function applyDataSubtitle(panel, data, desc) {
+  if (!desc || typeof desc.subtitleFrom !== "function") return;
+  const text = desc.subtitleFrom(data);
+  if (typeof text !== "string" || !text.trim()) return;
+  const sub = panelSubNode(panel);
+  if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * How a trend's subject is worded in its subtitle: the name, then "(chosen automatically)" when the answer's `*_source`
+ * sentence says the read chose it, or "(partly chosen automatically)" when only half was (the I/O pair). The sentence is
+ * the server's own ("as requested", or one that says "chosen automatically"), so a subject somebody named is not
+ * labelled as a guess. An answer with no source sentence gets the bare name.
+ */
+export function trendSubject(name, source) {
+  if (typeof name !== "string" || !name) return null;
+  if (typeof source !== "string" || !source || source === "as requested") return name;
+  if (source.startsWith("chosen automatically")) return name + " (chosen automatically)";
+  return source.includes("chosen automatically") ? name + " (partly chosen automatically)" : name;
 }
 
 /**
@@ -926,6 +973,13 @@ export function fmtBytes(v) {
   if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
   return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
 }
+/* A size given in megabytes, written in the unit that fits it (#7410): a table that holds 140 KB read "0 MB" under fmtMb, which prints whole
+   megabytes. Null is the dash and 0 is a real 0 B, as fmtBytes. */
+export function fmtMbFit(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? fmtBytes(n * 1024 * 1024) : "—";
+}
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
@@ -943,6 +997,7 @@ export const FORMATTERS = {
   ms: fmtMs,
   mb: fmtMb,
   bytes: fmtBytes,
+  mbfit: fmtMbFit,
   time: localTime,
   reltime: relTime,
   bool: fmtBool,

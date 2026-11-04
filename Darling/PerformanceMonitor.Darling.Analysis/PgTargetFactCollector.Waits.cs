@@ -220,6 +220,7 @@ deltas AS (
         event,
         profile_period_ms,
         backend_count,
+        sampled_ms,
         CASE WHEN prev_count IS NULL THEN NULL
              WHEN sample_count < prev_count THEN sample_count
              ELSE sample_count - prev_count
@@ -234,7 +235,10 @@ by_event AS (
         CAST(coalesce(SUM(delta_samples), 0) AS bigint)                     AS delta_samples,
         CAST(coalesce(SUM(delta_samples * profile_period_ms), 0) AS bigint) AS estimated_wait_ms,
         MAX(profile_period_ms)                                              AS profile_period_ms,
-        MAX(backend_count)                                                  AS peak_backends,
+        /* #7428: only the service sampler's backend_count is a count of one collection's backends (sampled_ms is set
+           on its rows). The extension's is the distinct pids in the module's cumulative profile, which only rises until a
+           reset, so a peak of it would put 'seen waiting in one collection' on a figure that is not that. NULL there. */
+        MAX(backend_count) FILTER (WHERE sampled_ms IS NOT NULL)            AS peak_backends,
         CAST(count(*) FILTER (WHERE reset_here) AS integer)                 AS reset_count
     FROM deltas
     WHERE event_type IS NOT NULL

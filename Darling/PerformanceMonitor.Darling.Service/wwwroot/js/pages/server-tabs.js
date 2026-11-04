@@ -55,12 +55,12 @@ import { systemEventsChartSpecs, COUNTERS_INTRO, counterChartsDrawn } from "./sy
 import { SQL_TAB_REACH, POSTGRES_TAB_REACH, withTabReach } from "./server-tab-reach.js";
 import { PG_EVICTION_STATS, PG_BLOCKING_STATS, PG_DATABASE_STATS, pgQueryDurationTrendSpecs, pgDatabaseTrendSpecs, PG_DEADLOCK_GRAPH_COLUMNS, PG_DEADLOCK_COLUMNS, PG_LOG_EVENT_COLUMNS, PG_COLUMN_STATS_COLUMNS, PG_PREDICATE_COLUMNS, PG_LOCK_STATS_COLUMNS, PG_PLAN_COLUMNS, PG_PLAN_CAPTURE_READINESS_COLUMNS, PG_LOGGING_AUDIT_COLUMNS, PG_TOP_QUERY_COLUMNS, PG_BLOCKING_CHAIN_COLUMNS, PG_BLOCKING_CYCLE_COLUMNS, PG_DATABASE_COLUMNS } from "./server-tabs/pg-activity.js";
 import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS } from "./server-tabs/pg-config.js";
-import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
+import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, pgWriteStatsBlankNote, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
 import { momentStat, PG_CPU_SERIES, PG_EXTENSION_CENSUS_COLUMNS, PG_EXTENSION_COLUMNS } from "./server-tabs/pg-overview.js";
 import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-replication.js";
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
-import { pgWaitTrendSpecs, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
+import { pgWaitTrendSpecs, pgWaitSamplingBackendsNote, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
 import { fanout, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, FINDING_COLUMNS, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
@@ -1357,7 +1357,7 @@ export const POSTGRES_TABS = [
           rowsKey: "cycles",
           columns: PG_BLOCKING_CYCLE_COLUMNS,
           emptyText:
-            "No lock cycle was sampled in this window — the healthy state. A cycle has no root blocker to attribute, which is why it is a separate grid rather than a chain with a missing root.",
+            "No lock cycle was sampled in this window.",
         },
       ]),
       /* One fetch, two panels: the eviction pass count and the statement cap in a tile (the figures the desktop
@@ -1447,7 +1447,7 @@ export const POSTGRES_TABS = [
           rowsKey: "databases",
           columns: PG_DATABASE_COLUMNS,
           emptyText:
-            "No per-database activity in this window. These are changes over the window, so one snapshot is not enough.",
+            "No databases to list.",
         },
       ]),
       /* #2663 the same counters over TIME, directly under the window they summarise. This is where the
@@ -1560,8 +1560,10 @@ export const POSTGRES_TABS = [
           viz: "stat",
           stats: PG_SESSION_STATE_STATS,
           span: 2,
+          /* #7410: the read's empty message explains its sampling for an MCP client; the page says the one sentence. */
+          emptyWins: true,
           emptyText:
-            "No session held a transaction open past the collector's floor in this window. Sessions are sampled, so one that opened and closed between two captures left no trace.",
+            "No session held a transaction open in this window, as far as the samples show.",
         },
         {
           title: "By Session",
@@ -1569,8 +1571,9 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "sessions",
           columns: PG_SESSION_STATE_COLUMNS,
+          emptyWins: true,
           emptyText:
-            "No session held a transaction open past the collector's floor. Sessions are sampled, so one that opened and closed between two captures is not shown.",
+            "No sessions to list.",
         },
       ]),
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
@@ -1591,7 +1594,7 @@ export const POSTGRES_TABS = [
           rowsKey: "holders",
           columns: PG_XMIN_COLUMNS,
           emptyText:
-            "No holder in this window. Four unrelated causes produce the same symptom — a long-running session, a replication slot, standby feedback, a prepared transaction — so this grid names the cause rather than repeating that the horizon is old.",
+            "No holder to list: nothing held the horizon back in this window.",
         },
       ]),
       ...fanout("get_pg_autovacuum_health", { server, hours: ctx.hours, limit: 20 }, [
@@ -1602,7 +1605,7 @@ export const POSTGRES_TABS = [
           stats: PG_AUTOVACUUM_STATS,
           span: 2,
           emptyText:
-            "No table has dead tuples, pending analyze work, inserts since its last vacuum, or autovacuum disabled — the healthy answer.",
+            "No table is behind on vacuum or analyze.",
         },
         {
           title: "Tables Behind",
@@ -1611,7 +1614,7 @@ export const POSTGRES_TABS = [
           rowsKey: "tables",
           columns: PG_AUTOVACUUM_COLUMNS,
           emptyText:
-            "No table is behind on vacuum or analyze. The collector records only tables with pending work, so an empty grid is the healthy case rather than a collector that has not run.",
+            "No tables to list.",
         },
       ]),
       ...fanout("get_pg_wraparound_risk", { server, hours: ctx.hours }, [
@@ -1641,7 +1644,7 @@ export const POSTGRES_TABS = [
           rowsKey: "databases",
           columns: PG_WRAPAROUND_COLUMNS,
           emptyText:
-            "No per-database freeze headroom in this window. Both counters are tracked: a database can be comfortable on XIDs and in trouble on MultiXacts, which is why they are separate columns rather than one worst-of.",
+            "No per-database freeze headroom in this window.",
         },
       ]),
     ],
@@ -1683,7 +1686,10 @@ export const POSTGRES_TABS = [
         "waits",
         PG_WAIT_SAMPLING_COLUMNS,
         ctx.label + ", sample counts from a periodic profiler; event type CPU means running, not waiting",
-        "No sampled waits in this window."
+        "No sampled waits in this window.",
+        2, null, null, null, null, null, null, false, null,
+        /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
+        { noteFrom: pgWaitSamplingBackendsNote }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
@@ -1753,7 +1759,9 @@ export const POSTGRES_TABS = [
         PG_WRITE_STATS,
         ctx.label + ", requested checkpoints mean write volume filled max_wal_size before the interval elapsed",
         2,
-        "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second."
+        "No checkpoint or WAL activity differenced yet. These are differenced across snapshots, so a single collection has nothing to difference against and the window fills on the second.",
+        /* #7428: says why a tile is blank, from the reply's own fields. */
+        { noteFrom: pgWriteStatsBlankNote }
       ),
       /* #2663 the I/O time series. Everything above this line describes one window; this follows one
          (backend_type, context) pair through it. The pair is the subject rather than the backend type alone
@@ -1777,7 +1785,7 @@ export const POSTGRES_TABS = [
           stats: PG_SLOT_STATS,
           span: 2,
           emptyText:
-            "This server has no replication slots. A slot is the thing that retains WAL indefinitely, so none is one fewer way to fill a disk.",
+            "This server has no replication slots.",
         },
         {
           title: "Slots",
@@ -1786,7 +1794,7 @@ export const POSTGRES_TABS = [
           rowsKey: "slots",
           columns: PG_SLOT_COLUMNS,
           emptyText:
-            "No replication slots on this server. An inactive slot retains WAL forever and is the usual way a PostgreSQL instance fills its disk with nobody watching, so an empty grid here is good news.",
+            "No slots to list.",
         },
       ]),
       /* #2629: the connected replicas, beside the slots. Two different questions and the DANGEROUS case is
@@ -1823,7 +1831,7 @@ export const POSTGRES_TABS = [
           stats: PG_BLOAT_STATS,
           span: 2,
           emptyText:
-            "No table of at least 1 MB was measured on this server. Below that floor bloat is not an actionable amount of space, so an empty panel here is the healthy answer rather than a missing read.",
+            "No table of at least 1 MB was measured on this server, and below that floor bloat is not worth acting on.",
         },
         {
           title: "By Table",
@@ -1832,7 +1840,7 @@ export const POSTGRES_TABS = [
           rowsKey: "tables",
           columns: PG_BLOAT_COLUMNS,
           emptyText:
-            "No table of at least 1 MB was measured on this server. Bloat under a megabyte is not worth a maintenance window, so the collector does not store it.",
+            "No tables to list.",
         },
       ]),
       ...fanout("get_pg_index_usage", { server, hours: ctx.hours, limit: 25 }, [
@@ -1852,7 +1860,7 @@ export const POSTGRES_TABS = [
           rowsKey: "indexes",
           columns: PG_INDEX_USAGE_COLUMNS,
           emptyText:
-            "No index of at least 64 KB was recorded on this server, so there is nothing here to judge. This collector runs daily and is gated off on read replicas, where scan counts are the replica's own rather than the writer's.",
+            "No indexes to list.",
         },
       ]),
       /* #2629: index bloat, beside the table bloat above and the usage counts. The three answer one
@@ -1926,7 +1934,7 @@ export const POSTGRES_TABS = [
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
         ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
-        "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
+        "No configuration parameter changed value in this window."
       ),
       tablePanel(
         "Settings",

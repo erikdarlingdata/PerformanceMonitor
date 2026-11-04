@@ -963,7 +963,7 @@ public sealed class ServerPageTabsTests
             "if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);",
             panels,
             StringComparison.Ordinal);
-        Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText) {", js, StringComparison.Ordinal);
+        Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText, extra = null) {", js, StringComparison.Ordinal);
     }
 
     /// <summary>

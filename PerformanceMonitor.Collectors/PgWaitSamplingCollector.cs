@@ -57,8 +57,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>5. Aggregated away from <c>pid</c>.</b> The raw profile is per-backend, so a busy server
 /// accumulates a row per pid per wait, and pids are transient — the same query appears as many rows that
 /// mean one thing. Grouping by <c>(event_type, event, queryid)</c> is the shape a read actually wants, and
-/// <c>backend_count</c> preserves the one thing the pid dimension was carrying: how many backends were
-/// waiting this way.</para>
+/// <c>backend_count</c> preserves the one thing the pid dimension was carrying: how many distinct backends
+/// were behind the row. It is NOT a current count (#7428): on the extension arm it is the distinct pids in the
+/// module's cumulative profile, which keeps a row per pid until a reset, so it only rises between resets, and on
+/// the sampler arm it is the last window's. A reader must not quote it as how many backends are waiting now.</para>
 ///
 /// <para><b>6. Two arms, one table, one instrument per target (#3604).</b> A stock target WITHOUT the
 /// extension used to get nothing from this collector but an hourly <c>EXTENSION_MISSING</c> skip — and

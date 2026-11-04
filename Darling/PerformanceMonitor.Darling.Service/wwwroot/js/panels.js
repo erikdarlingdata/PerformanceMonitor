@@ -54,14 +54,16 @@ import {
   dbFilteredEmptyText,
   sourceStrip,
   clampText,
+  plainEmptyStrip,
   disclosure,
   markPartialSubtitle,
+  applyDataSubtitle,
   localizeIsoText,
   localizeAlertDetail,
   noValuesText,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -110,6 +112,18 @@ export function emptyHeadline(desc, res) {
      session), "unavailable" or "precondition" envelope is a different statement, and "No deadlocks" over it would be a false
      all-clear that also drops the server's own engine-gate line; those keep the read's message. */
   return desc && desc.emptyWins && desc.emptyText && res.status === "empty" ? desc.emptyText : res.message;
+}
+
+/**
+ * #7410: the strip an empty reply draws in a panel. A panel's agreed sentence (emptyWins) or a reply with no structured reason shows
+ * the message as before. A reply that names a missing extension, a source the login cannot read, or plan capture that is not ready
+ * shows one plain sentence built from its `hints`, and the tool's full text is behind "More detail". A panel whose
+ * `extensionMissingLine` says what is not collected uses that sentence for a missing extension.
+ */
+export function panelEmptyStrip(desc, res) {
+  if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
+  return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
 
 /**
@@ -217,20 +231,12 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
     mount(body, emptyStrip(desc.notCollectedLine));
     return;
   }
-  /* A panel whose collector reads one optional PostgreSQL extension says plainly that the extension is not installed when the
-     server's precondition answer says that (pg_stat_kcache behind OS CPU by Query), a fixable state. It is not the
-     "does not apply to this kind of server" line, which is for a server that can never have the data. */
-  if (res.kind === "empty" && res.status === "precondition" && desc.extensionMissingLine
-      && typeof res.message === "string" && res.message.includes("extension it reads is not installed")) {
-    mount(body, emptyStrip(desc.extensionMissingLine));
-    return;
-  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
 
@@ -256,9 +262,12 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
     const note = desc.noteKey ? getPath(res.data, desc.noteKey) : null;
     /* #4925: a panel may carry further server notes (`moreNoteKeys`), each rendered as its own line when non-null. */
     const moreNotes = (desc.moreNoteKeys || []).map((k) => getPath(res.data, k));
+    /* #7428: a note the page composes from the answer's fields (`noteFrom(data)`), for a sentence the server does not write, such as why a tile is blank. */
+    if (typeof desc.noteFrom === "function") moreNotes.push(desc.noteFrom(res.data));
     /* #4966: a grid says where its table's data starts when that is after the window's start (windowFloorStrip). */
     const floor = windowFloorStrip(res.data, desc);
     /* #5644 W12: a row-capped panel stops claiming the window it was asked for in its heading. */
+    applyDataSubtitle(body.parentNode, res.data, desc);
     markPartialSubtitle(body.parentNode, res.data, desc);
     /* A narrowed read draws its chart over the hours it answered for, not the Range it was asked for (#2802).
        A copy, so the caller's descriptor keeps the window it asked for. */
@@ -1405,8 +1414,11 @@ function vizStat(data, desc) {
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
-  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
-  return el(
+  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
+     so when it is true the panel says so in words (the stat's `pageCut` sentence) under the tiles. */
+  const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(s.pageCut));
+  const tiles = el(
     "div",
     { class: "stats" },
     shown.map((s) => {
@@ -1423,6 +1435,7 @@ function vizStat(data, desc) {
       ]);
     })
   );
+  return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
 }
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the

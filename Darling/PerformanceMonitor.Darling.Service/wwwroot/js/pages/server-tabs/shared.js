@@ -6,8 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
-import { renderPanel, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
@@ -131,11 +131,19 @@ export function fanout(read, params, specs, intro = null) {
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [noticeStrip(intro.text)]);
     }
+    /* #7410: panels over one read that all come back empty share one message, so the first says it and the rest point at it. The pointer says "the panel that says why" because span panels can sit side by side, so the
+       first one may be to the left rather than above. A panel that shows its own emptyWins sentence does not say the message, so it neither
+       claims it nor gets the pointer. */
+    let saidEmpty = false;
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-      if (res.kind === "empty") return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), emptyStrip(emptyHeadline(spec, res))]);
+      if (res.kind === "empty") {
+        const repeats = saidEmpty && emptyHeadline(spec, res) === res.message;
+        saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
+        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as the panel that says why.") : panelEmptyStrip(spec, res)]);
+      }
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
            hand vizLine the fetch's `hours` as `windowHours` — otherwise a fanout line panel (Current Waits,
@@ -151,6 +159,7 @@ export function fanout(read, params, specs, intro = null) {
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
+        applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -689,12 +698,14 @@ export function renderInto(body, render) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
+export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, extra = null) {
   if (!emptyText) throw new Error("tablePanel(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;
+  /* #7428: further descriptor fields the positional list has no slot for, such as `noteFrom`. */
+  if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
 }
 
@@ -708,8 +719,8 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
  * finding} is the type — which is data, not the {status,message} envelope, so it reaches vizStat and renders
  * as a row of em-dashes. vizStat spends this at exactly the all-null case; see the guard there.
  */
-export function stat(title, read, params, stats, subtitle, span = 1, emptyText) {
-  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText });
+export function stat(title, read, params, stats, subtitle, span = 1, emptyText, extra = null) {
+  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText, ...(extra || {}) });
 }
 
 /**
@@ -1340,10 +1351,9 @@ export const PG_SLOT_STATS = [
 ];
 
 export const PG_AUTOVACUUM_STATS = [
-  { key: "tables_returned", label: "Tables returned", format: "int" },
-  { key: "past_threshold_count", label: "Past threshold (of those)", format: "int" },
-  { key: "growing_count", label: "Still growing (of those)", format: "int" },
-  { key: "autovacuum_disabled_count", label: "Autovacuum off (of those)", format: "int" },
+  { key: "past_threshold_count", label: "Past threshold", format: "int" },
+  { key: "growing_count", label: "Still growing", format: "int" },
+  { key: "autovacuum_disabled_count", label: "Autovacuum off", format: "int" },
   { key: "worst_table", label: "Worst table", format: "text", small: true },
   { key: "worst_severity", label: "Severity", format: "text", small: true },
 ];
