@@ -120,6 +120,48 @@ public sealed class WebPlainEmptyMessageBehaviourTests
         Assert.Equal("No deadlocks.", r.GetProperty("emptyWins").GetProperty("text").GetString());
     }
 
+    private const string SamePointer = "Empty for the same reason as the panel that says why.";
+
+    private static string[] Bodies(JsonElement r, string name)
+        => System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(r.GetProperty(name).EnumerateArray(), x => x.GetString()!));
+
+    [Fact]
+    public void PanelsOverOneEmptyRead_SayTheMessageOnce_AndTheRestPointAtIt()
+    {
+        var r = Run();
+        var message = r.GetProperty("fanoutMessage").GetString()!;
+        var bodies = Bodies(r, "fanoutThreeEmpty");
+        Assert.Equal(message, bodies[0]);
+        Assert.Equal(SamePointer, bodies[1]);
+        Assert.Equal(SamePointer, bodies[2]);
+        // Panels with span sit side by side, so the first can be to the left: the pointer must not claim a direction.
+        Assert.DoesNotContain("above", bodies[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEmptyWinsPanel_NeitherSaysTheMessage_NorTakesThePointer()
+    {
+        var r = Run();
+        var message = r.GetProperty("fanoutMessage").GetString()!;
+
+        // Its own sentence first: the next plain panel is the first to say the message, the one after points at it.
+        var first = Bodies(r, "fanoutEmptyWinsFirst");
+        Assert.Equal("Nothing for A.", first[0]);
+        Assert.Equal(message, first[1]);
+        Assert.Equal(SamePointer, first[2]);
+
+        // Between two plain panels: it keeps its own sentence and the third still points at the first.
+        var between = Bodies(r, "fanoutEmptyWinsBetween");
+        Assert.Equal(message, between[0]);
+        Assert.Equal("Nothing for B.", between[1]);
+        Assert.Equal(SamePointer, between[2]);
+
+        // A reply that is not a true negative never takes the panel's sentence, so the emptyWins panel is the one that says it.
+        var notEmpty = Bodies(r, "fanoutNotEmptyStatus");
+        Assert.Equal(message, notEmpty[0]);
+        Assert.Equal(SamePointer, notEmpty[1]);
+    }
+
     [Fact]
     public void ThePageCutFlag_IsASentenceUnderTheTiles_NotATile()
     {

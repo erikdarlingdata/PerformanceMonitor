@@ -22,6 +22,8 @@ class FakeNode {
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === "class") this.className = String(v); }
   getAttribute(k) { return this.attrs[k]; }
   appendChild(c) { c.parent = this; this.children.push(c); return c; }
+  get firstChild() { return this.children[0] || null; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; return c; }
   addEventListener() {}
   findAll(pred, out = []) { if (pred(this)) out.push(this); this.children.forEach((c) => c.findAll(pred, out)); return out; }
 }
@@ -33,6 +35,7 @@ globalThis.location = { hash: "#/server/a/vacuum" };
 const root = process.argv[2];
 const { panelEmptyStrip, VIZ } = await import(pathToFileURL(root + "/panels.js").href);
 const { applyFormat } = await import(pathToFileURL(root + "/util.js").href);
+const { fanout } = await import(pathToFileURL(root + "/pages/server-tabs/shared.js").href);
 
 const longMessage =
   "The pg_buffer_usage collector is running against example-pg-01 but the PostgreSQL extension it reads is not installed there: " +
@@ -94,4 +97,23 @@ out.cut = tiles({ database_count: 30, truncated: true });
 out.notCut = tiles({ database_count: 3, truncated: false });
 
 out.fit = { small: applyFormat("mbfit", 0.14), whole: applyFormat("mbfit", 2), large: applyFormat("mbfit", 4096), none: applyFormat("mbfit", null), zero: applyFormat("mbfit", 0) };
+
+/* fanout (server-tabs/shared.js): several panels over one read. The canned reply is the wire body the page would get; only fetch is a stand-in. */
+let fanoutRead = 0;
+const runFanout = async (specs, reply) => {
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(reply) });
+  const panels = fanout("get_fanout_probe_" + ++fanoutRead, { hours: 24 }, specs);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  return panels.map((p) => p.findAll((n) => String(n.className).includes("panel-body"))[0].textContent);
+};
+const table = (title, extra) => ({ title, viz: "table", emptyText: "Nothing for " + title + ".", ...extra });
+const fanoutMessage = "No rows came back for this read in the window.";
+const emptyReply = { status: "empty", message: fanoutMessage, hints: null };
+out.fanoutThreeEmpty = await runFanout([table("A"), table("B"), table("C")], emptyReply);
+/* A panel with its own agreed sentence (emptyWins) does not say the read's message, so it neither stands in for it nor is it shortened. */
+out.fanoutEmptyWinsFirst = await runFanout([table("A", { emptyWins: true }), table("B"), table("C")], emptyReply);
+out.fanoutEmptyWinsBetween = await runFanout([table("A"), table("B", { emptyWins: true }), table("C")], emptyReply);
+/* A reply that is not a true negative keeps the read's message even on an emptyWins panel, so that panel is the one that says it. */
+out.fanoutNotEmptyStatus = await runFanout([table("A", { emptyWins: true }), table("B")], { status: "unavailable", message: fanoutMessage, hints: null });
+out.fanoutMessage = fanoutMessage;
 console.log(JSON.stringify(out));

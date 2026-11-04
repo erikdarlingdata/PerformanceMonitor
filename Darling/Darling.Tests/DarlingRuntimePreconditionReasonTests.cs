@@ -54,4 +54,15 @@ public sealed class DarlingRuntimePreconditionReasonTests
         Assert.False(Reason("x", "SUCCESS").TryGetProperty("hints", out _));
         Assert.False(Reason("x", null).TryGetProperty("hints", out _));
     }
+
+    [Fact]
+    public void PlanCaptureThatIsNotReady_CarriesTheReasonAndTheCountOnTheWire()
+    {
+        var r = JsonDocument.Parse(DarlingMcpPgPlanTools.PlanCaptureNotReadyStatus(new[] { "capture_threshold = -1", "extension_available = false" })).RootElement;
+        Assert.Equal("precondition", r.GetProperty("status").GetString());
+        Assert.Contains("capture_threshold = -1 | extension_available = false", r.GetProperty("message").GetString()!, System.StringComparison.Ordinal);
+        var hints = r.GetProperty("hints");
+        Assert.Equal("plan_capture_not_ready", hints.GetProperty("reason").GetString());
+        Assert.Equal(2, hints.GetProperty("unsatisfied_count").GetInt32());
+    }
 }
