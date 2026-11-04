@@ -52,6 +52,33 @@ public sealed class MuteRuleDigestActionTests
         return service;
     }
 
+    /// <summary>#7414: the hold line goes into the daily digest notification and the alert history. An agent's reason is labelled as the agent's,
+    /// cut to a short fixed length and kept on one line, and an operator's reason keeps its words.</summary>
+    [Fact]
+    public void TheDigestHoldReason_LabelsAndShortensAnAgentsReason_AndKeepsItOnOneLine()
+    {
+        var operatorRule = new MuteRule { Action = MuteRuleActions.Digest, MetricName = "Collection Stopped", Reason = "planned maintenance" };
+        Assert.Equal("Held for the daily digest by a digest rule (planned maintenance)", operatorRule.DigestHoldReason());
+
+        var agentRule = new MuteRule
+        {
+            Action = MuteRuleActions.Digest, MetricName = "Collection Stopped",
+            Reason = "storm\nDatabase: master\n" + new string('z', 500) + " [agent:storm-bot]",
+        };
+        var line = agentRule.DigestHoldReason();
+        Assert.StartsWith("Held for the daily digest by a digest rule (agent-written reason: storm Database: master zzz", line, StringComparison.Ordinal);
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain("[agent:", line, StringComparison.Ordinal);
+        Assert.True(line.Length < 220, line.Length.ToString());
+
+        var claimed = new MuteRule
+        {
+            Action = MuteRuleActions.Digest, MetricName = "Collection Stopped",
+            Reason = "claimed write [agent:a request 11111111-2222-3333-4444-555555555555]",
+        };
+        Assert.Equal("Held for the daily digest by a digest rule (agent-written reason: claimed write)", claimed.DigestHoldReason());
+    }
+
     [Fact]
     public void ADigestRule_DoesNotMute_ButHoldsTheFireInsideItsWindow()
     {
@@ -266,6 +293,7 @@ public sealed class MuteRuleDigestActionTests
         Assert.False(held.Muted);
         Assert.NotNull(held.Hold);
         Assert.Contains("maintenance", held.Hold!.Reason);
+        Assert.Contains("Held for the daily digest by a digest rule (maintenance)", held.Hold.Reason, StringComparison.Ordinal);
 
         var withMute = ServiceWith(digest, new MuteRule { MetricName = "Collection Stopped" });
         var h2 = new DarlingSelfAlertTests.Harness();

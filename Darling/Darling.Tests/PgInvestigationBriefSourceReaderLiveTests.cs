@@ -491,6 +491,59 @@ INSERT INTO config.agent_environment_profiles (scope_server_id, profile_text) VA
         });
     }
 
+    /* #7414: an agent's rule reason enters every investigation request's brief for the whole change window, so a brief carries a short,
+       labelled piece of it and at most three such rules, and an operator's older change still fits the recent_changes budget. */
+    [Fact]
+    public async Task AnAgentWrittenRuleReason_IsShortenedAndLabelled_AndCannotCrowdOutAnOperatorsChange()
+    {
+        await RunAsync(async (dataSource, connection, ct) =>
+        {
+            var current = new InvestigationRequestStore(dataSource, 30, () => Now.AddMinutes(-10));
+            var requestId = (await current.OpenOrJoinAsync(Alert(Now.AddMinutes(-10)), ct)).RequestId!.Value;
+            var mutes = new PgMuteRuleStore(dataSource);
+
+            await mutes.InsertAsync(new MuteRule
+            {
+                Id = "op-mute", ServerName = ServerName, MetricName = "Blocking", Reason = "operator maintenance window",
+                CreatedAtUtc = Now.AddDays(-3),
+            });
+            var longReason = "AGENTTEXT" + new string('q', 1_900);
+            for (var i = 0; i < 6; i++)
+            {
+                await mutes.InsertAsync(new MuteRule
+                {
+                    Id = "agent-mute-" + i, ServerName = ServerName, MetricName = "Blocking",
+                    Reason = longReason + " [agent:storm-bot]", CreatedAtUtc = Now.AddHours(-2).AddMinutes(i),
+                });
+            }
+
+            var reader = new PgInvestigationBriefSourceReader(dataSource, utcNow: () => Now);
+            var sources = await reader.ReadAsync(requestId, ct);
+            Assert.NotNull(sources);
+
+            const string label = "agent-written reason:";
+            var rules = sources!.RecentChanges.Where(c => c.Kind == "mute_rule").ToList();
+            var agentRules = rules.Where(c => c.Text.Contains(label, StringComparison.Ordinal)).ToList();
+            Assert.Equal(PgInvestigationBriefSourceReader.MaxAgentMuteRules, agentRules.Count);
+            foreach (var rule in agentRules)
+            {
+                var reason = rule.Text[(rule.Text.IndexOf(label, StringComparison.Ordinal) + label.Length)..].Trim();
+                Assert.True(reason.Length <= PgInvestigationBriefSourceReader.AgentReasonChars + 3, reason.Length.ToString());
+                Assert.DoesNotContain("[agent:", rule.Text, StringComparison.Ordinal);
+            }
+
+            var operatorRule = Assert.Single(rules, c => c.Text.Contains("reason: operator maintenance window", StringComparison.Ordinal));
+            Assert.DoesNotContain("agent-written", operatorRule.Text, StringComparison.Ordinal);
+
+            /* The composed brief keeps the operator's change inside the section's 2000-character budget. */
+            string? brief = await new InvestigationBriefComposer(reader, new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools, () => Now)
+                .ComposeAsync(requestId, ct);
+            Assert.NotNull(brief);
+            Assert.Contains("operator maintenance window", brief, StringComparison.Ordinal);
+            Assert.Contains("agent-written reason: AGENTTEXT", brief, StringComparison.Ordinal);
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;

@@ -108,6 +108,47 @@ public sealed class AgentChangeUndoLiveTests
         });
     }
 
+    private static string TimedRule(string reason, string? expiresAtUtc, string action) =>
+        new JsonObject
+        {
+            ["enabled"] = true, ["reason"] = reason, ["metric_name"] = "Blocking", ["server_id"] = 7, ["expires_at_utc"] = expiresAtUtc,
+            ["action"] = action,
+        }.ToJsonString();
+
+    /// <summary>#7414: an agent shortens an operator's permanent rule (mute or digest) to expire in seconds and the expired-rule purge removes it.
+    /// The row being gone is the agent's expiry at work, not a change by someone else, so undo puts the before image back. A rule that is gone
+    /// while the agent's expiry has not come (someone deleted it) still refuses changed_since, and so does a rule someone edited.</summary>
+    [Theory]
+    [InlineData("mute")]
+    [InlineData("digest")]
+    public async Task ARuleThePurgeRemovedAfterTheAgentsExpiry_ComesBack_ButOneDeletedBeforeItsExpiryDoesNot(string action)
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var expired = DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture);
+            var calledExpired = await JournalChangeAsync(connection, "mute", "e1", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", expired, action), ct: ct);
+
+            var result = await undo.UndoAsync(calledExpired, Login, ct);
+            Assert.True(result.Undone, result.Code + " " + result.Words);
+            Assert.Equal($"operator's permanent rule|{action}|", await ScalarAsync(connection,
+                "SELECT reason || '|' || action || '|' || coalesce(expires_at_utc::text, '') FROM config.config_mute_rules WHERE id = 'e1'", ct));
+
+            var later = DateTime.UtcNow.AddHours(3).ToString("o", CultureInfo.InvariantCulture);
+            var calledLater = await JournalChangeAsync(connection, "mute", "e2", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", later, action), ct: ct);
+            var refused = await undo.UndoAsync(calledLater, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'e2'", ct));
+
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, expires_at_utc, action) VALUES ('e3', true, now() at time zone 'utc', 'a person edited this', 'Blocking', 7, now() at time zone 'utc' - interval '5 minutes', '" + action + "')", ct);
+            var calledEdited = await JournalChangeAsync(connection, "mute", "e3", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", expired, action), ct: ct);
+            Assert.Equal("changed_since", (await undo.UndoAsync(calledEdited, Login, ct)).Code);
+        });
+    }
+
     /// <summary>The mute image with the four repeating-schedule fields (#7040): days as names, times as HH:mm, the IANA zone.</summary>
     private static string ScheduledMute(string reason, string[]? days, string? start, string? end, string? zone) =>
         new JsonObject

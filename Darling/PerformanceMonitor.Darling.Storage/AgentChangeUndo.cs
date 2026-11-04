@@ -552,7 +552,12 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
         var current = await ReadCurrentAsync(connection, transaction, spec, key, cancellationToken);
         var label = kind switch { AgentChangeKinds.Mute => "mute rule", AgentChangeKinds.CustomRule => "custom alert rule", AgentChangeKinds.SignatureMerge => "deadlock signature merge", _ => "threshold override" };
-        if (!Equal(spec, current, after))
+        /* #7414: a mute or digest rule the agent changed to expire soon is removed by the expired-rule purge once it passes, and the row being
+           gone is then no one's change but the expiry the agent set. The after image says when it expired, so a rule that is gone and was
+           due to be gone is not "changed since": the before image goes back. A row that is gone with an unexpired after image was deleted
+           by someone else and still refuses. */
+        var purgedAfterExpiry = current is null && before is not null && kind == AgentChangeKinds.Mute && after is not null && ExpiredAtOrBefore(after, Now());
+        if (!purgedAfterExpiry && !Equal(spec, current, after))
             return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} changed since the agent's change, so its current settings are kept. Review it and change it by hand if you still want it back.");
 
         if (after is not null && before is null && kind == AgentChangeKinds.SignatureMerge)
@@ -680,6 +685,12 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
         return row;
     }
+
+    /// <summary>True when the mute rule image carries an <c>expires_at_utc</c> that is at or before <paramref name="nowUtc"/>.</summary>
+    private static bool ExpiredAtOrBefore(JsonObject image, DateTime nowUtc) =>
+        image["expires_at_utc"] is JsonNode e
+        && DateTime.TryParse(e.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+        && at <= nowUtc;
 
     /// <summary>Equality on the spec's fields only. Null and absent are equal; numbers by value; times by instant; JSON by structure.</summary>
     private static bool Equal(Spec spec, JsonObject? current, JsonObject? after)
