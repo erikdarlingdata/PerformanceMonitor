@@ -128,6 +128,79 @@ public sealed class McpTopReadsCollectorRanEmptyTests : IClassFixture<SharedDuck
         Assert.Equal(2, empty.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
     }
 
+    /// <summary>
+    /// #7442: an as_of window that ENDS before the first row the store kept, with the collector running and finding nothing inside it, counts
+    /// its runs. The row probe finds no row in the window and the all-time oldest row sits after it, so the old note said "the store holds no
+    /// collection of query_stats ... collection may have stopped" beside <c>successful_runs_in_window</c>. The note now measures from the first run.
+    /// </summary>
+    [Fact]
+    public async Task QueryStats_AsOfBeforeTheFirstStoredRow_MeasuresTheWindowFromTheFirstRun_NotFromNoCollection()
+    {
+        var asOf = RoundedUtcNow().AddHours(-2);
+        var firstRun = asOf.AddMinutes(-45);
+        await SeedRunAsync("query_stats", firstRun, "SUCCESS", 0);
+        await SeedRunAsync("query_stats", asOf.AddMinutes(-25), "SUCCESS", 0);
+        await SeedRunAsync("query_stats", asOf.AddMinutes(-5), "SUCCESS", 0);
+        await SeedSnapshotAsync(asOf.AddHours(1), "0xLATER");
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetTopQueriesByCpu(
+            new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: 3, as_of: asOf.ToString("o"))).RootElement;
+
+        AssertWindowStartsAtFirstRun(root, firstRun);
+    }
+
+    /// <summary>#7442: the same as_of window on get_query_store_top, which reads the query_store collector's runs.</summary>
+    [Fact]
+    public async Task QueryStoreTop_AsOfBeforeTheFirstStoredRow_MeasuresTheWindowFromTheFirstRun_NotFromNoCollection()
+    {
+        var asOf = RoundedUtcNow().AddHours(-2);
+        var firstRun = asOf.AddMinutes(-45);
+        await SeedRunAsync("query_store", firstRun, "SUCCESS", 0);
+        await SeedRunAsync("query_store", asOf.AddMinutes(-25), "SUCCESS", 0);
+        await SeedRunAsync("query_store", asOf.AddMinutes(-5), "SUCCESS", 0);
+        await SeedQueryStoreRowAsync(asOf.AddHours(1));
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetQueryStoreTop(
+            new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: 3, as_of: asOf.ToString("o"))).RootElement;
+
+        AssertWindowStartsAtFirstRun(root, firstRun);
+    }
+
+    private static DateTime RoundedUtcNow()
+    {
+        var now = DateTime.UtcNow;
+        return new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc);
+    }
+
+    private static void AssertWindowStartsAtFirstRun(JsonElement root, DateTime firstRun)
+    {
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        var hints = root.GetProperty("hints");
+        Assert.Equal(3, hints.GetProperty("successful_runs_in_window").GetInt64());
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(firstRun, DateTimeOffset.Parse(hints.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture).UtcDateTime);
+        Assert.DoesNotContain("holds no collection", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
+    private async Task SeedQueryStoreRowAsync(DateTime collectedUtc)
+    {
+        var collected = DateTime.SpecifyKind(collectedUtc, DateTimeKind.Unspecified);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, last_execution_time)
+VALUES ($1, $2, $3, $4, $5, $6)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collected });
+        cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "TestServer" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = "TestDb" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = collected });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     private async Task<JsonElement> TopQueriesAsync(int hoursBack, string? database = null) =>
         JsonDocument.Parse(await McpQueryTools.GetTopQueriesByCpu(
             new LocalDataService(_duckDb), _serverManager, "TestServer", hours_back: hoursBack, database_name: database)).RootElement;

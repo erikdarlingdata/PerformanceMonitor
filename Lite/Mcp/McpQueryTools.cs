@@ -1534,8 +1534,7 @@ public sealed class McpQueryTools
         var floor = await dataService.GetQueryWindowFloorAsync(relation, serverId, requestedStart, windowEnd);
         if (floor is null
             /* The two Queries relations that store a row every cycle have no collector in the probe's map (it reads their rows only), but the log still names it. */
-            && (LocalDataService.QueryWindowRelationCollector(relation)
-                ?? (relation == QueryWindowRelation.QueryStats ? "query_stats" : relation == QueryWindowRelation.QueryStoreStats ? "query_store" : null)) is { } collector
+            && LoggedCollectorOf(relation) is { } collector
             && oldest is DateTime kept
             && kept + TruncationSlack >= windowEnd
             && await dataService.CollectorStoredRowsAtOrBeforeAsync(serverId, collector, requestedStart + TruncationSlack))
@@ -1551,6 +1550,46 @@ public sealed class McpQueryTools
 
         return WindowNotice(floor, requestedStart, table, emptyAnswer: true);
     }
+
+    /// <summary>The collector a window relation's runs are logged under: the probe's map, plus the two Queries relations that store a row every cycle (the probe reads their rows only, but the log still names the collector).</summary>
+    private static string? LoggedCollectorOf(QueryWindowRelation relation) =>
+        LocalDataService.QueryWindowRelationCollector(relation)
+        ?? (relation == QueryWindowRelation.QueryStats ? "query_stats" : relation == QueryWindowRelation.QueryStoreStats ? "query_store" : null);
+
+    /// <summary>
+    /// #7442 (Darling's twin is <c>DarlingMcpDataTools.WithWindowHints</c>): the notice of an <c>empty</c> answer that COUNTS the collector's
+    /// successful runs in the window (<c>hints.successful_runs_in_window</c>, written by <see cref="EmptyCollectorRan"/>), or null when the
+    /// answer does not. Such an answer is not a window the store "holds no collection" for: a collector that ran and stored nothing leaves no
+    /// row for the row probe to find, and a note that says the store holds none beside a sentence that counts the runs contradicts it. The
+    /// reply measures coverage from the earliest of those runs, as an answer with rows measures it from its floor: a first run within
+    /// <see cref="TruncationSlack"/> of the start is a covered window at the start that was asked for, a later one is a truncated window that
+    /// begins at that run. It decides before the row probe, so it also holds when that probe has a floor (a <c>database_name</c> filter that
+    /// emptied the page while other databases had rows) or an all-time oldest row that sits after an <c>as_of</c> window: the run-based start is
+    /// never later than such a floor.
+    /// </summary>
+    private static async Task<McpWindowNotice?> RanEmptyWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
+    {
+        if (!ReadStatus(answer).IsEmpty
+            || LoggedCollectorOf(relation) is not { } collector
+            || System.Text.Json.Nodes.JsonNode.Parse(answer) is not System.Text.Json.Nodes.JsonObject node
+            || node["hints"] is not System.Text.Json.Nodes.JsonObject hints
+            || !hints.ContainsKey("successful_runs_in_window"))
+        {
+            return null;
+        }
+
+        var facts = await dataService.GetCollectorRunFactsAsync(serverId, collector, window: (requestedStart, windowEnd));
+        return facts is { SuccessfulRunsInWindow: > 0, FirstSuccessInWindowUtc: { } firstRun }
+            ? WindowNotice(firstRun, requestedStart, table)
+            : null;
+    }
+
+    /// <summary><see cref="RanEmptyWindowNoticeAsync"/> when the answer counts runs, otherwise <see cref="EmptyWindowNoticeAsync"/>.</summary>
+    private static async Task<McpWindowNotice?> EmptyAnswerWindowNoticeAsync(
+        string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table) =>
+        await RanEmptyWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table)
+        ?? await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table);
 
     /// <summary>
     /// #7005: <paramref name="answer"/>, when it is an empty or unavailable status, with <paramref name="notice"/> written in: a payload
@@ -1677,7 +1716,7 @@ public sealed class McpQueryTools
         }
 
         return status.IsEmptyOrUnavailable
-            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+            ? (await EmptyAnswerWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)
             : await WithDataWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table);
@@ -1823,7 +1862,7 @@ public sealed class McpQueryTools
         }
 
         return status.IsEmptyOrUnavailable
-            ? (await EmptyWindowNoticeAsync(dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
+            ? (await EmptyAnswerWindowNoticeAsync(answer, dataService, relation, serverId, requestedStart, windowEnd, table) is { } emptyNotice
                 ? WithWindowNotice(answer, emptyNotice, requestedStart, windowEnd)
                 : answer)
             : answer;
