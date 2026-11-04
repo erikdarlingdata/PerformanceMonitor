@@ -247,6 +247,35 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("terminal state", cappedText, StringComparison.Ordinal);
     }
 
+    /* #7454 review: READ_ONLY with reason 0 (or only bits that are none of 1, 2, 4) while desired_state is
+       READ_WRITE has no recorded cause. get_query_store_health calls that shape the classic silent failure, so the
+       sentence must say the cause is unrecorded and point at the health tool and the error log, and must not tell
+       the reader it is the database's benign state. A documented state bit keeps its "not clutter" wording. */
+    [Theory]
+    [InlineData(0)]
+    [InlineData(16)]
+    [InlineData(1024 | 16)]
+    public void ReadOnlyWithNoDocumentedReason_SaysTheCauseIsNotRecorded_NotThatItIsBenign(int readonlyReason)
+    {
+        var row = Assert.Single(QueryStoreClutter.Compose(
+            [], [], [Config("db", "READ_ONLY", readonlyReason: readonlyReason, desired: "READ_WRITE")]));
+        Assert.Contains(QueryStoreClutter.ReasonReadOnlyDatabaseState, row.Reasons);
+
+        var text = string.Join(" ", QueryStoreClutter.Recommendations(row));
+
+        Assert.Contains("the cause is not recorded", text, StringComparison.Ordinal);
+        Assert.Contains("get_query_store_health", text, StringComparison.Ordinal);
+        Assert.Contains("error log", text, StringComparison.Ordinal);
+        Assert.Contains("do not treat it as benign", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("database's state, not clutter", text, StringComparison.Ordinal);
+
+        var documented = Assert.Single(QueryStoreClutter.Compose(
+            [], [], [Config("db", "READ_ONLY", readonlyReason: 4, desired: "READ_WRITE")]));
+        var documentedText = string.Join(" ", QueryStoreClutter.Recommendations(documented));
+        Assert.Contains("database's state, not clutter", documentedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("the cause is not recorded", documentedText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheVerdict_IsTheWorstArm_AndEveryArmKeepsItsReason()
     {

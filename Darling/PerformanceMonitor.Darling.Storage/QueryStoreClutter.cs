@@ -98,6 +98,10 @@ public static class QueryStoreClutter
     /// single-user, emergency). A reason with no band, as <see cref="ReasonQueryStoreOff"/> is.</summary>
     public const string ReasonReadOnlyDatabaseState = "qs_read_only_state";
 
+    /// <summary>The readonly_reason bits that name a database state (1 read-only, 2 single-user, 4 emergency).
+    /// A READ_ONLY store with none of them set has no documented cause (#7454).</summary>
+    private const int DocumentedStateBits = 1 | 2 | 4;
+
     /// <summary>#7454: READ_ONLY with no reason bit while desired_state is READ_ONLY, which is an operator's own
     /// <c>OPERATION_MODE = READ_ONLY</c>. A reason with no band.</summary>
     public const string ReasonReadOnlyOperator = "qs_read_only_operator";
@@ -495,8 +499,19 @@ public static class QueryStoreClutter
                         $"Query Store is READ_ONLY because it reached a limit of its own (readonly_reason {c4.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c4.ReadonlyReason)}) while desired_state is {c4.DesiredState}. New runtime statistics are being dropped, and this database's clutter reached its terminal state. get_query_store_health has the decode and the remedy.");
                     break;
                 case ReasonReadOnlyDatabaseState when row.Config is { } c5:
-                    lines.Add(
-                        $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {(c5.ReadonlyReason == 0 ? "no reason bit set" : QueryStoreReadonlyReason.Decode(c5.ReadonlyReason))}) while desired_state is {c5.DesiredState}. Query Store cannot record while the database is in that state, so runtime statistics are not being collected. This is the database's state, not clutter, and this view does not grade it. get_query_store_health has the decode.");
+                    // Reason 0, or bits that are none of the three documented state bits (1, 2, 4), carries no
+                    // recorded cause. With desired_state READ_WRITE that is get_query_store_health's "classic
+                    // silent failure", so it must not be worded as the database's benign state (#7454).
+                    if ((c5.ReadonlyReason & DocumentedStateBits) == 0)
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {(c5.ReadonlyReason == 0 ? "no reason bit set" : QueryStoreReadonlyReason.Decode(c5.ReadonlyReason))}) while desired_state is {c5.DesiredState}. No documented reason is recorded for it, so the cause is not recorded: this view does not grade it as clutter, but do not treat it as benign. Read get_query_store_health and the SQL Server error log for the cause before deciding.");
+                    }
+                    else
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c5.ReadonlyReason)}) while desired_state is {c5.DesiredState}. Query Store cannot record while the database is in that state, so runtime statistics are not being collected. This is the database's state, not clutter, and this view does not grade it. get_query_store_health has the decode.");
+                    }
                     break;
                 case ReasonReadOnlyOperator when row.Config is { } c6:
                     lines.Add(
