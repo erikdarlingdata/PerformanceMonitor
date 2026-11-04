@@ -4887,7 +4887,7 @@
                             <DataGrid Grid.Row="10" x:Name="PgCapturedPlansGrid" Style="{StaticResource DarkGrid}"
                                       HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="170"/>
+                                    <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
                                     <DataGridTextColumn Header="Top Node" Binding="{Binding TopNodeType}" Width="150"/>
                                     <DataGridTextColumn Header="Nodes" Binding="{Binding NodeCount}" ElementStyle="{StaticResource NumericCell}" Width="80"/>
                                     <!-- Ranked by total: a plan that takes 40ms constantly costs more than
@@ -4898,10 +4898,18 @@
                                     <!-- CAPTURES, not executions: the collector reads an overlapping tail
                                          of the log, so this is a frequency signal rather than a count. -->
                                     <DataGridTextColumn Header="Captures" Binding="{Binding Captures}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
-                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="*">
+                                    <DataGridTemplateColumn Header="Plan (redacted)" Width="300">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
                                                 <TextBlock Text="{Binding PlanJson}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding PlanJson}"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <!-- #7428: the statement behind the id, after the plan so the numbers stay in view. The plan holds no statement text. -->
+                                    <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -5026,10 +5034,18 @@
                         <DataGridTextColumn Header="First Seen" Binding="{Binding FirstSeenAt}" Width="140" SortMemberPath="FirstSeenAtUtc"/>
                         <DataGridTextColumn Header="Last Seen" Binding="{Binding LastSeenAt}" Width="140" SortMemberPath="LastSeenAtUtc"/>
                         <DataGridTextColumn Header="On The Instance" Binding="{Binding InstanceContext}" Width="220"/>
-                        <DataGridTemplateColumn Header="Caveats" Width="*">
+                        <DataGridTemplateColumn Header="Caveats" Width="300">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding Caveats}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Caveats}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <!-- #7428: the statement behind the Query ID, last so the numbers stay in view. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
@@ -5669,9 +5685,17 @@
                         <!-- Usually NOT 1: the extension defaults to 1/max_connections, so these counts
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
-                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryId}" Width="*"/>
+                        <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
                         <!-- Newest row per predicate, so the rows can come from different snapshots. -->
                         <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
+                        <!-- #7428: the statement behind the Query ID, last so the numbers stay in view. -->
+                        <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding StatementText}"/>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>

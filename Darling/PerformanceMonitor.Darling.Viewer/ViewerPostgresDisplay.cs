@@ -1194,6 +1194,9 @@ internal static class PgDisplay
         /// compute_query_id is off, neither of which is a query whose id happens to be zero.</summary>
         public string LastQueryId { get; init; } = "";
 
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for id 0 and for a null id, which name no statement. Derived, so it is not the reader's LastQueryText column.</summary>
+        public string StatementText { get; init; } = "";
+
         /// <summary><b>The column this panel exists for.</b> An age in transactions, and the words in
         /// <see cref="PinsNothingText"/> when the session held neither a snapshot nor a transaction id in
         /// any sample.</summary>
@@ -1338,9 +1341,11 @@ internal static class PgDisplay
             LastState = r.LastState ?? "",
             LastWait = wait,
             LastCommandTag = r.LastCommandTag ?? "",
+            /* #7428: "no statement" for 0 and the dash for a null id, like every other PostgreSQL query id cell. */
             LastQueryId = r.LastQueryId is { } queryId
-                ? queryId.ToString("N0", CultureInfo.CurrentCulture)
-                : string.Empty,
+                ? (queryId == 0 ? "no statement" : queryId.ToString("N0", CultureInfo.CurrentCulture))
+                : "—",
+            StatementText = r.LastQueryId is null or 0 ? "" : r.LastQueryText ?? "(statement text not captured yet)",
             PeakHorizonAge = r.PeakHorizonAge < 0
                 ? PinsNothingText
                 : string.Create(CultureInfo.CurrentCulture, $"{r.PeakHorizonAge:N0} transactions"),
@@ -1987,6 +1992,10 @@ internal static class PgDisplay
         public double WorstEstimateErrorRatio { get; init; }
         public double SampleRate { get; init; }
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public string CaptureTime { get; init; } = "";
         /// <summary>The UTC instant <see cref="CaptureTime"/> is formatted from. The column sorts by it, not by that text.</summary>
         public DateTime CaptureTimeUtc { get; init; }
@@ -2005,6 +2014,8 @@ internal static class PgDisplay
         WorstEstimateErrorRatio = row.WorstEstimateErrorRatio,
         SampleRate = row.SampleRate,
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         CaptureTime = SnapshotTime(row.CaptureTime),
         CaptureTimeUtc = row.CaptureTime,
         Source = row,
@@ -2082,6 +2093,10 @@ internal static class PgDisplay
     internal sealed class CapturedPlanRow
     {
         public long QueryId { get; init; }
+        /// <summary>#7428: what the Query ID cell shows: "no statement" for 0, else the id. The column sorts by <see cref="QueryId"/>, the number.</summary>
+        public string QueryIdText { get; init; } = "";
+        /// <summary>#7428: the captured statement text for the Statement column, or "(statement text not captured yet)" until the hourly capture reaches the id. Empty for 0, which names no statement. Derived, so it is not the reader's QueryText column.</summary>
+        public string StatementText { get; init; } = "";
         public string TopNodeType { get; init; } = "";
         public int NodeCount { get; init; }
         public double TotalDurationMs { get; init; }
@@ -2094,6 +2109,8 @@ internal static class PgDisplay
     internal static CapturedPlanRow CapturedPlan(DarlingPgPlanCaptureReader.PgPlanCaptureRow row) => new()
     {
         QueryId = row.QueryId,
+        QueryIdText = QueryIdText(row.QueryId),
+        StatementText = row.QueryId == 0 ? "" : row.QueryText ?? "(statement text not captured yet)",
         TopNodeType = row.TopNodeType ?? "",
         NodeCount = row.NodeCount,
         TotalDurationMs = Math.Round(row.TotalDurationMs, 1),

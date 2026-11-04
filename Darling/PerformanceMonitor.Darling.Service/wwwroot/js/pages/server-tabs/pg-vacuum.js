@@ -7,6 +7,7 @@
  */
 
 import { fmtMs } from "../../util.js";
+import { codeDisclosure, pgQueryIdText } from "./shared.js";
 
 /**
  * A cell over a column whose store writes -1 for "there was none of this".
@@ -183,7 +184,7 @@ export const PG_SESSION_STATE_COLUMNS = [
   /* The leading SQL keyword, whitelisted at collection - NOT a truncation of the statement. No raw query
      text is stored anywhere: pg_stat_activity.query carries literal parameter values. */
   { key: "last_command_tag", label: "Command" },
-  { key: "last_query_id", label: "Query ID", mono: true },
+  { key: "last_query_id", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "query_id_note", label: "Query ID Note", clamp: true },
   { key: "finding", label: "Finding", clamp: true },
   /* Instance context from this backend's most recent sample: two idle-in-transaction sessions out of six
@@ -196,5 +197,8 @@ export const PG_SESSION_STATE_COLUMNS = [
   { key: "capture_was_truncated", label: "Capture Truncated", format: "bool" },
   { key: "first_seen_at", label: "First Seen", format: "time" },
   { key: "last_seen_at", label: "Last Seen", format: "time" },
+  /* #7428: the statement behind the id, last so the numbers stay on the page. Null until the hourly capture reaches
+     the id, and always null for "no statement" and for a session with no id. */
+  { key: "last_query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.last_query_text) },
 ];
 

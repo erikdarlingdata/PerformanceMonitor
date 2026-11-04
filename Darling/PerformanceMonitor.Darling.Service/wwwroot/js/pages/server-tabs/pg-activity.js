@@ -7,7 +7,7 @@
  */
 
 import { fmtMs, trendSubject } from "../../util.js";
-import { codeDisclosure, listCell } from "./shared.js";
+import { codeDisclosure, listCell, pgQueryIdText } from "./shared.js";
 
 /**
  * A duration cell that honours the PostgreSQL collectors' −1 "not applicable" sentinel.
@@ -207,11 +207,15 @@ export const PG_PREDICATE_COLUMNS = [
   { key: "table_name", label: "Table" },
   { key: "column_name", label: "Column" },
   { key: "operator", label: "Op" },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "rows_evaluated", label: "Rows Evaluated", format: "int" },
   { key: "rows_filtered", label: "Rows Filtered", format: "int" },
   { key: "filtered_pct", label: "Filtered %", format: "num1" },
   { key: "worst_estimate_error_ratio", label: "Worst Est. Error", format: "num2" },
   { key: "sample_rate", label: "Sample Rate", format: "num2" },
+  /* #7428: the statement behind the id, last like Top Query Shapes, so the numbers stay on the page. Null until the
+     hourly capture reaches the id, and always null for "no statement". */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 /* granted is second, right beside the mode, because an ungranted lock is the entire finding and burying it
@@ -230,7 +234,7 @@ export const PG_LOCK_STATS_COLUMNS = [
    blocks written IS, because a spill is the explanation for a statement whose time makes no sense from its
    row count, and it is the one counter PostgreSQL exposes that changes what you would do next. */
 export const PG_PLAN_COLUMNS = [
-  { key: "queryid", label: "Query ID", mono: true },
+  { key: "queryid", label: "Query ID", mono: true, display: pgQueryIdText() },
   { key: "top_node_type", label: "Top Node" },
   { key: "node_count", label: "Nodes", format: "int" },
   { key: "total_duration_ms", label: "Total", format: "ms" },
@@ -241,6 +245,9 @@ export const PG_PLAN_COLUMNS = [
      statement actually ran, and this label has to keep the two apart. */
   { key: "captures", label: "Captures", format: "int" },
   { key: "plan_hash", label: "Plan Hash", mono: true },
+  /* #7428: the statement behind the id, last like Top Query Shapes, so the numbers stay on the page. Null until the
+     hourly capture reaches the id, and always null for "no statement". */
+  { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },
 ];
 
 /* Remedy last and deliberately widest. Facet, state and observed value are what the eye scans down; the

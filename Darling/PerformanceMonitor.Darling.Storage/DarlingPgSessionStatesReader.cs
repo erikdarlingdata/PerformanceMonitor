@@ -26,6 +26,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingPgSessionStatesReader
 {
+    /// <param name="LastQueryText">#7428: the normalised statement text captured for <see cref="LastQueryId"/> in
+    /// <c>collect.pg_statement_text</c>, or null until the hourly capture reaches that id. Also null for id 0 and for a
+    /// null id, which name no statement. Never the raw <c>pg_stat_activity.query</c>, which this collector deliberately
+    /// does not store.</param>
     public sealed record PgSessionStateRow(
         long BackendId,
         int Pid,
@@ -56,7 +60,8 @@ public static class DarlingPgSessionStatesReader
         int ActiveSessions,
         int IdleInTransactionSessions,
         int ReportableSessions,
-        bool CaptureWasTruncated);
+        bool CaptureWasTruncated,
+        string? LastQueryText = null);
 
     /// <summary>
     /// One row per backend seen in the window, with its peaks and its identity from the most recent sample.
@@ -92,6 +97,12 @@ public static class DarlingPgSessionStatesReader
     ///
     /// <para><b>Joins use <c>IS NOT DISTINCT FROM</c> where a column is nullable</b>, because <c>=</c> is
     /// NULL for a NULL operand and would silently drop the row rather than match it.</para>
+    ///
+    /// <para><b>#7428: <c>last_query_text</c> is a scalar lookup in the select list</b>, not a join, so it stays out
+    /// of the rollup and the worst-first ORDER BY. PostgreSQL evaluates an expensive select-list expression after the
+    /// sort when a LIMIT bounds the result, so only the page's rows look anything up (measured with EXPLAIN ANALYZE
+    /// on a throwaway store). The text store has (server_id, queryid) as its PRIMARY KEY (#2219): at most one row per
+    /// id, so the lookup cannot multiply or raise. Query id 0 and NULL find nothing and read as null.</para>
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
@@ -213,7 +224,11 @@ public static class DarlingPgSessionStatesReader
             coalesce(l.active_sessions, 0)                          AS active_sessions,
             coalesce(l.idle_in_transaction_sessions, 0)             AS idle_in_transaction_sessions,
             coalesce(l.reportable_sessions, 0)                      AS reportable_sessions,
-            coalesce(r.capture_was_truncated, false)                AS capture_was_truncated
+            coalesce(r.capture_was_truncated, false)                AS capture_was_truncated,
+            (SELECT t.query_text
+             FROM collect.pg_statement_text AS t
+             WHERE t.server_id = $1
+             AND   t.queryid   = l.query_id)                        AS last_query_text
         FROM rolled AS r
         JOIN latest AS l
           ON  l.backend_id IS NOT DISTINCT FROM r.backend_id
@@ -299,7 +314,8 @@ public static class DarlingPgSessionStatesReader
             reader.IsDBNull(26) ? 0 : reader.GetInt32(26),
             reader.IsDBNull(27) ? 0 : reader.GetInt32(27),
             reader.IsDBNull(28) ? 0 : reader.GetInt32(28),
-            !reader.IsDBNull(29) && reader.GetBoolean(29));
+            !reader.IsDBNull(29) && reader.GetBoolean(29),
+            reader.FieldCount > 30 && !reader.IsDBNull(30) ? reader.GetString(30) : null);
     }
 
     /// <summary>
