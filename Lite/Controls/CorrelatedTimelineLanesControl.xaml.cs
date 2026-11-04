@@ -408,7 +408,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             onStartChosen: start => DataStartFound?.Invoke(start));
     }
 
-    private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
+    internal void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
         List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0,
         string blockingUnit = PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit)
     {
@@ -442,6 +442,22 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         double barWidth = EventLaneGeometry.BarWidthDays(windowSpanDays);
         double maxCount = 0;
 
+        // Baseline band for blocking: added before the bars so it paints behind them (#7433)
+        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        {
+            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
+            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+
+            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
+
+            PerformanceMonitor.Ui.BaselineBand.Add(BlockingChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineBlocking"));
+
+            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
+            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
+            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
+            meanLine.LineWidth = 1;
+        }
+
         // Blocking bars — red
         if (blockingData.Count > 0)
         {
@@ -472,24 +488,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             maxCount = Math.Max(maxCount, deadlockData.Max(d => d.Value));
         }
 
-        // Baseline band for blocking
-        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
-        {
-            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
-            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
-
-            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
-
-            var band = BlockingChart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(25);
-            band.LineStyle.Width = 0;
-
-            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
-            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
-            meanLine.LineWidth = 1;
-        }
-
         BlockingChart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         ReapplyAxisColors(BlockingChart);
@@ -508,7 +506,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
        plotting it directly avoids the "alert says 95% but chart shows 60%"
        confusion (PM #1004). Baseline band + anomaly markers stay on SQL
        because that's the metric the CPU baseline was computed from. */
-    private void UpdateCpuLane(
+    internal void UpdateCpuLane(
         List<(double Time, double Value)> sqlData,
         List<(double Time, double Value)> totalData,
         BaselineBucket? baseline = null)
@@ -539,9 +537,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             _crosshairManager?.SetLaneBaseline(CpuChart, lower, upper, 10);
 
-            var band = CpuChart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(25);
-            band.LineStyle.Width = 0;
+            PerformanceMonitor.Ui.BaselineBand.Add(CpuChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineCpu"));
 
             var meanLine = CpuChart.Plot.Add.HorizontalLine(baseline.Mean);
             meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(60);
@@ -603,7 +599,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         CpuChart.Refresh();
     }
 
-    private void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
+    internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
         List<(double Time, double Value)> data, string colorHex,
         double? yMin = null, double? yMax = null, BaselineBucket? baseline = null,
         double minAnomalyValue = 0)
@@ -628,9 +624,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             _crosshairManager?.SetLaneBaseline(chart, lower, upper, minAnomalyValue);
 
-            var band = chart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(25);
-            band.LineStyle.Width = 0;
+            PerformanceMonitor.Ui.BaselineBand.Add(chart.Plot, lower, upper, colorHex);
 
             var meanLine = chart.Plot.Add.HorizontalLine(baseline.Mean);
             meanLine.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(60);
