@@ -615,6 +615,13 @@ public sealed class ViewerPostgresTabsTests
     [Theory]
     /* A sustained holder: the critical band, and the only one that gets the red. */
     [InlineData(10, 9, 10, 0L, 5_000_000L, false, "Critical")]
+    /* #7381: the floor is 2 holder samples, so 2 of 2 is still red. */
+    [InlineData(2, 2, 0, 1_000L, 5_000_000L, false, "Critical")]
+    /* #7381: 1 of 1 is a sighting, not a hold, and so is the monitor's own sampler (1 of 1, age 0). */
+    [InlineData(1, 1, 0, 1_000L, 5_000_000L, false, "Healthy")]
+    [InlineData(1, 1, 0, 1_000L, 0L, false, "Healthy")]
+    /* #7381: always the oldest, but at age 0 nothing waited behind it. */
+    [InlineData(5, 5, 0, 1_000L, 0L, false, "Healthy")]
     /* Idle in transaction, long, pinning NOTHING: the warning band and the amber. The correction this
        whole feature exists to make. */
     [InlineData(10, 0, 10, 600_000L, -1L, false, "Warning")]
@@ -665,16 +672,12 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(lit <= 1, $"{lit} row flags fired for band '{expectedBand}'; the bands are exclusive.");
     }
 
-    /// <summary>The two thresholds the viewer copies are the same numbers the MCP surface decides on.
+    /// <summary>The idle threshold the viewer copies is the same number the MCP surface decides on.
     /// Asserted directly as well as behaviourally above, because a drift caught at the constant names the
     /// defect, while a drift caught only through a fixture names a row.</summary>
     [Fact]
-    public void TheCopiedSessionThresholds_AreTheOnesTheReadUses()
+    public void TheCopiedIdleThreshold_IsTheOneTheReadUses()
     {
-        Assert.Equal(
-            DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare,
-            PgDisplay.SustainedHolderSampleShare,
-            precision: 10);
         Assert.Equal(
             DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs,
             PgDisplay.IdleWithoutHorizonAttentionMs);

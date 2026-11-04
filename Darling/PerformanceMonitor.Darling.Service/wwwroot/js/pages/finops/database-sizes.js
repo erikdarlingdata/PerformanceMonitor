@@ -11,7 +11,7 @@
    the read returns them. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 
 // The desktop's Auto Growth text: a percentage step, a MB step, "Disabled" when growth is off, "-" when unknown.
@@ -76,7 +76,7 @@ export const tab = {
         const data = res.data || {};
         const files = Array.isArray(data.rows) ? data.rows : [];
         const notes = [];
-        if (typeof data.captured_at === "string" && data.captured_at) notes.push(noticeStrip("Captured " + relTime(data.captured_at) + " (" + localTime(data.captured_at) + ")"));
+        if (typeof data.captured_at === "string" && data.captured_at) notes.push(captionStrip("Captured " + relTime(data.captured_at) + " (" + localTime(data.captured_at) + ")"));
         if (data.truncated) notes.push(noticeStrip("Showing the largest " + files.length + " of " + data.file_count + " files."));
         if (typeof data.note === "string" && data.note.trim()) notes.push(noticeStrip(data.note));
         mount(body, [

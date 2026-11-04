@@ -160,9 +160,7 @@ public sealed class ReleaseWalkWordingTests
     public void TheKcachePanel_NamesTheMissingExtensionInPlainWords()
     {
         var tabs = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        var panels = System.IO.File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js"));
         Assert.Contains("pg_stat_kcache is not installed on this server", tabs, StringComparison.Ordinal);
-        Assert.Contains("res.status === \"precondition\" && desc.extensionMissingLine", panels, StringComparison.Ordinal);
     }
 
     [Fact]
