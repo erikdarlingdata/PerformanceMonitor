@@ -13,7 +13,8 @@
   },
   "servers": [
     { "name": "ui-sql", "host": "127.0.0.1,1", "auth": "integrated" },
-    { "name": "ui-pg", "engine": "postgres", "host": "127.0.0.1", "port": 1, "auth": "sql", "username": "ui-smoke", "password": "unused" }
+    { "name": "ui-pg", "engine": "postgres", "host": "127.0.0.1", "port": 1, "auth": "sql", "username": "ui-smoke", "password": "unused" },
+    { "name": "ui-long-name-sql-server-production-east-region-cluster-node-01-primary", "host": "127.0.0.2,1", "auth": "integrated" }
   ],
   "alerts": { "enabled": false },
   "analysis": { "enabled": false },

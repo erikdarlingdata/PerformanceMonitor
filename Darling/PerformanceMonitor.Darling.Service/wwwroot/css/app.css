@@ -1244,8 +1244,9 @@ pre.code {
 .markdown-body .md-link:hover { text-decoration: underline; }
 
 /* The notebook DOCUMENT: markdown cells + composed-panel cells stacked vertically. Prose is kept to a readable
-   measure; panel cells fill the document width. */
-.notebook-doc { display: flex; flex-direction: column; gap: 1.1rem; max-width: 1100px; }
+   measure (.notebook-md below); panel cells fill the document width, and the document is the page's width: a 1100 px cap left half of a
+   2560 px screen empty beside the triage and notebook panels (#7479). */
+.notebook-doc { display: flex; flex-direction: column; gap: 1.1rem; }
 .notebook-md { max-width: 820px; }
 .notebook-panel .panel.card { margin-bottom: 0; }
 

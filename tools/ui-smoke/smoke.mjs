@@ -21,6 +21,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runShots } from "./shots.mjs";
+import { runLayout } from "./layout.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const baseUrl = (process.env.UI_SMOKE_URL || "http://127.0.0.1:5153").replace(/\/+$/, "");
@@ -227,6 +228,19 @@ for (const spec of config.pages) {
   for (const p of r.panels) console.log(`       panel ${String(p.title).padEnd(36)} ${p.state.padEnd(8)}${p.rows != null ? " rows=" + p.rows : ""}`);
   for (const p of r.problems) console.log(`       PROBLEM ${p}`);
 }
+
+/* The layout pass (#7479): every page again at 600, 1280 and 2560 px wide, measured. UI_SMOKE_LAYOUT=off skips it. A failure fails the run. */
+let layout = { failures: [], rows: [], seconds: 0 };
+if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off") {
+  try {
+    layout = await runLayout({ config, baseUrl, outDir, only, settle, browser, sessionCookie: process.env.UI_SMOKE_SESSION_COOKIE });
+  } catch (e) {
+    layout.failures.push({ page: "-", width: 0, check: "layout-stage-threw", selector: "", detail: e && e.message ? e.message.split("\n")[0] : String(e) });
+  }
+  for (const f of layout.failures) console.log(`LAYOUT ${f.page} @${f.width} ${f.check} ${f.selector} : ${f.detail}`);
+  for (const f of layout.exempted || []) console.log(`LAYOUT-EXEMPT ${f.page} @${f.width} ${f.check}: ${f.detail} (exempt: ${f.reason})`);
+  console.log(`layout: ${layout.rows.length} page/width loads in ${layout.seconds}s, ${layout.failures.length} failures`);
+}
 await browser.close();
 
 /* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), so nothing the screenshot stage does can lose it. */
@@ -248,11 +262,11 @@ if ((process.env.UI_SMOKE_SHOTS || "compare").toLowerCase() === "compare" && (sh
   console.log(`screenshots: ${shots.length - differ} matched, ${differ} differ (advisory), ${shotProblems.length} problems`);
 }
 
-writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems, screenshots: shots }, null, 2));
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems, screenshots: shots, layout }, null, 2));
 const failed = results.filter((r) => r.problems.length);
 console.log(`\nui-smoke: ${results.length - failed.length}/${results.length} pages clean, ${results.filter((r) => r.flaked).length} flaked`);
 if (results.length === 0) {
   console.log("ui-smoke: no page ran.");
   process.exit(1);
 }
-process.exit(failed.length || shotProblems.length ? 1 : 0);
+process.exit(failed.length || shotProblems.length || layout.failures.length ? 1 : 0);

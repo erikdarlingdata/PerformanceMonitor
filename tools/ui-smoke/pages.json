@@ -11,11 +11,13 @@
   "allowList": [],
   "servers": [
     "ui-sql",
-    "ui-pg"
+    "ui-pg",
+    "ui-long-name-sql-server-production-east-region-cluster-node-01-primary"
   ],
   "pages": [
     {
       "name": "fleet",
+      "layoutExempt": [{ "check": "width-unused", "reason": "the fleet server cards are capped at 460 px and start at the left on purpose (#2772, #7402), and the summary strip is a compact block, so a fleet of a few servers cannot fill a 2560 px row" }],
       "hash": "#/fleet",
       "screenshot": { "mask": [".meta"] },
       "nav": "fleet",
@@ -103,7 +105,7 @@
         "grids": [
           {
             "index": 0,
-            "exactRows": 2
+            "exactRows": 3
           }
         ]
       }
@@ -410,6 +412,14 @@
           { "panel": "get_cpu_scheduler_pressure", "state": "empty" }
         ]
       }
-    }
+    },
+    { "name": "long-name-overview", "hash": "#/server/ui-long-name-sql-server-production-east-region-cluster-node-01-primary", "server": "ui-long-name-sql-server-production-east-region-cluster-node-01-primary", "expect": {} },
+    { "name": "ui-sql-iotrends", "hash": "#/server/ui-sql/iotrends", "server": "ui-sql", "expect": {} },
+    { "name": "finops-recommendations", "hash": "#/finops/ui-sql/recommendations", "nav": "finops", "expect": {} },
+    { "name": "investigations", "hash": "#/investigations", "nav": "investigations", "expect": {} },
+    { "name": "proposals", "hash": "#/proposals", "nav": "proposals", "expect": {} },
+    { "name": "known-patterns", "hash": "#/known-patterns", "nav": "known-patterns", "expect": {} },
+    { "name": "manage-query-tags", "hash": "#/manage-query-tags", "nav": "manage-query-tags", "expect": {} },
+    { "name": "query-tag-usage", "hash": "#/query-tag-usage", "nav": "query-tag-usage", "expect": {} }
   ]
 }
