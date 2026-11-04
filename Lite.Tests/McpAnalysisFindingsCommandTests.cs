@@ -159,10 +159,20 @@ public sealed class McpAnalysisFindingsCommandTests : IClassFixture<SharedDuckDb
         Assert.Equal(JsonValueKind.Null, rcsi.GetProperty("structured_remediation").ValueKind);
         Assert.Equal(JsonValueKind.Null, none.GetProperty("structured_remediation").ValueKind);
 
+        /* #7416 parity with Darling's envelope: is_config_fix and standing_state ride every finding. A persisted RCSI action on a DB_CONFIG root is both;
+           a wait root with no action and a plan-regression root are neither. */
+        Assert.All(findings, f => Assert.True(f.TryGetProperty("is_config_fix", out _) && f.TryGetProperty("standing_state", out _),
+            "every finding must expose is_config_fix and standing_state"));
+        Assert.True(rcsi.GetProperty("is_config_fix").GetBoolean());
+        Assert.True(rcsi.GetProperty("standing_state").GetBoolean());
+        Assert.False(none.GetProperty("is_config_fix").GetBoolean());
+        Assert.False(none.GetProperty("standing_state").GetBoolean());
+
         /* ...and the force finding's verdict crosses the wire intact: ineligible, the blocker NAMED,
            the artifacts split. This is the flag surviving FindingStore -> AlertContextSerializer ->
            tool projection end to end, not just the builder's unit pins. */
         var forced = findings.Single(f => f.GetProperty("story_path_hash").GetString() == "reco_force_hash");
+        Assert.False(forced.GetProperty("standing_state").GetBoolean());
         var structured = forced.GetProperty("structured_remediation");
         Assert.Equal("force", structured.GetProperty("verb").GetString());
         var target = Assert.Single(structured.GetProperty("force_plan_targets").EnumerateArray());

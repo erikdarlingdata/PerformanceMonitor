@@ -189,9 +189,14 @@ public static class DatabaseProtectionBands
         return list;
     }
 
-    /// <summary>The chip's value: how many facts are overdue. Null when none, so a chip shows only when something is late.</summary>
+    /// <summary>The chip's value: how many facts are overdue and on how many databases, for example <c>25 items on 11 databases</c> (#7416). Null when none,
+    /// so a chip shows only when something is late. The Health Checks sentence counts databases, so this one says what it counts too.</summary>
     public static string? ChipValue(IReadOnlyList<DatabaseProtectionOverdue>? overdue) =>
-        overdue is { Count: > 0 } ? string.Create(CultureInfo.InvariantCulture, $"{overdue.Count} overdue") : null;
+        overdue is { Count: > 0 } ? CountText(overdue.Count, overdue.Select(o => o.Database).Distinct(StringComparer.OrdinalIgnoreCase).Count()) : null;
+
+    /// <summary>"25 items on 11 databases", "1 item on 1 database".</summary>
+    public static string CountText(int items, int databases) =>
+        string.Create(CultureInfo.InvariantCulture, $"{items} {(items == 1 ? "item" : "items")} on {databases} {(databases == 1 ? "database" : "databases")}");
 
     /// <summary>The chip's detail: each overdue fact with its label, for example <c>Full backup: Sales (9 days old), CHECKDB: Sales (never checked)</c>.</summary>
     public static string ChipDetail(IReadOnlyList<DatabaseProtectionOverdue> overdue)

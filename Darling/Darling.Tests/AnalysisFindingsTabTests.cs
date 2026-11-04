@@ -144,6 +144,26 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void AStandingStateCard_GetsNoQueriesLink_AndAnIncidentCardGetsOneThatNamesTheTab()
+    {
+        var groups = Run("standingLink").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => Strings(g.GetProperty("links")));
+        Assert.Empty(groups.Single(g => g.Key.StartsWith("VolumeLow", StringComparison.Ordinal)).Value);
+        Assert.Equal(new[] { "Open Queries tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRoot_AreOneCard_WithTheNewestChainsFigures_AndTheOtherChainNamedUnderIt()
+    {
+        var r = Run("sameRoot");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, Strings(r.GetProperty("cards")).Length);
+        Assert.Contains("2 findings", Strings(r.GetProperty("headers")).Single(), StringComparison.Ordinal);
+        Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
+        Assert.Contains("also seen as: LATCH_EX → TEMPDB_USAGE (INFO", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ANullSeverity_RendersTheLabelAlone_NotNaN()
     {
         var text = Run("nullSeverity").GetProperty("text").GetString()!;

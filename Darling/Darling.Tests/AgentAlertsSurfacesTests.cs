@@ -89,7 +89,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
 
         Assert.Equal(
             [
-                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", "21, 23"),
+                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", ""),
                 new ViewerAgentAlertGapRow("An enabled alert tells no operator, so nobody hears when it fires.", "Sev 20"),
             ],
             rows);
@@ -100,7 +100,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
     {
         var rows = ViewerAgentAlertsText.GapRows(Read(Complete().Where(a => a.MessageId is not (824 or 825)).ToArray()));
 
-        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "824, 825")], rows);
+        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "")], rows);
     }
 
     [Fact]
@@ -109,8 +109,8 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
         var read = Read(Complete().Where(a => a.Severity != 21).ToArray());
         var captured = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
 
-        Assert.Equal($"Alert setup: gaps   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
-        Assert.StartsWith("Alert setup: ok   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
+        Assert.Equal($"Alert setup: 1 gap   Alerts defined: 9   Captured: {captured}", ViewerAgentAlertsText.StatusLine(read, ServerClock.Utc));
+        Assert.StartsWith("Alert setup: OK   Alerts defined: 10", ViewerAgentAlertsText.StatusLine(Read(Complete().ToArray()), ServerClock.Utc), StringComparison.Ordinal);
     }
 
     [Fact]

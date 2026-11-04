@@ -525,6 +525,9 @@ public sealed class DarlingMcpTrendTools
                    cut (limit bit); this is the tier's reach falling short of the requested start, and the two
                    want opposite remedies — see the class remarks and McpHelpers.WindowTruncatedDescription. */
                 window_truncated = history.Truncated,
+                /* #7416 item 21: true only when the requested start is older than the tier that answered keeps. */
+                start_older_than_tier = history.StartOlderThanTier,
+                tier_keeps_days = history.TierKeepsDays,
                 bucket = history.Source == "raw" ? "per-collection" : "1 hour",
                 /* #3897: the width beside the word, as every trend carrying `bucket` now publishes it — null on
                    the per-collection history, the rollup's hour otherwise. Lite's twin writes it through
@@ -928,7 +931,8 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private sealed record TrendDisclosure(
         string Source, DateTime EffectiveStartUtc, DateTime WindowEndUtc, bool Truncated, string Bucket,
-        string? AggregateNote, Dictionary<string, object>? Routing = null, int? BucketMinutes = null)
+        string? AggregateNote, Dictionary<string, object>? Routing = null, int? BucketMinutes = null,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null)
     {
         /// <summary>The disclosure keys in the order they are written, so the data envelope and the empty
         /// envelope carry the same block in the same shape.</summary>
@@ -946,6 +950,11 @@ public sealed class DarlingMcpTrendTools
                key at the same position; McpPayloadContractCensusTests fails a bare `truncated` beside
                `effective_hours_back` on either SKU. The C# member stays `Truncated` — the wire key renamed. */
             envelope["window_truncated"] = Truncated;
+            /* #7416 item 21: the one reason a late head can be named. True only when the requested start is older than the
+               tier that answered keeps (tier_keeps_days); a late first point alone proves nothing aged out. Lite's
+               WriteDisclosure writes the same two keys at the same position. */
+            envelope["start_older_than_tier"] = StartOlderThanTier;
+            envelope["tier_keeps_days"] = TierKeepsDays;
             envelope["bucket"] = Bucket;
             /* #3897: the width in minutes beside its word, null on a series that is not time-bucketed (the Query
                Store trend's per-interval points). Lite's WriteDisclosure writes it at the same position. */
@@ -1034,7 +1043,9 @@ public sealed class DarlingMcpTrendTools
             result.Truncated,
             TrendBuckets.Word(bucket.Minutes),
             RoutedAggregateNote(result.Route, bucket),
-            BucketMinutes: bucket.Minutes);
+            BucketMinutes: bucket.Minutes,
+            StartOlderThanTier: result.StartOlderThanTier,
+            TierKeepsDays: result.TierKeepsDays);
 
     /// <summary>
     /// The routed trio's disclosure for an EMPTY answer: the tier is described from its floor rather than from
@@ -1050,12 +1061,15 @@ public sealed class DarlingMcpTrendTools
     {
         var reach = route.Tier == RetentionTier.Raw ? route.Coverage.RawOldestUtc : route.Coverage.HourlyFloorUtc;
         var (effectiveStart, truncated) = DescribeEmptyCoverage(reach, startUtc, windowEndUtc);
+        var tierFloor = DurationTrendRouting.TierFloorUtc(route.Tier, route.RawRetentionApplies, route.ResolvedAtUtc);
 
         return new TrendDisclosure(
             route.Source, effectiveStart, windowEndUtc, truncated,
             TrendBuckets.Word(bucket.Minutes),
             RoutedAggregateNote(route, bucket),
-            BucketMinutes: bucket.Minutes);
+            BucketMinutes: bucket.Minutes,
+            StartOlderThanTier: truncated && tierFloor is DateTime floor && startUtc < floor,
+            TierKeepsDays: DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies));
     }
 
     /// <summary>

@@ -64,13 +64,13 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static decimal? OptimizationCostShare(long part, long total, decimal monthly, int hoursBack)
     {
         if (monthly <= 0m || total <= 0) return null;
-        return Math.Round(FinOpsCost.Share(part, total, FinOpsCost.WindowBudget(monthly, hoursBack)), 2, MidpointRounding.AwayFromZero);
+        return FinOpsWireFigures.Clean(Math.Round(FinOpsCost.Share(part, total, FinOpsCost.WindowBudget(monthly, hoursBack)), 2, MidpointRounding.AwayFromZero));
     }
 
     internal static object IdleDatabaseRow(IdleDatabase r) => new
     {
         database_name = r.DatabaseName,
-        total_size_mb = r.TotalSizeMb,
+        total_size_mb = FinOpsWireFigures.Mb(r.TotalSizeMb),
         file_count = r.FileCount,
         /* The monitored server's own clock, read verbatim: no Z, no shifting. */
         last_execution_server_local = r.LastExecutionTime?.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture),
@@ -79,8 +79,8 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static object TempdbRow(TempdbSummaryMetric r) => new
     {
         metric = r.Metric,
-        current_mb = r.CurrentMb,
-        peak_24h_mb = r.Peak24hMb,
+        current_mb = FinOpsWireFigures.Mb(r.CurrentMb),
+        peak_24h_mb = FinOpsWireFigures.Mb(r.Peak24hMb),
         warning = r.Warning,
     };
 
@@ -93,7 +93,7 @@ public sealed partial class DarlingMcpFinOpsTools
             category = r.Category,
             total_wait_time_ms = r.TotalWaitTimeMs,
             waiting_tasks = r.WaitingTasks,
-            pct_of_total = r.PctOfTotal,
+            pct_of_total = FinOpsWireFigures.Pct(r.PctOfTotal),
             top_wait_type = r.TopWaitType,
             top_wait_time_ms = r.TopWaitTimeMs,
             est_cost_usd = OptimizationCostShare(r.TotalWaitTimeMs, total, monthly, hoursBack),
@@ -108,9 +108,9 @@ public sealed partial class DarlingMcpFinOpsTools
         {
             database_name = r.DatabaseName,
             total_cpu_ms = r.TotalCpuMs,
-            avg_cpu_ms_per_exec = r.AvgCpuMsPerExec,
+            avg_cpu_ms_per_exec = FinOpsWireFigures.Clean(r.AvgCpuMsPerExec),
             total_reads = r.TotalReads,
-            avg_reads_per_exec = r.AvgReadsPerExec,
+            avg_reads_per_exec = FinOpsWireFigures.Clean(r.AvgReadsPerExec),
             executions = r.Executions,
             /* #5320: judged on the whole statement, then cut to the 200 characters the SQL preview carries. */
             query_preview = McpHelpers.StatementPreview(r.FullQueryText, 200),
@@ -124,11 +124,11 @@ public sealed partial class DarlingMcpFinOpsTools
         rows.OrderBy(r => r.Day).Select(r => (object)new
         {
             day = r.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            avg_granted_mb = r.AvgGrantedMb,
-            avg_used_mb = r.AvgUsedMb,
-            efficiency_pct = r.EfficiencyPct,
-            peak_granted_mb = r.PeakGrantedMb,
-            wasted_mb = r.AvgGrantedMb - r.AvgUsedMb,
+            avg_granted_mb = FinOpsWireFigures.Mb(r.AvgGrantedMb),
+            avg_used_mb = FinOpsWireFigures.Mb(r.AvgUsedMb),
+            efficiency_pct = FinOpsWireFigures.Pct(r.EfficiencyPct),
+            peak_granted_mb = FinOpsWireFigures.Mb(r.PeakGrantedMb),
+            wasted_mb = FinOpsWireFigures.Mb(r.AvgGrantedMb - r.AvgUsedMb),
             total_grantees = r.TotalGrantees,
             total_waiters = r.TotalWaiters,
             timeout_errors = r.TimeoutErrors,

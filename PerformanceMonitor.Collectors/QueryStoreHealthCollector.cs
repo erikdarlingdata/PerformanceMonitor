@@ -174,26 +174,26 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     /// </summary>
     private const string UngatedPayloadBodyText = @"
 SELECT /* PerformanceMonitorLite */
-    actual_state = qso.actual_state_desc,
-    desired_state = qso.desired_state_desc,
-    readonly_reason = qso.readonly_reason,
-    current_storage_size_mb = qso.current_storage_size_mb,
-    max_storage_size_mb = qso.max_storage_size_mb,
-    size_based_cleanup_mode = qso.size_based_cleanup_mode_desc,
-    stale_query_threshold_days = qso.stale_query_threshold_days,
-    max_plans_per_query = qso.max_plans_per_query,
-    interval_length_minutes = qso.interval_length_minutes,
-    query_capture_mode = qso.query_capture_mode_desc";
+    actual_state = PerformanceMonitorLite.actual_state_desc,
+    desired_state = PerformanceMonitorLite.desired_state_desc,
+    readonly_reason = PerformanceMonitorLite.readonly_reason,
+    current_storage_size_mb = PerformanceMonitorLite.current_storage_size_mb,
+    max_storage_size_mb = PerformanceMonitorLite.max_storage_size_mb,
+    size_based_cleanup_mode = PerformanceMonitorLite.size_based_cleanup_mode_desc,
+    stale_query_threshold_days = PerformanceMonitorLite.stale_query_threshold_days,
+    max_plans_per_query = PerformanceMonitorLite.max_plans_per_query,
+    interval_length_minutes = PerformanceMonitorLite.interval_length_minutes,
+    query_capture_mode = PerformanceMonitorLite.query_capture_mode_desc";
 
     /// <summary>The 2017+ ordinal (#3796), appended to <see cref="UngatedPayloadBodyText"/> only where the
     /// engine has the column; see <see cref="HasWaitStatsCaptureMode"/>.</summary>
     private const string WaitStatsCaptureModeColumnText = @",
-    wait_stats_capture_mode = qso.wait_stats_capture_mode_desc";
+    wait_stats_capture_mode = PerformanceMonitorLite.wait_stats_capture_mode_desc";
 
     private const string PayloadBodyTailText = @"
-FROM sys.database_query_store_options AS qso
+FROM sys.database_query_store_options AS PerformanceMonitorLite
 WHERE (DB_ID() > 4 OR DB_ID() = 2)
-AND   qso.readonly_reason & 8 = 0 /*#6252 (#1558): bit 8 = a readable secondary replica, the engine's flag for every kind (an availability group, a cloud read replica, a geo-secondary) where the HADR join in the list sees only the first. Its Query Store options are the primary's, replicated, so the row repeats the primary's health row. Skipped, not reported: a database with no health row reads as not collected. A storage-cap READ_ONLY has other bits (readonly_reason 65536) and still reports.*/
+AND   PerformanceMonitorLite.readonly_reason & 8 = 0 /*#6252 (#1558): bit 8 = a readable secondary replica, the engine's flag for every kind (an availability group, a cloud read replica, a geo-secondary) where the HADR join in the list sees only the first. Its Query Store options are the primary's, replicated, so the row repeats the primary's health row. Skipped, not reported: a database with no health row reads as not collected. A storage-cap READ_ONLY has other bits (readonly_reason 65536) and still reports.*/
 OPTION(RECOMPILE);";
 
     /// <summary>

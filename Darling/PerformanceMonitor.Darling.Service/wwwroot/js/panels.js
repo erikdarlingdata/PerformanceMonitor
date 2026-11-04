@@ -55,6 +55,7 @@ import {
   sourceStrip,
   clampText,
   plainEmptyStrip,
+  noteStrip,
   disclosure,
   markPartialSubtitle,
   localizeIsoText,
@@ -121,6 +122,8 @@ export function emptyHeadline(desc, res) {
  */
 export function panelEmptyStrip(desc, res) {
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
+  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine === true ? desc.emptyText : desc.emptyLine);
   const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
   return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
@@ -276,8 +279,8 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
       floor,
       /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
       sourceStrip(res.data, desc),
-      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
-      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
     ]);
   } catch (e) {
@@ -307,7 +310,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue,exportOnly}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -361,7 +364,7 @@ export function gridTable(rows, desc) {
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
   const bodyRows = rows.map((row) => {
     const rc = typeof desc.rowClass === "function" ? desc.rowClass(row) : desc.rowClass;
-    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => cell(row, c)));
+    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => exportOnlyCell(row, c)));
     trRow.set(tr, row);
     if (typeof desc.onRow === "function") desc.onRow(row, tr);
     return tr;
@@ -1097,7 +1100,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null, title: c.hint || null });
+  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") || null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1195,7 +1198,7 @@ function makeGridSort(desc, cols, rows) {
       const th = ths[i];
       if (!th) return;
       const live = sortable[i];
-      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "");
       th.setAttribute("tabindex", live ? "0" : "-1");
       /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
       th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
@@ -1231,7 +1234,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;
@@ -1292,10 +1295,14 @@ export function reapplyGridSort(tbody) {
    the table never renders with no columns. */
 export function visibleColumns(cols, rows) {
   const kept = cols.filter((c) => {
-    if (!c.hideWhenEmpty) return true;
+    /* #7416: `hideWhenAllZero` drops a count column that is zero (or missing) on every row: a column of zeros on a healthy server says nothing, and a
+       column that has a number says why it is there in its header hint. */
+    if (c.hideWhenAllZero && !rows.some((row) => Number(getPath(row, c.key)) > 0)) return false;
+    if (!c.hideWhenEmpty && !c.hideWhenZero) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
-      return v != null && v !== "";
+      /* #7410: `hideWhenZero` also drops a column whose every value is 0, the counters only some engines fill (Top Query Shapes' temp blocks, WAL and peak memory). */
+      return v != null && v !== "" && !(c.hideWhenZero && Number(v) === 0);
     });
   });
   return kept.length ? kept : cols;
@@ -1303,6 +1310,14 @@ export function visibleColumns(cols, rows) {
 
 function isNumericCol(c) {
   return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
+}
+
+/* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging
+   Settings Audit folds Unit and Source into the Value cell and the cost into the remedy cell, and the export still keeps each as its own field. */
+function exportOnlyCell(row, c) {
+  const td = cell(row, c);
+  if (c.exportOnly) td.classList.add("export-only");
+  return td;
 }
 
 function cell(row, c) {
@@ -1370,7 +1385,7 @@ function cell(row, c) {
     const full = getPath(row, c.detailKey);
     if (typeof full === "string" && full !== "") {
       const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
-      const box = disclosure(text, detail, { max: 60 });
+      const box = disclosure(text, detail, { max: c.detailMax || 60 });
       box.classList.add("cell-detail");
       return el("td", { class: cls.join(" ") || null }, [box]);
     }
@@ -1414,27 +1429,37 @@ function vizStat(data, desc) {
   /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
      so when it is true the panel says so in words (the stat's `pageCut` sentence) under the tiles. */
   const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(s.pageCut));
-  const tiles = el(
-    "div",
-    { class: "stats" },
-    shown.map((s) => {
-      const sev = s.sev || s.severity;
-      const raw = getPath(data, s.key);
-      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
-      /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
-         smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
-      const hasValue = raw != null || (why != null && why !== "");
-      const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
-      /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
-      const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
-      const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
-      return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
-        el("div", { class: "label", text: s.label }),
-      ]);
-    })
-  );
-  return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  const tile = (s) => {
+    const sev = s.sev || s.severity;
+    /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
+    const made = typeof s.display === "function" ? s.display(data) : null;
+    const raw = made != null ? made : getPath(data, s.key);
+    const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+    /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
+       smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
+    const hasValue = raw != null || (why != null && why !== "");
+    const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+    /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
+    const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
+    const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    return el("div", { class: "stat" }, [
+      el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
+      el("div", { class: "label", text: s.label }),
+    ]);
+  };
+  /* #7416: a `sentence` stat is prose, not a figure. Drawn as a bold tile it filled a tile track and pushed its neighbour wide;
+     it is a line of text across the panel instead, and the tiles that remain keep their natural width. */
+  const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
+  if (!sentences.length) {
+    const tiles = el("div", { class: "stats" }, shown.map(tile));
+    return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  }
+  const rest = shown.filter((s) => !s.sentence);
+  return el("div", { class: "stat-block" }, [
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
+    rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
+    ...cutNotes,
+  ]);
 }
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
@@ -1537,6 +1562,27 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName, store) {
   location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
+}
+
+/**
+ * Open one panel of a server's tab (#7416): a tile that says a column is nearly full goes to the panel that names it, not to the top of a tab
+ * that runs to tens of thousands of pixels. The panel is found by its `data-title` once the tab has drawn it (the tab builds its panels
+ * after the server's card arrives), then scrolled to the top of the view. It is looked for for four seconds and the scroll is repeated once
+ * after the tab's reads settle, because panels above it change height as they fill in.
+ */
+export function navigateServerPanel(serverName, store, tab, panelTitle) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName) + "/" + encodeURIComponent(tab), store);
+  let tries = 0;
+  const look = () => {
+    const panel = typeof document.querySelector === "function" ? document.querySelector('[data-title="' + panelTitle + '"]') : null;
+    if (panel && typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ block: "start" });
+      setTimeout(() => panel.scrollIntoView({ block: "start" }), 1500);
+      return;
+    }
+    if (++tries < 40) setTimeout(look, 100);
+  };
+  setTimeout(look, 100);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in

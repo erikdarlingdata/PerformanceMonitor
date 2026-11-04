@@ -260,6 +260,9 @@ internal static class ManagedConfFile
         /* Planner page cost: no legacy block and no marker; this file is the only place the setting is written. */
         blocks.Append(DarlingManagedPostgres.BuildPlannerPageCostConfAppend());
 
+        /* TimescaleDB telemetry off (#7446): same shape, no legacy block and no marker. */
+        blocks.Append(DarlingManagedPostgres.BuildTelemetryLevelConfAppend());
+
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
         foreach (var key in order)
@@ -361,6 +364,7 @@ internal static class ManagedConfFile
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             [DarlingManagedPostgres.RandomPageCostSetting] = DarlingManagedPostgres.RandomPageCostValue,
+            [DarlingManagedPostgres.TelemetryLevelSetting] = DarlingManagedPostgres.TelemetryLevelValue,
         };
 
     /// <summary>

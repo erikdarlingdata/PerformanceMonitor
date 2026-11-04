@@ -38,13 +38,13 @@ public partial class LocalDataService
     /// 200 and be omitted entirely, while Darling's twin — ranked by duration in SQL — kept it. Same tool
     /// name, different truth per SKU. The tool now reads <see cref="GetSlowestLongQueryCompletionsAsync"/>.</para>
     /// </summary>
-    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null)
+    public async Task<List<LongQueryCompletionRow>> GetRecentLongQueryCompletionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, QueryTagReadScope? tags = null, bool includeMonitor = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues) + MonitorStatementClause(includeMonitor);
         /* #5993: the query tag filter, on the raw rows before the newest-N cap. */
         var tagValues = new List<object>();
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
@@ -77,14 +77,14 @@ LIMIT {LongQueryGridCap}";
     /// and the <c>LIMIT</c>, so the page is the slowest N of the chosen databases and a cap never counts another database's
     /// rows (Darling's <c>DarlingLongQueryReader</c> predicate sits in the same place). Null or empty reads every database.</para>
     /// </summary>
-    public async Task<List<LongQueryCompletionRow>> GetSlowestLongQueryCompletionsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int limit, IReadOnlyList<string>? databaseNames = null, QueryTagReadScope? tags = null)
+    public async Task<List<LongQueryCompletionRow>> GetSlowestLongQueryCompletionsAsync(int serverId, int hoursBack, DateTime? asOfUtc, int limit, IReadOnlyList<string>? databaseNames = null, QueryTagReadScope? tags = null, bool includeMonitor = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         /* $4 is the row cap, so the optional database list starts at $5. */
-        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues) + MonitorStatementClause(includeMonitor);
         /* #5992: the query tag filter, on the raw rows before the duration ranking and the limit. */
         var tagValues = new List<object>();
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
@@ -106,6 +106,16 @@ LIMIT $4";
 
         return await ReadLongQueryCompletionsAsync(command);
     }
+
+    /// <summary>
+    /// #7416 item 11: the predicate that leaves the monitor's own statements out of a long-query read unless the caller asks for them.
+    /// The stored <c>client_app_name</c> is the connection's program name, so the test is the shared prefix match
+    /// (<see cref="PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern"/>): a user's application that merely
+    /// contains the words is kept, and a row with no program name is never the monitor's.
+    /// </summary>
+    internal static string MonitorStatementClause(bool includeMonitor) => includeMonitor
+        ? ""
+        : $" AND (client_app_name IS NULL OR client_app_name NOT ILIKE '{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}')";
 
     /// <summary>The projection both long-query reads share, so the two cannot drift a column apart.</summary>
     private const string LongQueryCompletionsSelect = @"

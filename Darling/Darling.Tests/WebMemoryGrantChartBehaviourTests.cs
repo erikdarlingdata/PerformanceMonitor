@@ -71,10 +71,10 @@ public sealed class WebMemoryGrantChartBehaviourTests
         // Sizing: the desktop's five metrics (the two ceilings included) for each of two pools. Activity: four metrics each.
         var sizing = charts[0];
         Assert.Equal(10, sizing.GetProperty("series").GetArrayLength());
-        Assert.Contains("Pool 2: Max Target MB (ceiling)", sizing.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
+        Assert.Contains("Default pool: Max Target MB (ceiling)", sizing.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
         var activity = charts[1];
         Assert.Equal(8, activity.GetProperty("series").GetArrayLength());
-        Assert.Contains("Pool 1: Forced Grants", activity.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
+        Assert.Contains("Internal pool: Forced Grants", activity.GetProperty("series").EnumerateArray().Select(s => s.GetProperty("label").GetString()));
 
         // Three collection times, each its own x position: the window is a series, not one instant.
         var times = sizing.GetProperty("points").EnumerateArray().Select(p => p.GetProperty("collection_time").GetString()).ToArray();

@@ -575,6 +575,17 @@ table.data td.clamp { max-width: 28rem; }
 .clamp-text[role="button"] { cursor: pointer; }
 .clamp-text.open { white-space: pre-wrap; overflow-wrap: anywhere; }
 .plan-summary { display: flex; flex-wrap: wrap; gap: 0 1rem; margin: 4px 0; }
+/* #7410: a prose column that takes the width the grid has. It wraps at a floor of 12rem, grows with a wide screen, and the grid scrolls sideways only when
+   the floors alone do not fit. The closed summary of a click-to-open cell in it wraps too, so a sentence is read without opening it. */
+/* #7410: a column built only so Copy and the CSV carry it (exportOnly) is not drawn. */
+table.data .export-only { display: none; }
+table.data td.flow-cell { min-width: 12rem; max-width: none; overflow-wrap: anywhere; }
+/* #7410: a narrower floor for the short wrapping columns of a wide grid (Logging Settings Audit), so its last column is not pushed past the panel at 1280 px. */
+table.data td.flow-cell.flow-narrow { min-width: 8rem; }
+table.data td.flow-cell .disclosure { max-width: none; }
+table.data td.flow-cell .disclosure > .disc-summary { white-space: normal; overflow: visible; text-overflow: clip; }
+/* The query text of Top Query Shapes keeps room to read: its closed summary is one line, and without a floor the auto layout squeezes it to a few characters. */
+table.data td.query-cell { min-width: 16rem; }
 table.data td.pre { white-space: pre-wrap; }
 table.data td.mono { font-family: var(--mono); font-size: 0.78rem; }
 table.data td.sev-Warning { color: var(--warn); }
@@ -911,8 +922,14 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .strip.notice { background: rgba(255, 213, 79, 0.10); border: 1px solid rgba(255, 213, 79, 0.35); color: var(--warn); }
 .strip.loading { color: var(--muted); }
 .strip.source { color: var(--muted); font-size: 0.85em; }
-.strip.plain-empty .disclosure { margin-top: 0.4rem; max-width: none; }
-.strip.plain-empty .disc-body { margin-top: 0.3rem; white-space: pre-wrap; }
+/* #7416: the tool's own wording of a notice, one click away under the plain sentence. */
+.strip-detail { margin-top: 0.35rem; font-size: 0.8rem; }
+.strip-detail > summary { cursor: pointer; }
+.strip-detail > div { margin-top: 0.25rem; overflow-wrap: anywhere; }
+.strip.plain-empty .disclosure,
+.strip.plain-note .disclosure { margin-top: 0.4rem; max-width: none; }
+.strip.plain-empty .disc-body,
+.strip.plain-note .disc-body { margin-top: 0.3rem; white-space: pre-wrap; }
 
 /* #7402: ONE spacing rule for a banner and for a Run now row. Whatever follows either one (a panel, a table, a button row,
    a Copy bar) starts a normal gap below it, at every width, instead of each page adding its own margin. In normal flow this
@@ -1638,6 +1655,8 @@ table.data td.rec-text { min-width: 16rem; }
 .slicer-reset { padding: 0.1rem 0.6rem; font-size: 0.74rem; }
 .slicer-track { position: relative; height: 56px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 .slicer-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+.slicer-dots { position: absolute; inset: 0; pointer-events: none; }
+.slicer-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-dark); }
 .slicer-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .slicer-area { fill: var(--accent); fill-opacity: 0.18; stroke: none; }
 .slicer-overlay { fill: none; stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 5 3; vector-effect: non-scaling-stroke; }
@@ -1679,3 +1698,12 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 /* #7109: a proposal's detail lines (a plan handle, a request id, a JSON fact) have no break points, so they wrap anywhere instead of pushing a 390 px page wider than the screen. */
 .fact-list { padding-left: 1.2rem; }
 .fact-list li, .kv { overflow-wrap: anywhere; }
+
+/* #7416: a stat that is a sentence (Health Checks) is a line of text across the panel, and the tiles beside it keep their natural width
+   instead of stretching to fill the row. */
+.stat-block { display: flex; flex-direction: column; gap: 0.6rem; }
+.stat-sentence { margin: 0; line-height: 1.4; overflow-wrap: anywhere; }
+.stats.natural { grid-template-columns: repeat(auto-fit, minmax(150px, 14rem)); }
+.metric-chip.clickable { cursor: pointer; }
+.metric-chip.clickable:hover { filter: brightness(1.15); }
+.metric-chip.clickable:focus-visible { outline: 2px solid var(--accent, #4fc3f7); outline-offset: 1px; }

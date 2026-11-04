@@ -111,6 +111,16 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
     }
 
     [Fact]
+    public void ThePlatformColumn_ShowsOnlyWhenSomeRowNamesAPlatform()
+    {
+        var boxed = ViewerDatabaseProtectionText.Rows(Read(Fact("a", fullAgo: Day), Fact("b", fullAgo: Day)));
+        Assert.False(ViewerDatabaseProtectionText.ShowsPlatformColumn(boxed));
+
+        var mixed = ViewerDatabaseProtectionText.Rows(Read(Fact("a", fullAgo: Day), Fact("b", platform: "platform_managed", fullAgo: Day)));
+        Assert.True(ViewerDatabaseProtectionText.ShowsPlatformColumn(mixed));
+    }
+
+    [Fact]
     public void APlatformManagedTarget_ShowsTheAgeAndTheLabel_AndIsNotOverdueWhenRdsCheckDbIsRecent()
     {
         var read = Read(

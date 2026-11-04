@@ -367,6 +367,7 @@ export const READ_FIELDS = {
         { key: "duration_ms", label: "Total", format: "ms" },
         { key: "rows_collected", label: "Rows", format: "int" },
         { key: "error_message", label: "Error", wrap: true, localizeText: true, plain: "counts" },
+        { key: "run_note", label: "Run note", wrap: true, localizeText: true, plain: "counts", hideWhenEmpty: true },
         { key: "read_source", label: "Read source", wrap: true, hideWhenEmpty: true },
       ],
     },

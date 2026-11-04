@@ -147,7 +147,7 @@ public class RelationshipGraph
         // CPU_SPIKE → SOS_SCHEDULER_YIELD (spike confirmed by scheduler pressure)
         AddEdge("CPU_SPIKE", "SOS_SCHEDULER_YIELD", "cpu_spike",
             "Scheduler yields — CPU spike caused scheduler starvation",
-            facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].BaseSeverity > 0);
+            facts => HasFact(facts, "SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].Value >= 0.25);
 
         // CPU_SPIKE → CXPACKET (spike from parallelism)
         AddEdge("CPU_SPIKE", "CXPACKET", "cpu_spike",
@@ -177,12 +177,12 @@ public class RelationshipGraph
         // PAGEIOLATCH_SH → RESOURCE_SEMAPHORE (memory grants contributing to buffer pressure)
         AddEdge("PAGEIOLATCH_SH", "RESOURCE_SEMAPHORE", "memory_pressure",
             "RESOURCE_SEMAPHORE present — memory grants competing with buffer pool",
-            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].Severity > 0);
+            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // PAGEIOLATCH_EX → same
         AddEdge("PAGEIOLATCH_EX", "RESOURCE_SEMAPHORE", "memory_pressure",
             "RESOURCE_SEMAPHORE present — memory grants competing with buffer pool",
-            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].Severity > 0);
+            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // RESOURCE_SEMAPHORE → PAGEIOLATCH (downstream I/O cascade)
         AddEdge("RESOURCE_SEMAPHORE", "PAGEIOLATCH_SH", "memory_grants",
@@ -202,7 +202,7 @@ public class RelationshipGraph
         // MEMORY_GRANT_PENDING → RESOURCE_SEMAPHORE (waiters confirm RESOURCE_SEMAPHORE waits)
         AddEdge("MEMORY_GRANT_PENDING", "RESOURCE_SEMAPHORE", "memory_grants",
             "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
-            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].Severity > 0);
+            facts => HasFact(facts, "RESOURCE_SEMAPHORE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE"]));
 
         // MEMORY_GRANT_PENDING → QUERY_SPILLS (insufficient grants causing spills)
         AddEdge("MEMORY_GRANT_PENDING", "QUERY_SPILLS", "memory_grants",
@@ -212,12 +212,12 @@ public class RelationshipGraph
         // PAGEIOLATCH_SH → IO_READ_LATENCY_MS (buffer miss confirmed by disk latency)
         AddEdge("PAGEIOLATCH_SH", "IO_READ_LATENCY_MS", "memory_pressure",
             "Read latency elevated — disk confirms buffer pool pressure",
-            facts => HasFact(facts, "IO_READ_LATENCY_MS") && facts["IO_READ_LATENCY_MS"].BaseSeverity > 0);
+            facts => HasFact(facts, "IO_READ_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_READ_LATENCY_MS"]));
 
         // PAGEIOLATCH_EX → IO_READ_LATENCY_MS
         AddEdge("PAGEIOLATCH_EX", "IO_READ_LATENCY_MS", "memory_pressure",
             "Read latency elevated — disk confirms buffer pool pressure",
-            facts => HasFact(facts, "IO_READ_LATENCY_MS") && facts["IO_READ_LATENCY_MS"].BaseSeverity > 0);
+            facts => HasFact(facts, "IO_READ_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_READ_LATENCY_MS"]));
 
         // MEMORY_GRANT_PENDING → PARAMETER_SENSITIVITY (grant pressure traced to a sensitive plan)
         AddEdge("MEMORY_GRANT_PENDING", "PARAMETER_SENSITIVITY", "memory_grants",
@@ -237,7 +237,7 @@ public class RelationshipGraph
         // SOS_SCHEDULER_YIELD → RESOURCE_SEMAPHORE_QUERY_COMPILE (CPU pressure traced to compiles)
         AddEdge("SOS_SCHEDULER_YIELD", "RESOURCE_SEMAPHORE_QUERY_COMPILE", "memory_grants",
             "Query-compile memory pressure — compilation contributing to CPU pressure",
-            facts => HasFact(facts, "RESOURCE_SEMAPHORE_QUERY_COMPILE") && facts["RESOURCE_SEMAPHORE_QUERY_COMPILE"].BaseSeverity > 0);
+            facts => HasFact(facts, "RESOURCE_SEMAPHORE_QUERY_COMPILE") && FactScorer.ClearsRootBar(facts["RESOURCE_SEMAPHORE_QUERY_COMPILE"]));
     }
 
     /* ── Blocking & Deadlocking ── */
@@ -277,7 +277,7 @@ public class RelationshipGraph
         // DEADLOCKS → LCK_M_S (reader/writer deadlocks)
         AddEdge("DEADLOCKS", "LCK_M_S", "deadlocking",
             "Reader lock waits present — RCSI could prevent reader/writer deadlocks",
-            facts => HasFact(facts, "LCK_M_S") && facts["LCK_M_S"].BaseSeverity > 0);
+            facts => HasFact(facts, "LCK_M_S") && FactScorer.ClearsRootBar(facts["LCK_M_S"]));
 
         // LCK_M_S → DB_CONFIG (reader/writer contention → RCSI recommendation)
         AddEdge("LCK_M_S", "DB_CONFIG", "lock_contention",
@@ -289,7 +289,7 @@ public class RelationshipGraph
         // DB_CONFIG → LCK_M_S (RCSI-off confirmed by reader/writer lock contention)
         AddEdge("DB_CONFIG", "LCK_M_S", "config_issue",
             "LCK_M_S waits — readers blocked by writers, RCSI would eliminate these",
-            facts => HasFact(facts, "LCK_M_S") && facts["LCK_M_S"].BaseSeverity > 0
+            facts => HasFact(facts, "LCK_M_S") && FactScorer.ClearsRootBar(facts["LCK_M_S"])
                   && HasFact(facts, "DB_CONFIG")
                   && facts["DB_CONFIG"].Metadata.GetValueOrDefault("rcsi_off_count") > 0);
 
@@ -346,12 +346,12 @@ public class RelationshipGraph
         // IO_WRITE_LATENCY_MS → WRITELOG (write latency with log waits)
         AddEdge("IO_WRITE_LATENCY_MS", "WRITELOG", "io_pressure",
             "WRITELOG waits — transaction log I/O bottleneck",
-            facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].Severity > 0);
+            facts => HasFact(facts, "WRITELOG") && facts["WRITELOG"].Value >= 0.05);
 
         // WRITELOG → IO_WRITE_LATENCY_MS (log waits confirmed by disk latency)
         AddEdge("WRITELOG", "IO_WRITE_LATENCY_MS", "log_io",
             "Write latency elevated — disk confirms log I/O bottleneck",
-            facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && facts["IO_WRITE_LATENCY_MS"].BaseSeverity > 0);
+            facts => HasFact(facts, "IO_WRITE_LATENCY_MS") && FactScorer.ClearsRootBar(facts["IO_WRITE_LATENCY_MS"]));
 
         // #3538 A5: the two halves of commit latency on a synchronous availability group. A commit on the
         // primary pays the local log flush (WRITELOG) AND the wait for the synchronous secondary to harden
@@ -382,7 +382,7 @@ public class RelationshipGraph
         // LATCH_EX → TEMPDB_USAGE (latch contention often from TempDB allocation)
         AddEdge("LATCH_EX", "TEMPDB_USAGE", "latch_contention",
             "TempDB usage — latch contention may be on TempDB allocation pages",
-            facts => HasFact(facts, "TEMPDB_USAGE") && facts["TEMPDB_USAGE"].BaseSeverity > 0);
+            facts => HasFact(facts, "TEMPDB_USAGE") && FactScorer.ClearsRootBar(facts["TEMPDB_USAGE"]));
 
         // LATCH_EX → CXPACKET (parallel operations amplifying latch contention)
         AddEdge("LATCH_EX", "CXPACKET", "latch_contention",
@@ -417,7 +417,7 @@ public class RelationshipGraph
         // QUERY_SPILLS → TEMPDB_USAGE (spills consuming tempdb space)
         AddEdge("QUERY_SPILLS", "TEMPDB_USAGE", "query_performance",
             "TempDB usage elevated — spills consuming TempDB space",
-            facts => HasFact(facts, "TEMPDB_USAGE") && facts["TEMPDB_USAGE"].BaseSeverity > 0);
+            facts => HasFact(facts, "TEMPDB_USAGE") && FactScorer.ClearsRootBar(facts["TEMPDB_USAGE"]));
 
         // QUERY_HIGH_DOP → CXPACKET (high-DOP queries causing parallelism waits)
         AddEdge("QUERY_HIGH_DOP", "CXPACKET", "query_performance",
@@ -446,12 +446,12 @@ public class RelationshipGraph
         // PLAN_REGRESSION → CPU_SQL_PERCENT (regressed plan driving CPU load)
         AddEdge("PLAN_REGRESSION", "CPU_SQL_PERCENT", "query_performance",
             "SQL Server CPU elevated — the regressed plan is burning CPU",
-            facts => HasFact(facts, "CPU_SQL_PERCENT") && facts["CPU_SQL_PERCENT"].BaseSeverity > 0);
+            facts => HasFact(facts, "CPU_SQL_PERCENT") && FactScorer.ClearsRootBar(facts["CPU_SQL_PERCENT"]));
 
         // PLAN_REGRESSION → CPU_SPIKE (regressed plan caused a CPU spike)
         AddEdge("PLAN_REGRESSION", "CPU_SPIKE", "query_performance",
             "CPU spike — the regressed plan is burning CPU",
-            facts => HasFact(facts, "CPU_SPIKE") && facts["CPU_SPIKE"].BaseSeverity > 0);
+            facts => HasFact(facts, "CPU_SPIKE") && FactScorer.ClearsRootBar(facts["CPU_SPIKE"]));
     }
 
     /* ── Maintenance ── */

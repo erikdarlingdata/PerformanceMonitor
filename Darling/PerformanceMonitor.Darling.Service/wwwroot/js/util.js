@@ -285,6 +285,12 @@ export function browserZoneOrBlank() {
   }
 }
 
+/** #7416: the service writes its window notices for an MCP client in lowercase ("partial window: ..."). A notice drawn on a page starts a
+    sentence, so the opening word is capitalised here, the one place every notice strip passes through. */
+function startOfSentence(text) {
+  return typeof text === "string" ? text.replace(/^partial window:/, "Partial window:") : text;
+}
+
 /**
  * #7402: what a line chart says when the read returned points and not one of them holds a number to draw. A message the read itself
  * carries (its `message`) is used as the tool wrote it for a person. Without one, a read that counted points whose rate could not be
@@ -301,12 +307,36 @@ export function noValuesText(data) {
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
-  return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
+  return el("div", { class: "strip notice", role: "status" }, [startOfSentence(localizeIsoText(plainText(message)))]);
+}
+
+/**
+ * #7410: a yellow note with a long tool text behind it. `short` is the one plain sentence the strip shows. The tool's whole note sits
+ * behind "More detail" (the same disclosure plainEmptyStrip uses), so nothing is lost.
+ */
+export function noticeStripWithDetail(short, full) {
+  if (typeof full !== "string" || !full.trim() || plainText(full) === short) return noticeStrip(short);
+  return el("div", { class: "strip notice plain-note", role: "status" }, [
+    localizeIsoText(short),
+    disclosure("More detail", localizeIsoText(plainText(full)), { title: "What the read said, in full" }),
+  ]);
+}
+
+/**
+ * #7410: the strip a read's `note` draws above a grid that has rows. A panel that names `noteShort` shows that plain sentence and keeps
+ * the tool's note one click away. Any other note is drawn as it always was: a caveat about the data (a cut window, a floor) is not
+ * shortened by a rule, only by a sentence somebody wrote for that panel.
+ */
+export function noteStrip(desc, note, data) {
+  /* `noteShort` is a sentence, or a function of the read's data for a note that has two cases (Statement Evictions: unknown, or a pass count). */
+  const short = desc && typeof desc.noteShort === "function" ? desc.noteShort(data) : desc && desc.noteShort;
+  if (typeof short === "string" && short) return noticeStripWithDetail(short, note);
+  return noticeStrip(note);
 }
 
 /** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
     yellow `strip notice`, which is for a caveat about otherwise good data. `caveat` is true when the line also carries one (a cut list, a
-    shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. */
+    shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. A tab's usage note (what the tab reads and leaves to the desktop viewer) is a caption too (#7416). */
 export function captionStrip(message, caveat) {
   if (caveat) return noticeStrip(message);
   return el("div", { class: "strip source", role: "status" }, [localizeIsoText(plainText(message))]);
@@ -349,6 +379,22 @@ export function chartNoteText(data, kind) {
  * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
  */
 const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+
+/**
+ * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the
+ * one reason the read can name. A late first point alone proves nothing aged out (a query first run five hours ago, or a server that
+ * was off earlier, gives the same one), so "aged out" is said only when the read's own `start_older_than_tier` is true, with how long
+ * the tier keeps data from `tier_keeps_days`. Otherwise the note says only that the store holds nothing earlier at this tier.
+ * `subject` is the lead ("History", "History for this query").
+ */
+export function trendHeadNote(d, subject) {
+  const head = subject + " starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for. ";
+  if (d.start_older_than_tier === true) {
+    const days = Number(d.tier_keeps_days);
+    return head + "The earlier part has aged out of this tier" + (days > 0 ? ", which keeps " + days + (days === 1 ? " day" : " days") + " of data." : ".");
+  }
+  return head + "The store holds nothing earlier in this window at this tier.";
+}
 
 /** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
 export function chartNote(data, kind) {
@@ -570,7 +616,7 @@ export function cappedReadNote(data, desc) {
   const total = Number(data.total_snapshots);
   const counts = shown > 0 && total > shown ? shown.toLocaleString() + " of " + total.toLocaleString() + " snapshots" : "rows";
   return {
-    text: "partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
+    text: "Partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
     oldest,
   };
 }
@@ -632,14 +678,14 @@ export function windowNoteText(data) {
   const first = at(data.data_start_utc);
   if (start && end && oldest) {
     return (
-      "partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
-      "The window started at " + start + ". The grid covers " + oldest + " to " + end + "."
+      "Partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
+      "The window you asked for runs from " + start + " to " + end + "."
     );
   }
   if (start && end && first) {
     return (
-      "partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
-      "The panel covers " + first + " to " + end + "."
+      "Partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
+      "It runs to " + end + "."
     );
   }
 
@@ -950,6 +996,15 @@ export function fmtMbFit(v) {
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
+/** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
+    and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
+    starts with a capital, and a word the service already capitalised is left as it is. */
+export function fmtStatusWord(v) {
+  if (typeof v !== "string" || !v.trim()) return fmtText(v);
+  const word = v.trim();
+  if (word.toLowerCase() === "ok") return "OK";
+  return /^[a-z][a-z_ ]*$/.test(word) ? word[0].toUpperCase() + word.slice(1).replace(/_/g, " ") : word;
+}
 export function fmtBool(v) {
   return v === true ? "yes" : v === false ? "no" : "—";
 }
@@ -969,6 +1024,7 @@ export const FORMATTERS = {
   reltime: relTime,
   bool: fmtBool,
   text: fmtText,
+  status: fmtStatusWord,
 };
 
 export function applyFormat(name, value, opts) {
