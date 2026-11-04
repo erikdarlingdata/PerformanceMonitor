@@ -30,3 +30,14 @@ export const PG_CONFIG_CHANGE_COLUMNS = [
   { key: "source", label: "Source", small: true },
 ];
 
+/* #7447: audit_config's PostgreSQL rows. The SQL Server grid (AUDIT_COLUMNS) carries a Suggested column, but a PostgreSQL row
+   has no suggested_value: the recommendation sentence carries the evidence. object_name is set only on the per-table autovacuum
+   row and is blank for the server-level settings. */
+export const PG_AUDIT_COLUMNS = [
+  { key: "setting", label: "Setting" },
+  { key: "status", label: "Status", statusSev: true },
+  { key: "current_value", label: "Current" },
+  { key: "object_name", label: "Table", small: true },
+  { key: "recommendation", label: "Why", wrap: true },
+];
+

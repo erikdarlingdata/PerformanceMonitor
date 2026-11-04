@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -153,7 +153,7 @@ export function fanout(read, params, specs, intro = null) {
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
         markPartialSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -733,7 +733,7 @@ export function renderInto(body, render) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, hideWhenNotCollected = false) {
+export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, hideWhenNotCollected = false, extra = null) {
   if (!emptyText) throw new Error("tablePanel(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   /* #7409: the panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
@@ -741,7 +741,17 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;
+  /* #7410: `noteShort` (the plain sentence over a long note) and `emptyLine` (the plain empty sentence), see panels.js. */
+  if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
+}
+
+/**
+ * #7410: tablePanel() whose own empty sentence is the one the page says for a true negative (status "empty"). The tool's longer text for that
+ * answer stays behind "More detail". A reply that is not a true negative (unavailable, precondition) still shows the tool's text.
+ */
+export function tablePanelPlain(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2) {
+  return tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span, null, null, null, null, null, null, false, null, false, { emptyLine: true });
 }
 
 /**

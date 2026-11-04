@@ -501,7 +501,15 @@ const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
  */
 export function shortEmptyLine(res, extensionLine) {
   const h = res && res.hints && typeof res.hints === "object" ? res.hints : null;
-  if (!h || typeof h.reason !== "string") return null;
+  if (!h) return null;
+  /* #7410: Top Queries on a window that stored snapshots but no measured delta. The hints carry the counts and the hours that would answer, so the sentence is built
+     from them and the tool's paragraph (which names as_of and hours_back for an MCP client) sits behind "More detail". */
+  if (typeof h.reason !== "string" && h.snapshots_with_measured_delta === 0 && Number(h.snapshots_in_window) > 0) {
+    const hours = Number(h.suggested_hours_back);
+    return "No query in this range changed enough between snapshots to attribute CPU to it." +
+      (hours > 0 ? " A range of the last " + hours + (hours === 1 ? " hour" : " hours") + " or more reaches one that did." : " A longer range may.");
+  }
+  if (typeof h.reason !== "string") return null;
   if (h.reason === "extension_missing") {
     if (extensionLine) return extensionLine;
     const names = Array.isArray(h.extensions) ? h.extensions.filter((n) => typeof n === "string" && n) : [];

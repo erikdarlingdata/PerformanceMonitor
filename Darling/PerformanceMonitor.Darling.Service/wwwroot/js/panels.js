@@ -55,6 +55,7 @@ import {
   sourceStrip,
   clampText,
   plainEmptyStrip,
+  noteStrip,
   disclosure,
   markPartialSubtitle,
   localizeIsoText,
@@ -121,6 +122,8 @@ export function emptyHeadline(desc, res) {
  */
 export function panelEmptyStrip(desc, res) {
   if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  /* A panel with `emptyLine` says that plain sentence for a true negative and keeps the tool's own text behind "More detail" (#7410). */
+  if (desc.emptyLine && res.status === "empty") return plainEmptyStrip(res, desc.emptyLine === true ? desc.emptyText : desc.emptyLine);
   const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
   return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
@@ -276,8 +279,8 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
       floor,
       /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
       sourceStrip(res.data, desc),
-      typeof note === "string" && note.trim() ? noticeStrip(note) : null,
-      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noticeStrip(n) : null)),
+      typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
     ]);
   } catch (e) {
@@ -307,7 +310,7 @@ export const VIZ = {
  */
 const NO_FIELDS_MSG = "No fields configured — edit this view and run Auto-detect fields.";
 
-/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
+/* table: desc = { rowsKey, columns:[{key,label,format,align,wrap,clamp,mono,pre,sevKey,statusSev,sortable,sortValue,csv,copy,copyValue,exportOnly}], sortable, sortId, onRow(row, tr), rowClass(row)|string, tools:false }
 
    Column-header sort (#4843). A header click cycles ascending -> descending -> the server's own order, with a ▲/▼
    indicator and aria-sort; Enter and Space on the focused header do the same. The comparison reads the RAW row value
@@ -361,7 +364,7 @@ export function gridTable(rows, desc) {
   const grid = desc.sortable === false ? null : makeGridSort(desc, cols, rows);
   const bodyRows = rows.map((row) => {
     const rc = typeof desc.rowClass === "function" ? desc.rowClass(row) : desc.rowClass;
-    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => cell(row, c)));
+    const tr = el("tr", { class: typeof rc === "string" && rc ? rc : null }, cols.map((c) => exportOnlyCell(row, c)));
     trRow.set(tr, row);
     if (typeof desc.onRow === "function") desc.onRow(row, tr);
     return tr;
@@ -1097,7 +1100,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: isNumericCol(c) ? "num" : null, title: c.hint || null });
+  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") || null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1195,7 +1198,7 @@ function makeGridSort(desc, cols, rows) {
       const th = ths[i];
       if (!th) return;
       const live = sortable[i];
-      th.className = live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "";
+      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "");
       th.setAttribute("tabindex", live ? "0" : "-1");
       /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
       th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
@@ -1231,7 +1234,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;
@@ -1295,10 +1298,11 @@ export function visibleColumns(cols, rows) {
     /* #7416: `hideWhenAllZero` drops a count column that is zero (or missing) on every row: a column of zeros on a healthy server says nothing, and a
        column that has a number says why it is there in its header hint. */
     if (c.hideWhenAllZero && !rows.some((row) => Number(getPath(row, c.key)) > 0)) return false;
-    if (!c.hideWhenEmpty) return true;
+    if (!c.hideWhenEmpty && !c.hideWhenZero) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
-      return v != null && v !== "";
+      /* #7410: `hideWhenZero` also drops a column whose every value is 0, the counters only some engines fill (Top Query Shapes' temp blocks, WAL and peak memory). */
+      return v != null && v !== "" && !(c.hideWhenZero && Number(v) === 0);
     });
   });
   return kept.length ? kept : cols;
@@ -1306,6 +1310,14 @@ export function visibleColumns(cols, rows) {
 
 function isNumericCol(c) {
   return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
+}
+
+/* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging
+   Settings Audit folds Unit and Source into the Value cell and the cost into the remedy cell, and the export still keeps each as its own field. */
+function exportOnlyCell(row, c) {
+  const td = cell(row, c);
+  if (c.exportOnly) td.classList.add("export-only");
+  return td;
 }
 
 function cell(row, c) {
@@ -1373,7 +1385,7 @@ function cell(row, c) {
     const full = getPath(row, c.detailKey);
     if (typeof full === "string" && full !== "") {
       const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
-      const box = disclosure(text, detail, { max: 60 });
+      const box = disclosure(text, detail, { max: c.detailMax || 60 });
       box.classList.add("cell-detail");
       return el("td", { class: cls.join(" ") || null }, [box]);
     }
