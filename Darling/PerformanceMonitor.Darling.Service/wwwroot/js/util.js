@@ -1028,7 +1028,13 @@ export function fmtMb(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, 1, 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+}
+/* #7488: the decimals a stepped-up axis label keeps at least. A tick step that is a whole number of the larger unit (20 GB) prints "20 GB";
+   a step that is not (a 10,000 MB step is 9.77 GB) keeps one decimal, as a tooltip or table cell does. */
+function wholeStepMin(o, per) {
+  const step = stepOf(o);
+  return step != null && Number.isInteger(Number((step / per).toPrecision(12))) ? 0 : 1;
 }
 /* A size in `unit` (kb, mb, gb or tb, any case) stepped up to the unit that keeps it under 1,024, written "MB", "GB": the
    same rule fmtMb applies, so 80,000 MB reads "78.1 GB" and never a cut-off "80,000.0 mb". Null when `unit` is not a size. */
@@ -1048,8 +1054,23 @@ export function fmtSize(v, unit, o) {
     i++;
   }
   /* A tooltip or table cell keeps one decimal, as every composed value does; an axis tick prints as many as its step needs. */
-  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? 1 : 0, per);
+  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? wholeStepMin(o, per) : 0, per);
   return fixed(value, places) + " " + SIZE_UNITS[i];
+}
+/* #7488: how many of a size axis's own units one step-up unit holds, for an axis whose largest value is `max` in `unit` (kb, mb, gb or tb):
+   1 while the labels stay in `unit` (max under 1,024), 1024 once they print in the next unit up (60,000 MB reads GB), and so on, the
+   same ladder fmtSize and fmtMb climb. The chart picks its ticks in that larger unit so the labels land on round numbers there
+   (20 GB, 40 GB) and not on round numbers of the smaller one (58.6 GB). 1 for a unit that is not a size. */
+export function sizeAxisPer(unit, max) {
+  let i = SIZE_UNITS.indexOf(String(unit == null ? "" : unit).toUpperCase());
+  const top = Math.abs(Number(max));
+  if (i < 0 || !isFinite(top)) return 1;
+  let per = 1;
+  while (top / per >= 1024 && i < SIZE_UNITS.length - 1) {
+    per *= 1024;
+    i++;
+  }
+  return per;
 }
 /* A byte count in human units (B, KB, MB, GB; 1024-based). A null is the dash, never 0 bytes: 0 is a real answer. The table sorts
    a column on the raw number, so "900 KB" sorts below "2.0 MB" whatever the text says. */
@@ -1407,10 +1428,33 @@ export async function apiGetFleet(store) {
 
     const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    if (res.kind === "data") stampFleetWindow(res.data);
+    return res;
   } finally {
     scope.n--;
   }
+}
+
+/** #7507: the roll-up carries its window once (window_start / window_end), but the Blocking and Deadlocks tiles sit on each card, so
+    every card is stamped with the window length in hours. The tile then names the window the SERVER read, whatever it was, and no page
+    hardcodes "past hour". A reply with no usable window leaves the cards unstamped and their tiles as they were. */
+export function stampFleetWindow(data) {
+  if (!data || !Array.isArray(data.cards)) return data;
+  const start = parseUtc(data.window_start);
+  const end = parseUtc(data.window_end);
+  const minutes = start && end ? Math.round((end.getTime() - start.getTime()) / 60000) : 0;
+  if (minutes > 0) for (const c of data.cards) if (c && typeof c === "object") c.window_hours = minutes / 60;
+  return data;
+}
+
+/** #7507: a window length in hours as the words a tile uses: "past hour", "past 6 hours", "past day", "past 3 days", "past 90 minutes". */
+export function windowPhrase(hours) {
+  if (!(hours > 0)) return null;
+  if (hours === 1) return "past hour";
+  if (hours >= 24 && hours % 24 === 0) return hours === 24 ? "past day" : "past " + hours / 24 + " days";
+  if (Number.isInteger(hours)) return "past " + hours + " hours";
+  return "past " + Math.round(hours * 60) + " minutes";
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a

@@ -347,7 +347,7 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocked_process_reports does, and truncated means the window held more reports than limit.")]
+    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocked_process_reports does, and truncated means the window held more reports than limit. event_time is UTC, but stamps inside the XML (lasttranstarted, lastbatchstarted, lastbatchcompleted) are on the monitored server's clock.")]
     public static async Task<string> GetBlockedProcessXml(
         LocalDataService dataService,
         ServerManager serverManager,

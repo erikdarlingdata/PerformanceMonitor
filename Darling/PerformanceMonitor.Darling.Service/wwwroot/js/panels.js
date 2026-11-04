@@ -1527,6 +1527,8 @@ function vizLine(data, desc) {
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
+    /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). */
+    sizeUnit: desc.format === "mb" ? "mb" : null,
     unit: desc.unit ?? null,
     title: desc.title || null,
     atTime: desc.atTime || null,

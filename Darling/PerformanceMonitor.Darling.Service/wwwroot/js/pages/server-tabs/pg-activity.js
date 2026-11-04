@@ -89,6 +89,8 @@ export function pgQueryDurationTrendSpecs(ctx) {
       format: "num2",
       unit: "ms",
       emptyText: empty,
+      /* #7410: one plain sentence for a true negative. The tool's text (which also says a statement can be evicted) is behind "More detail". */
+      emptyLine: "No statement execution time to chart in this window.",
     },
     {
       ...common,

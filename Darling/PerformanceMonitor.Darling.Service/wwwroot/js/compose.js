@@ -420,6 +420,7 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           formatValue: (v, o) => formatComposedValue(v, panelSpec.overlay.unit || "", o),
           unit: axisUnit(panelSpec.overlay.unit || ""),
           integerTicks: panelSpec.overlay.unit === "count",
+          sizeUnit: panelSpec.overlay.unit || null,
         }
       : null;
 
@@ -452,6 +453,8 @@ export function renderComposedResult(result, panelSpec, opts = {}) {
           /* A count measure prints through fmtInt, so its gridlines sit on whole numbers: a fractional step on a
              small domain would repeat one label down the axis. */
           integerTicks: unit === "count",
+          /* #7488: a kb / mb / gb / tb measure picks its ticks in the unit its labels step up to; any other unit is ignored by the chart. */
+          sizeUnit: unit,
           mode: panelSpec.viz,
           thresholds,
           annotations: annotationLayers(result.annotations, opts.annotationMeta),

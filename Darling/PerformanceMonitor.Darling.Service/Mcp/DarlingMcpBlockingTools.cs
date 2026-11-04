@@ -704,7 +704,7 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocking does, and truncated means the window held more reports than limit.")]
+    [McpServerTool(Name = "get_blocked_process_xml"), Description("Gets the raw blocked process report XML from extended events, NEWEST FIRST. Contains full detail about both the blocked and blocking sessions for deep analysis. Only rows that CARRY a report (the XE capture; the DMV fallback never has one) are counted against limit; reports_returned, truncated and oldest_returned_event_time / newest_returned_event_time describe the page the same way get_blocking does, and truncated means the window held more reports than limit. event_time is UTC, but stamps inside the XML (lasttranstarted, lastbatchstarted, lastbatchcompleted) are on the monitored server's clock.")]
     public static Task<string> GetBlockedProcessXml(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,

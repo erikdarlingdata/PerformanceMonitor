@@ -14,7 +14,7 @@
  */
 
 import { holdsPage, keepScroll, noteRefreshError, replaceNodes, showPage, showRefreshError } from "../refresh-in-place.js";
-import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
+import { el, mount, readTool, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, windowPhrase, bandClass, rollupTextId, tagPill, frontDoor, currentStore } from "../util.js";
 import { frontDoorStores, healthBandClass, healthLabel, currentFirst, currentMark } from "../store-picker.js";
 import { VIZ, navigateServer, navigateServerPanel } from "../panels.js";
 import { favoritesFirst, onChange as onLocalChange } from "../viewer-local.js";
@@ -844,14 +844,19 @@ export function metricBands(c, store) {
       ? fmtMb(c.memory_mb) + (c.buffer_pool_mb != null ? " · BP " + fmtMb(c.buffer_pool_mb) : "")
       : null;
 
-  const blockingDetail = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
+  /* #7507: both tiles count the roll-up's window (the one hour /api/fleet answers by default), which nothing on the page said — and
+     the Range control beside them reads "Past day". The window comes off the card (apiGetFleet stamps it from the reply), and a chip
+     with no events still names it. A card with no stamped window keeps the details it had. */
+  const windowWords = windowPhrase(c.window_hours);
+  const blockingWait = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
+  const blockingDetail = [windowWords, blockingWait].filter(Boolean).join(" · ") || null;
   /* #3368: the chip's VALUE is the count and its colour is banded on the RATE, so the detail carries the
      rate — a chip that bands on a figure it does not show leaves "Deadlocks 3" against an amber border with
      no way to see which tier was crossed, and "3" is the same string over an hour and over a day. Null when
      the window was too short to normalise, which is the reading the band itself had to go on. */
   const deadlockRate = c.deadlock_rate_per_hour != null ? fmtNum(c.deadlock_rate_per_hour) + "/hr" : null;
   const deadlockLast = c.deadlock_count > 0 && c.deadlock_last_seen ? "last " + relTime(c.deadlock_last_seen) : null;
-  const deadlockDetail = [deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
+  const deadlockDetail = [windowWords, deadlockRate, deadlockLast].filter(Boolean).join(" · ") || null;
 
   /* #2779: a server that has stopped collecting has stale collector counts — its collectors are not "OK", they
      are unmeasured. collector_severity keys only on the FAILING count (a stale collector is neither healthy nor

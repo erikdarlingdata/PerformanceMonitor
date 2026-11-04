@@ -156,6 +156,39 @@ out.loneAxis = { left: lone.leftLabels, leftRoom: lone.left - 8, leftNeed: lone.
 const tiny = axes({ points: rows([1, 2, 3, 4]), series2: { key: "b", label: "B", color: "#00f" }, formatValue: (v) => String(v) });
 out.tinyAxis = { left: tiny.left, rightGutter: tiny.width - tiny.right };
 
+/* #7488: a size axis whose labels step up to GB picks its ticks in GB. The expected words are built here with the page's own number
+   formatter, so the test holds in any locale. A chart whose largest value stays under 1,024 MB keeps the ticks it always had. */
+const GB = (n) => util.fmtInt(n) + " GB";
+const mbFmt = (v, o) => util.applyFormat("mb", v, o);
+const sized = (values, extra = {}) => axes({ points: rows(values), formatValue: mbFmt, sizeUnit: "mb", ...extra });
+const unsized = (values) => axes({ points: rows(values), formatValue: mbFmt });
+const composedBoth = axes({
+  points: rows([42000, 51000, 60000, 58000], "a", [10000, 20000, 30000, 24000]),
+  formatValue: (v, o) => compose.formatComposedValue(v, "mb", o),
+  sizeUnit: "mb",
+  series2: { key: "b", label: "B", color: "#00f", formatValue: (v, o) => compose.formatComposedValue(v, "mb", o), sizeUnit: "mb" },
+});
+out.sizeAxis = {
+  big: sized([42000, 51000, 60000, 58000]).leftLabels,
+  bigExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
+  bigWithout: unsized([42000, 51000, 60000, 58000]).leftLabels,
+  small: sized([120, 340, 500, 410]).leftLabels,
+  smallWithout: unsized([120, 340, 500, 410]).leftLabels,
+  edge: sized([300, 900, 1023]).leftLabels,
+  edgeWithout: unsized([300, 900, 1023]).leftLabels,
+  composedLeft: composedBoth.leftLabels,
+  composedRight: composedBoth.rightLabels,
+  composedLeftExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
+  composedRightExpected: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+};
+
+/* A chart of counts keeps every tick on a whole number (integerTicks), where the same range without it steps by 0.2. */
+out.integerAxis = {
+  withOption: [1, 2, 3, 7, 40].map((max) => ({ max, ticks: charts.niceScale(0, max, 4, null, true).ticks })),
+  without: charts.niceScale(0, 1, 4, null, false).ticks,
+  drawn: axes({ points: rows([0, 1, 0, 1]), formatValue: (v) => util.fmtInt(v), integerTicks: true }).leftLabels,
+};
+
 out.composed = {
   mb: [0.5, 512, 1023, 1024, 1536, 80000, 2000000].map((v) => compose.formatComposedValue(v, "mb")),
   kb: compose.formatComposedValue(2048, "kb"),

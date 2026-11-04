@@ -44,6 +44,8 @@ export function pgWaitTrendSpecs(ctx) {
       resetKey: "counter_reset",
       resetLabel: "Profile reset",
       emptyText: "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.",
+      /* #7410: the plain sentence for a true negative; the tool's text, which names the instrument, is behind "More detail". */
+      emptyLine: "No samples for this wait event in this window. A trend needs at least two snapshots, so a short window shows nothing.",
     },
   ];
 }
