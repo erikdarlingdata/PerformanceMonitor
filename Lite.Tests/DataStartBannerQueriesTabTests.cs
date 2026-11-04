@@ -1204,7 +1204,7 @@ VALUES ($1, $2, $3, $4, $5, 'RESOURCE_MEMPHYSICAL_LOW', 1, 0)";
     [InlineData("ServerTab.Pickers.cs", "private async System.Threading.Tasks.Task UpdateMemoryClerksChartFromPickerAsync(", "GetChartWindow(hoursBack, fromDate, toDate)", "MemoryClerksChart")]
     [InlineData("ServerTab.Pickers.cs", "private async System.Threading.Tasks.Task UpdateWaitStatsChartFromPickerAsync(", "GetChartWindow(hoursBack, null, null)", "WaitStatsChart")]
     [InlineData("ServerTab.Pickers.cs", "private async System.Threading.Tasks.Task UpdatePerfmonChartFromPickerAsync(", "GetChartWindow(hoursBack, null, null)", "PerfmonChart")]
-    [InlineData("CorrelatedTimelineLanesControl.xaml.cs", "private void SyncXAxes(", "GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow)", "chart")]
+    [InlineData("CorrelatedTimelineLanesControl.xaml.cs", "void SyncXAxes(", "GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow)", "chart")]
     public void ChartSurfaces_PinTheirXAxisToTheRequestedRange_OnTheDataPathToo(string file, string signature, string window, string charts)
     {
         var body = Body(CodeOf(file), signature);

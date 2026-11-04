@@ -614,7 +614,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
         {
             CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
             return;
@@ -627,7 +627,7 @@ public partial class ViewerServerTab
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
-        CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ShowChartLegend(CollectorDurationChart);
         CollectorDurationChart.Refresh();
     }

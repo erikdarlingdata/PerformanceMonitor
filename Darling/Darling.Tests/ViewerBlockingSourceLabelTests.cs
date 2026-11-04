@@ -71,8 +71,8 @@ public sealed class ViewerBlockingSourceLabelTests
     [Fact]
     public void TheCharts_PutTheLabelOnTheAxisOnlyWhenTheyDrawRows()
     {
-        var trend = Between(Tab, "private void RenderBlockingTrendChart(", "private void RenderDeadlockTrendChart(");
-        var duration = Between(Tab, "private void RenderBlockingDurationChart(", "private void RenderBlockingTotalDurationChart(");
+        var trend = Between(Tab, "void RenderBlockingTrendChart(", "void RenderDeadlockTrendChart(");
+        var duration = Between(Tab, "void RenderBlockingDurationChart(", "private void RenderBlockingTotalDurationChart(");
         var total = Between(Tab, "private void RenderBlockingTotalDurationChart(", "private void RenderDeadlockWaitChart(");
 
         Assert.Single(Occurrences(trend, "BlockingTrendLabels.LegendFor(sources)"));

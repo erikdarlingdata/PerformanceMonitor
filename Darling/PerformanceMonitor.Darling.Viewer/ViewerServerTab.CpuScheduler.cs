@@ -77,7 +77,8 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
         CpuSchedRenderer.Render(CpuSchedulerChart, _cpuSchedulerHover, data,
-            startUtc.ToOADate(), endUtc.ToOADate());
+            ChartXStart(startUtc, endUtc), endUtc.ToOADate());
+        KeepPlottedInView(CpuSchedulerChart, startUtc, endUtc);
     }
 
     /// <summary>Tears down the scheduler hover helper (mirrors the other tabs' dispose).</summary>

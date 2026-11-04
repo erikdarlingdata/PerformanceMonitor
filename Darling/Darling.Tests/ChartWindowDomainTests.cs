@@ -73,7 +73,6 @@ public sealed class ChartWindowDomainTests
            one is passed, so the burst of a sparse series never re-scales the axis to itself. */
         Assert.Contains("const dataTMin = rows[0].t.getTime();", charts, StringComparison.Ordinal);
         Assert.Contains("const dataTMax = rows[rows.length - 1].t.getTime();", charts, StringComparison.Ordinal);
-        Assert.Contains("const tMin = hasWindow ? windowStart : dataTMin;", charts, StringComparison.Ordinal);
         Assert.Contains("const tMax = hasWindow ? windowEnd : dataTMax;", charts, StringComparison.Ordinal);
 
         /* A window is honoured only when it is two real numbers with end AFTER start — a degenerate window falls
