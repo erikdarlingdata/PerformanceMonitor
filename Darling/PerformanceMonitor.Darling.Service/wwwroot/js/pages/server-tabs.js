@@ -402,8 +402,7 @@ export const SERVER_TABS = [
           xKey: "collection_time",
           series: WAITING_TASK_SERIES,
           emptyText:
-            "Nothing was waiting in this window. If the server has never been sampled the read says so " +
-            "explicitly rather than reporting this as an all-clear.",
+            "Nothing was waiting in this window.",
         },
         {
           title: "Blocked Sessions",
@@ -424,8 +423,7 @@ export const SERVER_TABS = [
         subtitle: ctx.label,
         atTimeItem: "blocking",
         emptyText:
-          "No lock waits in this window. If wait stats have never been collected for this server the read " +
-          "says so explicitly rather than reporting an absence of lock contention.",
+          "No lock waits in this window.",
       }),
       /* #2484: severity, the companion to the two count trends at the top of this tab. One read, two
          charts, via fanout for the same reason as above. */
@@ -440,8 +438,7 @@ export const SERVER_TABS = [
           xKey: "time",
           series: BLOCKING_SEVERITY_SERIES,
           emptyText:
-            "No blocking in this window. If neither capture path has ever produced a row the read says " +
-            "so explicitly rather than reporting a clean bill of health.",
+            "No blocking in this window.",
         },
         {
           title: "Deadlock Severity",
@@ -600,8 +597,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           emptyText:
-            "No stored-procedure activity in this window. A server that runs no procedures lands here too, " +
-            "and the read says which of the two it found.",
+            "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
       ),
       linePanel(
@@ -616,8 +612,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           emptyText:
-            "No Query Store activity in this window. If Query Store is off on this server's databases the " +
-            "read says so rather than showing an empty chart.",
+            "No Query Store activity in this window.",
         }
       ),
       /* #2520: the same table this tab always had, now with the drill-down attached. The CPU tab keeps the
@@ -754,8 +749,7 @@ export const SERVER_TABS = [
         label: ctx.label,
         columns: QUERY_HEATMAP_COLUMNS,
         emptyText:
-          "No query executed in this window. Query stats are collected every cycle whether or not anything " +
-          "ran, so the read distinguishes a server nobody collected from one that was simply idle.",
+          "No query executed in this window. Query stats are collected every cycle whether or not anything ran.",
       }),
       tagFilteredCard("longqueries", (picker, redraw) => {
         /* #7416 item 11: the monitor's own statements are left out by default (on an idle server every long completion is
@@ -1011,7 +1005,7 @@ export const SERVER_TABS = [
         "errors",
         SEVERE_ERROR_COLUMNS,
         ctx.label,
-        "No severe errors in this window — the healthy state for this read."
+        "No severe errors in this window, which is the healthy state."
       ),
       tablePanel(
         "Scheduler Issues",
@@ -1020,7 +1014,7 @@ export const SERVER_TABS = [
         "issues",
         SCHEDULER_ISSUE_COLUMNS,
         ctx.label,
-        "No scheduler issues in this window — the healthy state for this read."
+        "No scheduler issues in this window, which is the healthy state."
       ),
       tablePanel(
         "I/O Issues",
@@ -1029,7 +1023,7 @@ export const SERVER_TABS = [
         "issues",
         IO_ISSUE_COLUMNS,
         ctx.label,
-        "No I/O issues in this window — the healthy state for this read."
+        "No I/O issues in this window, which is the healthy state."
       ),
       tablePanel(
         "CPU Tasks",
@@ -1066,7 +1060,7 @@ export const SERVER_TABS = [
         "events",
         MEMORY_OOM_COLUMNS,
         ctx.label,
-        "No memory node OOM events in this window — the healthy state for this read.",
+        "No memory node OOM events in this window, which is the healthy state.",
         2, null, null, MEMORY_OOM_GROUPS
       ),
       /* #2484: the ninth member of the get_health_parser_* family. Built with tablePanel(), not a bare object

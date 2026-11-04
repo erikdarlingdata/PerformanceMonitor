@@ -173,7 +173,7 @@ export async function drawQueryTrend(slot, server, ctx, query, signal) {
     VIZ.table(trend.data, {
       rowsKey: "trend",
       columns: QUERY_TREND_COLUMNS,
-      emptyText: "No collections recorded this query in the window the read could reach.",
+      emptyText: "No collection recorded this query in the part of the window that is stored.",
     }),
   ]);
 }

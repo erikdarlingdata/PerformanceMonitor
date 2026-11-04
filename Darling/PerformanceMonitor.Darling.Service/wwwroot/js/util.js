@@ -1028,7 +1028,13 @@ export function fmtMb(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, 1, 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+}
+/* #7488: the decimals a stepped-up axis label keeps at least. A tick step that is a whole number of the larger unit (20 GB) prints "20 GB";
+   a step that is not (a 10,000 MB step is 9.77 GB) keeps one decimal, as a tooltip or table cell does. */
+function wholeStepMin(o, per) {
+  const step = stepOf(o);
+  return step != null && Number.isInteger(Number((step / per).toPrecision(12))) ? 0 : 1;
 }
 /* A size in `unit` (kb, mb, gb or tb, any case) stepped up to the unit that keeps it under 1,024, written "MB", "GB": the
    same rule fmtMb applies, so 80,000 MB reads "78.1 GB" and never a cut-off "80,000.0 mb". Null when `unit` is not a size. */
@@ -1048,8 +1054,23 @@ export function fmtSize(v, unit, o) {
     i++;
   }
   /* A tooltip or table cell keeps one decimal, as every composed value does; an axis tick prints as many as its step needs. */
-  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? 1 : 0, per);
+  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? wholeStepMin(o, per) : 0, per);
   return fixed(value, places) + " " + SIZE_UNITS[i];
+}
+/* #7488: how many of a size axis's own units one step-up unit holds, for an axis whose largest value is `max` in `unit` (kb, mb, gb or tb):
+   1 while the labels stay in `unit` (max under 1,024), 1024 once they print in the next unit up (60,000 MB reads GB), and so on, the
+   same ladder fmtSize and fmtMb climb. The chart picks its ticks in that larger unit so the labels land on round numbers there
+   (20 GB, 40 GB) and not on round numbers of the smaller one (58.6 GB). 1 for a unit that is not a size. */
+export function sizeAxisPer(unit, max) {
+  let i = SIZE_UNITS.indexOf(String(unit == null ? "" : unit).toUpperCase());
+  const top = Math.abs(Number(max));
+  if (i < 0 || !isFinite(top)) return 1;
+  let per = 1;
+  while (top / per >= 1024 && i < SIZE_UNITS.length - 1) {
+    per *= 1024;
+    i++;
+  }
+  return per;
 }
 /* A byte count in human units (B, KB, MB, GB; 1024-based). A null is the dash, never 0 bytes: 0 is a real answer. The table sorts
    a column on the raw number, so "900 KB" sorts below "2.0 MB" whatever the text says. */
