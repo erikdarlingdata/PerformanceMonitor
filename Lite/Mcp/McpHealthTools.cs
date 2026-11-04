@@ -324,14 +324,20 @@ public sealed class McpHealthTools
                 ? new Dictionary<string, CollectorRunTimeReading>(StringComparer.OrdinalIgnoreCase)
                 : await runTimes.ReadAsync(dataService, resolved.ServerId, rows, DateTime.UtcNow);
 
-            var compactCount = full_detail ? 0 : rows.Count(IsCollectionHealthCompactEligible);
+            /* #7375: on a server with Always On off, a HEALTHY Always On collector is listed once as not_collected with Darling's sentence
+               and is left out of the listed rows and the detail counts, as on Darling. The newest server_properties row decides, a NULL flag
+               reading as off. A FAILING one keeps its row. The sweep figures below keep every row, as Darling's do. */
+            var alwaysOnOff = await McpEngineCapability.AlwaysOnOffAsync(dataService, resolved.ServerId);
+            var (shownRows, alwaysOnNotCollected) = McpEngineCapability.SplitCollectionHealthByAlwaysOn(alwaysOnOff, rows);
+
+            var compactCount = full_detail ? 0 : shownRows.Count(IsCollectionHealthCompactEligible);
             /* #4198's second cut: a row that fails the predicate above used to keep the full ~30-field shape
                below regardless of full_detail. Measured on both SKUs' #4198 fixtures that alone could not clear
                the response budget -- the weight is 30+ small fields times every row that needs a look, which
                previewing free text cannot touch -- so that row now gets PartialCollectionHealthRow instead,
                unless full_detail=true asks for everything. */
-            var partialCount = full_detail ? 0 : rows.Count - compactCount;
-            var result = rows.Select(r =>
+            var partialCount = full_detail ? 0 : shownRows.Count - compactCount;
+            var result = shownRows.Select(r =>
             {
                 runTimeReadings.TryGetValue(r.CollectorName, out var runTime);
                 return full_detail
@@ -339,7 +345,7 @@ public sealed class McpHealthTools
                     : IsCollectionHealthCompactEligible(r)
                         ? (object)CompactCollectionHealthRow(r, runTime)
                         : (object)PartialCollectionHealthRow(r, runTime);
-            }).Concat(engineNotCollected);
+            }).Concat(alwaysOnNotCollected).Concat(engineNotCollected);
 
             static object FullCollectionHealthRow(CollectorHealthRow r, CollectorRunTimeReading? runTime) => new
             {
@@ -741,7 +747,7 @@ public sealed class McpHealthTools
                    describes what THIS response actually did instead of what the argument nominally requested. */
                 collector_detail_note = full_detail
                     ? "full_detail=true: every field is served for every collector below."
-                    : $"{compactCount} of {rows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
+                    : $"{compactCount} of {shownRows.Count} collector(s) below are HEALTHY with nothing to report (no errors, denials, session/extension-missing runs or abandoned cycles this window) and are compacted to collector/status/compact/total_runs/rows_stored/avg_duration_ms/last_success. {partialCount} need a look (failing, stale, stopped, erroring, denied, regressed, or an unexplained zero) and carry a leaner partial_detail shape instead of full detail: in a partial row a missing key means null, false or 0, and only collector, status, partial_detail, total_runs and errors are always present. Pass full_detail=true for every field on every collector.",
                 /* #6180: the response-size cut, observed. Null note and false flag when every collector fit. */
                 truncated = collectorCount < collectorRows.Count,
                 collectors_returned = collectorCount,

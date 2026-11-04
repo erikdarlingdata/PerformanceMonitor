@@ -45,7 +45,7 @@ internal static class DarlingGatedCollectorRows
 
 
     /// <summary>The sentence on a not-applicable Always On row.</summary>
-    internal const string AlwaysOnOffMessage = "Always On availability groups are not enabled on this server, so there is nothing for this collector to read.";
+    internal const string AlwaysOnOffMessage = CollectorHealthClassifier.AlwaysOnOffMessage;
 
     /// <summary>The two Always On collectors, named once in the shared classifier (#6828) so the count surfaces and this list cannot disagree.</summary>
     internal static bool IsAlwaysOnCollector(string collectorName) =>
@@ -76,7 +76,7 @@ internal static class DarlingGatedCollectorRows
         try
         {
             var properties = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, serverId, cancellationToken);
-            return properties is { IsHadrEnabled: false };
+            return CollectorHealthClassifier.IsAlwaysOnOff(properties is not null, properties?.IsHadrEnabled ?? false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
