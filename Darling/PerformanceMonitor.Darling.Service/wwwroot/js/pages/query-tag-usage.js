@@ -116,7 +116,8 @@ export function sectionTable(block, onTag) {
       [el("td", {}, [label]), ...keys.map((k) => el("td", { class: "num", text: fmtFigure(r.figures[k]) }))]
     );
   });
-  return el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)]);
+  /* #7479: a table with no scroll box of its own ran past the panel at 600 px (653 px of table in a 600 px page); in a .table-wrap it scrolls inside the panel. */
+  return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)])]);
 }
 
 /** "the last 24 hours", "the last 7 days", or "this time range" when the window is not a plain preset. */

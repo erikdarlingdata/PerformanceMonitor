@@ -14,8 +14,9 @@
 --
 -- Seeded (SQL Server target "ui-sql", 6 hours back, one row a minute unless said otherwise):
 --   cpu_utilization_stats 360 | memory_stats 360 | wait_stats 4 types x 360 | file_io_stats 2 files x 360
---   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes) | server_properties 1
---   database_size_stats 3 databases x 2 files, newest minute | collection_log 5 collectors x 72 (every 5 minutes), all success
+--   query_stats 12 queries (3 databases x 4) x 36 collections (every 10 minutes), plus (#7479) 2 queries in a 77-character database name x 36, and 300 queries in
+--   BulkDb x 1 collection (a grid of several hundred rows) | server_properties 1
+--   database_size_stats 4 databases x 2 files, newest minute (the fourth has a 77-character name, #7479) | collection_log 5 collectors x 72 (every 5 minutes), all success
 --   blocked_process_reports 2 | deadlocks 1 | analysis_findings 2 | config_alert_log 1 (metric 'High CPU', the name #/triage resolves)
 --   ag_replica_states 2 (one group, SalesAG: UISQL01 primary, UISQL02 secondary) | ag_database_replica_states 4 (2 databases x 2 replicas), newest minute
 -- Seeded (PostgreSQL target "ui-pg"):
@@ -41,6 +42,19 @@ WHERE name = 'ui-sql'
 -- The observed-registry row (the service writes it on a first connect, which never happens here).
 INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
 VALUES (:sid, :'sname', 'ui-sql', TRUE, 3, 16, 'sqlserver',
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
+ON CONFLICT (server_id) DO UPDATE SET
+    server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
+    sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
+
+-- A third SQL Server with a 70-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
+-- has an observed-registry row and nothing else: like the other two it is at an address nothing listens on.
+SELECT server_id AS lsid, host AS lname
+FROM config.config_monitored_servers
+WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary'
+\gset
+INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
+VALUES (:lsid, :'lname', 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary', TRUE, 3, 16, 'sqlserver',
         (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
@@ -114,8 +128,25 @@ CROSS JOIN (VALUES
     (9,  'ReportingDb', 'SELECT * FROM dbo.DailySales WHERE SaleDate >= @From;', 80, 30000, 7000),
     (10, 'ReportingDb', 'SELECT TOP (50) * FROM dbo.TopCustomers ORDER BY Revenue DESC;', 60, 22000, 5000),
     (11, 'ReportingDb', 'EXEC dbo.RefreshDailySales;', 2, 400000, 90000),
-    (12, 'ReportingDb', 'SELECT COUNT(*) FROM dbo.AuditTrail WHERE ActorId = @ActorId;', 150, 8000, 1800))
+    (12, 'ReportingDb', 'SELECT COUNT(*) FROM dbo.AuditTrail WHERE ActorId = @ActorId;', 150, 8000, 1800),
+    (13, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy', 'SELECT t.TransactionId, t.AccountIdentifierWithAVeryLongColumnNameThatHasNoSpacesAtAllAndKeepsGoingForQuiteAWhile, t.PostedAmountInReportingCurrency FROM dbo.ArchivedFinancialTransactionsHistoryPartitionedByFiscalQuarterAndLegalEntity AS t WHERE t.PostedOn >= @From AND t.PostedOn < @To ORDER BY t.PostedOn DESC;', 20, 70000, 12000),
+    (14, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy', 'EXEC dbo.usp_RebuildArchivedFinancialTransactionsHistorySummaryForEveryLegalEntityAndFiscalQuarterInTheReportingWarehouse;', 1, 500000, 100000))
     AS q(n, db, query_text, execs, cpu_us, reads);
+
+-- query_stats, BulkDb (#7479): 300 queries, one collection each, so the Queries grid and the triage list have several hundred rows to lay out.
+-- collection_id 5500000 + n. Low CPU, so they sort below the 12 queries above.
+INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, creation_time,
+    last_execution_time, execution_count, total_worker_time, total_elapsed_time, total_logical_reads, total_logical_writes, total_physical_reads, total_rows,
+    min_worker_time, max_worker_time, min_elapsed_time, max_elapsed_time, query_text, sql_handle, plan_handle,
+    delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes, delta_physical_reads, delta_rows,
+    sample_interval_seconds)
+SELECT 5500000 + n, :'anchor'::timestamp, :sid, :'sname', 'BulkDb', '0x' || lpad(to_hex(n * 4099), 16, '0'), '0x' || lpad(to_hex(n * 7919), 16, '0'),
+       :'anchor'::timestamp - interval '2 days', :'anchor'::timestamp,
+       10 + n % 7, (10 + n % 7) * 40, (10 + n % 7) * 80, (10 + n % 7) * 12, 0, 0, 10 + n % 7,
+       20, 60, 40, 120,
+       'SELECT Col' || n || ' FROM dbo.BulkTable' || n || ' WHERE Id = @Id;', '0x02' || lpad(to_hex(n), 8, '0'), '0x06' || lpad(to_hex(n), 8, '0'),
+       10 + n % 7, (10 + n % 7) * 40, (10 + n % 7) * 80, (10 + n % 7) * 12, 0, 0, 10 + n % 7, 600
+FROM generate_series(100, 399) AS n;
 
 -- server_properties: Overview. One row, the newest minute. collection_id 6000000.
 INSERT INTO collect.server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
@@ -131,7 +162,7 @@ SELECT 7000000 + 10 * d.n + f.fid, mm.t, :sid, :'sname', d.db, 4 + d.n, f.fid, f
        d.db || f.suffix, f.dir || d.db || f.suffix, f.total_mb, f.total_mb / 2, 256, -1, 'FULL', 160, 'ONLINE',
        f.dir, 512000, 300000
 FROM (SELECT t FROM ui_minutes WHERE m = 0) mm
-CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'InventoryDb'), (3, 'ReportingDb')) AS d(n, db)
+CROSS JOIN (VALUES (1, 'SalesDb'), (2, 'InventoryDb'), (3, 'ReportingDb'), (4, 'ReportingWarehouse_ArchiveFinancialTransactionsHistory_2019_2025_ReadOnlyCopy')) AS d(n, db)
 CROSS JOIN (VALUES (1, 'ROWS', '.mdf', 'D:\data\', 20480), (2, 'LOG', '_log.ldf', 'L:\log\', 4096)) AS f(fid, kind, suffix, dir, total_mb);
 
 -- collection_log: Health and Collection Health. 5 collectors, every 5 minutes, all success. log_id 8000000 + 1000 * collector + k.

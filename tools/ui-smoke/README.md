@@ -14,10 +14,11 @@ requests (#6656), and it is not a required check.
 | File | What it is |
 | --- | --- |
 | `run-ui-smoke.ps1` | The entry, in CI and locally: builds the service, starts it on the store, waits for `/api/ping` and the config seed, applies `seed.sql`, runs `smoke.mjs`, stops the service. |
-| `darling.ui-smoke.json` | The service config. Two servers, `ui-sql` (SQL Server) and `ui-pg` (PostgreSQL), both at `127.0.0.1` port 1, so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) The web host asks for its token on loopback too, so `web.network` holds only a token. `run-ui-smoke.ps1` makes a fresh one per run, signs in once, and passes the session cookie to `smoke.mjs` and `shots.mjs`, so the pages render as a signed-in editor sees them. |
+| `darling.ui-smoke.json` | The service config. Three servers, `ui-sql` (SQL Server), `ui-pg` (PostgreSQL) and a SQL Server with a 70-character name (#7479), all at addresses nothing listens on (`127.0.0.1` port 1), so they fail to connect at once and the service never collects over the seeded rows. (`servers: []` is refused by config validation.) The web host asks for its token on loopback too, so `web.network` holds only a token. `run-ui-smoke.ps1` makes a fresh one per run, signs in once, and passes the session cookie to `smoke.mjs` and `shots.mjs`, so the pages render as a signed-in editor sees them. |
 | `seed.sql` | The rows. Every time is relative to the store's own clock and every count is fixed, so the assertions are exact. |
 | `pages.json` | The pages and what each must show. |
 | `smoke.mjs` | The browser walk (`playwright-core`, the installed Chrome or Edge). |
+| `layout.mjs` | The layout pass ("The layout pass" below): every page at 600, 1280 and 2560 px wide. |
 | `shots.mjs` | The screenshot step (`playwright-core`'s own Chromium, `pixelmatch`, `pngjs`). |
 | `baselines/*.png` | The baseline screenshots, one per page marked `screenshot` in `pages.json`. |
 
@@ -52,6 +53,30 @@ tools/ui-smoke/run-ui-smoke.ps1 -PgBin $bin -PgPort 55401 -Channel msedge     # 
 Logs, `report.json`, failure screenshots and traces land in `-WorkDir` (default `%TEMP%\darling-ui-smoke`). Open a
 trace with `npx playwright show-trace <page>.trace.zip`. `UI_SMOKE_PAGES=ui-pg-waits,alerts` runs only those pages when
 you call `node smoke.mjs` yourself.
+
+## The layout pass (#7479)
+
+After the walk, `layout.mjs` loads every page again at 600, 1280 and 2560 px wide (the window is 800 px tall) and measures it in the
+page. It fails the job and lists every failure with the page, width, check, selector and numbers, not only the first. A full-page PNG of
+every page at every width is written to `<out>/layout/<page>@<width>.png` and uploaded in the `darling-ui-smoke` artifact. The job summary
+lists the failures. `UI_SMOKE_LAYOUT=off` skips the pass.
+
+| Check | Fails when |
+| --- | --- |
+| `page-scrolls-sideways` | `documentElement.scrollWidth > clientWidth` |
+| `content-past-edge` | an element reaches past the right edge of `#main`, of a panel or of a card that holds it. An element inside a box that scrolls or clips sideways (a grid's `.table-wrap`, a chart's SVG) is not measured against what is outside that box, but the box is |
+| `text-clipped` | an element with `overflow: hidden` has text wider than its box (`scrollWidth > clientWidth`) and no `title` to read the rest. Cells of a grid are not measured: they clamp by design |
+| `chart-size` | a `.chart` plot is under 60 px tall or 120 px wide, or sticks out of its panel |
+| `width-unused` | at 2560 only: the right-most panel, card, tile, chart or grid ends before 80% of the width `#main` has. A page with none of those (an empty state, a form) has nothing to measure |
+
+A page can exempt one check with `"layoutExempt": [{ "check": "...", "reason": "..." }]` in `pages.json`. The pass prints every exempted
+failure as a `LAYOUT-EXEMPT` line with its reason. Fix the page first: an exemption is for a layout that is wanted (the fleet's server cards
+are capped and left-aligned on purpose, #2772 and #7402).
+
+Time added: about 1.7 s for each page and width, 126 loads, so 3.5 minutes on a laptop (210 s measured), on top of the walk.
+
+The seed has hard names and a long grid for this pass: a database with a 77-character name (two queries and its files), a third server with
+a 70-character name, and 300 queries in `BulkDb` that give the Queries grid several hundred rows.
 
 ## Screenshot baselines
 

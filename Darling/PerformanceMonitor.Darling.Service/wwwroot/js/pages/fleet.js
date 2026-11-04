@@ -772,7 +772,7 @@ function serverCard(c, store, own = true) {
         /* #2031: a muted-bell right of the dot when a whole-server alert silence is active, so a silenced
            server stops looking healthy-quiet. The Silence / Unsilence button beside it shows for an editing seat. */
         effectiveSilenced(c) ? el("span", { class: "silenced-bell", title: "Alerts silenced for this server", role: "img", "aria-label": "Alerts silenced" }) : null,
-        el("span", { class: "title", text: c.display_name }),
+        el("span", { class: "title", title: c.display_name, text: c.display_name }), /* #7479: the title ellipsizes in a 260 px card; the full name is on hover */
         own ? alertBadge(c.server_id) : null,
         own ? favoriteStar(c.server_id) : null,
         own ? silenceButton(c) : null,
