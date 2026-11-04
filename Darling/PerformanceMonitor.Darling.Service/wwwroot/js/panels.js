@@ -1405,23 +1405,28 @@ function vizStat(data, desc) {
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
   const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
-  return el(
-    "div",
-    { class: "stats" },
-    shown.map((s) => {
-      const sev = s.sev || s.severity;
-      const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
-      const raw = getPath(data, s.key);
-      const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
-      /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
-      const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
-      const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
-      return el("div", { class: "stat" }, [
-        el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
-        el("div", { class: "label", text: s.label }),
-      ]);
-    })
-  );
+  const tile = (s) => {
+    const sev = s.sev || s.severity;
+    const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
+    const raw = getPath(data, s.key);
+    const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+    /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
+    const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
+    const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    return el("div", { class: "stat" }, [
+      el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
+      el("div", { class: "label", text: s.label }),
+    ]);
+  };
+  /* #7416: a `sentence` stat is prose, not a figure. Drawn as a bold tile it filled a tile track and pushed its neighbour wide;
+     it is a line of text across the panel instead, and the tiles that remain keep their natural width. */
+  const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
+  if (!sentences.length) return el("div", { class: "stats" }, shown.map(tile));
+  const rest = shown.filter((s) => !s.sentence);
+  return el("div", { class: "stat-block" }, [
+    ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
+    rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
+  ]);
 }
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
@@ -1520,6 +1525,27 @@ function vizBandlist(data, desc) {
 /** Set the hash route to a server's detail page. */
 export function navigateServer(serverName, store) {
   location.hash = storeHash("#/server/" + encodeURIComponent(serverName), store);
+}
+
+/**
+ * Open one panel of a server's tab (#7416): a tile that says a column is nearly full goes to the panel that names it, not to the top of a tab
+ * that runs to tens of thousands of pixels. The panel is found by its `data-title` once the tab has drawn it (the tab builds its panels
+ * after the server's card arrives), then scrolled to the top of the view. It is looked for for four seconds and the scroll is repeated once
+ * after the tab's reads settle, because panels above it change height as they fill in.
+ */
+export function navigateServerPanel(serverName, store, tab, panelTitle) {
+  location.hash = storeHash("#/server/" + encodeURIComponent(serverName) + "/" + encodeURIComponent(tab), store);
+  let tries = 0;
+  const look = () => {
+    const panel = typeof document.querySelector === "function" ? document.querySelector('[data-title="' + panelTitle + '"]') : null;
+    if (panel && typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ block: "start" });
+      setTimeout(() => panel.scrollIntoView({ block: "start" }), 1500);
+      return;
+    }
+    if (++tries < 40) setTimeout(look, 100);
+  };
+  setTimeout(look, 100);
 }
 
 /** Collector rows worst first (Failing, then Warning, then the rest, then Healthy, then not applicable), each group in

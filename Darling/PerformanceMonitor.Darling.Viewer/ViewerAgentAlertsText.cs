@@ -76,13 +76,12 @@ public static class ViewerAgentAlertsText
             : read.InstanceStatus.Gaps.Select(g => new ViewerAgentAlertGapRow(g.Message, GapWhich(g))).ToList();
     }
 
-    /// <summary>The alerts the gap is about, else the severities or errors that have no alert.</summary>
+    /// <summary>The alerts the gap is about, empty when it is about severities or errors that have no alert (#7416): the sentence beside it already
+    /// lists those numbers, so a second column repeating them said nothing new.</summary>
     public static string GapWhich(AgentAlertGap gap)
     {
         ArgumentNullException.ThrowIfNull(gap);
-        return gap.Alerts.Count > 0
-            ? string.Join(", ", gap.Alerts)
-            : string.Join(", ", gap.Missing.Select(m => m.ToString(CultureInfo.InvariantCulture)));
+        return string.Join(", ", gap.Alerts);
     }
 
     /// <summary>The sentence under the gaps list when it has no row: the all-clear for ok, <see cref="NoData"/> otherwise (the status line has the reason).</summary>

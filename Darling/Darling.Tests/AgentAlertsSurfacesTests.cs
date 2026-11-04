@@ -89,7 +89,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
 
         Assert.Equal(
             [
-                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", "21, 23"),
+                new ViewerAgentAlertGapRow("No alert for severity 21, 23.", ""),
                 new ViewerAgentAlertGapRow("An enabled alert tells no operator, so nobody hears when it fires.", "Sev 20"),
             ],
             rows);
@@ -100,7 +100,7 @@ public sealed class ViewerAgentAlertsTextTests : IDisposable
     {
         var rows = ViewerAgentAlertsText.GapRows(Read(Complete().Where(a => a.MessageId is not (824 or 825)).ToArray()));
 
-        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "824, 825")], rows);
+        Assert.Equal([new ViewerAgentAlertGapRow("No alert for error 824, 825.", "")], rows);
     }
 
     [Fact]

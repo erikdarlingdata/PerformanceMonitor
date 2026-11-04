@@ -279,9 +279,11 @@ LIMIT 1";
             _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
             ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        var worst = read.Columns.Where(c => c.Band is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical)
+            .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, worst);
     }
 
     /// <summary>
@@ -750,7 +752,7 @@ public sealed class ServerSummaryItem
     public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
 
     /// <summary>Identity capacity detail: the fullest column's band.</summary>
-    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : IdentityCapacity.Detail;
 
     /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
     public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
@@ -1596,4 +1598,24 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar);
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, IdentityColumnFact? Worst = null)
+{
+    /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
+    /// sentence when no column is known.</summary>
+    public string Detail
+    {
+        get
+        {
+            if (Worst is null)
+                return $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {WorstBand}.";
+            var name = string.Join(".", new[] { Worst.DatabaseName, Worst.SchemaName, Worst.TableName, Worst.ColumnName }.Where(p => !string.IsNullOrEmpty(p)));
+            var percent = Worst.PercentUsed is { } p
+                ? string.Create(CultureInfo.InvariantCulture, $": {(p >= 99.95 || p == 0 ? p.ToString("0", CultureInfo.InvariantCulture) : p.ToString("0.0", CultureInfo.InvariantCulture))}% used")
+                : "";
+            var left = Worst.ValuesRemaining is { } r ? ", " + r.ToString("N0", CultureInfo.InvariantCulture) + " left" : "";
+            return name + percent + left + (ColumnsAtBar > 1
+                ? string.Create(CultureInfo.InvariantCulture, $". The fullest of {ColumnsAtBar} columns at 70% or more. The Identity Capacity tab lists them.")
+                : ". The Identity Capacity tab lists it.");
+        }
+    }
+}

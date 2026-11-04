@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -1877,8 +1878,9 @@ internal static class PgDisplay
         ChangedAt = SnapshotTime(row.ChangedAtUtc),
         ChangedAtUtc = row.ChangedAtUtc,
         Name = row.Name,
-        OldValue = row.OldValue,
-        NewValue = row.NewValue,
+        /* #7416 item 3: a pair that differs only in whitespace (log_line_prefix) shows it. */
+        OldValue = ConfigValueText.Shown(row.OldValue, row.NewValue),
+        NewValue = ConfigValueText.Shown(row.NewValue, row.OldValue),
         Unit = row.Unit,
         Scope = ConfigChangeScope(row),
         Kind = row.ChangeKind,

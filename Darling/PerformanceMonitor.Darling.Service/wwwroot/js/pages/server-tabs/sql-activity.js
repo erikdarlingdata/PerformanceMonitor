@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, windowFromHours, clampText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, windowFromHours, clampText } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -74,7 +74,7 @@ export function perfmonPanel(server, ctx) {
     mount(body, [
       VIZ.table({ ...res.data, counters: perfmonRows(res.data.counters) }, {
         rowsKey: "counters",
-        columns: PERFMON_COLUMNS,
+        columns: perfmonColumns(res.data.counters),
         emptyText: "No perfmon counters in the latest snapshot.",
       }),
       picker.node,
@@ -295,14 +295,36 @@ function jobMessageCell(r) {
   return el("div", { class: "jh-message" }, [clampText(text)]);
 }
 
+/* #7416: a stored counter value is a whole number (a gauge's reading, a delta), and "1.00" or "86.00" claims a precision it does not
+   have. A whole number prints whole, a fraction keeps two places. */
+export function wholeOrTwoPlaces(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  return Number.isInteger(n) ? fmtInt(n) : fmtNum(n, 2);
+}
+
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
   { key: "instance_name", label: "Instance" },
   { key: "per_second", label: "Per second", format: "rate" },
   { key: "running_total", label: "Total since counter start", format: "int" },
-  { key: "value", label: "Value", format: "num2" },
-  { key: "delta_value", label: "Delta", format: "num2" },
+  { key: "value", label: "Value", display: (r) => wholeOrTwoPlaces(r.value) },
+  { key: "delta_value", label: "Delta", display: (r) => wholeOrTwoPlaces(r.delta_value) },
 ];
+
+/* #7416: the same counter and instance can come from two objects (Transaction Delay with instance _Total is in both the database replica
+   and the database mirroring object), and the two rows then read alike. The Object column is drawn only when a row would repeat another. */
+export function perfmonColumns(counters) {
+  const seen = new Set();
+  let repeats = false;
+  for (const c of counters || []) {
+    const key = (c.counter_name || "") + "|" + (c.instance_name || "");
+    if (seen.has(key)) repeats = true;
+    seen.add(key);
+  }
+  if (!repeats) return PERFMON_COLUMNS;
+  return [PERFMON_COLUMNS[0], { key: "object_name", label: "Object" }, ...PERFMON_COLUMNS.slice(1)];
+}
 
 export const INDEX_COLUMNS = [
   { key: "database_name", label: "Database" },

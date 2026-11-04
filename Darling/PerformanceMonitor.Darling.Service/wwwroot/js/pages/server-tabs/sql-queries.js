@@ -152,7 +152,7 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
         trend.data.effective_hours_back +
         " hours back, not the " +
         trend.data.hours_back +
-        " the window asked for — earlier collections have aged out of the tier that answered."
+        " the window asked for. The store holds nothing earlier in this window at this tier."
     );
   }
 

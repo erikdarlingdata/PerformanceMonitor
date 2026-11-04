@@ -725,7 +725,7 @@ public sealed class DarlingMcpDataTools
     /// (<see cref="TrendPayloads.PerfmonLatestRow"/>). A method of its own so the row can be checked without a
     /// store.</summary>
     internal static Dictionary<string, object?> PerfmonRowPayload(DarlingDataReader.PerfmonRow r) =>
-        TrendPayloads.PerfmonLatestRow(r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType);
+        TrendPayloads.PerfmonLatestRow(r.CounterName, r.InstanceName, r.Value, r.DeltaValue, r.SampleIntervalSeconds, r.CntrType, r.ObjectName);
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 

@@ -575,7 +575,8 @@ internal static class McpHelpers
     /// one it is still in the tools/list text.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
-        " window_truncated is true when the store did not hold the start of the window; effective_start / " +
+        " window_truncated is true when the first point served is later than the start of the window: the store holds nothing earlier in this window at this tier. " +
+        "It does not say why (retention, a query first seen later, a server that collected later); effective_start / " +
         "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
         "changes it. WIRE CHANGE: formerly named truncated.";
 

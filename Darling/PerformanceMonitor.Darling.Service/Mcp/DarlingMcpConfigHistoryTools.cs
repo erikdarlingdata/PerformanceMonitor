@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -115,7 +116,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
+    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting, so its flips are listed apart in status_changes and never in changes. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
     public static Task<string> GetDatabaseConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -153,8 +154,12 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, databases, cancellationToken);
-            var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
-            if (changes.Count == 0)
+            var allChanges = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
+               status_changes so the history is kept without calling it a configuration change. */
+            var changes = allChanges.Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();
+            var statusChanges = allChanges.Where(c => !ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();
+            if (allChanges.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
                 var notCollected = McpHelpers.WithDatabase(
@@ -191,7 +196,16 @@ public sealed class DarlingMcpConfigHistoryTools
                 truncation_note = notice.TruncationNote,
                 database_name = databases.Describe(),
                 change_count = changes.Count,
-                changes = result
+                changes = result,
+                status_change_count = statusChanges.Count,
+                status_changes = statusChanges.Select(c => new
+                {
+                    change_time = c.ChangeTime.ToString("o"),
+                    database_name = c.DatabaseName,
+                    setting_name = c.SettingName,
+                    old_value = c.OldValue,
+                    new_value = c.NewValue
+                })
             }, McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the changes (see DarlingMcpWindowNotice.ReadAsync). */
