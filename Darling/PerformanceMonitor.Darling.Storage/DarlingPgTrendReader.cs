@@ -267,13 +267,19 @@ public static class DarlingPgTrendReader
         SELECT event
         FROM differenced
         GROUP BY event
+        /* #7409: an event whose samples did not move in the window is not the one that dominates it. Without this the
+           tie of an all-zero window fell to the name, and the trend drew a caption about an event with 0 samples. */
+        HAVING SUM(CASE
+                       WHEN prev_samples IS NULL THEN 0
+                       WHEN sample_count < prev_samples THEN sample_count
+                       ELSE sample_count - prev_samples
+                   END) > 0
         /* Summed per-interval deltas, with WaitTrendSql's reset rule (#7205): the counters restart at zero when
            the target restarts, and across the restart the new value is taken whole. MAX - MIN across a window
            holding a restart is the pre-restart lifetime total, which ranks whichever event ran longest before
            it. The first snapshot of each event has nothing to difference against, so it adds 0 rather than
-           being filtered out: an event seen once in the window stays a candidate (every sum is 0 and the event
-           name decides, as before), so a window with a single snapshot still answers "needs two snapshots"
-           rather than "nothing was sampled". */
+           being filtered out, and the HAVING above then drops an event whose sum is 0 (#7409), so a window with a
+           single snapshot, like one where nothing moved, chooses nothing and the tool says so in words that cover both. */
         ORDER BY SUM(CASE
                          WHEN prev_samples IS NULL THEN 0
                          WHEN sample_count < prev_samples THEN sample_count

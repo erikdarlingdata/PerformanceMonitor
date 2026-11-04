@@ -32,16 +32,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgSessionStatesTools
 {
     /// <summary>
-    /// A session must have been seen holding the horizon in at least this share of the samples that saw it
-    /// before the tool calls it a sustained holder rather than a passing one.
-    /// <para>Half. Every session with an open write transaction is momentarily the oldest holder at some
-    /// point — that is what a transaction IS — so a single sighting proves nothing beyond "this instance
-    /// does writes". Sustained holding is the finding, and the tool reports the raw sample counts beside the
-    /// verdict so a caller can disagree with the threshold rather than having to trust it.</para>
-    /// </summary>
-    internal const double SustainedHolderSampleShare = 0.5;
-
-    /// <summary>
     /// The duration past which an idle-in-transaction session is worth a human's attention even when it
     /// pins nothing.
     /// <para>Five minutes. It holds no snapshot and no transaction id, so it is costing vacuum nothing — but
@@ -79,8 +69,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "Grant pg_monitor to the monitoring role and this becomes answerable.";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
@@ -93,6 +82,24 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "transaction end, which is an application change, not a database one - terminating the "
                  + "backend releases the horizon immediately but the code path that opened it will do it "
                  + "again.";
+        }
+
+        if (r.HorizonHolderSamples > 0 && r.PeakHorizonAge == 0)
+        {
+            /* #7381: the oldest open transaction on the instance, but at age 0 it held the newest xid or
+               snapshot, so no row version waited behind it. On a quiet instance the oldest is simply
+               whatever ran. Said plainly so a count like 5 of 5 does not read as a hold. */
+            var zero = "Was the oldest open transaction on the instance in "
+                     + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s), but its horizon age never rose "
+                     + "above 0: it held the newest xid or snapshot, so no row version waited behind it and "
+                     + "VACUUM lost nothing. On a quiet instance the oldest transaction is just whatever ran.";
+
+            /* Same long-idle check as the passing branch below, and for the same reason: a forgotten
+               idle-in-transaction writer on a quiet target is age 0 here AND Warning in SessionSeverity,
+               so returning only the sentence above put "lost nothing" and a Warning in one JSON row. */
+            return zero + LongIdleOtherAxis(r,
+                ", though at age 0 it pinned nothing for VACUUM to wait behind. A forgotten commit is "
+                + "still a forgotten commit on a quiet instance.");
         }
 
         if (r.HorizonHolderSamples > 0)
@@ -110,15 +117,10 @@ public sealed class DarlingMcpPgSessionStatesTools
                and the reason they nearly did not is that is_horizon_holder means OLDEST rather than
                HOLDS: several long transactions on one instance take turns being oldest, so none of them
                reaches the sustained threshold and every one of them still needs saying. */
-            return r.IdleInTransactionSamples > 0
-                && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs
-                ? passing + " It is a finding on the OTHER axis though: at "
-                          + FormatDuration(r.PeakStateDurationMs) + " idle inside a transaction it is "
-                          + "holding a connection and any locks the transaction took, and it did pin "
-                          + "the horizon while it did so - just not as the oldest holder for most of "
-                          + "the window. Being the oldest is a property of the INSTANCE, not of this "
-                          + "session: on a busy one several long transactions take turns."
-                : passing;
+            return passing + LongIdleOtherAxis(r,
+                ", and it did pin the horizon while it did so - just not as the oldest holder for most of "
+                + "the window. Being the oldest is a property of the INSTANCE, not of this "
+                + "session: on a busy one several long transactions take turns.");
         }
 
         if (r.PeakHorizonAge < 0 && r.IdleInTransactionSamples > 0)
@@ -150,6 +152,19 @@ public sealed class DarlingMcpPgSessionStatesTools
     }
 
     /// <summary>
+    /// The long-idle-in-transaction sentence both holder branches of <see cref="HorizonFinding"/> share, so
+    /// the text agrees with <see cref="SessionSeverity"/>'s Warning arm (same condition) whichever branch the
+    /// row lands in. Empty when the row is not long idle. <paramref name="tail"/> is what is particular to
+    /// the branch, and starts with its own punctuation.
+    /// </summary>
+    private static string LongIdleOtherAxis(DarlingPgSessionStatesReader.PgSessionStateRow r, string tail)
+        => r.IdleInTransactionSamples > 0 && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs
+            ? " It is a finding on the OTHER axis though: at " + FormatDuration(r.PeakStateDurationMs)
+              + " idle inside a transaction it is holding a connection and any locks the transaction took"
+              + tail
+            : "";
+
+    /// <summary>
     /// Severity band, server-computed so the browser and the WPF row styles paint the same thing from the
     /// same decision rather than each re-deriving it.
     /// <para>The four words are the HOUSE vocabulary — <c>Healthy</c>, <c>Warning</c>, <c>Critical</c>,
@@ -168,8 +183,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             return "Unknown";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
