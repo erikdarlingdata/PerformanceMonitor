@@ -16,7 +16,7 @@
    The same person makes both presses. The server works out who is pressing from the sign-in, so the body sends nothing.
    Every value here is drawn as text. The agent's reason is labelled as the agent's, and a program or host name a client set is plain text. */
 
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, errorStrip, apiGet, apiWrite, localTime } from "../util.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, noticeStrip, errorStrip, apiGet, apiWrite, localTime } from "../util.js";
 
 /** The words for each server action kind. */
 export const KIND_LABELS = {
@@ -186,7 +186,7 @@ export async function buildProposal(body, id, isCurrent = () => true) {
     if (data.press_note) nodes.push(noticeStrip(data.press_note));
   } else if (p.state === "pending") {
     if (data.press_note) nodes.push(noticeStrip(data.press_note));
-    else if (data.person_name) nodes.push(noticeStrip("You press as " + data.person_name + "."));
+    else if (data.person_name) nodes.push(captionStrip("You press as " + data.person_name + "."));
     /* #7207: both buttons stay disabled from the click until the reply arrives, so a double click sends one press, not two, and a draw
        that lands in between (the poll, Refresh) draws them disabled too. The reply draws the page again, which replaces the buttons. */
     const buttons = [];

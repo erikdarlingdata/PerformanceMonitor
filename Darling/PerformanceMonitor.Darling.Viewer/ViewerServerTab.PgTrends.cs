@@ -36,14 +36,14 @@ public partial class ViewerServerTab
     /// <summary>One chart of a trend: its key, y-axis label, hover unit, and the lines it draws.</summary>
     private sealed record PgTrendPanel(string Key, string YLabel, string Unit, IReadOnlyList<PgTrendLine> Lines);
 
-    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(UniformGrid host, string key, string unit)
+    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit)
     {
         if (_pgTrendCharts.TryGetValue(key, out var existing))
         {
             return existing;
         }
 
-        var chart = new WpfPlot { MinHeight = 200, Margin = new System.Windows.Thickness(2) };
+        var chart = new WpfPlot();
         ApplyTheme(chart);
         chart.Refresh();
         var hover = new ChartHoverHelper(chart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
@@ -64,7 +64,7 @@ public partial class ViewerServerTab
     private static IEnumerable<PgTrendLine> Measured(params PgTrendLine[] lines) =>
         lines.Where(l => l.Values.Any(v => !double.IsNaN(v)));
 
-    private void RenderPgTrendPanels(UniformGrid host, IEnumerable<PgTrendPanel> panels, DateTime startUtc, DateTime endUtc)
+    private void RenderPgTrendPanels(Panel host, IEnumerable<PgTrendPanel> panels, DateTime startUtc, DateTime endUtc)
     {
         foreach (var panel in panels)
         {

@@ -1446,7 +1446,9 @@
                      "what is it now". One line per top-5 database by current PVS size, 7 days; legend
                      labels carry each database's latest %-of-database. Collapsed until the loader has
                      points, so an ADR-less server shows no dead chart. -->
-                <ScottPlot:WpfPlot Grid.Row="2" x:Name="PvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
+                    <ScottPlot:WpfPlot x:Name="PvsTrendChart" Visibility="Collapsed"/>
+                </ui:ChartGridPanel>
                 <Grid Grid.Row="3" Margin="10,0,10,10">
                     <DataGrid x:Name="PvsStatsDataGrid"
                               AutoGenerateColumns="False"

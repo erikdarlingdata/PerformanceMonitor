@@ -1534,11 +1534,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
         if (c.BlockingSeverity >= HealthSeverity.Warning && c.BlockingCount > 0)
         {
-            /* #3539 A3: the deadlock line's rule, one metric over — the count is the countable fact, the
-               rate is the banded one, and an unrateable window prints the count alone. */
-            parts.Add(c.BlockingRatePerHour.HasValue
-                ? $"Blocking {c.BlockingCount} ({c.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)} waits/hr)"
-                : $"Blocking {c.BlockingCount}");
+            /* #7444: the count, then the arm that fired the band (the longest block, the peak snapshot or the rate),
+               from the classifier's own arms so the text cannot drift from the band. #3539 A3: an unrateable window
+               with no wait fired prints the count alone. */
+            parts.Add(ServerHealthClassifier.BlockingReason(c.ToHealthMetrics()));
         }
 
         if (c.DeadlockSeverity >= HealthSeverity.Warning && c.DeadlockCount > 0)

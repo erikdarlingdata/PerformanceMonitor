@@ -108,6 +108,8 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
                 + lastSuccess.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
                 root.GetProperty("message").GetString()!,
                 StringComparison.Ordinal);
+            /* #7409: with no captures nothing is proved, so the zeros are not sent and the page keeps its dashes. */
+            Assert.False(root.TryGetProperty("worst_chain_victims", out _));
         });
     }
 
@@ -129,6 +131,10 @@ public sealed class DarlingMcpPgOfflineAndStatusWordLiveTests
             Assert.Equal("Orders PG", root.GetProperty("server").GetString());
             Assert.True(root.GetProperty("captures_total").GetInt32() > 0);
             Assert.Equal(0, root.GetProperty("captures_with_blocking").GetInt32());
+            /* #7409: captures and none blocked proves these are zero, so the page draws 0 and not a dash. */
+            Assert.Equal(0, root.GetProperty("pct_of_captures_with_blocking").GetDouble());
+            Assert.Equal(0, root.GetProperty("worst_chain_victims").GetInt32());
+            Assert.Equal(0, root.GetProperty("cycles_sampled").GetInt32());
             Assert.Contains("No blocking was present in any of the", root.GetProperty("finding").GetString()!, StringComparison.Ordinal);
         });
     }

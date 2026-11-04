@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -152,16 +153,120 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
         Assert.Contains("Start with 6 (this server's cores-per-socket, capped at 8)", maxdop.GetProperty("recommendation").GetString(), StringComparison.Ordinal);
     }
 
-    private static JsonElement MaxdopRecommendation(string json)
+    /// <summary>#7400: a server under 4 GB of RAM suggested a negative max server memory (1,023 MB RAM, ~-3,073). The OS reserve
+    /// is capped at half of RAM, so the suggestion is positive, below the RAM, and the text states the reserve it used.</summary>
+    [Fact]
+    public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryAboveRam_SuggestsHalfOfRam_NotANegativeNumber()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: 92160);
+        await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        var memory = Recommendation(json, "max server memory (MB)");
+        Assert.Equal("review", memory.GetProperty("status").GetString());
+        Assert.Equal(511, memory.GetProperty("suggested_value").GetInt32());
+        var text = memory.GetProperty("recommendation").GetString()!;
+        Assert.Contains("Consider reducing to ~511 MB", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("~-", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The unlimited default on the same 1,023 MB server: the warning states the reserve the suggestion used.</summary>
+    [Fact]
+    public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryAtTheDefault_StatesTheReserveItUsed()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: int.MaxValue);
+        await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        var memory = Recommendation(json, "max server memory (MB)");
+        Assert.Equal(511, memory.GetProperty("suggested_value").GetInt32());
+        Assert.Contains("~511 MB (leaving 512 MB for the OS)", memory.GetProperty("recommendation").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>A server whose max memory is already at or under the smaller suggestion reads as fine, with no advice to reduce.</summary>
+    [Fact]
+    public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryUnderTheSuggestion_IsOk()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: 400);
+        await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        var memory = Recommendation(json, "max server memory (MB)");
+        Assert.Equal("ok", memory.GetProperty("status").GetString());
+        Assert.Equal(400, memory.GetProperty("suggested_value").GetInt32());
+    }
+
+    /// <summary>#7400: the above-guidance MAXDOP note named logical processors in a NUMA node while the number came from cores per
+    /// socket (8 logical processors, 4 cores per socket, MAXDOP 8 read "guidance of 4 (logical processors ...)"). It now names the
+    /// figure it used, with the MAXDOP 0 branch's wording, and the status and the number are unchanged.</summary>
+    [Fact]
+    public async Task AuditConfig_MaxdopAboveGuidance_NamesTheCoresPerSocketItUsed()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName, maxdop: 8);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        var maxdop = MaxdopRecommendation(json);
+        Assert.Equal("review", maxdop.GetProperty("status").GetString());
+        Assert.Equal(4, maxdop.GetProperty("suggested_value").GetInt32());
+        var text = maxdop.GetProperty("recommendation").GetString()!;
+        Assert.Contains("above the topology-based guidance of 4 (this server's cores-per-socket, capped at 8)", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("logical processors", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same note on an Azure SQL Database names the database's vCores.</summary>
+    [Fact]
+    public async Task AuditConfig_MaxdopAboveGuidance_OnAzureSqlDatabase_NamesTheVcores()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, vcoreCount: 4, coresPerSocket: 32);
+        await SeedServerConfigAsync(_azureServerId, AzureServerName, maxdop: 8);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, AzureServerName);
+
+        Assert.Contains("above the topology-based guidance of 4 (this database's vCores, capped at 8)",
+            MaxdopRecommendation(json).GetProperty("recommendation").GetString(), StringComparison.Ordinal);
+    }
+
+    private static JsonElement MaxdopRecommendation(string json) => Recommendation(json, "max degree of parallelism");
+
+    private static JsonElement Recommendation(string json, string setting)
     {
         using var doc = JsonDocument.Parse(json);
         foreach (var r in doc.RootElement.GetProperty("recommendations").EnumerateArray())
         {
-            if (r.GetProperty("setting").GetString() == "max degree of parallelism")
+            if (r.GetProperty("setting").GetString() == setting)
                 return r.Clone();
         }
 
-        throw new Xunit.Sdk.XunitException("audit_config returned no MAXDOP recommendation: " + json);
+        throw new Xunit.Sdk.XunitException($"audit_config returned no '{setting}' recommendation: " + json);
+    }
+
+    /// <summary>One memory_stats row, the source of the physical memory the audit grades max server memory against.</summary>
+    private async Task SeedPhysicalMemoryAsync(int serverId, string serverName, double totalPhysicalMb)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO memory_stats
+    (collection_id, collection_time, server_id, server_name,
+     total_physical_memory_mb, available_physical_memory_mb,
+     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
+VALUES ($1, $2, $3, $4, $5, 100, 500, 500, 400)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
+        cmd.Parameters.Add(new DuckDBParameter { Value = totalPhysicalMb });
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private static string StatusOf(string json) =>
@@ -203,12 +308,16 @@ VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384, $
     }
 
     /// <summary>The two settings audit_config grades first, so the tool has recommendations to echo.</summary>
-    private async Task SeedServerConfigAsync(int serverId, string serverName)
+    private async Task SeedServerConfigAsync(int serverId, string serverName, int maxdop = 0, int? maxMemoryMb = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
 
-        foreach (var (name, value) in new[] { ("cost threshold for parallelism", 5), ("max degree of parallelism", 0) })
+        var settings = new List<(string Name, int Value)> { ("cost threshold for parallelism", 5), ("max degree of parallelism", maxdop) };
+        if (maxMemoryMb is int maxMemory)
+            settings.Add(("max server memory (MB)", maxMemory));
+
+        foreach (var (name, value) in settings)
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"

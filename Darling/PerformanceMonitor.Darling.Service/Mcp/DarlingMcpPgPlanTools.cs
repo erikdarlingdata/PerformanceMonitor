@@ -322,20 +322,31 @@ public sealed class DarlingMcpPgPlanTools
 
         if (unmet.Count > 0)
         {
-            return McpHelpers.Status(
-                "precondition",
-                "This server cannot capture execution plans yet, so an empty result here says nothing about "
-                + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
-                + string.Join(" | ", unmet)
-                + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
-                + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
-                + "satisfied or not, in the order they have to be fixed in.");
+            return PlanCaptureNotReadyStatus(unmet);
         }
 
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
         var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
         return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints()), cancellationToken);
+    }
+
+    /// <summary>
+    /// The <c>precondition</c> answer for a server whose plan capture is not ready: the message names every unmet facet, and <c>hints</c> carries
+    /// <c>reason</c> and <c>unsatisfied_count</c>, which the web page builds its one plain sentence from (#7410).
+    /// </summary>
+    internal static string PlanCaptureNotReadyStatus(IReadOnlyList<string> unmet)
+    {
+        return McpHelpers.Status(
+            "precondition",
+            "This server cannot capture execution plans yet, so an empty result here says nothing about "
+            + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
+            + string.Join(" | ", unmet)
+            + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
+            + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
+            + "satisfied or not, in the order they have to be fixed in.",
+            /* #7410: the page's plain sentence is built from the count, not from the message. */
+            new { reason = "plan_capture_not_ready", unsatisfied_count = unmet.Count });
     }
 
     /// <summary>

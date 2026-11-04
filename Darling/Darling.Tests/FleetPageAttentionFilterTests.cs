@@ -228,10 +228,10 @@ public sealed class FleetPageAttentionFilterTests
         var app = ReadRepoFileLf(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "css", "app.css"));
         Assert.Contains(".server-grid {", app, StringComparison.Ordinal);
-        /* Cap + centre asserted as a contiguous block, so the centring is pinned to .server-grid rather than
+        /* Cap + start-alignment asserted as a contiguous block (#7402), so the alignment is pinned to .server-grid rather than
            merely present somewhere (ReadRepoFile has already normalised CRLF to \n). */
         Assert.Contains(
-            "repeat(auto-fit, minmax(260px, 460px));\n  justify-content: center;",
+            "repeat(auto-fit, minmax(260px, 460px));\n  justify-content: start;",
             app,
             StringComparison.Ordinal);
 
@@ -241,8 +241,7 @@ public sealed class FleetPageAttentionFilterTests
             app.IndexOf(".grid {", StringComparison.Ordinal) < app.IndexOf(".server-grid {", StringComparison.Ordinal),
             ".server-grid must follow .grid in app.css or its width cap loses the cascade");
 
-        /* The indented tag-group grid overrides the centring back to start — a centred grouped grid detaches its
-           cards from their left-aligned header (review-caught). It keeps the cap; only justify-content differs. */
+        /* The indented tag-group grid keeps its own start alignment under its left-aligned header. It keeps the cap. */
         Assert.Contains(".tag-group-grid { margin: 0.5rem 0 0.2rem; justify-content: start; }", app, StringComparison.Ordinal);
 
         /* Both server-card grids (flat + tag-group) must carry the class, or the cap misses one view. */

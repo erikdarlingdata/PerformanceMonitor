@@ -19,7 +19,7 @@
  */
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
-import { plainText } from "./plain-text.js";
+import { plainText, shortEmptyLine } from "./plain-text.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -130,6 +130,15 @@ export function clampText(text, opts = {}) {
   const node = el("span", { class: "clamp-text", title: full || null, text: full });
   const long = full.length > CLAMP_MIN_CHARS || /[\r\n]/.test(full);
   if (opts.expandable === false || !long) return node;
+  return makeClampToggle(node);
+}
+
+/**
+ * Make `node` open and close in place on a click, or Enter/Space (`.open` and aria-expanded): the one toggle every clamped text
+ * shares (clampText's one-line cell, a tile's three-line detail). The click that ends a text selection is the reader copying,
+ * not opening, and the toggle stops its event so a clickable row or card around it is not also activated.
+ */
+export function makeClampToggle(node, onToggle) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.setAttribute("aria-expanded", "false");
@@ -143,6 +152,7 @@ export function clampText(text, opts = {}) {
     const open = node.getAttribute("aria-expanded") !== "true";
     node.setAttribute("aria-expanded", open ? "true" : "false");
     node.classList.toggle("open", open);
+    if (typeof onToggle === "function") onToggle(open);
   };
   node.addEventListener("click", toggle);
   node.addEventListener("keydown", (e) => {
@@ -152,6 +162,56 @@ export function clampText(text, opts = {}) {
     }
   });
   return node;
+}
+
+/* A server page tile's detail longer than this many characters is clamped to about three lines (#7395). A tile is at least 13rem
+   wide and a line holds about 36 characters there, so three lines show about 100: a shorter detail shows in full. */
+const TILE_DETAIL_CLAMP_CHARS = 100;
+
+/**
+ * #7395: the server page's metric tiles let a detail wrap, so a long one (the Protection tile names every overdue backup and
+ * CHECKDB, and grows with the number of databases) pushed every tab down. A detail past TILE_DETAIL_CLAMP_CHARS stops at about
+ * three lines (`.clamp-lines`) and opens on demand like clampText; its title keeps the full text. A shorter detail is left as it
+ * is, and so is every tile the caller does not pass through here (the fleet cards keep their one-line ellipsis). Returns `root`.
+ */
+export function clampTileDetails(root, minChars = TILE_DETAIL_CLAMP_CHARS, openLabels) {
+  const hasClass = (n, name) => typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+  const remember = openLabels instanceof Set ? openLabels : null;
+  const stillOpen = [];
+  const walk = (n, label) => {
+    if (!n || typeof n !== "object") return;
+    if (hasClass(n, "detail") && String(n.textContent || "").length > minChars) {
+      n.className += " clamp-lines";
+      /* #7395: a tile the reader opened stays open when the head is drawn again. The tile is told apart by its label, since its
+         text changes between polls. A detail that is now short enough not to clamp is not here, so there is nothing to reopen. */
+      const open = remember !== null && label !== null && remember.has(label);
+      makeClampToggle(n, remember === null || label === null ? undefined : (isOpen) => (isOpen ? remember.add(label) : remember.delete(label)));
+      if (open) {
+        n.setAttribute("aria-expanded", "true");
+        n.classList.add("open");
+        stillOpen.push(label);
+      }
+      return;
+    }
+    const here = hasClass(n, "metric-chip") ? tileLabel(n) : label;
+    Array.from(n.children || []).forEach((c) => walk(c, here));
+  };
+  walk(root, null);
+  /* What is remembered is what is open on screen now: a label whose tile went short or went away is forgotten. */
+  if (remember !== null) {
+    remember.clear();
+    stillOpen.forEach((l) => remember.add(l));
+  }
+  return root;
+}
+
+/** A metric tile's label (its first line, without the severity badge beside it), or null when the tile has none. */
+function tileLabel(chip) {
+  const first = Array.from(chip.children || [])[0];
+  if (!first) return null;
+  const named = Array.from(first.children || [])[0];
+  const text = String((named || first).textContent || "").trim();
+  return text === "" ? null : text;
 }
 
 /*
@@ -186,6 +246,20 @@ export function errorStrip(message) {
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
 }
+/**
+ * #7410: an empty reply as the page shows it. When the reply names a setup step in its structured `hints` (shortEmptyLine) the strip
+ * says one plain sentence and the tool's full text sits behind a click ("More detail", the native disclosure above). A reply with no
+ * such field shows its text as emptyStrip always did. `line` (optional) is the sentence to use in place of the one built from `hints`.
+ */
+export function plainEmptyStrip(res, line) {
+  const short = line === undefined ? shortEmptyLine(res) : line;
+  if (!short) return emptyStrip(res.message);
+  const nodes = [localizeIsoText(short)];
+  if (typeof res.message === "string" && res.message && res.message !== short) {
+    nodes.push(disclosure("More detail", localizeIsoText(res.message), { title: "What the read said, in full" }));
+  }
+  return el("div", { class: "strip empty plain-empty" }, nodes);
+}
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
     admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
@@ -193,8 +267,11 @@ export function emptyStrip(message) {
     store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
 export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard has read-only access to the bundled store, so " + lists + ". " + toChange + ", use the Viewer app." +
-      (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
+    ? (adminWritesOff === true
+      ? "Changes from this page are turned off, so " + lists + ". " + toChange + ", use the Viewer app." +
+        " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service."
+      /* #7402: with the switch on (or not known) nothing was turned off: the refusal is about the store login's privilege, so no switch is claimed. */
+      : "This dashboard's store login has no write access, so " + lists + ". " + toChange + ", use the Viewer app.")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
@@ -208,10 +285,31 @@ export function browserZoneOrBlank() {
   }
 }
 
+/**
+ * #7402: what a line chart says when the read returned points and not one of them holds a number to draw. A message the read itself
+ * carries (its `message`) is used as the tool wrote it for a person. Without one, a read that counted points whose rate could not be
+ * known (`unrated_points`, as a server just after a restart answers) says so in plain words. The read's `unrated_note` is written for a
+ * tool client and is not shown.
+ */
+export function noValuesText(data) {
+  const message = data && typeof data.message === "string" ? plainText(data.message).trim() : "";
+  if (message) return message;
+  if (data && Number(data.unrated_points) > 0) return "No rate can be worked out yet for this period, so there is nothing to draw.";
+  return "No point in this period holds a value, so there is nothing to draw.";
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
+}
+
+/** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
+    yellow `strip notice`, which is for a caveat about otherwise good data. `caveat` is true when the line also carries one (a cut list, a
+    shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. */
+export function captionStrip(message, caveat) {
+  if (caveat) return noticeStrip(message);
+  return el("div", { class: "strip source", role: "status" }, [localizeIsoText(plainText(message))]);
 }
 
 /**
@@ -875,6 +973,13 @@ export function fmtBytes(v) {
   if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
   return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
 }
+/* A size given in megabytes, written in the unit that fits it (#7410): a table that holds 140 KB read "0 MB" under fmtMb, which prints whole
+   megabytes. Null is the dash and 0 is a real 0 B, as fmtBytes. */
+export function fmtMbFit(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? fmtBytes(n * 1024 * 1024) : "—";
+}
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
@@ -892,6 +997,7 @@ export const FORMATTERS = {
   ms: fmtMs,
   mb: fmtMb,
   bytes: fmtBytes,
+  mbfit: fmtMbFit,
   time: localTime,
   reltime: relTime,
   bool: fmtBool,

@@ -62,18 +62,64 @@ public sealed class DominantWaitEventRestartLiveTests
     }
 
     [Fact]
-    public async Task WindowWithOneSnapshotPerEvent_StillPicksAnEvent_ByName()
+    public async Task WindowWithOneSnapshotPerEvent_ChoosesNothing()
     {
         await RunAsync(async (connection, postgres, ct) =>
         {
-            /* Nothing to difference: every event's sum is 0, so the event name decides, as the MAX - MIN ranking did.
-               A null here sends the MCP tool down the "extension is missing" answer instead of "needs two snapshots". */
+            /* #7409: nothing to difference, so no event's samples moved and none dominates the window. This used to
+               pick the first by name, and the trend then drew a caption about an event with 0 samples. The tool answers
+               the null with words that cover "none sampled" and "a trend needs two snapshots". */
             await SeedAsync(connection, "relation", ct, 900);
             await SeedAsync(connection, "DataFileRead", ct, 40);
 
             var chosen = await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, ServerId, T0, T0.AddHours(1), ct);
 
-            Assert.Equal("DataFileRead", chosen);
+            Assert.Null(chosen);
+        });
+    }
+
+    /// <summary>#7409: an event that was snapshotted all window but never gained a sample did not dominate it. With one
+    /// that moved beside it the mover wins, and with none the trend chooses nothing instead of the first name.</summary>
+    [Fact]
+    public async Task AnEventWhoseSamplesDidNotMove_IsNotTheDominantEvent()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            await SeedAsync(connection, "DataFileRead", ct, 1000, 1000, 1000);
+            await SeedAsync(connection, "relation", ct, 10, 12, 15);
+            Assert.Equal("relation", await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, ServerId, T0, T0.AddHours(1), ct));
+
+            await DeleteRowsAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SeedAsync(connection, "RelationMapRead", ct, 40, 40, 40);
+            await SeedAsync(connection, "DataFileRead", ct, 1000, 1000, 1000);
+            Assert.Null(await DarlingPgTrendReader.GetDominantWaitEventAsync(postgres, ServerId, T0, T0.AddHours(1), ct));
+        });
+    }
+
+    /// <summary>#7409: the sampled-waits page leaves out a series whose samples did not move in the window, and its
+    /// window total and the shares of the series that did move are unchanged by that.</summary>
+    [Fact]
+    public async Task TheSampledWaitsPage_LeavesOutASeriesThatDidNotMove()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            await SeedAsync(connection, "RelationMapRead", ct, 40, 40, 40);
+            await SeedAsync(connection, "DataFileRead", ct, 100, 130, 160);
+
+            var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(postgres, ServerId, T0, T0.AddHours(1), 21, ct);
+
+            var only = Assert.Single(page.Rows);
+            Assert.Equal("DataFileRead", only.Event);
+            Assert.Equal(60, only.SampleCount);
+            Assert.Equal(60, page.WindowTotalSamples);
+
+            await DeleteRowsAsync(connection, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await SeedAsync(connection, "RelationMapRead", ct, 40, 40, 40);
+            var none = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(postgres, ServerId, T0, T0.AddHours(1), 21, ct);
+            Assert.Empty(none.Rows);
+            Assert.Equal(0, none.WindowTotalSamples);
         });
     }
 
