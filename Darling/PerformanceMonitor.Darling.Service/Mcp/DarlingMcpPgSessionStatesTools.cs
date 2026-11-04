@@ -32,37 +32,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgSessionStatesTools
 {
     /// <summary>
-    /// A session must have been seen holding the horizon in at least this share of the samples that saw it
-    /// before the tool calls it a sustained holder rather than a passing one.
-    /// <para>Half. Every session with an open write transaction is momentarily the oldest holder at some
-    /// point — that is what a transaction IS — so a single sighting proves nothing beyond "this instance
-    /// does writes". Sustained holding is the finding, and the tool reports the raw sample counts beside the
-    /// verdict so a caller can disagree with the threshold rather than having to trust it.</para>
-    /// </summary>
-    internal const double SustainedHolderSampleShare = 0.5;
-
-    /// <summary>
-    /// The fewest holder samples a session needs before it can be called a sustained holder (#7381). The
-    /// share rule alone is met by 1 of 1, and one sighting is a passing statement on a quiet instance, not a
-    /// hold. Copied into <c>PgDisplay</c>, which cannot call this class; a behavior test keeps the two equal.
-    /// </summary>
-    internal const int MinSustainedHolderSamples = 2;
-
-    /// <summary>
-    /// The one rule behind the Critical band and the "PINS THE XMIN HORIZON" text (#7381): at least
-    /// <see cref="MinSustainedHolderSamples"/> holder samples, at least <see cref="SustainedHolderSampleShare"/>
-    /// of the samples that saw the session, and a peak horizon age above 0. Age 0 means the session held the
-    /// newest xid or snapshot, so nothing waited behind it: being the oldest on a quiet instance is not the
-    /// same as holding anything. This also covers rows stored before the collector stopped reporting the
-    /// service's own connections.
-    /// </summary>
-    internal static bool IsSustainedHolder(DarlingPgSessionStatesReader.PgSessionStateRow r) =>
-        r.SampleCount > 0
-        && r.PeakHorizonAge > 0
-        && r.HorizonHolderSamples >= Math.Max(
-            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
-
-    /// <summary>
     /// The duration past which an idle-in-transaction session is worth a human's attention even when it
     /// pins nothing.
     /// <para>Five minutes. It holds no snapshot and no transaction id, so it is costing vacuum nothing — but
@@ -100,7 +69,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "Grant pg_monitor to the monitoring role and this becomes answerable.";
         }
 
-        var sustained = IsSustainedHolder(r);
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
@@ -199,7 +168,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             return "Unknown";
         }
 
-        var sustained = IsSustainedHolder(r);
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {

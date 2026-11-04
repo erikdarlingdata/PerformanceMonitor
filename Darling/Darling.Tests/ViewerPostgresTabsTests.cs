@@ -672,19 +672,12 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(lit <= 1, $"{lit} row flags fired for band '{expectedBand}'; the bands are exclusive.");
     }
 
-    /// <summary>The two thresholds the viewer copies are the same numbers the MCP surface decides on.
+    /// <summary>The idle threshold the viewer copies is the same number the MCP surface decides on.
     /// Asserted directly as well as behaviourally above, because a drift caught at the constant names the
     /// defect, while a drift caught only through a fixture names a row.</summary>
     [Fact]
-    public void TheCopiedSessionThresholds_AreTheOnesTheReadUses()
+    public void TheCopiedIdleThreshold_IsTheOneTheReadUses()
     {
-        Assert.Equal(
-            DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare,
-            PgDisplay.SustainedHolderSampleShare,
-            precision: 10);
-        Assert.Equal(
-            DarlingMcpPgSessionStatesTools.MinSustainedHolderSamples,
-            PgDisplay.MinSustainedHolderSamples);
         Assert.Equal(
             DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs,
             PgDisplay.IdleWithoutHorizonAttentionMs);
