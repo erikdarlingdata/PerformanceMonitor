@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -148,6 +149,42 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
 {
     private static readonly RecordingCollectorDeltaCalculator s_deltas = new();
 
+    private static int s_nextServer = 7_000;
+
+    /* The collector remembers raw ring buffer timestamps per server, so each read-sequence gets its own server id. */
+    private static int NewServer() => Interlocked.Increment(ref s_nextServer);
+
+    private static readonly DateTime s_bootAnchor = new(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// One query row: sample_time, notification, the two indicators, then the raw ring buffer timestamp. Without an
+    /// explicit raw value it is the stamp's offset from a fixed anchor, so rows in one read keep their real order
+    /// and spacing (what the query returns, since both come from the same ms_ticks).
+    /// </summary>
+    private static object[] Rec(object stamp, string notification, int process, int system, long? raw = null)
+        => new object[]
+        {
+            stamp, notification, process, system,
+            raw ?? (stamp is DateTime d ? (long)(d - s_bootAnchor).TotalMilliseconds : 0L),
+        };
+
+    private static readonly DateTime s_held = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+    private const long HeldRaw = 5_000_000_000;
+
+    /// <summary>
+    /// A read of the ring buffer as the query returns it: the held record (raw <see cref="HeldRaw"/>, first stored at
+    /// <see cref="s_held"/>) and an older record <paramref name="olderByMs"/> before it, both stamped
+    /// <paramref name="skew"/> later than they were first stored, which is how the shared clock drift shows.
+    /// </summary>
+    private static FakeCollectorDataReader HeldAndOlderRead(int olderByMs, TimeSpan skew)
+        => new(
+            Rec(s_held.AddMilliseconds(-olderByMs) + skew, "RESOURCE_MEM_STEADY", 0, 0, HeldRaw - olderByMs),
+            Rec(s_held + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0, HeldRaw));
+
+    private static async Task<List<MemoryPressureEventsCollector.Row>> PollAsync(FakeCollectorDataReader reader, int serverId, DateTime? watermark)
+        => await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: serverId), CancellationToken.None);
+
     [Fact]
     public void AppliesTo_SkipsAzureSqlDb()
     {
@@ -196,12 +233,12 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark.AddMinutes(-5), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 },
-            new object[] { DBNull.Value, "RESOURCE_MEMPHYSICAL_LOW", 3, 1 },
-            new object[] { watermark.AddMinutes(5), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 });
+            Rec(watermark.AddMinutes(-5), "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            Rec(DBNull.Value, "RESOURCE_MEMPHYSICAL_LOW", 3, 1),
+            Rec(watermark.AddMinutes(5), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         /* Older-than-watermark and NULL-sample_time (DateTime.MinValue) rows are both skipped. */
         var row = Assert.Single(rows);
@@ -216,10 +253,10 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     public async Task ReadAsync_NoWatermark_KeepsNullSampleTimeRows_AsMinValue()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { DBNull.Value, "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+            Rec(DBNull.Value, "RESOURCE_MEMPHYSICAL_LOW", 2, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, serverId: NewServer()), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal(DateTime.MinValue, row.SampleTime);
@@ -245,10 +282,10 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark.AddMilliseconds(skewMs), "RESOURCE_MEM_STEADY", 0, 0 });
+            Rec(watermark.AddMilliseconds(skewMs), "RESOURCE_MEM_STEADY", 0, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         Assert.Empty(rows);
     }
@@ -268,10 +305,10 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         for (var poll = 0; poll < 3_000; poll++)
         {
             using var reader = new FakeCollectorDataReader(
-                new object[] { firstStamp.AddMilliseconds(18.0 * poll), "RESOURCE_MEM_STEADY", 0, 0 });
+                Rec(firstStamp.AddMilliseconds(18.0 * poll), "RESOURCE_MEM_STEADY", 0, 0, raw: 1_000_000));
 
             var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-                reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+                reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
             stored += rows.Count;
             if (rows.Count > 0)
@@ -294,12 +331,12 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         var skew = TimeSpan.FromSeconds(30);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark.AddMinutes(-9) + skew, "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark + skew, "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMinutes(4) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+            Rec(watermark.AddMinutes(-9) + skew, "RESOURCE_MEM_STEADY", 0, 0),
+            Rec(watermark + skew, "RESOURCE_MEM_STEADY", 0, 0),
+            Rec(watermark.AddMinutes(4) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
@@ -316,11 +353,11 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         var skew = TimeSpan.FromSeconds(3);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark + skew, "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMilliseconds(5) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+            Rec(watermark + skew, "RESOURCE_MEM_STEADY", 0, 0),
+            Rec(watermark.AddMilliseconds(5) + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
@@ -335,11 +372,11 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { watermark.AddHours(3), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 },
-            new object[] { watermark.AddHours(3).AddSeconds(40), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 });
+            Rec(watermark.AddHours(3), "RESOURCE_MEMPHYSICAL_LOW", 2, 0),
+            Rec(watermark.AddHours(3).AddSeconds(40), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         Assert.Equal(
             new[] { "RESOURCE_MEMPHYSICAL_LOW", "RESOURCE_MEMPHYSICAL_HIGH" },
@@ -356,14 +393,142 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
         using var reader = new FakeCollectorDataReader(
-            new object[] { DBNull.Value, "RESOURCE_MEM_STEADY", 3, 1 },
-            new object[] { watermark.AddMinutes(-30), "RESOURCE_MEM_STEADY", 0, 0 },
-            new object[] { watermark.AddMinutes(11), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+            Rec(DBNull.Value, "RESOURCE_MEM_STEADY", 3, 1),
+            Rec(watermark.AddMinutes(-30), "RESOURCE_MEM_STEADY", 0, 0),
+            Rec(watermark.AddMinutes(11), "RESOURCE_MEMPHYSICAL_LOW", 2, 0));
 
         var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
-            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer()), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
+    }
+
+    /// <summary>
+    /// #7441: an older record 1 to 10 ms before the held one. Shared skew moves both rows, so the older row reads
+    /// nearer the watermark than the held one and a nearest-row guess takes it for the held record. With the raw
+    /// timestamp remembered, the held record is stored by the first poll and never again, however far the skew
+    /// grows over 500 polls (9 s at 18 ms a poll).
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    [InlineData(10)]
+    public async Task ReadAsync_OlderRecordJustBeforeTheHeldOne_HeldRecordIsStoredOnce(int olderByMs)
+    {
+        var server = NewServer();
+        DateTime? watermark = null;
+        var held = 0;
+        var older = 0;
+        for (var poll = 0; poll < 500; poll++)
+        {
+            using var reader = HeldAndOlderRead(olderByMs, TimeSpan.FromMilliseconds(18.0 * poll));
+            var rows = await PollAsync(reader, server, watermark);
+
+            held += rows.Count(r => r.MemoryNotification == "RESOURCE_MEMPHYSICAL_LOW");
+            older += rows.Count(r => r.MemoryNotification == "RESOURCE_MEM_STEADY");
+            if (rows.Count > 0)
+            {
+                watermark = rows.Max(r => r.SampleTime);
+            }
+        }
+
+        Assert.Equal(1, held);
+        Assert.Equal(1, older);
+    }
+
+    /// <summary>
+    /// #7441: the cold start that memory cannot help with. The service has just started, the store holds the
+    /// held record, and an older record sits 1 to 10 ms before it, so the first read takes the older row for the
+    /// held one and stores the held record once more. That is the whole cost: from the second read on the raw
+    /// timestamp is remembered and nothing is stored again over 500 polls. Before the fix the held record was
+    /// stored on every one of them.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    [InlineData(10)]
+    public async Task ReadAsync_ColdStartWithAnOlderRecordClose_CostsOneRepeatThenNothing(int olderByMs)
+    {
+        var server = NewServer();
+        var watermark = s_held;
+        var held = 0;
+        var older = 0;
+        for (var poll = 1; poll <= 500; poll++)
+        {
+            using var reader = HeldAndOlderRead(olderByMs, TimeSpan.FromMilliseconds(18.0 * poll));
+            var rows = await PollAsync(reader, server, watermark);
+
+            held += rows.Count(r => r.MemoryNotification == "RESOURCE_MEMPHYSICAL_LOW");
+            older += rows.Count(r => r.MemoryNotification == "RESOURCE_MEM_STEADY");
+            if (rows.Count > 0)
+            {
+                watermark = rows.Max(r => r.SampleTime);
+            }
+        }
+
+        Assert.Equal(1, held);
+        Assert.Equal(0, older);
+    }
+
+    /// <summary>
+    /// #7441: a read whose write failed leaves the watermark where it was, so the next read must hand the same
+    /// rows back. The raw value is trusted only once the watermark has moved past the read that returned it.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_WriteFailed_RowsComeBackUntilTheWatermarkMoves()
+    {
+        var server = NewServer();
+
+        var first = await PollAsync(HeldAndOlderRead(5, TimeSpan.Zero), server, watermark: null);
+        var retry = await PollAsync(HeldAndOlderRead(5, TimeSpan.FromMilliseconds(18)), server, watermark: null);
+        Assert.Equal(2, first.Count);
+        Assert.Equal(2, retry.Count);
+
+        var stored = retry.Max(r => r.SampleTime);
+        var after = await PollAsync(HeldAndOlderRead(5, TimeSpan.FromMilliseconds(36)), server, stored);
+        Assert.Empty(after);
+    }
+
+    /// <summary>
+    /// #7441: a server restart makes the raw timestamps a new, smaller series. Remembered values from the old
+    /// series would skip the new records, so a jump in the boot instant clears them, and the nearest-row guess is
+    /// not made either (no held record survives a restart): the new record 3 minutes after the watermark is kept.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_ServerRestarted_NewSeriesIsNotSkippedByTheOldMemory()
+    {
+        var server = NewServer();
+        var first = await PollAsync(HeldAndOlderRead(5, TimeSpan.Zero), server, watermark: null);
+        var watermark = first.Max(r => r.SampleTime);
+
+        using var afterRestart = new FakeCollectorDataReader(
+            Rec(watermark.AddMinutes(3), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, raw: 1_000));
+        var rows = await PollAsync(afterRestart, server, watermark);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", row.MemoryNotification);
+    }
+
+    /// <summary>
+    /// #7441: with memory, a record newer than the held one is kept even when it sits within the skew of it,
+    /// where a time test could not tell them apart.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_NewRecordRightAfterTheHeldOne_IsKeptByRawIdentity()
+    {
+        var server = NewServer();
+        var first = await PollAsync(HeldAndOlderRead(5, TimeSpan.Zero), server, watermark: null);
+        var watermark = first.Max(r => r.SampleTime);
+        var skew = TimeSpan.FromSeconds(2);
+
+        using var reader = new FakeCollectorDataReader(
+            Rec(s_held.AddMilliseconds(-5) + skew, "RESOURCE_MEM_STEADY", 0, 0, HeldRaw - 5),
+            Rec(s_held + skew, "RESOURCE_MEMPHYSICAL_LOW", 2, 0, HeldRaw),
+            Rec(s_held.AddMilliseconds(3) + skew, "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, HeldRaw + 3));
+        var rows = await PollAsync(reader, server, watermark);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", row.MemoryNotification);
     }
 }
