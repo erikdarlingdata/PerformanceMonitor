@@ -9,11 +9,16 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -28,6 +33,7 @@ namespace Darling.Tests;
 /// <para>#1776 own-store: deliberately NOT [Collection("live-postgres")]. This class never reads DARLING_TEST_PG. It
 /// reads DARLING_TEST_PGRUNTIME and stands up its own cluster, like <see cref="DarlingManagedPostgresTests"/>.</para>
 /// </summary>
+[Collection("darling-config-env")]
 public sealed class TelemetryLevelLiveTests
 {
     private const string SettingProbeSql =
@@ -119,6 +125,186 @@ public sealed class TelemetryLevelLiveTests
 
             DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// A new store's extension does not exist when the bootstrap reconciles the job, so the worker runs the pass again
+    /// right after it creates the extension. Without that, the job stays scheduled on a new store whose service stays up
+    /// and records a false Failed run every day until the first restart. This runs the worker's real collection loop on a
+    /// new managed store and reads the job without a second start. Passing no reconcile delegate to the loop (or deleting
+    /// the loop's call) leaves the job scheduled and fails the last assertion.
+    /// </summary>
+    [Fact]
+    public async Task NewStore_TheJobIsUnscheduled_WithoutASecondStart_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe) " +
+            "to run the #7446 telemetry E2E.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-telemetry-new-");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = DarlingManagedPostgresTests.FindFreeTcpPort(),
+            DataDirectory = Path.Combine(root.FullName, "pg"),
+        };
+        var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+
+        DarlingManagedPostgres? owner = null;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+
+            owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var connectionString = await owner.EnsureRunningAsync(timeout.Token);
+
+            /* The bootstrap's own pass found no extension: nothing exists to unschedule yet. */
+            Assert.False(await ExtensionExistsAsync(connectionString, timeout.Token), "A new store has no TimescaleDB extension before the worker runs.");
+
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new
+            {
+                postgres = new { managed = false, connectionString },
+            }), timeout.Token);
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
+            var darlingConfig = DarlingConfig.Load();
+
+            var logger = new DarlingStartWithNoServersLiveTests.RecordingLogger();
+            var worker = new DarlingWorker(
+                logger, NullLoggerFactory.Instance, new McpRuntimeState(), new WebRuntimeState(), new MonitoredServerRegistryState(),
+                new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), new ReadLatencyAccumulator());
+            var loop = typeof(DarlingWorker).GetMethod("RunCollectionLoopAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            /* The same delegate the bootstrap hands the loop for a managed store. */
+            Func<string, CancellationToken, Task> reconcile = async (cs, ct) => await owner.ReconcileTelemetryJobAsync(cs, ct);
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            stop.CancelAfter(TimeSpan.FromMinutes(5));
+            var task = (Task)loop.Invoke(
+                worker, [darlingConfig, connectionString, null, null, null, null, false, null, null, reconcile, stop.Token])!;
+
+            while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
+                && !task.IsCompleted)
+            {
+                await Task.Delay(100, timeout.Token);
+            }
+
+            Assert.False(task.IsFaulted, "the loop failed: " + task.Exception?.GetBaseException().Message);
+            stop.Cancel();
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            Assert.True(await ExtensionExistsAsync(connectionString, timeout.Token), "The worker creates the extension.");
+            Assert.False(await ReadJobScheduledAsync(connectionString, timeout.Token),
+                "The job must be unscheduled on a new store without a second start.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
+            if (owner is not null)
+            {
+                await owner.StopIfStartedByThisProcessAsync();
+            }
+
+            NpgsqlConnection.ClearAllPools();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The start that reloads the server so a legacy conf's new managed file takes effect (a new store) does it only
+    /// when the migration verified. A start whose pending migration has no backup to resume from reports Failed and
+    /// leaves the files unverified, and a reload there would put files the migration never verified in force. The first
+    /// start is the positive control: its migration verifies, so the server logs the reload. The second start must not.
+    /// </summary>
+    [Fact]
+    public async Task APendingMigrationWithNoBackup_DoesNotReloadTheServer_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe) " +
+            "to run the #7446 telemetry E2E.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-telemetry-pending-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig
+        {
+            Managed = true,
+            Port = DarlingManagedPostgresTests.FindFreeTcpPort(),
+            DataDirectory = dataDirectory,
+        };
+
+        DarlingManagedPostgres? owner = null;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+
+            owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await owner.EnsureRunningAsync(timeout.Token);
+            Assert.Equal(ManagedConfVerificationStatus.Verified, owner.LastManagedConfVerification?.Status);
+            await owner.StopIfStartedByThisProcessAsync();
+            NpgsqlConnection.ClearAllPools();
+            var reloadsAfterFirstStart = CountReloads(dataDirectory);
+            Assert.True(reloadsAfterFirstStart >= 1, "Positive control: a verified legacy migration reloads the server, and the server logs it.");
+
+            /* The state a crashed migration leaves with its backup gone: the pending file is there, the backup is not. */
+            await File.WriteAllTextAsync(Path.Combine(dataDirectory, "darling-managed.conf.pending"), string.Empty, timeout.Token);
+            foreach (var backup in Directory.GetFiles(dataDirectory, "postgresql.conf.pre-4215.*.bak"))
+            {
+                File.Delete(backup);
+            }
+
+            owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await owner.EnsureRunningAsync(timeout.Token);
+            Assert.Equal(ManagedConfVerificationStatus.Failed, owner.LastManagedConfVerification?.Status);
+            await owner.StopIfStartedByThisProcessAsync();
+
+            Assert.Equal(reloadsAfterFirstStart, CountReloads(dataDirectory));
+        }
+        finally
+        {
+            if (owner is not null)
+            {
+                await owner.StopIfStartedByThisProcessAsync();
+            }
+
+            NpgsqlConnection.ClearAllPools();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>How many times the server's own log says it reloaded its configuration files.</summary>
+    private static int CountReloads(string dataDirectory)
+    {
+        var total = 0;
+        foreach (var file in Directory.GetFiles(Path.Combine(dataDirectory, "log"), "*.log"))
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            total += reader.ReadToEnd().Split("reloading configuration files").Length - 1;
+        }
+
+        return total;
+    }
+
+    private static async Task<bool> ExtensionExistsAsync(string connectionString, CancellationToken ct)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>The file text without its telemetry line, re-hashed so it is not read as a hand edit.</summary>

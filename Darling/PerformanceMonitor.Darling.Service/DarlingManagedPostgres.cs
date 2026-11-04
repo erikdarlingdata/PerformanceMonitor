@@ -2650,9 +2650,10 @@ public sealed class DarlingManagedPostgres
     /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
     /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
     /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
-    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
-    /// store the value is in force from the following start; every store already on the managed file has the line
-    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
+    /// next start finds the file unchanged. That migration runs after the start and reloads the server only once it
+    /// has verified (<c>EnsureRunningAsync</c>, #7446), so on such a store the value is in force on that start when the
+    /// migration verifies, and from the following start when it does not; every store already on the managed file has
+    /// the line written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
     /// key became managed may hold the operator's own <c>random_page_cost</c> above the include, where the include would override it:
     /// <see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/> finds such a line and the render leaves the key out.
     ///
@@ -2765,8 +2766,8 @@ public sealed class DarlingManagedPostgres
     /// <c>proc_name</c> (never by id), so no row is a no-op, and only a row whose <c>scheduled</c> differs is
     /// altered, so a start that finds it settled writes nothing. An operator who sets the level back to
     /// <c>basic</c> with <c>ALTER SYSTEM</c> gets the job back at the next start. Reads the level in force, so it
-    /// follows whichever file won. A store without the extension yet (a new store, before the service creates it)
-    /// has no job and is left alone until the next start.
+    /// follows whichever file won. A store without the extension yet (a new store, when the start reaches this pass)
+    /// has no job and is left alone here; the worker runs the pass again right after it creates the extension.
     /// </summary>
     internal const string TelemetryJobReconcileSql = @"
 SELECT count(*)::int
@@ -3641,9 +3642,14 @@ FROM (
             /* #7446: a store whose conf was still the legacy blocks (every new store, and each one upgrading from a
                build before the managed file) was started on those blocks, and the migration above has just written
                darling-managed.conf, which carries the telemetry level. Have the server read it now so the level is
-               off on this first start, not only on the next. The file was verified equal to the one in force apart
-               from added keys (ManagedOnlyKeys), so the reload changes nothing else. */
-            if (confState != ManagedConfMigrationState.Kind.Verified)
+               off on this first start, not only on the next. Only on a Legacy start whose migration verified: a Verified
+               outcome means the file equals the one in force apart from added keys (ManagedOnlyKeys), so the reload
+               changes nothing else. A Failed or Unknown outcome leaves the files unverified, and before this change
+               such a start could not alter the running server, so it still does not. Every other confState started
+               on the migrated files already (PendingVerify, MigratedUnstamped) or on a file Step B owns (Verified),
+               so a reload would add nothing and could apply a hand edit. */
+            if (confState == ManagedConfMigrationState.Kind.Legacy
+                && migrationOutcome is { Status: ManagedConfVerificationStatus.Verified })
             {
                 await ReloadConfAndWaitAsync(connectionString, cancellationToken);
             }
