@@ -117,6 +117,39 @@ public static class DarlingPgServerConfigReader
         [DateTime.SpecifyKind(nowUtc - TimeSpan.FromHours(24), DateTimeKind.Unspecified), DateTime.MinValue];
 
     /// <summary>
+    /// #7409: the default in the same base as <c>setting</c>. PostgreSQL shows <c>log_file_mode</c>,
+    /// <c>unix_socket_permissions</c> and <c>data_directory_mode</c> in octal (<c>0640</c>) but reports their
+    /// <c>boot_val</c> in decimal (<c>384</c>), so a reader saw two unrelated numbers. Converted here, in the
+    /// statement that builds the reply, so rows already stored read right and the web page, the tool and the
+    /// desktop viewer (all one reader) agree. Four octal digits like PostgreSQL's own <c>%04o</c>.
+    /// </summary>
+    public const string DefaultAsSettingSql = """
+        CASE WHEN c.name IN ('log_file_mode', 'unix_socket_permissions', 'data_directory_mode')
+                  AND c.boot_val ~ '^[0-9]{1,4}$'
+             THEN lpad((((c.boot_val::int / 512) % 8) * 1000
+                        + ((c.boot_val::int / 64) % 8) * 100
+                        + ((c.boot_val::int / 8) % 8) * 10
+                        + (c.boot_val::int % 8))::text, 4, '0')
+             ELSE c.boot_val
+        END
+        """;
+
+    /// <summary>
+    /// #7409: true when the setting is not at its default. A source other than <c>default</c> is necessary, as
+    /// before (PostgreSQL's own verdict still keeps <c>archive_command</c> and <c>commit_timestamp_buffers</c>
+    /// default, whose displayed value differs from <c>boot_val</c> by convention), and no longer enough: a
+    /// setting that <c>initdb</c> wrote into the configuration file at the compiled-in value (<c>port</c> 5432,
+    /// <c>max_connections</c> 100) has source <c>configuration file</c> and the same value as the default, which
+    /// is not a difference. Compared as text after <see cref="DefaultAsSettingSql"/>'s conversion, because
+    /// <c>setting</c> and <c>boot_val</c> are stored in the same form for every other setting, and an empty
+    /// default compares against an empty value (NULL and '' are the same here).
+    /// </summary>
+    public const string DiffersFromDefaultSql = $$"""
+        (coalesce(c.source, 'default') <> 'default'
+         AND coalesce(c.setting, '') <> coalesce({{DefaultAsSettingSql}}, ''))
+        """;
+
+    /// <summary>
     /// The newest snapshot, session-scoped rows removed. Anchored on <c>MAX(collection_time)</c> for the
     /// server rather than on "within the last N hours": a configuration read has no window — it is the
     /// state now — and an hours filter would return NOTHING on a server whose hourly collector last ran
@@ -147,7 +180,7 @@ public static class DarlingPgServerConfigReader
     /// rows, and every non-default row is in both populations). Identical on every row; the reader takes it
     /// off any one of them.</para>
     /// </summary>
-    public const string CurrentConfigSql = """
+    public const string CurrentConfigSql = $$"""
         SELECT
             c.name,
             c.setting,
@@ -155,7 +188,7 @@ public static class DarlingPgServerConfigReader
             c.category,
             c.context,
             c.source,
-            c.boot_val,
+            {{DefaultAsSettingSql}} AS boot_val,
             c.reset_val,
             c.sourcefile,
             coalesce(c.sourceline, 0),
@@ -171,12 +204,12 @@ public static class DarlingPgServerConfigReader
                 source = 'default', which is PostgreSQL saying plainly that nobody set them.
                 boot_val is still stored and returned — it is useful to SEE what the default is — it just
                 does not get to decide this. */
-            (coalesce(c.source, 'default') = 'default') AS is_default,
+            NOT {{DiffersFromDefaultSql}} AS is_default,
             /* #3653: the stamp, on the row statement (see PgConfigRow.CollectionTimeUtc). */
             c.collection_time,
             /* #3653: the SNAPSHOT's non-default count, on the row statement and above the LIMIT, so the tool
                has a figure about the server rather than about the page (see PgConfigPage). */
-            COUNT(*) FILTER (WHERE coalesce(c.source, 'default') <> 'default') OVER ()::int AS snapshot_non_default_count
+            COUNT(*) FILTER (WHERE {{DiffersFromDefaultSql}}) OVER ()::int AS snapshot_non_default_count
         FROM pg_server_config AS c
         WHERE c.server_id = $1
         AND   c.collection_time >= $4
@@ -202,9 +235,13 @@ public static class DarlingPgServerConfigReader
                OR coalesce(c.pending_restart, false))
         /* Non-default first: 415 settings sorted alphabetically is a dump, not an answer. pending_restart
            outranks even that, because it is the one row that says the file and the running server
-           disagree. */
+           disagree. Then (#7409) the settings whose value differs from the default, then the ones pinned in a
+           file at the default value (visible after the real differences, since somebody may have pinned one on
+           purpose), then the rest. */
         ORDER BY coalesce(c.pending_restart, false) DESC,
-                 (coalesce(c.source, 'default') = 'default'),
+                 CASE WHEN {{DiffersFromDefaultSql}} THEN 0
+                      WHEN coalesce(c.source, 'default') <> 'default' THEN 1
+                      ELSE 2 END,
                  c.name
         LIMIT $3
         """;

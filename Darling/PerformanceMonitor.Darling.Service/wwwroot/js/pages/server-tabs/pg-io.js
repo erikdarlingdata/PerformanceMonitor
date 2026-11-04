@@ -15,7 +15,7 @@ export const PG_IO_SUMMARY_STATS = [
   { key: "combinations_returned", label: "Combinations returned", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "total_read_time_ms", label: "Read time", format: "ms" },
-  { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true },
+  { key: "busiest_by_read_time", label: "Busiest", format: "text", small: true, appendKey: "busiest_rank_note" },
   { key: "write_counters_tracked_anywhere", label: "Write counters tracked", format: "bool" },
 ];
 

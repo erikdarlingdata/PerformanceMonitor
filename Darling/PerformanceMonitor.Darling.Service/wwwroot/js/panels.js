@@ -1410,9 +1410,12 @@ function vizStat(data, desc) {
     { class: "stats" },
     shown.map((s) => {
       const sev = s.sev || s.severity;
-      const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       const raw = getPath(data, s.key);
       const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+      /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
+         smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
+      const hasValue = raw != null || (why != null && why !== "");
+      const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
       /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
       const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
       const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");

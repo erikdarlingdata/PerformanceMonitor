@@ -113,8 +113,11 @@ public sealed class PgServerConfigTests
     {
         var sql = DarlingPgServerConfigReader.CurrentConfigSql;
 
-        Assert.Contains("(coalesce(c.source, 'default') = 'default') AS is_default", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("c.setting IS NOT DISTINCT FROM c.boot_val", sql, StringComparison.Ordinal);
+        /* #7409: the verdict is still PostgreSQL's source first, and a value comparison only decides among the rows
+           that source says were set. The live test pins the behaviour (a file value equal to the default is not a
+           difference). */
+        Assert.Contains("NOT " + DarlingPgServerConfigReader.DiffersFromDefaultSql + " AS is_default", sql, StringComparison.Ordinal);
+        Assert.StartsWith("(coalesce(c.source, 'default') <> 'default'", DarlingPgServerConfigReader.DiffersFromDefaultSql, StringComparison.Ordinal);
     }
 
     /// <summary>
