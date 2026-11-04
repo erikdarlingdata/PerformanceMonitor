@@ -68,7 +68,7 @@ public sealed class McpHealthParserTools
             requestedStart, windowEnd, SystemHealthTable, emptyAnswer: emptyAnswer);
     }
 
-    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. On SQL Server on Linux, system_cpu_utilization is null and system_cpu_note says why, because the host figure is not reported there. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -102,6 +102,8 @@ public sealed class McpHealthParserTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null and this says why. */
+                system_cpu_note = SystemHealthHostCpu.NoteFor(await dataService.GetHostOsVersionAsync(resolved.ServerId)),
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 total_entries = rows.Count,

@@ -959,6 +959,8 @@ export const SERVER_TABS = [
           series: HEALTH_CPU_SERIES,
           format: "pct",
           unit: "%",
+          /* #7416 item 1: on SQL Server on Linux the read leaves System CPU out and says why here. */
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
         /* The Corruption and Contention Events charts (#6295), off the same fetch. */
@@ -971,6 +973,7 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "entries",
           columns: HEALTH_ENTRY_COLUMNS,
+          noteKey: "system_cpu_note",
           emptyText: "No system_health entries in this window.",
         },
       ]),

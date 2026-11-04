@@ -66,7 +66,7 @@ public sealed class DarlingMcpHealthParserTools
     /// </summary>
     private const string SystemHealthCollectorName = "system_health_events";
 
-    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators (spinlock backoffs, sick spinlocks, latch warnings, dump requests, non-yielding tasks, SQL vs system CPU, bad pages) captured by sp_server_diagnostics. On SQL Server on Linux, system_cpu_utilization is null and system_cpu_note says why, because the host figure is not reported there. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -93,6 +93,9 @@ public sealed class DarlingMcpHealthParserTools
                really reaches that event, and shown / total_entries show the page cap. With a small limit, effective_start can therefore
                name an event no returned row carries. */
             var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
+            /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is left out (null) and the reason named. */
+            var hostOs = await DarlingSystemHealthReader.GetHostOsVersionAsync(postgres, c.ServerId, cancellationToken);
+            var rows = SystemHealthHostCpu.Apply(c.Rows, hostOs);
 
             return Finish(notice, JsonSerializer.Serialize(new
             {
@@ -101,11 +104,12 @@ public sealed class DarlingMcpHealthParserTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                system_cpu_note = SystemHealthHostCpu.NoteFor(hostOs),
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
-                total_entries = c.Rows.Count,
-                shown = Math.Min(c.Rows.Count, limit),
-                entries = c.Rows.Take(limit).Select(r => new
+                total_entries = rows.Count,
+                shown = Math.Min(rows.Count, limit),
+                entries = rows.Take(limit).Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
                     state = r.State,
@@ -157,7 +161,9 @@ public sealed class DarlingMcpHealthParserTools
                     "none carried a SYSTEM component result with a timestamp (the other four sp_server_diagnostics components feed the sibling reads)", logger, cancellationToken);
 
             var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
-            var buckets = BucketCpu(c.Rows, bucketMinutes);
+            /* #7416 item 1: as in the entries read, System CPU is null (never a flat 0 or 100) where the host cannot report it. */
+            var hostOs = await DarlingSystemHealthReader.GetHostOsVersionAsync(postgres, c.ServerId, cancellationToken);
+            var buckets = BucketCpu(SystemHealthHostCpu.Apply(c.Rows, hostOs), bucketMinutes);
             /* The corruption and contention charts (#6295): the Viewer's first five sick spinlock types, oldest snapshot first. */
             var spinlockTypes = SickSpinlockTypes(c.Rows);
 
@@ -168,6 +174,7 @@ public sealed class DarlingMcpHealthParserTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                system_cpu_note = SystemHealthHostCpu.NoteFor(hostOs),
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
                 bucket_minutes = bucketMinutes,
