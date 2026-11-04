@@ -435,6 +435,44 @@ public sealed class ComparisonBandingTests
         Assert.All(clean.Rows, r => Assert.False(r.CoverageCaveat));
     }
 
+    /// <summary>
+    /// #7458: a side the collector never observed gives the other side nothing to be compared with. Keys on both
+    /// sides, a key on one side only and a plan-cache identity all come back without a direction, with their
+    /// values kept, and every counter that means "got worse or appeared" is 0.
+    /// </summary>
+    [Fact]
+    public void NotCompared_KeepsTheValues_AndCountsNoDirection()
+    {
+        var (baseline, comparison) = Scored(
+            [Cpu(50)],
+            [Cpu(74), Wait("CXPACKET", 0.4), BadActor("0xB", avgCpuMs: 500)]);
+
+        var banded = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true);
+        Assert.True(banded.Worse > 0);
+        Assert.True(banded.NewIssues > 0);
+
+        var result = ComparisonBanding.Compare(baseline, comparison, NoDispersion, coverageCaveat: true, notCompared: true);
+        Assert.True(result.NotCompared);
+        Assert.Equal(0, result.Worse);
+        Assert.Equal(0, result.Better);
+        Assert.Equal(0, result.Stable);
+        Assert.Equal(0, result.NewIssues);
+        Assert.Equal(0, result.ResolvedIssues);
+        Assert.Equal(0, result.FamiliesWorse);
+        Assert.Equal(result.Rows.Count, result.NotComparedRows);
+        Assert.All(result.Rows, r => Assert.Equal(ComparisonBanding.StatusNotCompared, r.Status));
+        Assert.All(result.Families, f => Assert.Equal(ComparisonBanding.StatusNotCompared, f.Status));
+        Assert.Empty(result.Churn.Appeared);
+
+        var cx = Assert.Single(result.Rows, r => r.Key == "CXPACKET");
+        Assert.Equal(ComparisonBanding.PresenceComparisonOnly, cx.Presence);
+        Assert.Equal(0.4, cx.ComparisonValue!.Value, precision: 6);
+        var cpu = Assert.Single(result.Rows, r => r.Key == Cpu(50).Key);
+        Assert.Equal(ComparisonBanding.PresenceBoth, cpu.Presence);
+        Assert.NotNull(cpu.BaselineValue);
+        Assert.NotNull(cpu.ComparisonValue);
+    }
+
     [Fact]
     public void NothingOnEitherSide_IsEmpty_ButChurnAloneIsNot()
     {
