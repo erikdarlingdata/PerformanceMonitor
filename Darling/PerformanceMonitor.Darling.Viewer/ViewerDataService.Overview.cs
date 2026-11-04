@@ -1220,7 +1220,7 @@ public sealed class ServerSummaryItem
             + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
             + $"Failing: {FailedCollectorCount}"
             + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "")
-            + (NoPermissionCollectorCount > 0 ? $", No permission: {NoPermissionCollectorCount}" : "");
+            + (NoPermissionCollectorCount > 0 ? $", Need setup: {NoPermissionCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time

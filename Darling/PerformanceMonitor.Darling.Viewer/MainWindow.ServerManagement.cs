@@ -413,10 +413,7 @@ public partial class MainWindow
                 tally = tally.Add(h.CollectorName, h.HealthStatus, h.ServerAlwaysOnOff, h.EngineGated);
             }
 
-            CollectorHealthText.Text = $"Collectors: {tally.Healthy} OK"
-                + (tally.Warning > 0 ? $", {tally.Warning} warning" : "")
-                + (tally.NotCollected > 0 ? $", {tally.NotCollected} not collected" : "")
-                + (tally.NoPermission > 0 ? $", {tally.NoPermission} no permission" : "");
+            CollectorHealthText.Text = CollectorCountText.StatusBar(tally);
             CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             CollectorHealthText.ToolTip = null;
         }

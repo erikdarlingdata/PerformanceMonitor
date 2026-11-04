@@ -18,6 +18,7 @@
     -->
     <UserControl.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <ui:OneLineTextConverter x:Key="OneLine"/>
         <local:PgBytesConverter x:Key="PgBytes"/>
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="14"/>
@@ -3914,7 +3915,7 @@
                                     <DataGridTextColumn Binding="{Binding GrowthMb, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="GrowthMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Growth MB" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding Severity, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Severity" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Severity" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding ErrorNumber, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ErrorNumber" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Error #" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Binding="{Binding TextData}" Width="400"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Details" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <DataGridTextColumn Binding="{Binding TextData, Converter={StaticResource OneLine}}" Width="400"><DataGridTextColumn.ElementStyle><Style TargetType="TextBlock"><Setter Property="ToolTip" Value="{Binding TextData}"/></Style></DataGridTextColumn.ElementStyle><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TextData" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Details" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <TextBlock x:Name="DefaultTraceNoDataMessage" Style="{StaticResource EmptyHint}" Text="No significant Default Trace events (auto-grow/shrink stalls, severe ErrorLog, schema DDL, security audits, memory change) in the selected time window."/>
@@ -4270,7 +4271,7 @@
                         <DataGridTemplateColumn Header="Statement" Width="360">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
-                                    <TextBlock Text="{Binding StatementText}" TextTrimming="CharacterEllipsis" ToolTip="{Binding StatementText}"/>
+                                    <TextBlock Text="{Binding StatementText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" ToolTip="{Binding StatementText}"/>
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
@@ -4616,14 +4617,14 @@
                                     <DataGridTemplateColumn Header="Root Query" Width="320">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding RootQuery}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding RootQuery}"/>
+                                                <TextBlock Text="{Binding RootQuery, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding RootQuery}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
                                     <DataGridTemplateColumn Header="Worst Victim Query" Width="320">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding WorstVictimQuery}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding WorstVictimQuery}"/>
+                                                <TextBlock Text="{Binding WorstVictimQuery, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding WorstVictimQuery}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
@@ -4810,7 +4811,7 @@
                                     <DataGridTemplateColumn Header="Statement" Width="*">
                                         <DataGridTemplateColumn.CellTemplate>
                                             <DataTemplate>
-                                                <TextBlock Text="{Binding QueryText}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding QueryText}"/>
+                                                <TextBlock Text="{Binding QueryText, Converter={StaticResource OneLine}}" TextTrimming="CharacterEllipsis" MaxHeight="90" ToolTip="{Binding QueryText}"/>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
                                     </DataGridTemplateColumn>
