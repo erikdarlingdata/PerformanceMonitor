@@ -44,6 +44,12 @@ function cancelPending(container) {
 const READER_ACTS = ["click", "change", "input", "keydown"];
 const isReaderAct = (e) => e.type !== "keydown" || e.key === "Enter" || e.key === " ";
 
+/** Drop the swap `container` has waiting, if any: its build never lands, so its `onDropped` runs. For a page that replaces the
+ *  container's content by some other route than showPage (an empty-state strip) while a poll's build is still waiting. */
+export function dropWaitingSwap(container) {
+  cancelPending(container);
+}
+
 /**
  * showPage for a page that fills `nodes` from reads of its own (the loading strips it draws first). The first paint, a sub-tab click
  * and a span change put `nodes` on the page at once. A poll over the same page (`holdsPage`) leaves the page on screen, so a grid the
@@ -52,29 +58,49 @@ const isReaderAct = (e) => e.type !== "keydown" || e.key === "Enter" || e.key ==
  * the reader going to another page. So does the reader acting on the page on screen (a click, a change, typing): `nodes` were built from
  * the page's state as it stood when the poll began, and what the reader did since is newer than that, so it must not be swapped out for
  * a page that shows the old state (#7393). The next poll draws from the new state. Returns a cancel function.
+ *
+ * `hooks` is how a page that owns an AbortController per build keeps the page on screen working (#7393). The page on screen keeps its
+ * reads, its listeners and its signal for as long as it is on screen, so a poll's build must not abort them when it starts, only when it
+ * lands. Exactly one of the two runs for each call, once:
+ *   `onShown()`   `nodes` are on the page now (at once, or after the wait): the page that was on screen has left it, so end its reads.
+ *   `onDropped()` `nodes` never reach the page (a newer render, the reader acting, the reader leaving): end the reads of the build.
  */
-export function showPageWhenSettled(container, key, nodes, isPoll) {
+export function showPageWhenSettled(container, key, nodes, isPoll, hooks = {}) {
   cancelPending(container);
   if (!holdsPage(container, key, isPoll)) {
     showPage(container, key, nodes);
+    if (hooks.onShown) hooks.onShown();
     return () => {};
   }
+  let over = false;
   const drop = (e) => {
     if (isReaderAct(e)) cancelPending(container);
   };
   const release = () => READER_ACTS.forEach((t) => container.removeEventListener(t, drop, true));
   /* Capture, so the drop runs before the control's own handler redraws the page on screen. */
   READER_ACTS.forEach((t) => container.addEventListener(t, drop, true));
-  const stop = whenSettled(nodes, () => {
-    release();
-    pending.delete(container);
-    if (holdsPage(container, key, true)) showPage(container, key, nodes);
-  });
+  let stop = () => {};
   const cancel = () => {
+    if (over) return;
+    over = true;
     release();
     stop();
+    if (hooks.onDropped) hooks.onDropped();
   };
-  pending.set(container, cancel);
+  stop = whenSettled(nodes, () => {
+    if (over) return;
+    over = true;
+    release();
+    pending.delete(container);
+    if (holdsPage(container, key, true)) {
+      showPage(container, key, nodes);
+      if (hooks.onShown) hooks.onShown();
+    } else if (hooks.onDropped) {
+      hooks.onDropped();
+    }
+  });
+  /* whenSettled runs `done` at once when nothing is loading: then the swap is over and there is nothing left to cancel. */
+  if (!over) pending.set(container, cancel);
   return cancel;
 }
 

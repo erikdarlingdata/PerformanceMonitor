@@ -23,12 +23,13 @@ namespace Darling.Tests;
 [Trait("Cost", "Slow")]
 public sealed class GridScrollKeepTests
 {
-    private static JsonElement Run(string scenario)
+    private static JsonElement Run(string scenario, string? variant = null)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-grid-scroll-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
         psi.ArgumentList.Add(scenario);
+        if (variant is not null) psi.ArgumentList.Add(variant);
 
         Process proc;
         try
@@ -157,6 +158,45 @@ public sealed class GridScrollKeepTests
         Assert.True(r.GetProperty("firstIsLatest").GetBoolean());
         Assert.True(r.GetProperty("activeIsB").GetBoolean());
         Assert.True(r.GetProperty("detailIsB").GetBoolean(), "the detail shows a different sweep from the highlighted row");
+    }
+
+    // #7393: FinOps builds the next page while the old one is on screen. The page on screen keeps its signal, reads and Escape key until it
+    // really leaves the screen, and a build that never lands ends itself.
+    [Fact]
+    public void FinOps_poll_leaves_the_page_on_screen_its_signal_and_its_Escape_key_while_the_swap_waits()
+    {
+        var r = Run("finopsPollLifecycle", "land");
+        Assert.True(r.GetProperty("stillTheLivePage").GetBoolean());
+        Assert.False(r.GetProperty("liveSignalWhileWaiting").GetBoolean(), "the poll aborted the signal of the page still on screen");
+        Assert.False(r.GetProperty("stagedSignalWhileWaiting").GetBoolean());
+        Assert.True(r.GetProperty("paneOpenBeforeEscape").GetBoolean());
+        Assert.False(r.GetProperty("paneOpenAfterEscape").GetBoolean(), "Escape no longer closes the index detail of the page on screen");
+    }
+
+    [Fact]
+    public void FinOps_swap_that_lands_ends_the_reads_of_the_page_it_replaced_and_keeps_the_new_ones()
+    {
+        var r = Run("finopsPollLifecycle", "land");
+        Assert.True(r.GetProperty("swapped").GetBoolean());
+        Assert.True(r.GetProperty("liveSignalAfterSwap").GetBoolean());
+        Assert.False(r.GetProperty("stagedSignalAfterSwap").GetBoolean());
+    }
+
+    [Fact]
+    public void FinOps_dropped_swap_ends_the_build_and_the_Database_box_on_screen_still_answers_a_search()
+    {
+        var r = Run("finopsPollLifecycle", "drop");
+        Assert.True(r.GetProperty("stagedSignalAfterDrop").GetBoolean(), "the dropped build kept its reads and listeners");
+        Assert.False(r.GetProperty("liveSignalAfterDrop").GetBoolean());
+        Assert.Equal(new[] { "Db1", "Db2" }, r.GetProperty("liveOptions").EnumerateArray().Select(o => o.GetString()!).ToArray());
+    }
+
+    [Fact]
+    public void FinOps_leaving_the_page_ends_the_page_on_screen_and_the_build_waiting()
+    {
+        var r = Run("finopsPollLifecycle", "leave");
+        Assert.True(r.GetProperty("liveSignalAfterLeave").GetBoolean());
+        Assert.True(r.GetProperty("stagedSignalAfterLeave").GetBoolean());
     }
 
     [Fact]

@@ -44,6 +44,7 @@ class FakeNode {
   }
   /* Only the class selectors the pages use here (".name"). */
   querySelectorAll(sel, acc = []) { for (const c of this.children) { if ((" " + c.className + " ").includes(" " + sel.slice(1) + " ")) acc.push(c); c.querySelectorAll(sel, acc); } return acc; }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   closest(sel) { for (let n = this; n; n = n.parent) if (sel === "[data-grid]" && n.getAttribute && n.getAttribute("data-grid") !== null) return n; return null; }
   find(tag) { for (const c of this.children) { if (c.tag === tag) return c; const f = c.find && c.find(tag); if (f) return f; } return null; }
   wraps(acc = []) { for (const c of this.children) { if (c.isWrap) acc.push(c); c.wraps && c.wraps(acc); } return acc; }
@@ -56,7 +57,13 @@ globalThis.document = {
   querySelectorAll: (sel) => (sel === ".table-wrap" ? page.wraps() : []),
   documentElement: { offsetHeight: 0 },
   getElementById: () => page,
+  /* The Locking tab listens for Escape on the document. */
+  listeners: {},
+  addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); },
+  removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn); },
+  fire(t, ev) { (this.listeners[t] || []).slice().forEach((f) => f({ type: t, ...ev })); },
 };
+globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 /* A poll's staged page waits on MutationObserver (whenSettled): the stand-in runs its callback when the scenario says the reads returned. */
 const observers = [];
 globalThis.MutationObserver = class { constructor(cb) { this.cb = cb; this.off = false; observers.push(this); } observe() {} disconnect() { this.off = true; } };
@@ -223,6 +230,69 @@ const scenarios = {
     const rows = page.querySelectorAll(".sweep-row");
     out.detailIsB = detailText() === "Sweep at " + localTime(sweeps[1].swept_at);
     out.activeIsB = rows.length === 2 && !rows[0].className.includes("active") && rows[1].className.includes("active");
+  },
+  /* #7393: the shipped FinOps page (pages/finops.js) on its Locking & Contention tab over stubbed reads. A poll builds the next page while
+     the old one stays on screen, so the page on screen must keep its signal, its reads and its Escape key for as long as it is on screen;
+     a build that never lands must end; a build that lands ends the page it replaced. `fetch` honours the abort signal as a browser does. */
+  async finopsPollLifecycle() {
+    const { renderFinops } = await import(pathToFileURL(root + "/pages/finops.js").href);
+    const { beginPageScope } = await import(pathToFileURL(root + "/util.js").href);
+    const calls = []; const held = []; let hold = false;
+    const objects = [{ database_name: "d", schema_name: "s", table_name: "t", index_name: "i" }];
+    globalThis.fetch = (url, init) => {
+      const u = String(url); const signal = init && init.signal;
+      const tool = (u.match(/\/api\/read\/([a-z_]+)/) || [])[1];
+      calls.push({ u, signal });
+      const body = tool === "list_servers" ? { server_count: 1, servers: [{ server_name: "srv", display_name: "srv" }] }
+        : u.startsWith("/api/server-databases") ? { server: "srv", databases: u.includes("search=") ? ["Db1", "Db2"] : ["Db1"], truncated: !u.includes("search=") }
+        : tool === "get_object_locking" ? (u.includes("detail_table") ? { detail: {} } : { objects })
+        : {};
+      const reply = { status: 200, ok: true, text: async () => JSON.stringify(body) };
+      if (!hold || tool === "list_servers") return Promise.resolve(reply);
+      return new Promise((resolve, reject) => {
+        held.push(() => resolve(reply));
+        if (signal) signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      });
+    };
+    const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0)); };
+    const sigOf = (prefix, n = 0) => calls.filter((c) => c.u.startsWith(prefix))[n].signal;
+    const find = (pred, node = page, acc = []) => { if (pred(node)) acc.push(node); node.children.forEach((c) => find(pred, c, acc)); return acc; };
+    const pane = () => page.querySelectorAll(".locking-detail")[0];
+    const paneOpen = () => pane().textContent.includes("Index detail");
+
+    renderFinops(page, "srv", "locking", { poll: false }); await flush();
+    const liveSig = sigOf("/api/server-databases", 0);
+    out.liveStartsAlive = liveSig.aborted === false;
+    hold = true;
+    find((n) => n.tag === "tr" && n.style.cursor === "pointer")[0].fire("click"); // the reader opens an index detail
+    const detailSig = calls.filter((c) => c.u.includes("detail_table"))[0].signal;
+    const liveHead = page.children[0];
+    renderFinops(page, "srv", "locking", { poll: true }); await flush(); // the poll: its reads are held, so its page waits
+    const stagedSig = sigOf("/api/server-databases", 1);
+    out.stillTheLivePage = page.children[0] === liveHead;
+    out.liveSignalWhileWaiting = liveSig.aborted; out.detailReadWhileWaiting = detailSig.aborted;
+    out.stagedSignalWhileWaiting = stagedSig.aborted;
+    out.paneOpenBeforeEscape = paneOpen();
+    document.fire("keydown", { key: "Escape" });
+    out.paneOpenAfterEscape = paneOpen();
+
+    const scenario = process.argv[4];
+    if (scenario === "drop") {
+      /* The reader types in the live Database box: the swap is dropped, and the search answer must still draw into the box on screen. */
+      hold = false; // the search is a read of its own, answered at once
+      const box = find((n) => n.tag === "input" && n.attrs.type === "text")[0];
+      box.value = "Db"; box.fire("input");
+      out.stagedSignalAfterDrop = stagedSig.aborted; out.liveSignalAfterDrop = liveSig.aborted;
+      await new Promise((r) => setTimeout(r, 330)); await flush();
+      out.liveOptions = find((n) => n.tag === "datalist")[0].children.map((o) => o.attrs.value);
+    } else if (scenario === "land") {
+      held.forEach((release) => release()); await flush(); readsReturned();
+      out.swapped = page.children[0] !== liveHead;
+      out.liveSignalAfterSwap = liveSig.aborted; out.stagedSignalAfterSwap = stagedSig.aborted;
+    } else if (scenario === "leave") {
+      beginPageScope();
+      out.liveSignalAfterLeave = liveSig.aborted; out.stagedSignalAfterLeave = stagedSig.aborted;
+    }
   },
   topGridStaysTop() {
     const g = grid("waits", 100); page.appendChild(g);

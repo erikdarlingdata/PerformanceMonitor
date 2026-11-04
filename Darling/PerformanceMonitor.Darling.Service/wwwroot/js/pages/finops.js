@@ -23,7 +23,7 @@
 
 import { storeHash, el, mount, readTool, onPageLeave, loadingStrip, errorStrip, emptyStrip } from "../util.js";
 import { setPanelSignal } from "../panels.js";
-import { showPageWhenSettled } from "../refresh-in-place.js";
+import { showPageWhenSettled, dropWaitingSwap } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { isPostgresRow } from "./finops/gate.js";
 import { tab as utilization } from "./finops/utilization.js";
@@ -59,13 +59,32 @@ const SERVER_KEY = "finops.server";
 const TAB_KEY = "finops.tab";
 
 let renderGeneration = 0;
-let panelAbort = null;
+/* #7393: a poll builds the next page while the old one is still on screen, so a render owns one controller per build and the module
+   tracks which build is where. `liveAbort` is the page on screen: its reads, its listeners and the panel signal stay alive until a
+   newer page really replaces it. `stagedAbort` is the build a poll has waiting. `listAbort` is the server list read of the newest
+   render. A controller is aborted when its page leaves the screen, or when its build is dropped without ever reaching it. */
+let liveAbort = null;
+let stagedAbort = null;
+let listAbort = null;
+let host = null;
 /* #6793: leaving the page (route() calls beginPageScope) aborts its panel reads and clears the shared panel signal, which would
    otherwise stay aborted for the next page that renders panels (panels.js keeps it as module state). */
 onPageLeave(() => {
-  if (panelAbort) panelAbort.abort();
+  if (host) dropWaitingSwap(host);
+  [liveAbort, stagedAbort, listAbort].forEach((c) => {
+    if (c) c.abort();
+  });
   setPanelSignal();
 });
+/* The page on screen is about to be replaced by something that is not a build: end its reads and drop the build a poll has waiting. */
+function endBuilds() {
+  if (host) dropWaitingSwap(host);
+  [liveAbort, stagedAbort].forEach((c) => {
+    if (c) c.abort();
+  });
+  liveAbort = stagedAbort = null;
+  setPanelSignal();
+}
 /* The last list_servers rows, so a hashchange paints in the same tick and only the poll re-reads them. */
 let lastRows = null;
 
@@ -176,11 +195,13 @@ export function renderFinops(main, server, tabId, opts) {
   const active = findTab(tabId || storedGet(TAB_KEY));
   const wanted = server || storedGet(SERVER_KEY);
 
-  /* Abort the previous render's reads and open this render's controller before any await. */
-  if (panelAbort) panelAbort.abort();
-  let controller = panelAbort = new AbortController();
+  host = main;
+  /* The previous render's server list read is moot. Its page is NOT aborted here: it stays on screen, with its signal, until a newer page replaces it. */
+  if (listAbort) listAbort.abort();
+  const listController = listAbort = new AbortController();
 
   const paint = (rows) => {
+    const controller = new AbortController();
     const head = el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]);
     const body = el("div", { class: "finops-body" });
     const row = resolveRow(rows, wanted);
@@ -197,8 +218,25 @@ export function renderFinops(main, server, tabId, opts) {
       el("div", { class: "finops-panel" }, [active.build(chosen, { signal: controller.signal, postgres: isPostgresRow(row) })]),
     ]);
     /* #7393: the tab's panels read as they build. A poll over the same server and tab leaves the page on screen and swaps the new one
-       in once its reads have drawn, so a grid the reader scrolled down keeps its place. Anything else paints at once. */
-    showPageWhenSettled(main, "finops|" + chosen + "|" + active.id, [head, body], isPoll);
+       in once its reads have drawn, so a grid the reader scrolled down keeps its place. Anything else paints at once. The page on screen
+       keeps its signal until the swap lands (onShown), and a build that never lands is aborted (onDropped), so the reads and the
+       listeners (Locking's Escape key) of the page the reader is using are never ended by a build that is only waiting. */
+    stagedAbort = controller;
+    showPageWhenSettled(main, "finops|" + chosen + "|" + active.id, [head, body], isPoll, {
+      onShown: () => {
+        const prior = liveAbort;
+        liveAbort = controller;
+        if (stagedAbort === controller) stagedAbort = null;
+        setPanelSignal(controller.signal);
+        if (prior && prior !== controller) prior.abort();
+      },
+      onDropped: () => {
+        if (stagedAbort === controller) stagedAbort = null;
+        controller.abort();
+      },
+    });
+    /* Still waiting: a panel the reader's next control builds on the page on screen takes that page's signal, not the waiting build's. */
+    if (stagedAbort === controller) setPanelSignal(liveAbort ? liveAbort.signal : undefined);
   };
 
   /* Every render, poll included, paints from the cache in the same tick: that rebuilds the tab's panels,
@@ -206,13 +244,16 @@ export function renderFinops(main, server, tabId, opts) {
   const hit = lastRows !== null && (!server || lastRows.some((r) => r.server_name === server || r.display_name === server));
   const hadCache = hit;
   if (hit) paint(lastRows);
-  else mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
+  else {
+    endBuilds();
+    mount(main, [el("div", { class: "page-head" }, [el("h2", { text: "FinOps" })]), el("div", { class: "finops-body" }, [loadingStrip("Loading servers")])]);
+  }
 
   const needFetch = !hit || isPoll;
   if (!needFetch) return;
 
   (async () => {
-    const res = await readTool("list_servers", {}, controller.signal);
+    const res = await readTool("list_servers", {}, listController.signal);
     if (generation !== renderGeneration) return;
     const body = main.querySelector(".finops-body");
     const show = (node) => {
@@ -224,7 +265,7 @@ export function renderFinops(main, server, tabId, opts) {
     /* An empty registry is a definite answer, not a failed read: drop the cache and the painted page's reads. */
     const showEmpty = () => {
       lastRows = null;
-      controller.abort();
+      endBuilds();
       if (body) mount(body, emptyStrip("No servers are registered yet."));
     };
     /* A read the page left (#6793) or a signed-out session says nothing about the registry: keep the cache and the painted page. */
@@ -235,10 +276,6 @@ export function renderFinops(main, server, tabId, opts) {
     const unchanged = hadCache && lastRows !== null && sameServers(lastRows, rows);
     lastRows = rows;
     if (!unchanged) {
-      if (hadCache) {
-        if (panelAbort) panelAbort.abort();
-        controller = panelAbort = new AbortController();
-      }
       paint(rows);
     }
   })();
