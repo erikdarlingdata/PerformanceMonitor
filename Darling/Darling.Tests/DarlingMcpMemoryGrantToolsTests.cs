@@ -514,6 +514,12 @@ FROM generate_series(1, " + PagedSamples + ") g",
             Assert.Equal(JsonValueKind.Null, all.GetProperty("limit_note").ValueKind);
             Assert.Equal(PagedSamples, all.GetProperty("summary").GetProperty("total_events").GetInt64());
 
+            /* A limit equal to the row count still answers every row: the boundary is not truncated. */
+            var exact = WindowFloorLiveHarness.Parse(await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, PagedSamples, asOf));
+            Assert.Equal(PagedSamples, exact.GetProperty("events").GetArrayLength());
+            Assert.False(exact.GetProperty("truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, exact.GetProperty("limit_note").ValueKind);
+
             /* A limit outside 1-1000 is refused by name. */
             Assert.Contains("limit", await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 0), StringComparison.Ordinal);
             Assert.Contains("exceeds maximum", await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 1001), StringComparison.Ordinal);

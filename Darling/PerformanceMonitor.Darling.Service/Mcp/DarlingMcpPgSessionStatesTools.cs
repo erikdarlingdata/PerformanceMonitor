@@ -209,6 +209,13 @@ public sealed class DarlingMcpPgSessionStatesTools
         return "Healthy";
     }
 
+    /// <summary>#7528: the reader answers -1 for a duration the collector did not measure (an autovacuum worker in
+    /// state <c>starting</c> has no query start). The <c>*_duration</c> text twins already read "not measured"; the
+    /// numeric <c>_ms</c> field answers null so -1 cannot be read as a measured duration. Same treatment as the
+    /// replication slot sizes in <c>get_pg_replication_slots</c>. peak_horizon_age and the xmin/xid ages keep their
+    /// documented -1 (pinned nothing).</summary>
+    internal static long? MeasuredMs(long milliseconds) => milliseconds >= 0 ? milliseconds : null;
+
     internal static string FormatDuration(long milliseconds)
     {
         if (milliseconds < 0)
@@ -313,17 +320,17 @@ public sealed class DarlingMcpPgSessionStatesTools
                     + "compute_query_id is off, and on a redacted row it is NULL with everything else "
                     + "privileged. Check the target's version before reading anything into this."
                     : null,
-                peak_xact_duration_ms = r.PeakXactDurationMs,
+                peak_xact_duration_ms = MeasuredMs(r.PeakXactDurationMs),
                 peak_xact_duration = FormatDuration(r.PeakXactDurationMs),
-                peak_state_duration_ms = r.PeakStateDurationMs,
+                peak_state_duration_ms = MeasuredMs(r.PeakStateDurationMs),
                 peak_state_duration = FormatDuration(r.PeakStateDurationMs),
-                peak_query_duration_ms = r.PeakQueryDurationMs,
+                peak_query_duration_ms = MeasuredMs(r.PeakQueryDurationMs),
                 /* How long the BACKEND has existed, against how long it has held its transaction. The pair
                    separates two different bugs that look identical in the transaction duration alone: a
                    connection created ten minutes ago that has been idle in transaction for all ten is a
                    pool handing out a session nobody finished with, while a three-day-old worker that has
                    held one for ten minutes is a code path that forgot to commit. */
-                backend_age_ms = r.PeakBackendDurationMs,
+                backend_age_ms = MeasuredMs(r.PeakBackendDurationMs),
                 backend_age = FormatDuration(r.PeakBackendDurationMs),
                 /* -1 means pinned NOTHING. Not a small age - no age. */
                 peak_horizon_age = r.PeakHorizonAge,
