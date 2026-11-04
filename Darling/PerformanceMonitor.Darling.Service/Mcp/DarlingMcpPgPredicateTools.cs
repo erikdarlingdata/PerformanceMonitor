@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPredicateTools
 {
-    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from pg_qualstats: which columns are filtered, with which operator, rows evaluated and rows filtered out. filtered_pct is 100*rows_filtered/rows_evaluated (a percent), NULL when nothing was evaluated, never a false 0%. worst_estimate_error_ratio large means the PLANNER is misjudging this predicate (a stats/correlation problem), not that it needs an index. SAMPLED: counts are raw at sample_rate (often 0.01) and are NEVER scaled up here. queryid is a STRING and joins get_pg_top_queries. query_text is the statement behind each queryid (400-char preview, full_text for all), null until hourly capture reaches it and for queryid 0. <<GUIDE>> Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. These are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries. query_text is the statement behind each queryid (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly capture reaches that queryid and always null for queryid 0, so a person need not look the id up.")]
+    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from pg_qualstats: which columns are filtered, with which operator, rows evaluated and rows filtered out. filtered_pct is 100*rows_filtered/rows_evaluated (a percent), NULL when nothing was evaluated, never a false 0%. worst_estimate_error_ratio large means the PLANNER is misjudging this predicate (a stats/correlation problem), not that it needs an index. SAMPLED: counts are raw at sample_rate (often 0.01) and are NEVER scaled up here. queryid is a STRING and joins get_pg_top_queries. query_text is the statement behind queryid. <<GUIDE>> Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. These are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries. query_text is the statement behind each queryid (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly capture reaches that queryid and always null for queryid 0, so a person need not look the id up.")]
     public static async Task<string> GetPgPredicateStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -104,10 +104,7 @@ public sealed class DarlingMcpPgPredicateTools
                changed mid-window would otherwise be reported as whichever row sorted first. */
             var rates = rows.Select(r => r.SampleRate).Distinct().OrderBy(r => r).ToArray();
 
-            var predicates = rows.Select(r =>
-            {
-                var (queryText, queryTextTruncated) = DarlingMcpPgStatementTools.StatementTextFor(r.QueryText, full_text);
-                return new
+            var predicates = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
                 schema_name = r.SchemaName,
@@ -117,8 +114,8 @@ public sealed class DarlingMcpPgPredicateTools
                 queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
                 /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
                    that id (the same rules as get_pg_top_queries), and always null for queryid 0. */
-                query_text = queryText,
-                query_text_truncated = queryTextTruncated,
+                query_text = DarlingMcpPgStatementTools.StatementTextFor(r.QueryText, full_text).Text,
+                query_text_truncated = DarlingMcpPgStatementTools.StatementTextFor(r.QueryText, full_text).Truncated,
                 sampled_executions = r.SampleCount,
                 rows_evaluated = r.RowsEvaluated,
                 rows_filtered = r.RowsFiltered,
@@ -128,7 +125,6 @@ public sealed class DarlingMcpPgPredicateTools
                 /* Per row, because it can change under the operator's hand mid-window and the counts
                    beside it are only interpretable against the rate that produced them. */
                 sample_rate = r.SampleRate,
-            };
             });
 
             var json = JsonSerializer.Serialize(new

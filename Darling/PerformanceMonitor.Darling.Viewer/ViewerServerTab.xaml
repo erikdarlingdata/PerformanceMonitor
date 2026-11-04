@@ -5686,8 +5686,6 @@
                              are a sample and the panel has to say so. -->
                         <DataGridTextColumn Header="Sample Rate" Binding="{Binding SampleRate}" ElementStyle="{StaticResource NumericCell}" Width="110"/>
                         <DataGridTextColumn Header="Query ID" Binding="{Binding QueryIdText}" SortMemberPath="QueryId" Width="170"/>
-                        <!-- Newest row per predicate, so the rows can come from different snapshots. -->
-                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                         <!-- #7428: the statement behind the Query ID, last so the numbers stay in view. -->
                         <DataGridTemplateColumn Header="Statement" Width="*" MinWidth="200">
                             <DataGridTemplateColumn.CellTemplate>
@@ -5696,6 +5694,8 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
+                        <!-- Newest row per predicate, so the rows can come from different snapshots. -->
+                        <DataGridTextColumn Header="Collected" Binding="{Binding CaptureTime}" Width="150" SortMemberPath="CaptureTimeUtc"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
