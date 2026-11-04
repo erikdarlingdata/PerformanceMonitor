@@ -56,10 +56,13 @@ public static class ConfigValueText
         return builder.Append('”').ToString();
     }
 
+    /// <summary>#7483: said after the visible form, so the row states why its two cells look alike. <c>config-values.js</c> has the same text.</summary>
+    public const string WhitespaceOnlyNote = " (white space only)";
+
     /// <summary>What the cell for <paramref name="own"/> shows beside <paramref name="other"/>: the value as stored, or its
-    /// visible-whitespace form when the pair differs only in whitespace. Null stays null.</summary>
+    /// visible-whitespace form and <see cref="WhitespaceOnlyNote"/> when the pair differs only in whitespace. Null stays null.</summary>
     public static string? Shown(string? own, string? other) =>
-        own is not null && DifferOnlyInWhitespace(own, other) ? VisibleWhitespace(own) : own;
+        own is not null && DifferOnlyInWhitespace(own, other) ? VisibleWhitespace(own) + WhitespaceOnlyNote : own;
 
     private static string StripWhitespace(string text) => new(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
 }
