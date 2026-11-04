@@ -78,11 +78,33 @@ public sealed class DiskFactCriticalScoreTests
         Assert.True(Score(0.02, null) >= CriticalBand);
     }
 
+    private static Fact CriticalDisk() =>
+        new() { Source = "disk", Key = "DISK_SPACE", Value = 0.01, Metadata = new() { ["min_free_mb"] = 500 } };
+
     [Fact]
-    public void AmplifiersStillAddOnTopOfTheCriticalBase_CappedAtTwo()
+    public void ASpillingFact_AddsItsBoostOnTopOfTheCriticalBase()
     {
-        var disk = new Fact { Source = "disk", Key = "DISK_SPACE", Value = 0.01, Metadata = new() { ["min_free_mb"] = 500 } };
-        new FactScorer().ScoreAll(new List<Fact> { disk });
-        Assert.InRange(disk.Severity, CriticalBand, 2.0);
+        // QUERY_SPILLS at 500 scores a base severity above 0, so the 0.2 spill arm of DiskSpaceAmplifiers matches:
+        // Severity = base x (1 + 0.2) = 1.5 x 1.2.
+        var disk = CriticalDisk();
+        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 500 };
+        new FactScorer().ScoreAll(new List<Fact> { disk, spills });
+
+        Assert.True(spills.BaseSeverity > 0);
+        Assert.Equal(CriticalBand, disk.BaseSeverity, precision: 6);
+        Assert.Equal(CriticalBand * 1.2, disk.Severity, precision: 6);
+    }
+
+    [Fact]
+    public void SpillsAndTempDbTogether_CapSeverityAtTwo()
+    {
+        // TEMPDB_USAGE at 95% clears the root bar (+0.3) and the spills add +0.2: 1.5 x 1.5 = 2.25, capped at 2.0.
+        var disk = CriticalDisk();
+        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 500 };
+        var tempdb = new Fact { Source = "tempdb", Key = "TEMPDB_USAGE", Value = 0.95 };
+        new FactScorer().ScoreAll(new List<Fact> { disk, spills, tempdb });
+
+        Assert.True(FactScorer.ClearsRootBar(tempdb));
+        Assert.Equal(2.0, disk.Severity, precision: 6);
     }
 }
