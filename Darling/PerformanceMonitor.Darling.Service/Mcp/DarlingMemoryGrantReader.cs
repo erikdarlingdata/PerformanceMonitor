@@ -282,11 +282,13 @@ internal static class DarlingMemoryGrantReader
         DateTime SampleTime, string MemoryNotification, int MemoryIndicatorsProcess, int MemoryIndicatorsSystem);
 
     /// <summary>
-    /// The RING_BUFFER_RESOURCE_MONITOR memory-pressure samples over the window — the viewer's
+    /// The RING_BUFFER_RESOURCE_MONITOR memory-pressure samples over the window, newest first — the viewer's
     /// <c>MemoryPressureEventsSql</c> (Lite's <c>GetMemoryPressureEventsAsync</c> ported to Postgres). Windowed
     /// on <c>sample_time</c> (the payload's own clock, which the <c>memory_pressure_events</c> index keys on),
     /// not collection_time, on the <c>v_memory_pressure_events</c> passthrough view. $1 server_id, $2 window
-    /// start, $3 window end (naive UTC).
+    /// start, $3 window end (naive UTC), $4 the row cap (#7516): the caller's limit + 1 so the extra row proves
+    /// truncation, or NULL for every row (<c>LIMIT NULL</c> is no limit in Postgres), which the web chart needs
+    /// because it counts every sample. The caller puts the page back in time order.
     /// </summary>
     public const string MemoryPressureEventsSql = """
         SELECT
@@ -298,26 +300,78 @@ internal static class DarlingMemoryGrantReader
         WHERE server_id = $1
         AND   sample_time >= $2
         AND   sample_time <= $3
-        ORDER BY sample_time
+        ORDER BY sample_time DESC
+        LIMIT $4
         """;
 
-    public static async Task<List<MemoryPressureEventRow>> GetMemoryPressureEventsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The whole window's counts per <c>memory_notification</c> (#7516), whatever the page cut: every sample, and
+    /// the samples with either indicator at 2 or more (the bar the web chart draws). Same window as
+    /// <see cref="MemoryPressureEventsSql"/>. $1 server_id, $2 window start, $3 window end.
+    /// </summary>
+    public const string MemoryPressureSummarySql = """
+        SELECT
+            memory_notification,
+            COUNT(*) AS events,
+            COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
+        FROM v_memory_pressure_events
+        WHERE server_id = $1
+        AND   sample_time >= $2
+        AND   sample_time <= $3
+        GROUP BY memory_notification
+        ORDER BY memory_notification
+        """;
+
+    /// <summary>One notification's count over the whole window.</summary>
+    public sealed record MemoryPressureNotificationCount(string MemoryNotification, long Events, long MediumOrWorseEvents);
+
+    /// <summary>The page (time order, oldest first), whether the window held more, and the whole window's counts.</summary>
+    public sealed record MemoryPressureEventsPage(
+        List<MemoryPressureEventRow> Rows, bool Truncated, long TotalEvents, long MediumOrWorseEvents,
+        IReadOnlyList<MemoryPressureNotificationCount> ByNotification);
+
+    /// <param name="limit">The newest rows to return, or null for every row in the window (the web chart).</param>
+    public static async Task<MemoryPressureEventsPage> GetMemoryPressureEventsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int? limit, CancellationToken cancellationToken = default)
     {
-        var rows = new List<MemoryPressureEventRow>();
-        await using var command = postgres.CreateCommand(MemoryPressureEventsSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var fetched = new List<MemoryPressureEventRow>();
+        await using (var command = postgres.CreateCommand(MemoryPressureEventsSql))
         {
-            rows.Add(new MemoryPressureEventRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = limit is { } l ? (object)((long)l + 1) : DBNull.Value,
+            });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                fetched.Add(new MemoryPressureEventRow(
+                    reader.GetDateTime(0),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+            }
         }
 
-        return rows;
+        var byNotification = new List<MemoryPressureNotificationCount>();
+        await using (var command = postgres.CreateCommand(MemoryPressureSummarySql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                byNotification.Add(new MemoryPressureNotificationCount(
+                    reader.IsDBNull(0) ? "" : reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+            }
+        }
+
+        var truncated = limit is { } cap && fetched.Count > cap;
+        var page = truncated ? fetched.Take(limit!.Value).ToList() : fetched;
+        page.Reverse();
+        return new MemoryPressureEventsPage(
+            page, truncated, byNotification.Sum(n => n.Events), byNotification.Sum(n => n.MediumOrWorseEvents), byNotification);
     }
 }

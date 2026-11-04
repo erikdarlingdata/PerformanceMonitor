@@ -311,14 +311,35 @@ public sealed class DarlingMcpMemoryGrantTools
         forced_grants_in_window = w.ForcedGrantsInWindow
     };
 
-    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure notification events (memory_notification: RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR (sp_pressuredetector's source), over a sample_time window ending at as_of (default 24h), oldest first. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed).")]
-    public static async Task<string> GetMemoryPressureEvents(
+    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure events (memory_notification: RESOURCE_MEMPHYSICAL_LOW/_HIGH, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR, over a sample_time window ending at as_of (default 24h), oldest first. Newest 200 (limit); summary counts the window; read truncated. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed).")]
+    public static Task<string> GetMemoryPressureEvents(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Newest events to return, still oldest first. Default 200, max 1000. summary counts the whole window; read truncated.")] int limit = DefaultPressureEventsLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
+    {
+        var limitError = McpHelpers.ValidateTop(limit);
+        return limitError != null
+            ? Task.FromResult(limitError)
+            : GetMemoryPressureEventsCore(postgres, server_name, hours_back, limit, as_of, logger, cancellationToken);
+    }
+
+    /// <summary>The default page of get_memory_pressure_events (#7516): a server under pressure writes thousands of samples a day.</summary>
+    public const int DefaultPressureEventsLimit = 200;
+
+    /// <summary>
+    /// get_memory_pressure_events with EVERY event in the window (#7516): the web Memory tab counts all the samples into its
+    /// per-hour chart, so it must not take the tool's default page. The reply still carries the summary.
+    /// </summary>
+    internal static Task<string> GetMemoryPressureEventsUncapped(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, ILogger? logger, CancellationToken cancellationToken) =>
+        GetMemoryPressureEventsCore(postgres, server_name, hours_back, null, as_of, logger, cancellationToken);
+
+    private static async Task<string> GetMemoryPressureEventsCore(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int? limit, string? as_of, ILogger? logger, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -329,8 +350,9 @@ public sealed class DarlingMcpMemoryGrantTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            var page = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit, cancellationToken);
+            var rows = page.Rows;
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. The events are
                windowed on sample_time, and an event can predate the collection that stored it (a ring-buffer read hands back history), so
@@ -365,6 +387,28 @@ public sealed class DarlingMcpMemoryGrantTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #7516: the cap, whether the window held more (observed from the extra row), and the whole window's counts. events_returned is the
+                   page's count; total_events is the window's. */
+                limit,
+                truncated = page.Truncated,
+                events_returned = rows.Count,
+                order = "oldest_first",
+                oldest_returned_at = McpHelpers.FormatEffectiveStart(rows[0].SampleTime),
+                newest_returned_at = McpHelpers.FormatEffectiveStart(rows[^1].SampleTime),
+                limit_note = page.Truncated
+                    ? $"Showing the newest {rows.Count} of {page.TotalEvents} events in the window (limit {limit}); the older {page.TotalEvents - rows.Count} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
+                    : null,
+                summary = new
+                {
+                    total_events = page.TotalEvents,
+                    medium_or_worse_events = page.MediumOrWorseEvents,
+                    by_notification = page.ByNotification.Select(n => new
+                    {
+                        memory_notification = n.MemoryNotification,
+                        events = n.Events,
+                        medium_or_worse_events = n.MediumOrWorseEvents
+                    })
+                },
                 events = rows.Select(r => new
                 {
                     sample_time = r.SampleTime.ToString("o"),
