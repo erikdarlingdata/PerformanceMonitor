@@ -8,6 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
@@ -307,11 +310,64 @@ public class MuteRule
     /// <summary>The line a held fire's history row carries as its reason: which digest rule held it, and the window it was in.</summary>
     public string DigestHoldReason()
     {
-        var name = string.IsNullOrWhiteSpace(Reason) ? Summary : Reason.Trim();
+        var name = string.IsNullOrWhiteSpace(Reason) ? Summary : HoldReasonName(Reason);
         var window = ScheduleText;
         return window is null
             ? $"Held for the daily digest by a digest rule ({name})"
             : $"Held for the daily digest by a digest rule ({name}) inside its window {window}";
+    }
+
+    /// <summary>#7414: how many characters of an operator's rule reason a hold line carries.</summary>
+    public const int HoldReasonOperatorChars = 200;
+
+    /// <summary>#7414: how many characters of an agent-written rule reason a hold line carries. The hold line goes into the daily digest
+    /// notification and the alert history, so an agent's text is kept short and labelled as the agent's.</summary>
+    public const int HoldReasonAgentChars = 100;
+
+    /// <summary>The suffix an agent's write appends to a rule reason: <c>[agent:&lt;id&gt;]</c>, or <c>[agent:&lt;id&gt; request &lt;uuid&gt;]</c> for a claimed write.</summary>
+    private static readonly Regex s_agentSuffix = new(
+        @"(\s*\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\])+\s*$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>The rule reason as a hold line names it: one line (line breaks, control and invisible characters become a space or are dropped, so the
+    /// text cannot start a line of its own in a notification body), cut to a fixed length, and labelled when an agent wrote it.</summary>
+    internal static string HoldReasonName(string reason)
+    {
+        var trimmed = reason.Trim();
+        var agent = s_agentSuffix.IsMatch(trimmed);
+        var text = OneLine(agent ? s_agentSuffix.Replace(trimmed, string.Empty) : trimmed, agent ? HoldReasonAgentChars : HoldReasonOperatorChars);
+        return agent ? "agent-written reason: " + text : text;
+    }
+
+    private static string OneLine(string value, int maxChars)
+    {
+        var builder = new StringBuilder(Math.Min(value.Length, maxChars));
+        var pendingSpace = false;
+        var cut = false;
+        foreach (var rune in value.EnumerateRunes())
+        {
+            var category = Rune.GetUnicodeCategory(rune);
+            if (category == UnicodeCategory.Format)
+                continue;
+            if (Rune.IsControl(rune) || Rune.IsWhiteSpace(rune) || category is UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+
+            var needed = (pendingSpace ? 1 : 0) + rune.Utf16SequenceLength;
+            if (builder.Length + needed > maxChars)
+            {
+                cut = true;
+                break;
+            }
+
+            if (pendingSpace)
+                builder.Append(' ');
+            pendingSpace = false;
+            builder.Append(rune.ToString());
+        }
+
+        return cut ? builder.ToString() + "..." : builder.ToString();
     }
 
     /// <summary>

@@ -31,8 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingAgentActionSeat
 {
     internal DarlingAgentActionSeat(DarlingMcpWritePolicy.Effective policy, StoreOwnerSource? owner = null,
-        IReadOnlySet<string>? namedAgentNames = null)
+        IReadOnlySet<string>? namedAgentNames = null, bool agentMuteRulesAllowed = true)
     {
+        AgentMuteRulesAllowed = agentMuteRulesAllowed;
         Policy = policy;
         Owner = owner;
         NamedAgentNames = namedAgentNames ?? new HashSet<string>();
@@ -43,6 +44,9 @@ public sealed class DarlingAgentActionSeat
     internal IReadOnlySet<string> NamedAgentNames { get; }
 
     internal DarlingMcpWritePolicy.Effective Policy { get; }
+
+    /// <summary>False when <c>mcp.allowAgentMuteRules</c> is off in darling.json (#7414): the claim-free mute and digest path refuses. Levels 2 and 3 are not affected.</summary>
+    internal bool AgentMuteRulesAllowed { get; }
 
     /// <summary>The service's own (store owner) data source, which the gate runs a change on (#6569): the journal keeps the agent action rows to the owner,
     /// and the tools' own data source is the <c>mcp</c> login. Null (a test host) runs the change on the tool's data source.</summary>
@@ -193,7 +197,7 @@ internal static class DarlingMcpAgentActions
             throw new AgentToolOutcomeException(answer);
     }
 
-    private static string? Serialize(MuteRule? rule) =>
+    internal static string? Serialize(MuteRule? rule) =>
         rule is null ? null : JsonSerializer.Serialize(DarlingMcpAlertTools.BuildMuteRulePayload(rule), McpHelpers.JsonOptions);
 
     private static async Task<AgentActionTarget> ServerTargetAsync(NpgsqlDataSource postgres, int serverId, string? id)
@@ -315,8 +319,20 @@ internal static class DarlingMcpAgentActions
         }
 
         var target = before is null ? new AgentActionTarget(-1, "no such target", rule_id, null) : await MuteTargetAsync(postgres, before);
+        /* #7414: a digest rule is not this path's to change (it cannot make one, and clearing the expiry of a bounded one would leave an unbounded
+           digest rule that the stale check skips), and an agent-made rule's 7 days are a lifetime on this path too. */
+        AgentActionRefusal? bound = null;
+        if (after is not null && before is not null)
+        {
+            if (before.IsDigestAction)
+                bound = new AgentActionRefusal(DarlingMcpAgentMuteDirect.LifetimeCode,
+                    "A digest rule cannot be changed with a claim: it is an operator's rule, or an agent's bounded rule made without one. Nothing was written.");
+            else if (DarlingMcpAgentMuteDirect.IsAgentMade(before))
+                bound = DarlingMcpAgentMuteDirect.LifetimeRefusal(before, after);
+        }
+
         return await RunAsync(seat, postgres, logger, tool, MuteRuleImage.Kind, agentAction, target,
-            (_, _, ctx, _) => Task.FromResult(after is null ? null : MuteAfterImageRefusal(after, ctx.RequestServerId)),
+            (_, _, ctx, _) => Task.FromResult(after is null ? null : bound ?? MuteAfterImageRefusal(after, ctx.RequestServerId)),
             (_, _, _) => Task.FromResult(Serialize(before)),
             async (connection, transaction, token) =>
             {

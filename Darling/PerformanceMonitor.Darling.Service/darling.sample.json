@@ -437,6 +437,12 @@
     // switch (default off) and a remediation login reference.
     // "allowInvestigations": true,
 
+    // Default on. With "allowInvestigations" on, an agent token can create, change, enable, disable and delete a
+    // mute or digest rule with no claim: one server or all servers, a named metric, expiring within 7 days of the
+    // rule's creation, with a reason, each write journaled (#7414). Set false to refuse those calls. The claim-based
+    // Level 2 and 3 tools are not affected.
+    // "allowAgentMuteRules": false,
+
     // Uncomment to give an operator and your investigation agents their own tokens on one service (#6542).
     // Each token has a name (1-64 of A-Za-z0-9._:-) and a role, "operator" (the reads and the write tools) or
     // "agent" (the reads, the investigation tools and the Level 2 action tools). An agent's agent_id must be the

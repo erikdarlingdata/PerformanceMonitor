@@ -200,7 +200,30 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
        #5632: config.service_version keeps one row per host (the version and start of its latest run), so a start inside
        the window is all it can give: an upgrade shows as a start on the new version, and the version before is not kept.
        Alert thresholds give nothing here: config_alert_settings keeps no change time. */
-    internal const string ChangesSql = @"
+    /* #7414: a reason an agent wrote ends in the suffix the write path appends: [agent:<id>] (a direct write) or
+       [agent:<id> request <uuid>] (a claimed one), more than once if two agents updated the rule. */
+    internal const string AgentReasonSuffixPattern = @"(\s*\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\])+\s*$";
+
+    /// <summary>#7414: how many characters of an agent-written rule reason a brief carries. The agent's text goes into every investigation
+    /// request's brief for the whole change window, so it is kept short and labelled; the full reason stays in the rule and the journal.</summary>
+    public const int AgentReasonChars = 100;
+
+    /// <summary>#7414: how many agent-written mute rules a brief names at most (the newest). Together with <see cref="AgentReasonChars"/>
+    /// they cannot fill the recent changes section's budget, so an operator's change is never cut for them.</summary>
+    public const int MaxAgentMuteRules = 3;
+
+    /// <summary>#7414: the control characters, line breaks and line or paragraph separators an agent-written reason may carry. Each run is replaced
+    /// with one space before the reason is cut, so the brief shows the reason as one line, as the digest hold line does (<c>MuteRule.OneLine</c>).</summary>
+    internal const string AgentReasonControlPattern = @"[\x01-\x1f\x7f-\x9f\u2028\u2029]+";
+
+    /// <summary>#7414: the invisible Format code points an agent-written reason may carry (zero-width characters, bidi controls, tag characters). Each is deleted,
+    /// as <c>MuteRule.OneLine</c> deletes them, so a reason cannot hide text or reverse the order the brief displays in.</summary>
+    internal const string AgentReasonFormatPattern = @"[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]+";
+
+    /// <summary>The agent-written reason with its attribution suffix cut, its Format code points deleted, its control characters turned into spaces and its ends trimmed, before it is cut to length.</summary>
+    private const string AgentReasonOneLineSql = @"btrim(regexp_replace(regexp_replace(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''), '" + AgentReasonFormatPattern + @"', '', 'g'), '" + AgentReasonControlPattern + @"', ' ', 'g'))";
+
+    internal static readonly string ChangesSql = @"
 SELECT at, kind, text, pattern
 FROM (
     SELECT m.created_at_utc AS at, 'mute_rule' AS kind,
@@ -208,11 +231,18 @@ FROM (
                      'for ' || coalesce(m.metric_name, 'every metric'),
                      CASE WHEN m.expires_at_utc IS NOT NULL THEN 'until ' || to_char(m.expires_at_utc, 'YYYY-MM-DD""T""HH24:MI:SS""Z""') END,
                      CASE WHEN m.recur_start_time IS NOT NULL THEN 'repeating window ' || to_char(m.recur_start_time, 'HH24:MI') || '-' || to_char(m.recur_end_time, 'HH24:MI') || ' ' || m.recur_time_zone END,
-                     CASE WHEN m.reason IS NOT NULL THEN 'reason: ' || m.reason END) AS text,
+                     CASE WHEN m.reason IS NULL THEN NULL
+                          WHEN m.agent_written
+                          THEN 'agent-written reason: ' || left(" + AgentReasonOneLineSql + @", " + AgentReasonChars + @")
+                               || CASE WHEN length(" + AgentReasonOneLineSql + @") > " + AgentReasonChars + @" THEN '...' ELSE '' END
+                          ELSE 'reason: ' || m.reason END) AS text,
            m.query_text_pattern AS pattern
-    FROM config_mute_rules AS m
-    WHERE (m.server_name IS NULL OR m.server_name = $2)
-      AND m.created_at_utc >= $3
+    FROM (SELECT r.*, COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) AS agent_written,
+                 row_number() OVER (PARTITION BY COALESCE(r.reason ~ '" + AgentReasonSuffixPattern + @"', false) ORDER BY r.created_at_utc DESC) AS recency
+          FROM config_mute_rules AS r
+          WHERE (r.server_name IS NULL OR r.server_name = $2)
+            AND r.created_at_utc >= $3) AS m
+    WHERE NOT m.agent_written OR m.recency <= " + MaxAgentMuteRules + @"
     UNION ALL
     SELECT am.muted_date, 'analysis_mute',
            concat_ws(' ', 'analysis finding muted:', am.story_path, CASE WHEN am.reason IS NOT NULL THEN 'reason: ' || am.reason END),

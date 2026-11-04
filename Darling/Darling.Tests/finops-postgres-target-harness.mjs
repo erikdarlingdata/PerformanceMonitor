@@ -84,6 +84,7 @@ globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
+  querySelectorAll: () => [], /* keepScroll lists the page's grids; this fake page draws none */
 };
 
 const REGISTRY = JSON.parse(process.env.HARNESS_REGISTRY || "[]");
