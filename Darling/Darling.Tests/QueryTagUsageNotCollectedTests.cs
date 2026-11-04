@@ -124,4 +124,87 @@ public sealed class QueryTagUsageNotCollectedTests
         Assert.Equal("hourly rollup note", plan.Single(t => t.Title.EndsWith(" - sql-one", StringComparison.Ordinal)).Note);
         Assert.Null(plan.Single(t => t.Title.EndsWith(" - pg-one", StringComparison.Ordinal)).Note);
     }
+
+    private const string SecondaryReason = "Query Store is not collected for sec-one: it is a readable secondary.";
+
+    /// <summary>#7376: a readable secondary Darling does not collect Query Store from reads not_collected with the reason get_query_store_top gives,
+    /// in the all-servers view, and the gate's "no coverage row" refusal of it is not what the section says is unserved. The SQL Server beside it
+    /// keeps its refusal, and the secondary's other sections are untouched.</summary>
+    [Fact]
+    public void AllServersBuild_ReadsAReadableSecondaryNotCollectedInQueryStoreOnly_AndNeverNamesItAsNotServed()
+    {
+        var servers = new[] { Sql(1, "sql-one"), Sql(2, "sec-one") };
+        var refused = new Dictionary<int, string> { [1] = "sql refusal reason", [2] = "secondary refusal reason" };
+        var data = Data(
+            unavailable: new Dictionary<string, string> { [QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(refused.Values) },
+            refused: refused);
+
+        var result = QueryTagUsageView.Build(
+            data, Scope(servers), allServers: true, tagFilter: null, notCollected: QueryTagUsageView.NotCollectedReasons(servers, data),
+            queryStoreNotCollected: new Dictionary<int, string> { [2] = SecondaryReason });
+
+        var queryStore = result.Tables.Where(t => t.Section == QueryTagRollupSection.QueryStore.Name).ToList();
+        var secondary = queryStore.Single(t => t.Title.EndsWith(" - sec-one", StringComparison.Ordinal));
+        Assert.Equal("not_collected", secondary.Status);
+        Assert.Equal(SecondaryReason, secondary.Message);
+        Assert.Equal("unavailable", queryStore.Single(t => t.Title.EndsWith(" - sql-one", StringComparison.Ordinal)).Status);
+        Assert.Contains("sql refusal reason", result.Message!, StringComparison.Ordinal);
+        Assert.DoesNotContain("secondary refusal reason", result.Message!, StringComparison.Ordinal);
+        Assert.All(
+            result.Tables.Where(t => t.Section != QueryTagRollupSection.QueryStore.Name && t.Title.EndsWith(" - sec-one", StringComparison.Ordinal)),
+            t => Assert.Equal("empty", t.Status));
+    }
+
+    /// <summary>#7376: when the secondary is the only server the gate refused, nothing is named as not served.</summary>
+    [Fact]
+    public void AllServersBuild_WithTheSecondaryTheOnlyRefusal_SaysNothingIsNotServed()
+    {
+        var servers = new[] { Sql(1, "sql-one"), Sql(2, "sec-one") };
+        var refused = new Dictionary<int, string> { [2] = "secondary refusal reason" };
+        var data = Data(
+            sections: new Dictionary<string, List<QueryTagRollupFact>> { [QueryTagRollupSection.QueryStore.Name] = [new QueryTagRollupFact(1, null, new double[QueryTagRollupSection.QueryStore.Measures.Count])] },
+            unavailable: new Dictionary<string, string>(), refused: refused);
+
+        var result = QueryTagUsageView.Build(
+            data, Scope(servers), allServers: true, tagFilter: null, queryStoreNotCollected: new Dictionary<int, string> { [2] = SecondaryReason });
+
+        Assert.Equal("not_collected", result.Tables.Single(t => t.Section == QueryTagRollupSection.QueryStore.Name && t.Title.EndsWith(" - sec-one", StringComparison.Ordinal)).Status);
+        Assert.DoesNotContain("Sections not served", result.Message ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7376: the "This server" scope shows the same reason for the secondary's Query Store section, not the interval-table refusal.</summary>
+    [Fact]
+    public void ThisServerBuild_ReadsAReadableSecondaryNotCollectedInQueryStore_WithItsReason()
+    {
+        var servers = new[] { Sql(2, "sec-one") };
+        var refused = new Dictionary<int, string> { [2] = "secondary refusal reason" };
+        var data = Data(
+            unavailable: new Dictionary<string, string> { [QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(refused.Values) },
+            refused: refused);
+
+        var result = QueryTagUsageView.Build(
+            data, Scope(servers), allServers: false, tagFilter: null, queryStoreNotCollected: new Dictionary<int, string> { [2] = SecondaryReason });
+
+        var table = result.Tables.Single(t => t.Section == QueryTagRollupSection.QueryStore.Name);
+        Assert.Equal("not_collected", table.Status);
+        Assert.Equal(SecondaryReason, table.Message);
+        Assert.DoesNotContain("secondary refusal reason", result.Message ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain("Sections not served", result.Message ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7376: with no readable-secondary reason (a server that holds Query Store rows is never asked), the refusal reads as it did.</summary>
+    [Fact]
+    public void ThisServerBuild_WithoutAReason_StillNamesTheGateRefusal()
+    {
+        var servers = new[] { Sql(2, "sec-one") };
+        var refused = new Dictionary<int, string> { [2] = "secondary refusal reason" };
+        var data = Data(
+            unavailable: new Dictionary<string, string> { [QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(refused.Values) },
+            refused: refused);
+
+        var result = QueryTagUsageView.Build(data, Scope(servers), allServers: false, tagFilter: null);
+
+        Assert.Equal("unavailable", result.Tables.Single(t => t.Section == QueryTagRollupSection.QueryStore.Name).Status);
+        Assert.Contains("secondary refusal reason", result.Message!, StringComparison.Ordinal);
+    }
 }

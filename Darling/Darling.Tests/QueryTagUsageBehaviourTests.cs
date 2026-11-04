@@ -94,6 +94,22 @@ public sealed class QueryTagUsageBehaviourTests
     }
 
     [Fact]
+    public void ANotCollectedSection_ShowsItsMessageOnly_WithNoTableOfZeros()
+    {
+        // #7376: a server the read answers not_collected (a readable secondary's Query Store, a PostgreSQL server) is the message alone. The server beside it keeps its table.
+        var run = Run();
+        var mixed = run.GetProperty("notCollectedMixed");
+        Assert.Equal(1, mixed.GetProperty("tables").GetInt32());
+        Assert.Contains(mixed.GetProperty("text").EnumerateArray(), n => n.GetString()!.Contains("sec-one", System.StringComparison.Ordinal));
+        var single = run.GetProperty("notCollectedSingle");
+        Assert.Equal(0, single.GetProperty("tables").GetInt32());
+        Assert.Contains(single.GetProperty("text").EnumerateArray(), n => n.GetString()!.Contains("readable secondary", System.StringComparison.Ordinal));
+        var all = run.GetProperty("notCollectedAll");
+        Assert.Equal(0, all.GetProperty("tables").GetInt32());
+        Assert.Equal(["each server says why.", "reason one", "reason two"], all.GetProperty("text").EnumerateArray().Select(n => n.GetString()).ToArray());
+    }
+
+    [Fact]
     public void AnHourlyFleetSection_ShowsTheReadsEdgesNote_AndARawSectionShowsNone()
     {
         // #6794: the hourly rollup leaves out the hours past its ceiling, so the page says so beside the heading.
