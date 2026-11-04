@@ -458,8 +458,7 @@ public sealed class ServerPageTabsTests
         var body = ServerTabsJs[draw..end];
 
         Assert.Contains("if (trend.data.window_truncated) {", body, StringComparison.Ordinal);
-        Assert.Contains("trend.data.effective_hours_back", body, StringComparison.Ordinal);
-        Assert.Contains("History for this query starts ", body, StringComparison.Ordinal);
+        Assert.Contains("trendHeadNote(trend.data, \"History for this query\")", body, StringComparison.Ordinal);
         Assert.DoesNotContain("trend.data.truncated", body, StringComparison.Ordinal);
     }
 

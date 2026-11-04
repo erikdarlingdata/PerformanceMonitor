@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, fmtInt, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -120,7 +120,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
   return panel;
 }
 
-async function drawQueryTrend(slot, server, ctx, query, signal) {
+export async function drawQueryTrend(slot, server, ctx, query, signal) {
   mount(slot, loadingStrip());
   const trend = await readToolWithinKeptHistory("get_query_trend", {
     server,
@@ -147,13 +147,7 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
      which this read has none of) is a different fact with the opposite remedy, and the two used to share a
      spelling. Reading the old key here would silently drop this notice: undefined is falsy. */
   if (trend.data.window_truncated) {
-    notes.push(
-      "History for this query starts " +
-        trend.data.effective_hours_back +
-        " hours back, not the " +
-        trend.data.hours_back +
-        " the window asked for. The store holds nothing earlier in this window at this tier."
-    );
+    notes.push(trendHeadNote(trend.data, "History for this query"));
   }
 
   mount(slot, [

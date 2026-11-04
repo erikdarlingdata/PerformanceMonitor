@@ -132,4 +132,26 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
         Assert.StartsWith("Reads the running requests from the monitored server once, now.", text);
         Assert.DoesNotContain("a newer request more than an hour later removes it", text);
     }
+
+    /// <summary>
+    /// #7416 item 21: the Top Queries per-query trend says the earlier part "aged out" only when the read says the requested start is
+    /// older than the tier keeps, and then names how long the tier keeps data. A first point that is merely later than the start
+    /// (a query first run five hours ago) names no cause.
+    /// </summary>
+    [Fact]
+    public void TheQueryTrendNote_SaysAgedOutOnlyWhenTheStartIsOlderThanTheTierKeeps()
+    {
+        var notes = Result.Value.GetProperty("queryTrendNotes");
+        var late = Assert.Single(notes.GetProperty("late").EnumerateArray()).GetString()!;
+        Assert.Contains("History for this query starts 4.9 hours back, not the 24 the window asked for.", late);
+        Assert.Contains("The store holds nothing earlier in this window at this tier.", late);
+        Assert.DoesNotContain("aged out", late);
+
+        var old = Assert.Single(notes.GetProperty("old").EnumerateArray()).GetString()!;
+        Assert.Contains("History for this query starts 90 hours back, not the 168 the window asked for.", old);
+        Assert.Contains("The earlier part has aged out of this tier, which keeps 4 days of data.", old);
+        Assert.DoesNotContain("holds nothing earlier", old);
+
+        Assert.DoesNotContain("starts", Assert.Single(notes.GetProperty("whole").EnumerateArray()).GetString()!);
+    }
 }

@@ -64,6 +64,13 @@ const answerFor = (name, params) => {
     if (server === "none") return { status: "empty", message: "No rows in this window." };
     return { trend: [1, 7, 13, 19].map((h, i) => ({ time: iso(START + h * HOUR), count: 2 + i })) };
   }
+  if (name === "get_query_trend") {
+    /* #7416 item 21: the head of the history is later than the window's start. "late" has the start inside the tier's retention; "old" does not. */
+    const base = { hours_back: 24, effective_hours_back: 4.9, window_truncated: true, source: "raw", bucket: "per-collection", bucket_minutes: null, trend: [{ collection_time: iso(END - 4 * HOUR), avg_cpu_ms: 4, avg_elapsed_ms: 5 }] };
+    if (server === "late") return { ...base, start_older_than_tier: false, tier_keeps_days: 4 };
+    if (server === "old") return { ...base, hours_back: 168, effective_hours_back: 90, start_older_than_tier: true, tier_keeps_days: 4 };
+    return { ...base, hours_back: 24, window_truncated: false };
+  }
   /* any other trend read: a few level rows, and the restart entry the payload carries */
   return {
     trend: [3, 9, 15].map((h) => ({ time: iso(START + h * HOUR), memory_mb: 50, allocated_mb: 40, avg_read_latency_ms: 2, avg_write_latency_ms: 3, line: "db1 data" })),
@@ -167,6 +174,15 @@ const bar = M.live.activeQueriesLiveBar("a", []);
 await flush();
 const block = bar.children[0];
 out.live = { first: block ? block.children.map((c) => c.tag) : [], second: bar.children[1] ? bar.children[1].tag : null, noteText: bar.children[1] ? bar.children[1].textContent : "" };
+
+/* #7416 item 21: the per-query trend's coverage note names a cause only when the read says the start is older than the tier keeps. */
+const trendNotes = async (server) => {
+  const slot = new FakeNode("div");
+  await M.queries.drawQueryTrend(slot, server, { hours: 24 }, { query_hash: "0xABC", database_name: "Orders" }, undefined);
+  await flush();
+  return all(slot).filter((n) => /(^|\s)notice(\s|$)/.test(cls(n))).map((n) => n.textContent);
+};
+out.queryTrendNotes = { late: await trendNotes("late"), old: await trendNotes("old"), whole: await trendNotes("whole") };
 
 console.log(JSON.stringify(out));
 process.exit(0);
