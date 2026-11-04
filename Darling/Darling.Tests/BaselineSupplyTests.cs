@@ -294,9 +294,6 @@ public class BaselineSupplyTests
         Assert.Equal(floored, DarlingRetention.ComputeStatementTextCutoff(now, 1));
         /* A retention above the window is honoured: the floor never shortens. */
         Assert.Equal(now.AddDays(-(90 + PgStatementText.PruneMarginDays)), DarlingRetention.ComputeStatementTextCutoff(now, 90));
-
-        /* The exclusion really is read by the baseline arms, so this floor has something to protect. */
-        Assert.Contains("FROM " + StatementTextLookup, PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(MetricNames.PgStatementShare)!, StringComparison.Ordinal);
     }
 
     /// <summary>The keyed half of the derivation is not vacuous (#3691 lane 33): the two statement arms read

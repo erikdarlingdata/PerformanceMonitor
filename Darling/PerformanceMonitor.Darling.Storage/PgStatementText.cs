@@ -119,7 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     /// none does. A window, not a GROUP BY, so the DISTINCT ON below still picks the costliest entry's text.
     /// </summary>
     private static readonly string OwnEntriesWindow =
-        "jsonb_agg(jsonb_build_array(s.userid, s.dbid)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
+        "jsonb_agg(jsonb_build_array(s.userid::bigint, s.dbid::bigint)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
         + ") OVER (PARTITION BY s.queryid) AS own_entries";
 
     /// <summary>
