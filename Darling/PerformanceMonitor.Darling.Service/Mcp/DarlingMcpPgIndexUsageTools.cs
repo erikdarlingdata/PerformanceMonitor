@@ -102,6 +102,17 @@ public sealed class DarlingMcpPgIndexUsageTools
             return "In use - scanned during this window. Nothing to do.";
         }
 
+        /* #7456: the counters were lost inside the window, so the zero is "none since they were lost", not
+           "none in the window". Crash recovery does this without recording a reset anywhere. */
+        if (r.StatsWereResetInWindow)
+        {
+            return "Zero scans since the statistics counters were lost or reset inside this window, which "
+                 + "is not evidence of disuse: the scans before that point are gone from the counter. "
+                 + "Crash recovery and an immediate shutdown discard the counters without recording a "
+                 + "reset. Wait for a full cycle of your slowest scheduled job after the restart, then "
+                 + "read again before judging this index.";
+        }
+
         /* Zero scans in the window, no structural blocker, enough history to say so. Even here the remedy
            is qualified, because two things the data cannot see remain. */
         var qualifier = r.IsPartial
@@ -122,6 +133,30 @@ public sealed class DarlingMcpPgIndexUsageTools
              + "a rare query whose plan is only acceptable because this index exists. Widen hours_back to "
              + "the longest interval any scheduled job runs on before acting, and prefer making the index "
              + "invisible to the planner first where you can, so the change is reversible without a rebuild.";
+    }
+
+    /// <summary>
+    /// What the lifetime scan count covers (#7456). A NULL <c>stats_reset</c> says no reset was recorded, not that
+    /// none happened: crash recovery and an immediate shutdown discard the statistics without recording one, and
+    /// the note must not read as proof the counter covers the whole life of the database. A counter that fell
+    /// between two stored samples is the store's own evidence that this happened.
+    /// </summary>
+    internal static string StatsResetNote(DarlingPgIndexUsageReader.PgIndexUsageRow r)
+    {
+        if (r.StatsReset is not null)
+        {
+            return "Lifetime scan counts cover only the period since this reset.";
+        }
+
+        return r.StatsWereResetInWindow
+            ? "No reset is recorded for this database, but this index's scan counter fell between two samples "
+              + "in the window. That is what crash recovery or an immediate shutdown does: they discard the "
+              + "statistics without recording a reset. The lifetime scan count covers only the period since "
+              + "then; get_pg_write_stats reports the postmaster restart."
+            : "No reset is recorded for this database. That does not prove the lifetime scan count covers its "
+              + "whole life: crash recovery and an immediate shutdown discard the statistics without "
+              + "recording a reset. The postmaster start time says when the counters last restarted; "
+              + "get_pg_write_stats reports postmaster_restarted for a restart inside the window.";
     }
 
     /// <summary>
@@ -271,7 +306,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 "scans_in_window is a difference between samples and covers only effective_start onward, so a short history undercounts: an index can look unused only because it has been watched briefly.",
                 logger: logger, cancellationToken: cancellationToken);
 
-            var unscanned = rows.Where(r => r.ScansInWindow == 0 && r.IsValid && !r.IsPrimaryKey
+            var unscanned = rows.Where(r => r.ScansInWindow == 0 && !r.StatsWereResetInWindow && r.IsValid && !r.IsPrimaryKey
                                             && !r.SupportsConstraint && !r.IsUnique && !r.IsReplicaIdentity
                                             && r.SampleCount >= MinimumSamplesForADisuseClaim).ToList();
             var reclaimable = unscanned.Sum(r => Math.Max(r.IndexBytes, 0));
@@ -308,14 +343,11 @@ public sealed class DarlingMcpPgIndexUsageTools
                     + "since the statistics were last reset; on 15 and below the server does not record "
                     + "this at all, so its absence says nothing."
                     : null,
-                /* The denominator for the lifetime counter. NULL means never reset, which is the ordinary
-                   state and means the counters run back to the start of the statistics system - not that
-                   the value is unknown. */
+                /* The denominator for the lifetime counter. NULL means no reset was RECORDED, which is not the
+                   same as never reset (#7456): crash recovery and an immediate shutdown discard every counter
+                   without writing a stats_reset, and from PostgreSQL 15 the column then stays NULL. */
                 stats_reset = r.StatsReset?.ToString("o"),
-                stats_reset_note = r.StatsReset is null
-                    ? "This database's statistics have never been reset, so the lifetime scan count covers "
-                    + "the whole life of the statistics system."
-                    : "Lifetime scan counts cover only the period since this reset.",
+                stats_reset_note = StatsResetNote(r),
                 stats_were_reset_in_window = r.StatsWereResetInWindow,
                 is_unique = r.IsUnique,
                 is_primary_key = r.IsPrimaryKey,
@@ -369,9 +401,9 @@ public sealed class DarlingMcpPgIndexUsageTools
                      + "deliberately not reported here, so this count is LOWER than get_pg_index_bloat's "
                      + "complete btree census — the difference is that floor, not a missing read."
                      + (resetSeen
-                         ? " At least one index's database had its statistics RESET inside this window, so "
-                         + "its windowed scan count is clamped at zero rather than negative and is a lower "
-                         + "bound."
+                         ? " At least one index's database had its statistics RESET, or lost to a crash restart, inside "
+                         + "this window, so its windowed scan count is clamped at zero rather than negative "
+                         + "and is a lower bound. A zero there is not counted among the unscanned indexes."
                          : string.Empty)
                      + (invalidCount > 0
                          ? $" {invalidCount} INVALID index(es) are present and sorted to the top - those are "

@@ -999,11 +999,13 @@ internal static class PgDisplay
             ? "no column statistics - check the monitoring login can SELECT this table"
             : row.LiveTuples < 0
                 ? "never analyzed - no row count to compare against"
-                : suppressed
-                    ? "statistics stale - ANALYZE this table, then re-read"
-                    : row.PgstattupleAvailable
-                        ? "estimate; confirm exactly with pgstattuple"
-                        : "estimate; pgstattuple is not installed here";
+                : row.LastAnalyzed is null
+                    ? "no record of the last ANALYZE - ANALYZE this table, then re-read"
+                    : suppressed
+                        ? "statistics stale - ANALYZE this table, then re-read"
+                        : row.PgstattupleAvailable
+                            ? "estimate; confirm exactly with pgstattuple"
+                            : "estimate; pgstattuple is not installed here";
 
         return new TableBloatRow
         {
