@@ -784,7 +784,7 @@ SELECT
     monitor_loop,
     blocking_open_transaction_count
 FROM " + xeRows + @" AS ev
-ORDER BY event_time DESC
+ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -996,7 +996,7 @@ SELECT
     contentious_object,
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.TrailingIdentityColumns}
 FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
-ORDER BY event_time DESC
+ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
 LIMIT 5000";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
