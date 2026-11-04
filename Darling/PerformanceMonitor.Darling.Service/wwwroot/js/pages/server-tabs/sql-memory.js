@@ -10,7 +10,7 @@ import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityNotes, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./shared.js";
+import { panelShell, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./shared.js";
 
 /* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
    target and available_physical_memory_mb as that target minus what is committed, so the first two tiles are the database's
@@ -244,10 +244,9 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
   }));
   if (!drawn.length) return mount(slot, [keptWindowStrip(trend), missingStrip(trend.data), emptyStrip("No clerk samples in this window.")]);
   /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-  const notes = discontinuityNotes(trend.data);
   mount(slot, [
     keptWindowStrip(trend),
-    notes.length ? noticeStrip(notes.join(" ")) : null,
+    /* #7416: memory clerk sizes are levels, not deltas, so a restart draws no restart strip. */
     missingStrip(trend.data),
     zoomableLineChart({
       atTime: { server },

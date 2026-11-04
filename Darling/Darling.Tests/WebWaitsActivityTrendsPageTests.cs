@@ -57,7 +57,7 @@ public sealed class WebWaitsActivityTrendsPageTests
         Assert.Contains("{ server, metric: kind, hours: ctx.hours, names: names.join(\",\") }", draw);
         Assert.Contains("data.missing_names", draw);
         Assert.Contains("data.hints.missing_names", draw);
-        Assert.Contains("discontinuityNotes(trend.data)", draw);
+        Assert.Contains("trend.data.discontinuities", draw);
     }
 
     [Fact]

@@ -65,9 +65,9 @@ public sealed class WebPartialWindowBehaviourTests
     public void ARowCappedChart_DrawsTheSameNoticeAsItsGrid_WorkedForAChart()
     {
         var r = Run();
-        Assert.StartsWith("partial window: this grid shows only the newest rows", S(r, "gridServerNote"));
+        Assert.StartsWith("Partial window: this grid shows only the newest rows", S(r, "gridServerNote"));
         var chart = S(r, "chartServerNote")!;
-        Assert.StartsWith("partial window: this chart shows only the newest rows", chart);
+        Assert.StartsWith("Partial window: this chart shows only the newest rows", chart);
         Assert.Contains("The chart covers", chart);
         Assert.DoesNotContain("grid", chart);
     }
@@ -85,9 +85,9 @@ public sealed class WebPartialWindowBehaviourTests
     {
         var r = Run();
         var oldest = S(r, "oldestLocal")!;
-        Assert.Equal("partial window: this grid shows only the newest 50 of 219 snapshots, back to " + oldest + ", because it stops at its row limit.", S(r, "activeGrid"));
-        Assert.StartsWith("partial window: this chart shows only the newest 50 of 219 snapshots", S(r, "activeChart"));
-        Assert.Equal("partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit.", S(r, "activeNoCounts"));
+        Assert.Equal("Partial window: this grid shows only the newest 50 of 219 snapshots, back to " + oldest + ", because it stops at its row limit.", S(r, "activeGrid"));
+        Assert.StartsWith("Partial window: this chart shows only the newest 50 of 219 snapshots", S(r, "activeChart"));
+        Assert.Equal("Partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit.", S(r, "activeNoCounts"));
     }
 
     [Fact]

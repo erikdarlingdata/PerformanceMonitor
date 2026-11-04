@@ -10,7 +10,7 @@ import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readE
 import { getPanelSignal } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { READ_FIELDS } from "../../read-fields.js";
-import { panelShell, discontinuityNotes, linePanel } from "./shared.js";
+import { panelShell, discontinuityStrip, linePanel } from "./shared.js";
 
 /**
  * What a File I/O Latency line is, for the subtitle (#5244 PR5): exactly one chosen database draws one line per file ("per
@@ -48,7 +48,6 @@ export function fileIoPanel(server, ctx) {
     const write = pivot(rows.filter((r) => r.avg_write_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_write_latency_ms" });
     if (!read.series.length && !write.series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-    const notes = discontinuityNotes(res.data);
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
@@ -57,7 +56,7 @@ export function fileIoPanel(server, ctx) {
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
-      notes.length ? noticeStrip(notes.join(" ")) : null,
+      discontinuityStrip(res.data),
       ...draw("Read latency (ms)", read, "file-io-latency", "No reads in this window."),
       ...draw("Write latency (ms)", write, "file-io-write-latency", "No writes in this window."),
     ]);

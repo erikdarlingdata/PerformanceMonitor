@@ -73,7 +73,7 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         Assert.Equal(string.Join(",", FirstFive), read.GetProperty("names").GetString());
         Assert.Equal(FirstFive, Strings(r.GetProperty("chart").GetProperty("labels")));
         Assert.Equal("ms/s", r.GetProperty("chart").GetProperty("unit").GetString());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        Assert.Contains("Rates start over there.", Strings(r.GetProperty("notices")).Single());
     }
 
     [Fact]
@@ -114,7 +114,8 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         Assert.Contains("Running", labels);
         Assert.Equal("sessions", r.GetProperty("chart").GetProperty("unit").GetString());
         Assert.Equal("session_stats", Assert.Single(r.GetProperty("reads").EnumerateArray()).GetProperty("metric").GetString());
-        Assert.Contains("baseline discontinuity at", Strings(r.GetProperty("notices")).Single());
+        // #7416: session counts are levels, so a restart in the window draws no restart notice on them.
+        Assert.Empty(Strings(r.GetProperty("notices")));
         Assert.Contains(Strings(r.GetProperty("notes")), n => n.Contains("application AppOne (4)") && n.Contains("host HostOne (6)"));
     }
 

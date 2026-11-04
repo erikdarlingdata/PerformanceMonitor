@@ -15,7 +15,7 @@ import { statsHistoryColumn } from "../stats-history.js";
 import { windowParams } from "../../time-slicer.js";
 import { activePlanColumns, planColumn } from "../plan-viewer.js";
 import { comparePick, compareControl } from "../top-compare.js";
-import { codeDisclosure, listCell, panelShell, discontinuityNotes, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
+import { codeDisclosure, listCell, panelShell, discontinuityStrip, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
 
 /**
  * Top Queries by CPU, plus that ONE query's per-collection history — the browser's per-query drill-down (#2520).
@@ -155,12 +155,12 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
         " the window asked for. The store holds nothing earlier in this window at this tier."
     );
   }
-  /* #3653 A5: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
-  notes.push(...discontinuityNotes(trend.data));
 
   mount(slot, [
     keptWindowStrip(trend),
     notes.length ? noticeStrip(notes.join(" ")) : null,
+    /* #3653 A5, #7416: the payload's baseline discontinuities, beside the #2353 coverage notes above. */
+    discontinuityStrip(trend.data),
     zoomableLineChart({
       atTime: { server },
       points: trend.data.trend || [],
@@ -394,10 +394,30 @@ export const QUERY_STORE_COLUMNS = [
  * — the same sentences the MCP payload and the WPF grid carry), behind a disclosure because each one is a
  * paragraph; it is never re-worded here.
  */
+/* #7416: the reason tokens in words (QueryStoreClutter.ReasonText). Unknown is "not graded": nothing was judged, because Query Store is off,
+   the database is a read-only replica, or the window held nothing. The row says so beside its reasons. */
+const QS_REASON_TEXT = {
+  read_cost_dominant: "Read cost dominates",
+  plan_churn_high: "High plan churn",
+  one_shot_plans: "Mostly one-shot plans",
+  plans_per_query_at_cap: "Plans per query at the cap",
+  storage_near_cap: "Storage near the cap",
+  qs_read_only: "Query Store read-only",
+  qs_off: "Query Store off",
+  qs_read_only_replica: "Query Store read-only (replica)",
+  not_measured: "Nothing measured in this window",
+};
+
+export function qsReasonsText(row) {
+  const words = (Array.isArray(row && row.verdict_reasons) ? row.verdict_reasons : []).map((t) => QS_REASON_TEXT[t] || t).join(", ");
+  if (!row || row.verdict !== "Unknown") return words || "—";
+  return words ? words + " (not graded)" : "Not graded";
+}
+
 export const QS_CLUTTER_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "verdict", label: "Verdict", sevKey: "verdict" },
-  { key: "verdict_reasons", label: "Reasons", render: (r) => listCell(r.verdict_reasons) },
+  { key: "verdict_reasons", label: "Reasons", render: (r) => document.createTextNode(qsReasonsText(r)) },
   /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
   { key: "excluded_reason", label: "Excluded Because" },
   { key: "read_cost.runs_slowest_pct", label: "Slowest on %", format: "num1" },

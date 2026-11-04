@@ -10,7 +10,7 @@ import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadin
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityNotes, withPanelSignal } from "./shared.js";
+import { panelShell, discontinuityStrip, withPanelSignal } from "./shared.js";
 
 /** The most counters the Perfmon chart draws at once: one read each, and the palette has ten colors. */
 const MAX_COUNTERS_CHARTED = 10;
@@ -110,7 +110,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
   const notes = [];
   const kept = [];
   let keptHours = 0;
-  const seenNotes = new Set();
+  const seenSteps = new Map();
   let failed = 0;
   let allRates = true;
   results.forEach((trend, i) => {
@@ -129,11 +129,12 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
       kept.push(trend);
     }
     /* #3653 A5: the payload's baseline discontinuities render as a notice above the chart. They are about the
-       server, so the same sentence from two counters shows once. */
-    for (const n of discontinuityNotes(trend.data)) seenNotes.add(n);
+       server, so the same step from two counters shows once. */
     const points = trend.data.trend || [];
     /* A rate counter plots its per_second (its stored value only climbs); any other counter plots its value. */
     const rate = points.some((p) => p && "per_second" in p);
+    /* #7416: only a rate counter is a delta, so only it has a baseline that a restart starts over. */
+    if (rate) for (const d of trend.data.discontinuities || []) seenSteps.set(d.at + "|" + d.reason, d);
     if (!rate) allRates = false;
     drawn.push({
       key: "c" + i,
@@ -154,7 +155,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
   }
   mount(slot, [
     kept.length ? keptWindowStrip(kept[0]) : null,
-    seenNotes.size ? noticeStrip([...seenNotes].join(" ")) : null,
+    discontinuityStrip({ discontinuities: [...seenSteps.values()] }),
     ...failures,
     zoomableLineChart({
       atTime: { server },
@@ -229,14 +230,13 @@ export function sessionStatsTrendPanel(server, ctx) {
     const points = res.data.trend || [];
     if (!points.length) return mount(body, [keptWindowStrip(res), emptyStrip("No session samples in this window.")]);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
-    const notes = discontinuityNotes(res.data);
     const newest = points[points.length - 1];
     const top = [];
     if (newest.top_application_name) top.push("application " + newest.top_application_name + " (" + newest.top_application_connections + ")");
     if (newest.top_host_name) top.push("host " + newest.top_host_name + " (" + newest.top_host_connections + ")");
     mount(body, [
       keptWindowStrip(res),
-      notes.length ? noticeStrip(notes.join(" ")) : null,
+      discontinuityStrip(res.data, { delta: false }), /* #7416: session counts are levels */
       zoomableLineChart({
         atTime: { server },
         points,

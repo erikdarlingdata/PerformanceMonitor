@@ -208,10 +208,23 @@ export function browserZoneOrBlank() {
   }
 }
 
+/** #7416: the service writes its window notices for an MCP client in lowercase ("partial window: ..."). A notice drawn on a page starts a
+    sentence, so the opening word is capitalised here, the one place every notice strip passes through. */
+function startOfSentence(text) {
+  return typeof text === "string" ? text.replace(/^partial window:/, "Partial window:") : text;
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
-  return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
+  return el("div", { class: "strip notice", role: "status" }, [startOfSentence(localizeIsoText(plainText(message)))]);
+}
+
+/** #7416: a usage note about a page ("these are the system_health session and default trace, parsed on read") is not a warning about the
+    data, so it is the quiet `strip source` text, not the yellow `strip notice`. The same split #7402 makes for the other tabs' routine
+    captions. A real caveat keeps noticeStrip. */
+export function usageNoteStrip(message) {
+  return el("div", { class: "strip source", role: "status" }, [localizeIsoText(plainText(message))]);
 }
 
 /**
@@ -472,7 +485,7 @@ export function cappedReadNote(data, desc) {
   const total = Number(data.total_snapshots);
   const counts = shown > 0 && total > shown ? shown.toLocaleString() + " of " + total.toLocaleString() + " snapshots" : "rows";
   return {
-    text: "partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
+    text: "Partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
     oldest,
   };
 }
@@ -534,14 +547,14 @@ export function windowNoteText(data) {
   const first = at(data.data_start_utc);
   if (start && end && oldest) {
     return (
-      "partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
-      "The window started at " + start + ". The grid covers " + oldest + " to " + end + "."
+      "Partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
+      "The window you asked for runs from " + start + " to " + end + "."
     );
   }
   if (start && end && first) {
     return (
-      "partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
-      "The panel covers " + first + " to " + end + "."
+      "Partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
+      "It runs to " + end + "."
     );
   }
 
