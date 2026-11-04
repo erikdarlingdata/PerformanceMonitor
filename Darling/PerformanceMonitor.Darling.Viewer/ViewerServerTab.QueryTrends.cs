@@ -157,7 +157,19 @@ public partial class ViewerServerTab
                     : $"{series.Source} (one point per collection)"
                 : $"{series.Source} rollup (one point per hour)",
             series.Truncated ? series.EffectiveStartUtc : null,
-            "the store no longer holds the rest of this window at this tier");
+            DescribeUnservedHead(series));
+
+    /// <summary>
+    /// Why a raw or hourly trend chart's head was not served (#7416 item 21). A late first point alone proves nothing aged out
+    /// (a query first run later, or a server that was off earlier, gives the same one), so the chart says the earlier part aged out of
+    /// the tier, and for how long the tier keeps data, only when the series says the requested start is older than that.
+    /// </summary>
+    internal static string DescribeUnservedHead(QueryTrendSeries series)
+        => series.StartOlderThanTier
+            ? series.TierKeepsDays is int days
+                ? $"the earlier part has aged out of this tier, which keeps {days} {(days == 1 ? "day" : "days")} of data"
+                : "the earlier part has aged out of this tier"
+            : "the store holds nothing earlier in this window at this tier";
 
     /// <summary>The bucket width named in a raw trend's coverage title (#4234): minutes below an hour, whole hours from it.</summary>
     private static string DescribeBucketWidth(int minutes)

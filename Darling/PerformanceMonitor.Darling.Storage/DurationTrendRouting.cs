@@ -151,6 +151,42 @@ public static class DurationTrendRouting
             : (startUtc, false);
 
     /// <summary>
+    /// How long a tier keeps its rows (#7416, item 21): the raw tier's four days or the hourly rollup's ninety, the figures
+    /// <see cref="ShouldUseRawTier"/> and <see cref="ResolveTier"/> already route on. Null when the tier never drops rows: raw on a
+    /// store without the extension (<paramref name="rawRetentionApplies"/> false, nothing ever drops it, #1664), or a tier this
+    /// ladder does not serve. The one place the days are stated, so the payload field and the web and desktop notes agree.
+    /// </summary>
+    public static TimeSpan? TierRetention(RetentionTier tier, bool rawRetentionApplies) => tier switch
+    {
+        RetentionTier.Raw => rawRetentionApplies ? TimescaleSupport.RawRetentionSpan : null,
+        RetentionTier.Hourly => TimescaleSupport.HourlyRetentionSpan,
+        _ => null,
+    };
+
+    /// <summary>The whole days <see cref="TierRetention"/> names, for the payload field and the notes that say how long the tier keeps data.</summary>
+    public static int? TierKeepsDays(RetentionTier tier, bool rawRetentionApplies) =>
+        TierRetention(tier, rawRetentionApplies) is TimeSpan keeps ? (int)keeps.TotalDays : null;
+
+    /// <summary>The oldest instant the tier keeps at <paramref name="nowUtc"/>, or null when it keeps everything (<see cref="TierRetention"/>).</summary>
+    public static DateTime? TierFloorUtc(RetentionTier tier, bool rawRetentionApplies, DateTime nowUtc) =>
+        TierRetention(tier, rawRetentionApplies) is TimeSpan keeps ? nowUtc - keeps : null;
+
+    /// <summary>
+    /// <see cref="DescribeCoverage(DateTime?, DateTime)"/> plus the one reason a late head can be NAMED (#7416, item 21). A first point
+    /// later than the start is not proof that anything aged out: a query first run five hours ago, or a server that was off earlier in
+    /// the day, gives the same late head with every row the tier ever had still in place. <c>StartOlderThanTier</c> is true only on a
+    /// truncated answer whose requested start sits before <paramref name="tierFloorUtc"/>, the oldest instant the tier that answered
+    /// keeps (<see cref="TierFloorUtc"/>): then the part of the window before that floor is gone from this tier by retention, whatever else
+    /// is also true. A null floor (the tier keeps everything) is never older.
+    /// </summary>
+    public static (DateTime EffectiveStartUtc, bool Truncated, bool StartOlderThanTier) DescribeCoverage(
+        DateTime? firstPointUtc, DateTime startUtc, DateTime? tierFloorUtc)
+    {
+        var (effectiveStart, truncated) = DescribeCoverage(firstPointUtc, startUtc);
+        return (effectiveStart, truncated, truncated && tierFloorUtc is DateTime floor && startUtc < floor);
+    }
+
+    /// <summary>
     /// The one word both apps use for the tier a trend was served from — get_query_trend's payload vocabulary
     /// (<c>source</c>), reused by the viewer's chart subtitle so a user reading the chart and an agent reading
     /// the tool describe the same series with the same word. The daily tier is not on this ladder (see the

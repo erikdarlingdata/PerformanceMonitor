@@ -265,6 +265,22 @@ export function chartNoteText(data, kind) {
  */
 const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
 
+/**
+ * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the
+ * one reason the read can name. A late first point alone proves nothing aged out (a query first run five hours ago, or a server that
+ * was off earlier, gives the same one), so "aged out" is said only when the read's own `start_older_than_tier` is true, with how long
+ * the tier keeps data from `tier_keeps_days`. Otherwise the note says only that the store holds nothing earlier at this tier.
+ * `subject` is the lead ("History", "History for this query").
+ */
+export function trendHeadNote(d, subject) {
+  const head = subject + " starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for. ";
+  if (d.start_older_than_tier === true) {
+    const days = Number(d.tier_keeps_days);
+    return head + "The earlier part has aged out of this tier" + (days > 0 ? ", which keeps " + days + (days === 1 ? " day" : " days") + " of data." : ".");
+  }
+  return head + "The store holds nothing earlier in this window at this tier.";
+}
+
 /** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
 export function chartNote(data, kind) {
   const text = chartNoteText(data, kind);
@@ -858,6 +874,15 @@ export function fmtBytes(v) {
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
+/** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
+    and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
+    starts with a capital, and a word the service already capitalised is left as it is. */
+export function fmtStatusWord(v) {
+  if (typeof v !== "string" || !v.trim()) return fmtText(v);
+  const word = v.trim();
+  if (word.toLowerCase() === "ok") return "OK";
+  return /^[a-z][a-z_ ]*$/.test(word) ? word[0].toUpperCase() + word.slice(1).replace(/_/g, " ") : word;
+}
 export function fmtBool(v) {
   return v === true ? "yes" : v === false ? "no" : "—";
 }
@@ -876,6 +901,7 @@ export const FORMATTERS = {
   reltime: relTime,
   bool: fmtBool,
   text: fmtText,
+  status: fmtStatusWord,
 };
 
 export function applyFormat(name, value, opts) {

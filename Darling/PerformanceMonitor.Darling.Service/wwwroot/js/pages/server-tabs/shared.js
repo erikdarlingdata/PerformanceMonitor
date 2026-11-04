@@ -879,7 +879,7 @@ export const COLLECTION_CAVEATS_PANEL = {
 };
 
 export const SWEEP_STATS = [
-  { key: "sweep_pressure.verdict", label: "Verdict", format: "text", small: true },
+  { key: "sweep_pressure.verdict", label: "Verdict", format: "status", small: true },
   { key: "sweep_pressure.busy_percent", label: "Sweep busy %", format: "num1" },
   { key: "sweep_pressure.busy_ms_per_minute", label: "Busy ms/min", format: "int" },
   { key: "sweep_pressure.peak_cycle_ms", label: "Peak cycle", format: "ms" },
@@ -892,7 +892,7 @@ export const SWEEP_STATS = [
    when there is none rather than showing a dash. The Read tile says "ok", or "unavailable" when the read failed (every figure is
    then a dash, which is not the zero a real empty window reports). */
 export const SKIPPED_CYCLES_STATS = [
-  { key: "skipped_cycles.status", label: "Read", format: "text", small: true },
+  { key: "skipped_cycles.status", label: "Read", format: "status", small: true },
   { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },
   { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
   { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },
@@ -1170,7 +1170,7 @@ const SERIES_TRENDS = {
     levels: true,
     emptyText: "No successful collector runs in this window.",
     emptyWins: true,
-    note: "One line per collector, the five with the longest run in the window; the Viewer's chart draws every collector. Each point is the longest run in its bucket, and a collector needs runs in two buckets to draw a line, so a collector that ran in only one bucket of a short window has no line.",
+    note: "One line per collector, the five with the longest run in the window. Each point is the longest run in its bucket, and a collector needs runs in two buckets to draw a line, so a collector that ran in only one bucket of a short window has no line.",
     minPoints: 2,
     charts: [
       { title: "Longest run (ms)", unit: "ms", value: (r) => r.max_duration_ms, empty: "No collector ran in two or more buckets of this window, so there is no line to draw." },

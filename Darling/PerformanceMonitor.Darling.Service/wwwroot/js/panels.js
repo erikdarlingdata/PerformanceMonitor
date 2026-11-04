@@ -1286,6 +1286,9 @@ export function reapplyGridSort(tbody) {
    the table never renders with no columns. */
 export function visibleColumns(cols, rows) {
   const kept = cols.filter((c) => {
+    /* #7416: `hideWhenAllZero` drops a count column that is zero (or missing) on every row: a column of zeros on a healthy server says nothing, and a
+       column that has a number says why it is there in its header hint. */
+    if (c.hideWhenAllZero && !rows.some((row) => Number(getPath(row, c.key)) > 0)) return false;
     if (!c.hideWhenEmpty) return true;
     return rows.some((row) => {
       const v = getPath(row, c.key);
@@ -1408,11 +1411,13 @@ function vizStat(data, desc) {
   const tile = (s) => {
     const sev = s.sev || s.severity;
     const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
-    const raw = getPath(data, s.key);
+    /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
+    const made = typeof s.display === "function" ? s.display(data) : null;
+    const raw = made != null ? made : getPath(data, s.key);
     const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
     /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
     const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
-    const shownValue = applyFormat(s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
     return el("div", { class: "stat" }, [
       el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
       el("div", { class: "label", text: s.label }),

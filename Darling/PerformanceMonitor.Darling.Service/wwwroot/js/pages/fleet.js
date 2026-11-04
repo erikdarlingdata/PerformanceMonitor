@@ -807,7 +807,7 @@ export function metricBands(c, store) {
       ? fmtInt(c.requests_waiting_for_threads) + " starved"
       : c.available_threads != null
       ? fmtInt(c.available_threads) + " free"
-      : "ok";
+      : "OK";
   /* W19 (#5644): the tile value reads "N free", so the line under it must not repeat N over the total (that read as
      N in use). It says how many are in use, of the total. */
   const threadsInUse =
@@ -838,7 +838,7 @@ export function metricBands(c, store) {
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
 
-  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "ok";
+  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "OK";
   const memDetail =
     c.memory_mb != null
       ? fmtMb(c.memory_mb) + (c.buffer_pool_mb != null ? " · BP " + fmtMb(c.buffer_pool_mb) : "")

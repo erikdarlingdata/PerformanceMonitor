@@ -88,8 +88,8 @@ public sealed class McpToolGuideHeadsTrendTests
         Assert.Contains("A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window", served.Tail!, StringComparison.Ordinal);
         Assert.EndsWith(BaselineDiscontinuities.DescriptionSentence, served.Tail!, StringComparison.Ordinal);
         Assert.Contains("window_truncated is true when the first point served is later than the start of the window", served.Tail!, StringComparison.Ordinal);
-        /* #7416: a late first point is not proof anything aged out, so the description names no cause it cannot know. */
-        Assert.DoesNotContain("aged out", served.Tail!, StringComparison.Ordinal);
+        /* #7416: a late first point is not proof anything aged out, so the description names that cause only under start_older_than_tier. */
+        Assert.Contains("start_older_than_tier, true only when the start is older than the tier that answered keeps", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("the store holds nothing earlier in this window at this tier", served.Tail!, StringComparison.Ordinal);
     }
 }
