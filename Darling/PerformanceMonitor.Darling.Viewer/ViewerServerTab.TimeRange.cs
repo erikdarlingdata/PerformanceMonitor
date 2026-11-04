@@ -365,7 +365,7 @@ public partial class ViewerServerTab
     internal static readonly TimeSpan ServerDataStartMaxAge = TimeSpan.FromMinutes(10);
 
     /// <summary>Reads the server's data start for the charts (#7386), one read for the whole tab, at most once per
-    /// <see cref="ServerDataStartMaxAge"/>. A failed read keeps the start the tab has (null means the axis stays as picked).</summary>
+    /// <see cref="ServerDataStartMaxAge"/>. A failed read drops the start (null means the axis stays as picked), the same as Lite, and the next refresh reads again.</summary>
     internal async Task RefreshServerDataStartAsync()
     {
         if (DateTime.UtcNow - _serverDataStartReadUtc < ServerDataStartMaxAge)
@@ -381,7 +381,11 @@ public partial class ViewerServerTab
         }
         catch
         {
-            /* The start only trims empty width off a chart; a read that failed costs nothing but that. */
+            /* The start only trims empty width off a chart. A read that failed makes no claim, so the charts fall back to the
+               picked range (as Lite does) rather than trust a start the failed read could not confirm. The read time stays
+               old, so the next refresh tries again. */
+            ServerDataStartUtc = null;
+            OverviewLanes.ServerDataStartUtc = null;
         }
     }
 

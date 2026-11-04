@@ -829,7 +829,7 @@ public partial class ServerTab : UserControl
 
     /* ========== Blocking/Deadlock Trend Charts ========== */
 
-    private void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateLockWaitTrendChart(List<LockWaitTrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(LockWaitTrendChart);
         ApplyTheme(LockWaitTrendChart);
@@ -848,9 +848,9 @@ public partial class ServerTab : UserControl
         _lockWaitTrendHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = LockWaitTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(LockWaitTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Lock Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("LockWaits"));
             zeroLine.MarkerSize = 0;
@@ -891,7 +891,7 @@ public partial class ServerTab : UserControl
         LockWaitTrendChart.Refresh();
     }
 
-    private void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateBlockingTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(BlockingTrendChart);
         ApplyTheme(BlockingTrendChart);
@@ -913,9 +913,9 @@ public partial class ServerTab : UserControl
         if (data.Count == 0)
         {
             /* No blocking events — show a flat line at zero so the chart looks active */
-            var zeroLine = BlockingTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(BlockingTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = PerformanceMonitor.Ui.BlockingTrendLabels.PerMinute;
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Blocking"));
             zeroLine.MarkerSize = 0;
@@ -955,7 +955,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
+        var plot = PerformanceMonitor.Ui.ChartAxisStart.PaddedFrom(BlockingTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()), expandedTimes[2]); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
         /* #7219: the read counts blocked-process reports, or DMV snapshot rows when the window holds no reports, so the legend, hover
            and axis name the arm that answered. The axis title stays short (the legend has the width): three star-height charts stack here. */
         var sources = data.Select(d => d.Source).ToList();
@@ -974,7 +974,7 @@ public partial class ServerTab : UserControl
         BlockingTrendChart.Refresh();
     }
 
-    private void UpdateDeadlockTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
+    internal void UpdateDeadlockTrendChart(List<TrendPoint> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(DeadlockTrendChart);
         ApplyTheme(DeadlockTrendChart);
@@ -996,9 +996,9 @@ public partial class ServerTab : UserControl
         if (data.Count == 0)
         {
             /* No deadlocks — show a flat line at zero so the chart looks active */
-            var zeroLine = DeadlockTrendChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(DeadlockTrendChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Deadlocks";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
             zeroLine.MarkerSize = 0;
@@ -1038,7 +1038,7 @@ public partial class ServerTab : UserControl
         expandedTimes.Add(rangeEnd.ToOADate());
         expandedCounts.Add(0);
 
-        var plot = DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
+        var plot = PerformanceMonitor.Ui.ChartAxisStart.PaddedFrom(DeadlockTrendChart.Plot.Add.Scatter(expandedTimes.ToArray(), expandedCounts.ToArray()), expandedTimes[2]); /* synthetic spike baseline (±0.0001d offsets), NOT a cadence series - gap-breaking would lock onto the artificial deltas (#1944 review) */
         plot.LegendText = "Deadlocks";
         plot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("Deadlocks"));
         plot.MarkerSize = 0; /* No markers, just lines */
@@ -1074,9 +1074,9 @@ public partial class ServerTab : UserControl
         _currentWaitsDurationHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = CurrentWaitsDurationChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(CurrentWaitsDurationChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Current Waits";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("CurrentWaits"));
             zeroLine.MarkerSize = 0;
@@ -1137,9 +1137,9 @@ public partial class ServerTab : UserControl
         _currentWaitsBlockedHover?.Clear();
         if (data.Count == 0)
         {
-            var zeroLine = CurrentWaitsBlockedChart.Plot.Add.Scatter(
+            var zeroLine = PerformanceMonitor.Ui.ChartAxisStart.Baseline(CurrentWaitsBlockedChart.Plot.Add.Scatter(
                 new[] { rangeStart.ToOADate(), rangeEnd.ToOADate() },
-                new[] { 0.0, 0.0 });
+                new[] { 0.0, 0.0 }));
             zeroLine.LegendText = "Blocked Sessions";
             zeroLine.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("BlockedSessions"));
             zeroLine.MarkerSize = 0;
