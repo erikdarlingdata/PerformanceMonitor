@@ -1559,6 +1559,8 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
+        /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
+        ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;

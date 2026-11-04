@@ -852,9 +852,21 @@ namespace PerformanceMonitor.Common
             DateTime searchedFromUtc,
             DateTime nowUtc,
             DateTime? connectDownSinceUtc) =>
-            connectDownSinceUtc.HasValue
+            EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
                 ? ServerFreshness.Offline
                 : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// The stored failed-connect flag, or null once a collection newer than it proves a later connect worked (#7590). The flag is cleared by
+        /// one write per connect that is allowed to fail, and a server that is collecting again must not read Offline for the rest of the session
+        /// because that write was lost: the age rule heals itself, so this does too. Every reader that takes <c>connect_down_since</c> from the
+        /// registry passes it through here with the newest collection it holds, and a surface with no collection time of its own is sent the
+        /// resolved value (the web reads the fleet card).
+        /// </summary>
+        public static DateTime? EffectiveConnectDownSince(DateTime? lastCollectionUtc, DateTime? connectDownSinceUtc) =>
+            connectDownSinceUtc.HasValue && lastCollectionUtc.HasValue && lastCollectionUtc.Value > connectDownSinceUtc.Value
+                ? null
+                : connectDownSinceUtc;
 
         /// <summary>
         /// The reason a failed connect puts on a card, in place of "collection stale" or "no recent collection" (#7590):
@@ -886,6 +898,23 @@ namespace PerformanceMonitor.Common
                 ? "is due now."
                 : "at " + nextAttemptUtc.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC.");
         }
+
+        /// <summary>
+        /// The <c>server_connection</c> block <c>get_collection_health</c> carries while a server is unreachable (#7590), the one shape for both
+        /// SKUs: Darling builds it from the stored failed connect, Lite from its in-process connection check. <paramref name="nextAttemptUtc"/> is
+        /// null where no retry time exists (Lite re-checks on its own interval and stores none). The collector rows beside it are the last runs from
+        /// before the connection failed, and the sentence says so when there are any.
+        /// </summary>
+        public static object ServerConnectionBlock(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc, bool hasCollectorRows) => new
+        {
+            status = "waiting_on_connection",
+            since = sinceUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            last_connect_error = lastError,
+            /* The retry decision, UTC; null when none is stored. */
+            next_connect_attempt = nextAttemptUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            message = WaitingOnConnectionText(sinceUtc, lastError, nextAttemptUtc, nowUtc)
+                + (hasCollectorRows ? " The collector rows are the last runs from before the connection failed." : ""),
+        };
 
         /// <summary>
         /// How a tile reads while its server is unreachable: the values are the last collected ones, and this says so with their age

@@ -9,6 +9,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -188,12 +189,29 @@ public class ServerUnreachableReadsOfflineTests
         var listed = Assert.Single(await DarlingDataReader.GetServerListAsync(postgres, ct));
         Assert.Equal(secondSince, listed.ConnectDownSince);
         Assert.Equal("second error", listed.LastConnectError);
-        Assert.Equal("Offline", DarlingMcpDataTools.FreshnessStatus(DateTime.UtcNow, listed.RegisteredAt, DateTime.UtcNow, listed.ConnectDownSince));
+        Assert.Equal("Offline", DarlingMcpDataTools.FreshnessStatus(DateTime.UtcNow.AddHours(-1), listed.RegisteredAt, DateTime.UtcNow, listed.ConnectDownSince));
         var admin = Assert.Single(await DarlingAdminServersReader.ReadAsync(postgres, ct));
         Assert.Equal(secondSince, admin.ConnectDownSince);
 
         var connection2 = await DarlingMcpDataTools.ReadServerConnectionAsync(postgres, 77, DateTime.UtcNow, null, ct);
         Assert.Equal("waiting_on_connection", JsonDocument.Parse(JsonSerializer.Serialize(connection2)).RootElement.GetProperty("status").GetString());
+
+        /* A collection newer than the first failure proves a later connect worked: the block goes, though the flag is still stored. */
+        await using (var seed = postgres.CreateCommand(
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, 77, 'sql-live', 'wait_stats', $2, 'SUCCESS')"))
+        {
+            seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+            seed.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddSeconds(5), DateTimeKind.Unspecified));
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.Null(await DarlingMcpDataTools.ReadServerConnectionAsync(postgres, 77, DateTime.UtcNow, null, ct));
+        await using (var clear = postgres.CreateCommand("DELETE FROM collection_log WHERE server_id = 77"))
+        {
+            await clear.ExecuteNonQueryAsync(ct);
+        }
+
+        Assert.NotNull(await DarlingMcpDataTools.ReadServerConnectionAsync(postgres, 77, DateTime.UtcNow, null, ct));
 
         await UpsertAsync(postgres, ct);
         Assert.Equal((null, null), await FleetReadAsync(postgres, ct));
@@ -221,5 +239,91 @@ public class ServerUnreachableReadsOfflineTests
         Assert.Equal("last known, 12 min ago", ServerHealthClassifier.LastKnownLabel(Now.AddMinutes(-12), Now));
         Assert.Equal("last known, 3 h ago", ServerHealthClassifier.LastKnownLabel(Now.AddHours(-3), Now));
         Assert.Equal("no last known value", ServerHealthClassifier.LastKnownLabel(null, Now));
+    }
+
+    /* The clearing write rides a swallowed upsert, so a flag that survives it must not hold a collecting server Offline: a collection newer than
+       the first failure proves a later connect worked. */
+    private static readonly DateTime StaleFlag = FiveMinutesAgo.AddMinutes(-30);
+
+    [Fact]
+    public void A_stored_failed_connect_older_than_the_newest_collection_reads_by_age_not_Offline()
+    {
+        var card = Build(StaleFlag).Card;
+
+        Assert.Equal(FleetHealthBand.Warning, card.Band);
+        Assert.True(card.IsOnline);
+        Assert.Null(card.ConnectDownSince);
+        Assert.Null(card.LastConnectError);
+        var reason = DarlingFleetReader.BuildReason(card);
+        Assert.DoesNotContain("unreachable", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("collection stale", reason, StringComparison.Ordinal);
+
+        /* The web page reads this card (collector-run.js turns Run all collectors now off on connect_down_since or an Offline band). */
+        var rollup = DarlingFleetReader.BuildRollup(new[] { card }, Now, Now.AddHours(-1), Now);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(rollup));
+        var json = doc.RootElement.GetProperty("cards")[0];
+        Assert.NotEqual("Offline", json.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("connect_down_since").ValueKind);
+    }
+
+    [Fact]
+    public void List_servers_and_the_offline_note_ignore_a_failed_connect_older_than_the_newest_collection()
+    {
+        var json = DarlingMcpDataTools.RenderServerList(
+            new[]
+            {
+                new DarlingDataReader.ServerListRow(1, "recovered", null, 16, FiveMinutesAgo, MonitoredEngineKind.SqlServer, null, FiveMinutesAgo.AddDays(-3),
+                    ConnectDownSince: StaleFlag, LastConnectError: ConnectError),
+            },
+            Now,
+            DarlingPeerDirectory.Snapshot.Empty);
+
+        using var document = JsonDocument.Parse(json);
+        var row = document.RootElement.GetProperty("servers")[0];
+        Assert.Equal("Warning", row.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("reason").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("connect_down_since").ValueKind);
+        Assert.Equal(JsonValueKind.Null, row.GetProperty("last_connect_error").ValueKind);
+
+        Assert.Equal("Warning", DarlingAdminServersReader.Build(new[]
+        {
+            new DarlingAdminServersReader.Row(1, "cfg", "host", null, false, "sqlserver", 0, "integrated", true, 0m, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Unspecified),
+                "srv", "srv", 16, null, null, MonitoredEngineKind.SqlServer, FiveMinutesAgo.AddDays(-3), FiveMinutesAgo, null, StaleFlag),
+        }, Now).Single().freshness);
+
+        /* The age here is five minutes, so the note says nothing: it must not claim the server is unreachable. */
+        Assert.Null(DarlingServerOfflineNote.LeadFor("recovered", FiveMinutesAgo, FiveMinutesAgo.AddDays(-3), Now, StaleFlag, ConnectError));
+        Assert.Contains("cannot connect", DarlingServerOfflineNote.LeadFor("down", FiveMinutesAgo, FiveMinutesAgo.AddDays(-3), Now, DownSince, ConnectError), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_viewer_row_ignores_a_failed_connect_older_than_the_newest_collection_so_Run_all_stays_on()
+    {
+        var server = new DarlingServer(1, "sql-01", "sql-01", true, 16, registeredAt: FiveMinutesAgo.AddDays(-3));
+        server.ConnectDownSince = StaleFlag;
+        server.LastConnectError = ConnectError;
+        server.ApplyFreshness(FiveMinutesAgo, Now);
+
+        /* ViewerServerTab.ShowServerConnectionState and the Run all gate read exactly this field. */
+        Assert.Null(server.ConnectDownSince);
+        Assert.NotEqual(ServerCollectionStatus.Offline, server.CardStatus);
+        Assert.DoesNotContain("unreachable", server.DotTooltip, StringComparison.OrdinalIgnoreCase);
+
+        var stillDown = new DarlingServer(2, "sql-02", "sql-02", true, 16, registeredAt: FiveMinutesAgo.AddDays(-3));
+        stillDown.ConnectDownSince = DownSince;
+        stillDown.ApplyFreshness(FiveMinutesAgo, Now);
+        Assert.Equal(DownSince, stillDown.ConnectDownSince);
+        Assert.Equal(ServerCollectionStatus.Offline, stillDown.CardStatus);
+
+        var summary = new ServerSummaryItem { LastCollectionTime = FiveMinutesAgo, RegisteredAt = FiveMinutesAgo.AddDays(-3), ConnectDownSince = StaleFlag };
+        summary.ApplyFreshness(Now);
+        Assert.Null(summary.ConnectDownSince);
+        Assert.NotEqual(ServerCollectionStatus.Offline, summary.CardStatus);
+
+        /* The tab header: a recovered server reads by age, and a SQL Server error's own period is not doubled. */
+        Assert.DoesNotContain("unreachable", ViewerServerTab.FreshnessLabel(FiveMinutesAgo, FiveMinutesAgo.AddDays(-3), Now, null, StaleFlag, ConnectError), StringComparison.OrdinalIgnoreCase);
+        var down = ViewerServerTab.FreshnessLabel(FiveMinutesAgo, FiveMinutesAgo.AddDays(-3), Now, null, DownSince, "Login failed for user 'x'.");
+        Assert.Contains("Login failed for user 'x'. Values shown are", down, StringComparison.Ordinal);
+        Assert.DoesNotContain("..", down, StringComparison.Ordinal);
     }
 }

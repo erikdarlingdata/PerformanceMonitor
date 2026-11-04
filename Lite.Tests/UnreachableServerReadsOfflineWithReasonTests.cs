@@ -122,4 +122,35 @@ public sealed class UnreachableServerReadsOfflineWithReasonTests : IClassFixture
         Assert.DoesNotContain("Server unreachable", server.DotTooltip, StringComparison.Ordinal);
         Assert.DoesNotContain("Server unreachable", card.StatusTooltip, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Get_collection_health_carries_the_server_connection_block_only_while_the_server_is_unreachable()
+    {
+        var down = AddServer("DownSrv");
+        var up = AddServer("UpSrv");
+        MarkDown(down);
+        _serverManager.GetConnectionStatus(up.Id).IsOnline = true;
+        var data = new LocalDataService(_fixture.DuckDb);
+
+        /* No collector rows in a fresh store: the unavailable answer still says why, the way Darling's twin does. */
+        using var downReply = JsonDocument.Parse(await McpHealthTools.GetCollectionHealth(data, _serverManager, "DownSrv"));
+        Assert.Equal("unavailable", downReply.RootElement.GetProperty("status").GetString());
+        var block = downReply.RootElement.GetProperty("server_connection");
+        Assert.Equal("waiting_on_connection", block.GetProperty("status").GetString());
+        Assert.Equal(DownSince.ToString("o"), block.GetProperty("since").GetString());
+        Assert.Equal(ConnectError, block.GetProperty("last_connect_error").GetString());
+        Assert.Equal(JsonValueKind.Null, block.GetProperty("next_connect_attempt").ValueKind);
+        Assert.Contains(Expected, block.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains(Expected, downReply.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        using var upReply = JsonDocument.Parse(await McpHealthTools.GetCollectionHealth(data, _serverManager, "UpSrv"));
+        Assert.Equal("unavailable", upReply.RootElement.GetProperty("status").GetString());
+        Assert.False(upReply.RootElement.TryGetProperty("server_connection", out _));
+
+        /* The same block both SKUs build, with collector rows beside it: the sentence says the rows are the runs from before. */
+        var withRows = McpHealthTools.ServerConnectionBlock(_serverManager.GetConnectionStatus(down.Id), DownSince.AddMinutes(5), hasCollectorRows: true);
+        using var rowsJson = JsonDocument.Parse(JsonSerializer.Serialize(withRows));
+        Assert.EndsWith("The collector rows are the last runs from before the connection failed.", rowsJson.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Null(McpHealthTools.ServerConnectionBlock(_serverManager.GetConnectionStatus(up.Id), DownSince, hasCollectorRows: true));
+    }
 }

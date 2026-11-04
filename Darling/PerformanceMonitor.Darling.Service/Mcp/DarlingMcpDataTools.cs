@@ -1909,6 +1909,9 @@ public sealed class DarlingMcpDataTools
             var engineVersion = MonitoredEngineVersion.DescribeEngineVersion(
                 s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion, s.SqlEngineEdition);
 
+            /* #7590: a collection newer than the first failure proves the connect works again, so the stored flag no longer counts. */
+            var connectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(s.LastCollection, s.ConnectDownSince);
+
             return new
             {
                 server_name = s.ServerName,
@@ -1926,11 +1929,11 @@ public sealed class DarlingMcpDataTools
                 sql_version = engineVersion,
                 status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince),
                 /* #7590: a server the service cannot connect to reads Offline at once, and says why here; all three are null otherwise. */
-                reason = s.ConnectDownSince.HasValue
-                    ? ServerHealthClassifier.UnreachableReason(s.ConnectDownSince.Value, s.LastConnectError)
+                reason = connectDownSince.HasValue
+                    ? ServerHealthClassifier.UnreachableReason(connectDownSince.Value, s.LastConnectError)
                     : null,
-                connect_down_since = s.ConnectDownSince?.ToString("o"),
-                last_connect_error = s.ConnectDownSince.HasValue ? s.LastConnectError : null,
+                connect_down_since = connectDownSince?.ToString("o"),
+                last_connect_error = connectDownSince.HasValue ? s.LastConnectError : null,
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
                 last_collection = s.LastCollection?.ToString("o"),
                 /* #6351: the other enabled registrations that last reported this machine's identity. Worked out at read, never stored. */
@@ -2062,7 +2065,12 @@ ORDER BY server_name";
         GetCollectionHealthCoreAsync(postgres, server_name, full_detail: false, uncutText: true, logger: null, cancellationToken);
 
     /// <summary>The registry read behind <c>server_connection</c> on <c>get_collection_health</c> (#7590).</summary>
-    internal const string ServerConnectionSql = "SELECT connect_down_since, last_connect_error, next_connect_attempt FROM servers WHERE server_id = $1";
+    internal const string ServerConnectionSql = $"""
+        SELECT s.connect_down_since, s.last_connect_error, s.next_connect_attempt,
+               (SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = s.server_id AND {CollectionCycleRow.NotCycleRowSql}
+                ORDER BY cl.collection_time DESC LIMIT 1) AS last_collection
+        FROM servers s WHERE s.server_id = $1
+        """;
 
     /// <summary>The server-level connection answer for <c>get_collection_health</c>: null while the last connect succeeded, else an object saying
     /// collection is waiting on the connection, since when, the last connect error and the next retry time (#7590). A read that fails answers null: this block is
@@ -2083,18 +2091,16 @@ ORDER BY server_name";
             }
 
             var since = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified);
+            /* A collection newer than the first failure proves a later connect worked: the flag whose clearing write was lost says nothing. */
+            DateTime? lastCollection = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Unspecified);
+            if (ServerHealthClassifier.EffectiveConnectDownSince(lastCollection, since) is null)
+            {
+                return null;
+            }
+
             var error = reader.IsDBNull(1) ? null : reader.GetString(1);
             DateTime? next = reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Unspecified);
-            return new
-            {
-                status = "waiting_on_connection",
-                since = since.ToString("o"),
-                last_connect_error = error,
-                /* The service's backoff decision, UTC; null when none is stored (a service that wrote the failure before it had decided). */
-                next_connect_attempt = next?.ToString("o"),
-                message = ServerHealthClassifier.WaitingOnConnectionText(since, error, next, nowUtc)
-                    + (hasCollectorRows ? " The collector rows are the last runs from before the connection failed." : ""),
-            };
+            return ServerHealthClassifier.ServerConnectionBlock(since, error, next, nowUtc, hasCollectorRows);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -141,6 +141,7 @@ internal static class DarlingServerOfflineNote
         string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc,
         DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
         if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) != "Offline")
         {
             return null;

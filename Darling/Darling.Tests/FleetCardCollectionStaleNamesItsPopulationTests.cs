@@ -185,7 +185,7 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
 
         Assert.Contains(
-            "var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, server.ConnectDownSince);\n"
+            "var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, connectDownSince);\n"
           + "        var flags = ServerCollectionStatusRules.FlagsFor(freshness);",
             reader, StringComparison.Ordinal);
         Assert.Contains("var collectionStale = flags.CollectionStale;", reader, StringComparison.Ordinal);

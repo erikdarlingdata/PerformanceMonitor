@@ -420,12 +420,13 @@ public partial class ViewerServerTab : UserControl
         DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null,
         DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
         var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) == ServerFreshness.Offline;
         /* #7590: the service's connect failed. The header says so, with the last values' age and the error, in place of the age-based note. */
         if (connectDownSinceUtc.HasValue)
         {
             var known = ServerHealthClassifier.LastKnownLabel(lastCollectionUtc, nowUtc);
-            return $"{ServerHealthClassifier.UnreachableReason(connectDownSinceUtc.Value, lastConnectError)}. Values shown are {known}";
+            return $"{ServerHealthClassifier.UnreachableReason(connectDownSinceUtc.Value, lastConnectError).TrimEnd('.')}. Values shown are {known}";
         }
 
         if (lastCollectionUtc is null)

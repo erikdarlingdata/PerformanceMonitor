@@ -348,6 +348,9 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
+        /* #7590: a collection newer than the first failed connect proves a later connect worked, so the flag (whose clearing write the service may
+           have lost) stops counting here, before the dot, the tooltip, the tab header and Run all collectors now read it. */
+        ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, ConnectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(
             ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc, ConnectDownSince));
         IsOnline = flags.IsOnline;

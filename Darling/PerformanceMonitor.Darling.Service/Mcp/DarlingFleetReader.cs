@@ -1265,7 +1265,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
            band itself comes from the shared ladder too, with the one departure a windowed read needs — an
            empty window on a server registered before it is Offline, not "never collected". */
         /* #7590: a server whose connect has failed is Offline at once, whatever the age of its last collection. */
-        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, server.ConnectDownSince);
+        /* A collection newer than the first failure proves a later connect worked, so a flag whose clearing write was lost does not hold the card
+           Offline for the session. The card carries the resolved value, which is also what the web page reads. */
+        var connectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(lastCollection ?? olderCollection, server.ConnectDownSince);
+        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now, connectDownSince);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1301,8 +1304,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             IsOnline = isOnline,
             AwaitingFirstCollection = awaitingFirstCollection,
             CollectionStale = collectionStale,
-            ConnectDownSince = server.ConnectDownSince,
-            LastConnectError = server.ConnectDownSince.HasValue ? server.LastConnectError : null,
+            ConnectDownSince = connectDownSince,
+            LastConnectError = connectDownSince.HasValue ? server.LastConnectError : null,
             /* W1b: the windowed read's newest collection, else (offline past the window) the real last one, display only. */
             LastCollectionTime = lastCollection ?? olderCollection,
             CpuPercent = cpuPercent,
