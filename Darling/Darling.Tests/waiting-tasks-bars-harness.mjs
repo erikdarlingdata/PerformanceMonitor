@@ -81,11 +81,13 @@ const closeWaits = [
   { collection_time: ago(1), wait_type: "CXCONSUMER", total_wait_ms: 30 },
   { collection_time: new Date(Date.parse(ago(1) + "Z") + 60000).toISOString().replace("Z", "0000"), wait_type: "CXCONSUMER", total_wait_ms: 20 },
 ];
+/* One collection in a 24 hour window: the tiling width is the whole plot, so only the cap keeps it from being a slab. */
+const loneWaits = [{ collection_time: ago(3), wait_type: "CXCONSUMER", total_wait_ms: 40 }];
 const manyWaits = Array.from({ length: 10 }, (_, i) => ({ collection_time: ago(3), wait_type: "W" + i, total_wait_ms: 100 - i }));
 
 const answerFor = (name) => {
   if (name === "get_current_waits_trend") {
-    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : WAITS, blocked_sessions: BLOCKED };
+    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : scenario === "lone" ? loneWaits : WAITS, blocked_sessions: BLOCKED };
   }
   if (name === "get_waiting_tasks") return { server: "a", tasks: TASKS };
   return {};
@@ -136,7 +138,7 @@ const chartReport = (panel) => {
 };
 
 const out = {};
-if (scenario === "default" || scenario === "many" || scenario === "close") {
+if (scenario === "default" || scenario === "many" || scenario === "close" || scenario === "lone") {
   const root = await draw("blocking");
   out.waiting = chartReport(panelOf(root, "Waiting Tasks"));
   out.blocked = chartReport(panelOf(root, "Blocked Sessions"));
