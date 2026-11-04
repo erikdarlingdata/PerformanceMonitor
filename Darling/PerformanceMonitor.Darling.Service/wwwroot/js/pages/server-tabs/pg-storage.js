@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
+import { detailColumn, bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
 
 /* The suppression count is a first-class tile rather than a per-row detail, because the usual cause is one
    instance-wide permissions gap: pg_stats is filtered by SELECT privilege and pg_monitor does not grant it,
@@ -31,13 +31,6 @@ export const PG_INDEX_USAGE_STATS = [
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
   { key: "truncated", pageCut: "The window held more indexes than the grid below lists.", label: "Truncated", format: "bool" },
 ];
-
-/* #6154: a column whose read writes a paragraph per row. The cell shows the short word `word(text)` gives, sorts and filters on it, and the
-   full text opens under it on a click (panels.js `detailKey`). What is true of every row goes in `hint`, the header tooltip. */
-function detailColumn(key, label, word, hint, extra) {
-  const short = (row) => word(row[key]);
-  return { key, label, hint, display: (row) => short(row) ?? "—", sortValue: short, detailKey: key, ...extra };
-}
 
 export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "schema_name", label: "Schema" },
@@ -72,7 +65,8 @@ export const PG_BLOAT_COLUMNS = [
      nothing. */
   { key: "dead_tuples", label: "Dead Tuples", format: "int", hint: "Rows deleted or updated and not yet cleaned up by vacuum. A count from the server's own statistics, not an estimate." },
   { key: "dead_tuple_pct", label: "Dead Tuple %", format: "num2", hint: "Dead tuples as a share of live plus dead rows. Click a value for what it means for this table.", detailKey: "dead_tuple_finding" },
-  detailColumn("bloat_finding", "Finding", bloatVerdict,
+  /* #7410: "Bloat Level", not "Finding": the Severity column beside it reads "Low" too, and two columns headed differently that say the same word looked like a repeat. */
+  detailColumn("bloat_finding", "Bloat Level", bloatVerdict,
     "How large the estimated bloat is: under 20% low, 20% to 50% moderate, above that high. Click a verdict for what to do about it."),
   { key: "mods_since_analyze_pct_of_rows", label: "Modified Since Analyze %", format: "num1" },
   { key: "last_analyzed", label: "Last Analyzed", format: "time" },
