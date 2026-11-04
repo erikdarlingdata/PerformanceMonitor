@@ -754,6 +754,8 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
         var tooHighMessage = tooHigh.GetProperty("message").GetString()!;
         Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", tooHighMessage, StringComparison.Ordinal);
         Assert.Contains("analyze_query_store_plan", tooHighMessage, StringComparison.Ordinal);
+        /* The page gives no plan_id, so the message names the read that does. */
+        Assert.Contains("get_query_store_top", tooHighMessage, StringComparison.Ordinal);
     }
 
     /// <summary>

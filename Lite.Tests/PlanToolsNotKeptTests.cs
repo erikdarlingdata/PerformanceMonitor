@@ -208,7 +208,7 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
             .GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
 
         Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", whole, StringComparison.Ordinal);
-        Assert.Contains("confirm current parallelism with analyze_query_store_plan", whole, StringComparison.Ordinal);
+        Assert.Contains("pass that row's database_name and plan_id to analyze_query_store_plan", whole, StringComparison.Ordinal);
     }
 
     [Fact]
