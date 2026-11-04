@@ -184,7 +184,7 @@ async function drawQueryTrend(slot, server, ctx, query, signal) {
   ]);
 }
 
-/** A grid drawn again on a tag pick: `build(picker)` draws the card with the tag filter under its title. Each draw aborts the one before it. */
+/** A grid drawn again on a tag pick: `build(picker, redraw)` draws the card with the tag filter under its title (`redraw` draws it again, for a control a card adds to the picker row). Each draw aborts the one before it. */
 export function tagFilteredCard(kind, build, cmp = null) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
@@ -197,7 +197,7 @@ export function tagFilteredCard(kind, build, cmp = null) {
     if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
     const picker = el("div", { class: "picker-row" }, [tagFilterPicker(kind, draw), ...(cmp ? [compareControl(draw, slot)] : [])]);
     setPanelSignal(mine.signal);
-    const card = cmp && comparePick.value !== "off" ? compareDrawn(kind, cmp, null, "Query Store", picker, mine.signal, () => build(picker)) : build(picker);
+    const card = cmp && comparePick.value !== "off" ? compareDrawn(kind, cmp, null, "Query Store", picker, mine.signal, () => build(picker, draw)) : build(picker, draw);
     setPanelSignal(outer);
     mount(slot, [card]);
   };

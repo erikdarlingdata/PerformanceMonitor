@@ -25,7 +25,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// duration DESC (NULLS LAST so attentions, whose duration is NULL, follow the ranked completions). The SQL
 /// is a public const so Darling.Tests can pin the dialect + columns without a live Postgres. $1 server_id,
 /// $2/$3 window (naive UTC), $4 row cap, $5 the chosen databases (#5244: one text[], NULL for every
-/// database).
+/// database). $6 include_monitor: false (the default) leaves out the monitor's own statements, the rows whose stored
+/// <c>client_app_name</c> starts with the monitor's program name prefix (#7416 item 11), a prefix match so a user's application that
+/// merely contains the words is kept. On an idle server every row is otherwise one of the monitor's own.
 /// </summary>
 internal static class DarlingLongQueryReader
 {
@@ -59,7 +61,7 @@ internal static class DarlingLongQueryReader
         public string? ObjectName { get; set; }
     }
 
-    public const string LongQueryCompletionsSql = """
+    public static readonly string LongQueryCompletionsSql = $$"""
         SELECT
             event_time,
             event_type,
@@ -85,6 +87,7 @@ internal static class DarlingLongQueryReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        AND   ($6::boolean OR client_app_name IS NULL OR client_app_name NOT ILIKE '{{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}}')
         /*TAG:hash:query_hash*/
         ORDER BY duration_microseconds DESC NULLS LAST, event_time DESC
         LIMIT $4
@@ -105,15 +108,15 @@ internal static class DarlingLongQueryReader
     /// page is the slowest N of those databases. <see cref="DatabaseFilter.All"/> (the default) is every database.</para>
     /// </summary>
     public static Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default) =>
-        GetRecentLongQueryCompletionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, tags: null, cancellationToken);
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases = default, CancellationToken cancellationToken = default, bool includeMonitor = false) =>
+        GetRecentLongQueryCompletionsAsync(postgres, serverId, startUtc, endUtc, cap, databases, tags: null, cancellationToken, includeMonitor);
 
     /// <summary>
     /// The same read narrowed to a query tag (#5984): <paramref name="tags"/> keeps only completions whose <c>query_hash</c> carries the tag
     /// (or a tag beneath it), or none, in the statement and ahead of the cap. Null is no tag filter.
     /// </summary>
     public static async Task<List<LongQueryReadRow>> GetRecentLongQueryCompletionsAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases, QueryTagFilter? tags, CancellationToken cancellationToken, bool includeMonitor = false)
     {
         var rows = new List<LongQueryReadRow>();
 
@@ -124,6 +127,7 @@ internal static class DarlingLongQueryReader
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
         command.Parameters.Add(databases.Parameter());
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = includeMonitor });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

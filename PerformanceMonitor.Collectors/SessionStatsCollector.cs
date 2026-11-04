@@ -39,7 +39,7 @@ public sealed class SessionStatsCollector : CollectorDefinitionBase<SessionStats
         long? TotalWrites,
         long? TotalLogicalReads);
 
-    private const string QueryText = @"
+    private const string QueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
@@ -87,7 +87,7 @@ WHERE des.session_id > 50
 AND   des.is_user_process = 1
 AND   des.program_name IS NOT NULL
 AND   des.program_name <> N''
-AND   des.program_name NOT LIKE N'PerformanceMonitor%'
+AND   des.program_name NOT LIKE N'{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}'
 GROUP BY
     des.program_name
 ORDER BY
