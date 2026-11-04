@@ -74,6 +74,8 @@ public sealed class AdminReportFeedbackBehaviourTests
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         Assert.Contains(Strings(page.GetProperty("strips")),
             t => t.Contains("this page is list-only", System.StringComparison.Ordinal) && t.Contains("To record feedback, use the Viewer app", System.StringComparison.Ordinal));
+        // #7402: nothing was turned off here (the switch is on or unknown), so the note must not say so or name a switch.
+        Assert.DoesNotContain(Strings(page.GetProperty("strips")), t => t.Contains("turned off", System.StringComparison.Ordinal) || t.Contains("web.allowAdminWrites", System.StringComparison.Ordinal));
     }
 
     [Fact]
@@ -84,7 +86,7 @@ public sealed class AdminReportFeedbackBehaviourTests
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         var note = Assert.Single(Strings(page.GetProperty("strips")), t => t.Contains("this page is list-only", System.StringComparison.Ordinal));
         const string SwitchSentence = " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service.";
-        Assert.Equal("This dashboard has read-only access to the bundled store, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
+        Assert.Equal("Changes from this page are turned off, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
         Assert.EndsWith(SwitchSentence, PerformanceMonitor.Darling.Service.DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), System.StringComparison.Ordinal);
     }
 

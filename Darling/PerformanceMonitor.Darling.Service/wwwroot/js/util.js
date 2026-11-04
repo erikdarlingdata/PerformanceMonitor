@@ -253,8 +253,11 @@ export function emptyStrip(message) {
     store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
 export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard has read-only access to the bundled store, so " + lists + ". " + toChange + ", use the Viewer app." +
-      (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
+    ? (adminWritesOff === true
+      ? "Changes from this page are turned off, so " + lists + ". " + toChange + ", use the Viewer app." +
+        " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service."
+      /* #7402: with the switch on (or not known) nothing was turned off: the refusal is about the store login's privilege, so no switch is claimed. */
+      : "This dashboard's store login has no write access, so " + lists + ". " + toChange + ", use the Viewer app.")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
@@ -268,10 +271,31 @@ export function browserZoneOrBlank() {
   }
 }
 
+/**
+ * #7402: what a line chart says when the read returned points and not one of them holds a number to draw. A message the read itself
+ * carries (its `message`) is used as the tool wrote it for a person. Without one, a read that counted points whose rate could not be
+ * known (`unrated_points`, as a server just after a restart answers) says so in plain words. The read's `unrated_note` is written for a
+ * tool client and is not shown.
+ */
+export function noValuesText(data) {
+  const message = data && typeof data.message === "string" ? plainText(data.message).trim() : "";
+  if (message) return message;
+  if (data && Number(data.unrated_points) > 0) return "No rate can be worked out yet for this period, so there is nothing to draw.";
+  return "No point in this period holds a value, so there is nothing to draw.";
+}
+
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
   return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
+}
+
+/** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
+    yellow `strip notice`, which is for a caveat about otherwise good data. `caveat` is true when the line also carries one (a cut list, a
+    shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. */
+export function captionStrip(message, caveat) {
+  if (caveat) return noticeStrip(message);
+  return el("div", { class: "strip source", role: "status" }, [localizeIsoText(plainText(message))]);
 }
 
 /**

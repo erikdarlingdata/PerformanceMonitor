@@ -78,7 +78,8 @@ const findAll = (node, test, out = []) => {
   return out;
 };
 const byTag = (tag) => (n) => n.tag === tag;
-const noticeTexts = (root) => findAll(root, (n) => String(n.className).split(" ").includes("notice")).map((n) => n.textContent);
+// #7402: a plain count is the quiet "source" caption and a cut list is the yellow "notice"; both are the tab's one-line count note.
+const noticeTexts = (root) => findAll(root, (n) => String(n.className).split(" ").some((c) => c === "notice" || c === "source")).map((n) => n.textContent);
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "index-analysis-limit-"));
 try {
