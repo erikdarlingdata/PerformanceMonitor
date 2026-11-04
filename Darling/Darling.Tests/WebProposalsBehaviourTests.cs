@@ -155,6 +155,17 @@ public sealed class WebProposalsBehaviourTests
     }
 
     [Fact]
+    public void ThePollOfTheList_KeepsTheListOnScreenWhileItsReadsRun_ThenSwapsTheNewOneIn()
+    {
+        var r = Run("pollKeepsTheListOnScreen");
+        Assert.True(r.GetProperty("keptWhileReading").GetBoolean());
+        Assert.True(r.GetProperty("replaced").GetBoolean());
+        Assert.Equal(0, r.GetProperty("loadingLeft").GetInt32());
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.Equal(1, r.GetProperty("firstPaintShowsLoading").GetInt32());
+    }
+
+    [Fact]
     public void TheRoutePage_ShowsTheSentence_ForEachRouteTheCheckNames_AndNothingForAFailedRead()
     {
         var r = Run("routeSentence");
