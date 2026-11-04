@@ -44,11 +44,10 @@ export const PG_WRAPAROUND_THRESHOLD_STATS = [
 export const PG_SESSION_STATE_STATS = [
   { key: "captures_in_window", label: "Captures", format: "int" },
   { key: "captures_with_sessions", label: "With reportable sessions", format: "int" },
-  { key: "sessions_returned", label: "Sessions returned", format: "int" },
   { key: "horizon_holder_count", label: "Pinned the xmin horizon", format: "int" },
   { key: "idle_in_transaction_pinning_nothing", label: "Idle in transaction, pinning nothing", format: "int" },
   { key: "redacted_row_count", label: "Redacted rows", format: "int" },
-  { key: "truncated", label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: "The window held more sessions than the grid below lists.", label: "Truncated", format: "bool" },
 ];
 
 export const PG_AUTOVACUUM_COLUMNS = [
@@ -83,7 +82,9 @@ export const PG_WRAPAROUND_COLUMNS = [
   { key: "pct_toward_wraparound", label: "% to Wraparound", format: "num2" },
   { key: "pct_toward_emergency_vacuum", label: "% to Emergency Vacuum", format: "num1" },
   { key: "window_peak_frozen_xid_age", label: "Peak Age (window)", format: "int" },
-  { key: "freezing_is_keeping_up", label: "Keeping Up", format: "bool" },
+  /* #7432: words, not a yes or no. The age climbs by design until autovacuum_freeze_max_age, so a yes/no read "no" on every
+     healthy database. The READ names the state (freeze_state_text) so the browser does not decide where a freeze is due. */
+  { key: "freeze_state_text", label: "Freezing", wrap: true },
   { key: "min_multixid_age", label: "MultiXact Age", format: "int" },
   { key: "multixids_remaining", label: "MultiXacts Left", format: "int" },
   { key: "pct_toward_multixact_wraparound", label: "% to MultiXact Wraparound", format: "num2" },

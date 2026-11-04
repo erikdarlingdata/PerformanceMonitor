@@ -192,7 +192,7 @@ export function activeQueriesLiveBar(server, columns) {
     const note = el("span", { class: "muted" }, [
       " Reads the running requests from the monitored server once, now. The result is shown here and also kept on the store: a newer request more than an hour later removes it, otherwise retention does.",
     ]);
-    mount(slot, [el("div", {}, [button, note]), status, output]);
+    mount(slot, [el("div", { class: "run-row" }, [button, note]), status, output]);
     slot.dataset.status = "ready";
     track(server, button);
     bars.set(server, { status, output, columns });

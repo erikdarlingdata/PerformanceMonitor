@@ -171,9 +171,9 @@ public sealed class QueryTagUsageBehaviourTests
     [Fact]
     public void TheFleetSections_NameEachServerByDisplayName_AndKeepTheKeyWhenThereIsNone()
     {
-        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it.
+        // #6157: the read names a server by its connection key; the heading is the display name list_servers gives it. The sections run in display-name order (#7402), so the key-named "b" comes before "Server A".
         var headings = Run().GetProperty("fleetHeadings").EnumerateArray().Select(h => h.GetString()).ToArray();
-        Assert.Equal(new[] { "Server A", "b" }, headings);
+        Assert.Equal(new[] { "b", "Server A" }, headings);
     }
 
     [Fact]
