@@ -898,7 +898,7 @@ public sealed class ServerPageTabsTests
         Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("const strip = usageNoteStrip(note);", js, StringComparison.Ordinal);
+        Assert.Contains("const strip = captionStrip(note);", js, StringComparison.Ordinal);
         Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 

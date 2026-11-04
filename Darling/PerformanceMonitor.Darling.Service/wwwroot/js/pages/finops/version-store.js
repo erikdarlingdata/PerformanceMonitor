@@ -12,7 +12,7 @@
 import { VIZ } from "../../panels.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
-import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
+import { el, readTool, readErrorStrip, emptyStrip, captionStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
 
 /* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
 const TREND_HOURS = 168;
@@ -96,7 +96,7 @@ async function load(server, ctx, body) {
       ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
-      el("div", { class: "strip notice", role: "status", text: "As of " + localTime(data.as_of) + " (latest snapshot)." }),
+      captionStrip("As of " + localTime(data.as_of) + " (latest snapshot)."),
       table,
       el("h4", { text: "PVS off-row size (MB), last " + TREND_HOURS + " hours, top databases by current size" }),
       chart,

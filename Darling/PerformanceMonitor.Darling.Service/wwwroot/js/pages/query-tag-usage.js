@@ -223,7 +223,10 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   if (note) parts.push(note);
   if (isNotCollectedBlock(block) && !Array.isArray(block.servers)) return el("div", { class: "panel", "data-section": section.name }, parts);
   if (Array.isArray(block.servers)) {
-    for (const s of block.servers) {
+    /* #7402: the sections run in the sidebar's order (favourites first, then the display name), through the one shared helper, not the connection key's order. */
+    const row = (s) => (Array.isArray(servers) ? servers.find((r) => r && r.server_name === s.server) : undefined);
+    const named = block.servers.map((s) => ({ s, server_name: s.server, display_name: displayNameFor(servers, s.server), server_id: row(s)?.server_id }));
+    for (const { s } of orderServers(named)) {
       /* #6157: the heading is the display name of the server; the read names it by its connection key. */
       parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       if (isEmptyBlock(s)) {

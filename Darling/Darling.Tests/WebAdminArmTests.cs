@@ -191,6 +191,21 @@ public sealed class WebAdminArmTests
     }
 
     [Fact]
+    public void TheManagedRefusal_ClaimsNoSwitch_WhenTheSwitchIsOn_AndSaysTurnedOffOnlyWhenItIsOff()
+    {
+        // Switch on: the refusal is about privilege (no admin credential yet, or the store refused the web login), so nothing was turned off.
+        var privilege = DarlingWebStoreWrites.Refused("press a proposal", managedStore: true, adminWritesOff: false);
+        Assert.DoesNotContain("turned off", privilege, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("web.allowAdminWrites", privilege, StringComparison.Ordinal);
+        Assert.Equal("This dashboard's store login has no write access, so it cannot press a proposal. Use the Viewer app to make the change.", privilege);
+
+        // Switch off: the switch is the cause, so the sentence says so and names it.
+        var off = DarlingWebStoreWrites.Refused("press a proposal", managedStore: true, adminWritesOff: true);
+        Assert.StartsWith("Changes from this page are turned off", off, StringComparison.Ordinal);
+        Assert.Contains("web.allowAdminWrites", off, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheRefusalSentence_NamesTheSwitch_OnlyOnTheManagedStoreWithTheSwitchOff()
     {
         Assert.Contains("web.allowAdminWrites", DarlingWebStoreWrites.Refused("record feedback", true, adminWritesOff: true), StringComparison.Ordinal);

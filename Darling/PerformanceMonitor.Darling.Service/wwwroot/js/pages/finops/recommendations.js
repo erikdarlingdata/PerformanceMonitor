@@ -12,7 +12,7 @@
    em dash, and the finding and detail text comes from the service in invariant format (a percent reads "20 %"). */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 
 const SEV = { High: "Critical", Medium: "Warning", Low: "Healthy" };
@@ -52,7 +52,7 @@ export const tab = {
         const data = res.data || {};
         const rows = (data.recommendations || []).map(displayRow);
         const skipped = data.skipped_checks || [];
-        const parts = [noticeStrip(noticeText(rows.length))];
+        const parts = [captionStrip(noticeText(rows.length))];
         if (data.monthly_cost_usd == null) parts.push(noticeStrip("Monthly cost not set for this server, so savings estimates are blank."));
         /* Databases this server holds only as an availability group secondary copy are left to the primary's findings (#5558). */
         if (data.secondary_replica_note) parts.push(noticeStrip(data.secondary_replica_note));

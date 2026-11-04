@@ -287,12 +287,12 @@ a:hover { text-decoration: underline; }
    way — two servers on an ultrawide gave two ~1000px cards, a lone server one full-width card, all whitespace
    past what six small stat tiles want. A bounded max track (260-460px, ~the width the issue measured as reading
    "correctly") keeps cards at a comfortable size, so the grid adds columns as it widens rather than fattening a
-   few cards. The flat grid centres the leftover space; the indented tag-group grid overrides that to start
-   (below) so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
+   few cards. Both server-card grids start the cards at the left edge (#7402), so grouped cards stay left-aligned under their header. Scoped to .server-grid, NOT .grid, because
    .grid is shared with the triage page, whose span-2 cards and notice strips want the full width. */
 .server-grid {
+  /* #7402: the cards start at the left edge, under the Servers heading, instead of floating in the middle with a gutter on each side. */
   grid-template-columns: repeat(auto-fit, minmax(260px, 460px));
-  justify-content: center;
+  justify-content: start;
 }
 
 /* #2020: grouped (tag-tree) fleet view — collapsible tag headers, each with its card grid indented beneath.
@@ -902,6 +902,18 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
 .strip-detail { margin-top: 0.35rem; font-size: 0.8rem; }
 .strip-detail > summary { cursor: pointer; }
 .strip-detail > div { margin-top: 0.25rem; overflow-wrap: anywhere; }
+.strip.plain-empty .disclosure { margin-top: 0.4rem; max-width: none; }
+.strip.plain-empty .disc-body { margin-top: 0.3rem; white-space: pre-wrap; }
+
+/* #7402: ONE spacing rule for a banner and for a Run now row. Whatever follows either one (a panel, a table, a button row,
+   a Copy bar) starts a normal gap below it, at every width, instead of each page adding its own margin. In normal flow this
+   collapses with a margin the next block already has. A grid or flex parent owns spacing with its gap, so it is left alone. */
+.strip:not(:last-child), .run-row:not(:last-child) { margin-bottom: 0.75rem; }
+.grid > .strip, .panel-grid > .strip, .stats > .strip { margin-bottom: 0; }
+/* The Run now row (Queries Run live now, Collection Health Run all collectors now): the button, then its explanation in
+   the page's small muted text, wrapping beside the button rather than under it. */
+.run-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0.4rem 0.75rem; }
+.run-row .muted { flex: 1 1 20rem; min-width: 0; font-size: 0.85rem; }
 
 .all-healthy {
   display: flex;
@@ -1370,9 +1382,17 @@ pre.code {
 .server-reason.band-Warning { color: var(--warn); }
 .server-reason.band-Offline { color: var(--err); }
 .server-reason.band-Healthy { color: var(--ok); }
-.server-why .metric-bands { max-width: 900px; }
+/* #7395: the tiles use the page's width instead of stopping at a fixed one. The column count follows the width the page has (a
+   tile is never narrower than 13rem), and auto-fit hands a row's spare width to the tiles instead of leaving blank columns. */
+.server-why .metric-bands { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
 /* The server page has room to show the whole sentence, so the tile detail wraps instead of truncating (#6901). */
 .server-why .metric-chip .detail { white-space: normal; overflow-wrap: anywhere; }
+/* #7395: a detail that is still long (clampTileDetails in util.js) stops at about three lines and opens on demand like .clamp-text. */
+.server-why .metric-chip .detail.clamp-lines { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.server-why .metric-chip .detail.clamp-lines[role="button"] { cursor: pointer; }
+.server-why .metric-chip .detail.clamp-lines.open { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
+/* An opened tile takes a row of its own, so the whole text reads in a few wide lines and the other tiles do not stretch to its height. */
+.server-why .metric-bands > .metric-chip:has(.detail.clamp-lines.open) { grid-column: 1 / -1; }
 
 /* ─────────────────────────── Fleet Sweeps (#3466 lane 3) ─────────────────────────── */
 
@@ -1609,7 +1629,6 @@ table.data td.rec-text { min-width: 16rem; }
 .slicer-reset { padding: 0.1rem 0.6rem; font-size: 0.74rem; }
 .slicer-track { position: relative; height: 56px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 .slicer-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
-.active-live-note { margin: 0.4rem 0 0.5rem; font-size: 0.85rem; max-width: 70ch; }
 .slicer-dots { position: absolute; inset: 0; pointer-events: none; }
 .slicer-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--bg-dark); }
 .slicer-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }

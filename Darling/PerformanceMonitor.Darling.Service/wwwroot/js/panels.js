@@ -54,13 +54,15 @@ import {
   dbFilteredEmptyText,
   sourceStrip,
   clampText,
+  plainEmptyStrip,
   disclosure,
   markPartialSubtitle,
   localizeIsoText,
   localizeAlertDetail,
+  noValuesText,
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
-import { plainText, plainTextNamed, plainTextCounts } from "./plain-text.js";
+import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -109,6 +111,18 @@ export function emptyHeadline(desc, res) {
      session), "unavailable" or "precondition" envelope is a different statement, and "No deadlocks" over it would be a false
      all-clear that also drops the server's own engine-gate line; those keep the read's message. */
   return desc && desc.emptyWins && desc.emptyText && res.status === "empty" ? desc.emptyText : res.message;
+}
+
+/**
+ * #7410: the strip an empty reply draws in a panel. A panel's agreed sentence (emptyWins) or a reply with no structured reason shows
+ * the message as before. A reply that names a missing extension, a source the login cannot read, or plan capture that is not ready
+ * shows one plain sentence built from its `hints`, and the tool's full text is behind "More detail". A panel whose
+ * `extensionMissingLine` says what is not collected uses that sentence for a missing extension.
+ */
+export function panelEmptyStrip(desc, res) {
+  if (emptyHeadline(desc, res) !== res.message) return emptyStrip(emptyHeadline(desc, res));
+  const extension = res.hints && res.hints.reason === "extension_missing" ? desc.extensionMissingLine : undefined;
+  return plainEmptyStrip(res, shortEmptyLine(res, extension));
 }
 
 /**
@@ -216,20 +230,12 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
     mount(body, emptyStrip(desc.notCollectedLine));
     return;
   }
-  /* A panel whose collector reads one optional PostgreSQL extension says plainly that the extension is not installed when the
-     server's precondition answer says that (pg_stat_kcache behind OS CPU by Query), a fixable state. It is not the
-     "does not apply to this kind of server" line, which is for a server that can never have the data. */
-  if (res.kind === "empty" && res.status === "precondition" && desc.extensionMissingLine
-      && typeof res.message === "string" && res.message.includes("extension it reads is not installed")) {
-    mount(body, emptyStrip(desc.extensionMissingLine));
-    return;
-  }
   if (res.kind === "empty") {
     /* #4966: a grid that looked and found nothing still says where its table's data starts when that is after the
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
-    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);
+    mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
 
@@ -1407,14 +1413,20 @@ function vizStat(data, desc) {
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
-  const shown = stats.filter((s) => !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
+     so when it is true the panel says so in words (the stat's `pageCut` sentence) under the tiles. */
+  const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(s.pageCut));
   const tile = (s) => {
     const sev = s.sev || s.severity;
-    const valueClass = "value" + (s.small ? " small" : "") + (sev ? " " + sevClass(sev) : "");
     /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
     const made = typeof s.display === "function" ? s.display(data) : null;
     const raw = made != null ? made : getPath(data, s.key);
     const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
+    /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
+       smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
+    const hasValue = raw != null || (why != null && why !== "");
+    const valueClass = "value" + (s.small && hasValue ? " small" : "") + (sev ? " " + sevClass(sev) : "");
     /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
     const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
     const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
@@ -1426,11 +1438,15 @@ function vizStat(data, desc) {
   /* #7416: a `sentence` stat is prose, not a figure. Drawn as a bold tile it filled a tile track and pushed its neighbour wide;
      it is a line of text across the panel instead, and the tiles that remain keep their natural width. */
   const sentences = shown.filter((s) => s.sentence && getPath(data, s.key) != null && getPath(data, s.key) !== "");
-  if (!sentences.length) return el("div", { class: "stats" }, shown.map(tile));
+  if (!sentences.length) {
+    const tiles = el("div", { class: "stats" }, shown.map(tile));
+    return cutNotes.length ? el("div", {}, [tiles, ...cutNotes]) : tiles;
+  }
   const rest = shown.filter((s) => !s.sentence);
   return el("div", { class: "stat-block" }, [
     ...sentences.map((s) => el("p", { class: "stat-sentence", text: String(getPath(data, s.key)) })),
     rest.length ? el("div", { class: "stats natural" }, rest.map(tile)) : null,
+    ...cutNotes,
   ]);
 }
 
@@ -1458,6 +1474,10 @@ function vizLine(data, desc) {
      now draws that lone bucket as a marker (a single reading IS data) rather than the old "not enough data
      points" strip — so a series that reached one bucket reads consistently beside siblings that reached two. */
   if (!points.length && desc.emptyText) return emptyStrip(desc.emptyText);
+  /* #7402: points came back and none holds a number for any series (an idle server just after a restart: its one point has no rate yet).
+     Say what happened, in the read's own words when it has a message, instead of a chart with nothing on it. */
+  const drawable = (v) => v != null && v !== "" && Number.isFinite(Number(v));
+  if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,

@@ -31,6 +31,8 @@ export function pgWaitTrendSpecs(ctx) {
       unit: "ms/s",
       span: 2,
       hideEmptySeries: true,
+      /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the chart is not drawn there. */
+      hideWhenNotCollected: true,
       resetKey: "counter_reset",
       resetLabel: "Profile reset",
       emptyText: "No samples for this wait event in the window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.",

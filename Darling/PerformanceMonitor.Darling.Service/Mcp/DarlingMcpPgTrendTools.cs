@@ -61,9 +61,12 @@ public sealed class DarlingMcpPgTrendTools
                     postgres, resolved.ServerId, resolved.DisplayName, "pg_wait_sampling", cancellationToken)
                     ?? EmptyStatus(await EmptyHintsAsync(postgres, "get_pg_wait_trend", resolved.ServerName, start, windowEnd, logger, cancellationToken),
                         "empty",
-                        $"No wait event was sampled on {resolved.DisplayName} in the last {hours_back} "
-                        + "hour(s), so there is nothing to follow. pg_wait_sampling needs the extension "
-                        + "loaded; get_pg_extensions reports whether it is."), cancellationToken);
+                        $"No wait event gained samples on {resolved.DisplayName} in the last {hours_back} "
+                        + "hour(s), so there is nothing to follow: none was sampled, or the window holds a "
+                        + "single collection (a trend needs at least two to difference)."
+                        + DarlingMcpPgWaitSamplingTools.DescribeInstrumentForEmpty(
+                            await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken))
+                        + " get_pg_extensions reports whether the pg_wait_sampling extension is loaded."), cancellationToken);
             }
 
             var points = await DarlingPgTrendReader.GetWaitTrendAsync(
