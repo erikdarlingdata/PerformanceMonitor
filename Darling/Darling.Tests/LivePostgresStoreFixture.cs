@@ -130,6 +130,26 @@ public sealed class LivePostgresStoreFixture : IAsyncLifetime
            returns true and still covers the path. */
         _ = await DarlingModuleMap.EnsureTableAsync(connection, null, cancellationToken);
 
+        /* DIAG7415 (diagnostic only, never merged): log every CREATE EXTENSION in this database. Created BEFORE the
+           baseline so the log table is not residue. */
+        try
+        {
+            await using var diag = new NpgsqlCommand(@"
+CREATE TABLE IF NOT EXISTS public.diag7415_log (id serial PRIMARY KEY, logged_at timestamptz NOT NULL DEFAULT clock_timestamp(), pid int, application_name text, tag text, query text);
+CREATE OR REPLACE FUNCTION public.diag7415_fn() RETURNS event_trigger LANGUAGE plpgsql SECURITY DEFINER AS $f$
+BEGIN
+  INSERT INTO public.diag7415_log (logged_at, pid, application_name, tag, query)
+  VALUES (clock_timestamp(), pg_backend_pid(), current_setting('application_name'), tg_tag, current_query());
+END $f$;
+DROP EVENT TRIGGER IF EXISTS diag7415_trg;
+CREATE EVENT TRIGGER diag7415_trg ON ddl_command_end WHEN TAG IN ('CREATE EXTENSION') EXECUTE FUNCTION public.diag7415_fn();", connection);
+            await diag.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("DIAG7415 setup failed: " + ex.Message);
+        }
+
         /* AFTER establishing: the baseline has to describe the store the tests will actually see, and
            migration plus the runtime setup above is what creates everything in it. */
         _baselineRelations = await RelationsAsync(connection, cancellationToken);
