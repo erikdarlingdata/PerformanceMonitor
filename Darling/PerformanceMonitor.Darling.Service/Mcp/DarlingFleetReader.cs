@@ -1256,6 +1256,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             FailedCollectorCount = collectors.Failing,
             /* #3539 A8d: the denominator that grades the failing count into a share. */
             CollectorCount = collectors.Total,
+            /* #7561: a column at its critical bar is a failing insert, so it bands the server Critical (the same rule ToHealthMetrics hands the re-band). */
+            IdentityCapacityCritical = FleetServerCard.IsIdentityCritical(identityCapacity),
         };
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
@@ -1345,8 +1347,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
             BlockingBandThresholds = blockingTiers,
-            /* #6875: set only when a column is at the warning bar or past it. The Band below is not read from it. */
+            /* #6875: set only when a column is at the warning bar or past it. #7561: a CRITICAL column raises the Band (OverallMetricSeverity reads it
+               through the metrics above); a WARN one stays a tile and is listed in Needs attention through HasAdvisoryTile. */
             IdentityCapacity = identityCapacity,
+            HasAdvisoryTile = (agentAlertGaps?.Count ?? 0) > 0 || (databaseProtectionOverdue?.Count ?? 0) > 0
+                || (identityCapacity is { ColumnsAtBar: > 0 } && !FleetServerCard.IsIdentityCritical(identityCapacity)),
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -1453,7 +1458,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         }
 
         var problems = cards
-            .Where(c => c.Band != FleetHealthBand.Healthy)
+            .Where(c => c.Band != FleetHealthBand.Healthy || c.HasAdvisoryTile)
             .OrderByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
             .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -1589,6 +1594,24 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         if (c.CollectionStale)
         {
             parts.Add("collection stale");
+        }
+
+        /* #7561: the identity tile's own words. A critical column bands the server; a warning one and the two setup tiles only list it. */
+        if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
+        {
+            parts.Add(FleetServerCard.IsIdentityCritical(identity)
+                ? $"Identity capacity critical ({identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the bar)"
+                : $"Identity capacity {identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the warning bar");
+        }
+
+        if (c.AgentAlertGaps is { Count: > 0 } gaps)
+        {
+            parts.Add($"Agent alerts {gaps.Count} gap{(gaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (c.DatabaseProtectionOverdue is { Count: > 0 } overdue)
+        {
+            parts.Add($"Protection {overdue.Count} overdue item{(overdue.Count == 1 ? "" : "s")}");
         }
 
         if (c.MetricCount > 0 && c.MeasuredMetricCount == 0)
@@ -3183,6 +3206,10 @@ public sealed class FleetServerCard
     /// <c>get_database_protection</c> agree). Null when nothing is overdue, when no capture is that fresh, and on a platform-managed server (Azure SQL Database,
     /// Managed Instance, Amazon RDS), where the age is shown and never judged. A chip on the card and nothing more: no band reads it.</summary>
     [JsonPropertyName("database_protection_overdue")] public IReadOnlyList<FleetDatabaseProtectionOverdue>? DatabaseProtectionOverdue { get; init; }
+    /// <summary>#7561: true when the card carries a tile that no band reads and that still wants a person: a Warning identity capacity tile, an Agent alert
+    /// setup gap or an overdue backup or CHECKDB. The band, the dot and the strip counts ignore it. <c>worst_servers</c> and <c>additional_problem_count</c> count
+    /// such a server (its <c>band</c> stays Healthy) and the web page sorts it above a server without one. A CRITICAL identity tile is not here: it bands the server Critical.</summary>
+    [JsonPropertyName("has_advisory_tile")] public bool HasAdvisoryTile { get; init; }
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539
@@ -3245,7 +3272,11 @@ public sealed class FleetServerCard
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        IdentityCapacityCritical = IsIdentityCritical(IdentityCapacity),
     };
+
+    internal static bool IsIdentityCritical(FleetIdentityCapacity? identityCapacity) =>
+        identityCapacity is { ColumnsAtBar: > 0 } && string.Equals(identityCapacity.WorstBand, IdentityCapacityMath.BandCritical, StringComparison.Ordinal);
 }
 
 /// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>

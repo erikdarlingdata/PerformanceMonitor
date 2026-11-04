@@ -1468,6 +1468,8 @@ public sealed class ServerSummaryItem
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the overall band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        /* #7561: a column at its critical bar is a failing insert, so the card bands Critical, as the service's fleet card does. */
+        IdentityCapacityCritical = IdentityCapacity is { ColumnsAtBar: > 0 } && IdentityCapacity.WorstBand == IdentityCapacityMath.BandCritical,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────

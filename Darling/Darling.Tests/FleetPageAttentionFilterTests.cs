@@ -68,7 +68,7 @@ public sealed class FleetPageAttentionFilterTests
         /* And the browser's predicate compares against the band this payload actually carries. */
         var healthyToken = JsonSerializer.Serialize(FleetHealthBand.Healthy, DarlingFleetReader.JsonOptions);
         Assert.Equal("\"Healthy\"", healthyToken);
-        Assert.Contains("return c.band !== " + healthyToken + ";", FleetJs, StringComparison.Ordinal);
+        Assert.Contains("return c.band !== " + healthyToken + " || c.has_advisory_tile === true;", FleetJs, StringComparison.Ordinal);
 
         /* Read off the card, never recomputed from the metrics — the R1 rule the whole page is built on. */
         Assert.DoesNotContain("cpu_severity ===", FleetJs, StringComparison.Ordinal);

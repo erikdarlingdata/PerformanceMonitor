@@ -848,6 +848,11 @@ public sealed class FleetRollup
         {
             parts.Add("collection stale");
         }
+        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity && identity.WorstBand == PerformanceMonitor.Collectors.IdentityCapacityMath.BandCritical)
+        {
+            /* #7561: the critical identity tile bands the card, so the reason names it, in the service's words. */
+            parts.Add($"Identity capacity critical ({identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the bar)");
+        }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
         {

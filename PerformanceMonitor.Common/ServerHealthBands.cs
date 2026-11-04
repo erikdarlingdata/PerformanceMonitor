@@ -682,6 +682,12 @@ namespace PerformanceMonitor.Common
         /// sweep band on what the operator set. Lite has no such knobs and leaves it null.</summary>
         public BlockingBandThresholds? BlockingBandThresholds { get; init; }
 
+        /// <summary>#7561: true when an identity column on this server is at or past the critical bar (an insert that will fail). It is not a
+        /// seventh metric: <see cref="MetricSeverities"/> and <see cref="ServerHealthClassifier.MeasuredMetricCounts"/> do not see it. It raises
+        /// <see cref="ServerHealthClassifier.OverallMetricSeverity"/> to Critical and counts as one Critical in <see cref="ServerHealthClassifier.FleetHealthScore"/>,
+        /// so the dot, the strip counts, the severity sort and the MCP reply agree with the tile.</summary>
+        public bool IdentityCapacityCritical { get; init; }
+
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
 
@@ -1371,6 +1377,12 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static HealthSeverity OverallMetricSeverity(in ServerHealthMetrics m)
         {
+            /* #7561: a column at its critical bar is a failing insert, a Critical whatever the six metrics read (even none). */
+            if (m.IdentityCapacityCritical)
+            {
+                return HealthSeverity.Critical;
+            }
+
             var worst = HealthSeverity.Unknown;
             foreach (var s in MetricSeverities(m))
             {
@@ -1474,7 +1486,7 @@ namespace PerformanceMonitor.Common
                 _ => 0,
             };
 
-            var criticals = 0;
+            var criticals = m.IdentityCapacityCritical ? 1 : 0;
             var warnings = 0;
             foreach (var sev in MetricSeverities(m))
             {
