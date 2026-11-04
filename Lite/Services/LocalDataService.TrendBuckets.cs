@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -355,7 +356,7 @@ ORDER BY 1";
     public async Task<bool> HasProcedureStatInWindowAsync(int serverId, int hoursBack, DateTime asOfUtc)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
-        return await ReadWindowSkippingEmptyArchiveAsync("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+        return await ReadWindowSkippingEmptyArchiveAsync<bool>("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
 
         async Task<bool> ReadAsync(string relation)
         {

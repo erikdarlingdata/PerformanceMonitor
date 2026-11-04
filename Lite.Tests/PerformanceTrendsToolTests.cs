@@ -151,7 +151,6 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
             await cmd.ExecuteNonQueryAsync();
         }
     }
-    }
 
     [Fact]
     public async Task QueryStoreEmpty_NamesTheCauseThePlanCacheTrendsDoNotHave()

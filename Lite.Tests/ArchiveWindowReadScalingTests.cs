@@ -304,6 +304,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 'Db_data', 'R
             ["GetCpuByDatabaseAsync"] = () => _service.GetCpuByDatabaseAsync(ServerId, start, end, 10),
             ["GetDatabaseResourceUsageAsync"] = () => _service.GetDatabaseResourceUsageAsync(ServerId, 6),
             ["GetTopResourceConsumersAsync"] = () => _service.GetTopResourceConsumersAsync(ServerId, 6),
+            ["HasProcedureStatInWindowAsync"] = () => _service.HasProcedureStatInWindowAsync(ServerId, 6, end),
             ["GetBucketedProcedureDurationTrendAsync"] = () => _service.GetBucketedProcedureDurationTrendAsync(ServerId, 6, end, 5),
         };
 
@@ -346,6 +347,17 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', 'Db_data', 'R
         var row = Assert.Single(await _service.GetCpuByDatabaseAsync(ServerId, Whole(NowUtc.AddDays(-12)), Whole(NowUtc), 10));
 
         Assert.Equal(800, row.ProcedureCpuUs);
+    }
+
+    /// <summary>#7498: the stored-row question answers from the archive when the only row in the window is archived.</summary>
+    [Fact]
+    public async Task TheStoredProcedureRowQuestion_FindsARowThatOnlyTheArchiveHolds()
+    {
+        await ExecuteAsync(ProcedureRow(Whole(NowUtc.AddDays(-10)), "OldProc", 700));
+        await ArchiveTableAsync("procedure_stats", NowUtc.AddDays(-1));
+
+        Assert.True(await _service.HasProcedureStatInWindowAsync(ServerId, 12 * 24, Whole(NowUtc)));
+        Assert.False(await _service.HasProcedureStatInWindowAsync(ServerId, 6, Whole(NowUtc)));
     }
 
     [Fact]
