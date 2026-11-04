@@ -2553,13 +2553,15 @@ CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_proces
     /// "can I reach this server right now". A failed connect stamps the first failure's time (kept while the failures continue, so it
     /// survives a service restart) and the exception message the service log prints; a good connect clears both. Every surface that bands a
     /// server reads them, so a server whose connection has failed reads Offline at once instead of waiting out the 30 minute collection age.
-    /// Both nullable, no DEFAULT, no backfill: NULL says the last connect succeeded or none has failed since this rung, which makes no claim.
+    /// <c>next_connect_attempt</c> is when the service will try the connect again (the backoff it already decided), so Collection Health can name the
+    /// next retry. All three nullable, no DEFAULT, no backfill: NULL says the last connect succeeded or none has failed since this rung, which makes no claim.
     /// No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
     /// </summary>
     private const string V242Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS connect_down_since timestamp,
-    ADD COLUMN IF NOT EXISTS last_connect_error text;";
+    ADD COLUMN IF NOT EXISTS last_connect_error text,
+    ADD COLUMN IF NOT EXISTS next_connect_attempt timestamp;";
 
     /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by

@@ -198,6 +198,9 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// <summary>The last connect error the service logged for this server while <see cref="ConnectDownSince"/> is set (#7590).</summary>
     public string? LastConnectError { get; set; }
 
+    /// <summary>When the service will try the connect again while <see cref="ConnectDownSince"/> is set (UTC), from <c>servers.next_connect_attempt</c> (#7590); Collection Health names it.</summary>
+    public DateTime? NextConnectAttemptUtc { get; set; }
+
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
     private bool _isFavorite;
@@ -1439,7 +1442,7 @@ SELECT
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.blocked_process_reports') AND attname = 'blocking_open_transaction_count' AND NOT attisdropped),
     /* V242 (#7590) adds the connect-failure state to the server registry. Found by catalog so the answer does not depend on the
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
-    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.servers') AND attname = 'last_connect_error' AND NOT attisdropped)";
+    EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.servers') AND attname = 'next_connect_attempt' AND NOT attisdropped)";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>

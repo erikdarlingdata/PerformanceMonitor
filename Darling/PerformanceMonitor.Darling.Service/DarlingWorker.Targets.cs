@@ -667,7 +667,7 @@ public sealed partial class DarlingWorker
                history does. */
             /* #7590: the same fact on the registry, so the web pages, the viewer and MCP read an unreachable server as Offline with the
                reason instead of waiting out the 30 minute collection age. Written before the alert call, which can wait on a slow send. */
-            await DarlingObservability.MarkConnectFailedAsync(_postgres!, server.Config.ServerId, failure, _logger, cancellationToken);
+            await DarlingObservability.MarkConnectFailedAsync(_postgres!, server.Config.ServerId, failure, _logger, cancellationToken, server.NextConnectAttempt);
             await _selfAlerts!.ApplyConnectionOutcomeAsync(
                 server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: failure, cancellationToken);

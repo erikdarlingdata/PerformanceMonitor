@@ -678,10 +678,10 @@ ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXI
             @"DROP VIEW IF EXISTS collect.v_blocked_process_reports;
 ALTER TABLE IF EXISTS collect.blocked_process_reports DROP COLUMN IF EXISTS blocking_open_transaction_count;
 CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collect.blocked_process_reports;"),
-        // V242 (#7590): the connect-failure state on the server registry. The last column is the probe's newest sentinel. The rewind drops both
+        // V242 (#7590): the connect-failure state on the server registry. The last column is the probe's newest sentinel. The rewind drops the three
         // columns so a re-run of V242 adds them again. Safe on a store that never had them.
         new(242, "hasServerConnectDownState",
-            @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error;"),
+            @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error, DROP COLUMN IF EXISTS next_connect_attempt;"),
     ];
 
     /// <summary>

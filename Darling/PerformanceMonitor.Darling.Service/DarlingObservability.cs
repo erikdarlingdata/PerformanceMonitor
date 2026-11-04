@@ -72,21 +72,23 @@ ON CONFLICT (server_id) DO UPDATE SET
     is_aws_rds = EXCLUDED.is_aws_rds,
     is_aws_rds_web_or_express = EXCLUDED.is_aws_rds_web_or_express,
     connect_down_since = NULL,
-    last_connect_error = NULL;";
+    last_connect_error = NULL,
+    next_connect_attempt = NULL;";
 
     /* The failed-connect half of the registry (V242, #7590). connect_down_since keeps the FIRST failure of an outage (COALESCE), so it also
-       survives a service restart while the server stays down; the error is the latest. A server that has never connected has no row yet and
+       survives a service restart while the server stays down; the error is the latest, and next_connect_attempt is when the backoff will try again. A server that has never connected has no row yet and
        matches nothing here: it has no collection to be stale, and reads as awaiting its first collection. The good connect clears both in
        UpsertServerSql above. */
     internal const string MarkConnectFailedSql = @"
 UPDATE servers
 SET connect_down_since = COALESCE(connect_down_since, $2),
-    last_connect_error = $3
+    last_connect_error = $3,
+    next_connect_attempt = $4
 WHERE server_id = $1;";
 
-    /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints (V242, #7590).
+    /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints and the time the backoff will try again (V242, #7590).
     /// Failure-isolated like the other observability writes: it logs at Debug and never throws.</summary>
-    public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, int serverId, string? error, ILogger? logger, CancellationToken cancellationToken)
+    public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, int serverId, string? error, ILogger? logger, CancellationToken cancellationToken, DateTime? nextAttemptUtc = null)
     {
         try
         {
@@ -96,6 +98,7 @@ WHERE server_id = $1;";
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
             command.Parameters.AddWithValue((object?)error ?? DBNull.Value);
+            command.Parameters.Add(new NpgsqlParameter { Value = nextAttemptUtc.HasValue ? DateTime.SpecifyKind(nextAttemptUtc.Value, DateTimeKind.Unspecified) : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
