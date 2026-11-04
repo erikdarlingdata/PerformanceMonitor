@@ -123,10 +123,10 @@ BEGIN" + NoDatabaseAccessNote.LoopGuardDbCursor + @"
 INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)
 SELECT /* PerformanceMonitorLite */
     DB_ID(),
-    df.file_id,
-    CONVERT(decimal(19,2), FILEPROPERTY(df.name, N''''SpaceUsed'''') * 8.0 / 1024.0),
-    CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)
-FROM sys.database_files AS df;'';';
+    PerformanceMonitorLite.file_id,
+    CONVERT(decimal(19,2), FILEPROPERTY(PerformanceMonitorLite.name, N''''SpaceUsed'''') * 8.0 / 1024.0),
+    CONVERT(decimal(19,2), PerformanceMonitorLite.size * 8.0 / 1024.0)
+FROM sys.database_files AS PerformanceMonitorLite;'';';
 
         EXECUTE sys.sp_executesql @sql;
     END TRY

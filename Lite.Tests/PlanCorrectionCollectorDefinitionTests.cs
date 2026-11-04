@@ -195,7 +195,7 @@ public sealed class PlanCorrectionCollectorDefinitionTests
         var text = PlanCorrectionCollector.Instance.BuildQuery(Context(isAzureSqlDb: true)).Text;
 
         /* \s* spans the newline: the source is CRLF on disk, so a literal "\n" match would not hold. */
-        Assert.Matches(@"\)\s+AS\s+pfd\s*OPTION\(RECOMPILE\);", text);
+        Assert.Matches(@"\)\s+AS\s+PerformanceMonitorLite\s*OPTION\(RECOMPILE\);", text);
         Assert.Matches(@"ORDER\s+BY\s+r\.score\s+DESC,\s+r\.recommendation_name\s*OPTION\(RECOMPILE\);", text);
 
         Assert.Equal(
@@ -243,8 +243,8 @@ public sealed class PlanCorrectionCollectorDefinitionTests
         Assert.Contains("INTO #pm_plan_correction_plans", text, StringComparison.Ordinal);
         Assert.Contains("INTO #pm_plan_correction_queries", text, StringComparison.Ordinal);
         Assert.Contains("INTO #pm_plan_correction_query_text", text, StringComparison.Ordinal);
-        Assert.Contains("AND   r.last_good_plan_id = qsp.plan_id", text, StringComparison.Ordinal);
-        Assert.Contains("WHERE q.query_text_id = qsqt.query_text_id", text, StringComparison.Ordinal);
+        Assert.Contains("AND   PerformanceMonitorLite.last_good_plan_id = qsp.plan_id", text, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.query_text_id = qsqt.query_text_id", text, StringComparison.Ordinal);
 
         /* Every temp is dropped explicitly, so nothing leaks across the sp_executesql scope. */
         foreach (var temp in new[]

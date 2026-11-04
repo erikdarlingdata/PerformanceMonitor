@@ -60,7 +60,7 @@ public class QueryStorePlanFetchTests
     {
         var sql = LiveSql(Context(capturePlanXml: true));
 
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerformanceMonitorLite.plan_id > ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER()", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("query_plan_text = CASE", sql, StringComparison.Ordinal);
     }
@@ -109,28 +109,28 @@ public class QueryStorePlanFetchTests
         var sql = QueryStoreCollector.Instance.BuildPlanFetchByIdsQuery(
             Db, Context(capturePlanXml: true), SomeIds, budgetBytes: 12L * 1024 * 1024).Text;
 
-        Assert.Contains("WHERE qsp.plan_id IN (900001, 900007, 900042)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsp.plan_id > ", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.plan_id IN (900001, 900007, 900042)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerformanceMonitorLite.plan_id > ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SELECT TOP", sql, StringComparison.Ordinal);
 
         Assert.Contains("b.running_bytes - b.plan_bytes < 12582912", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("b.running_bytes <= ", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(DATALENGTH(p.query_plan_text), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(DATALENGTH(PerformanceMonitorLite.query_plan_text), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("ROWS UNBOUNDED PRECEDING", sql, StringComparison.Ordinal);
-        Assert.Contains("query_plan_text = CONVERT(nvarchar(max), qsp.query_plan)", sql, StringComparison.Ordinal);
+        Assert.Contains("query_plan_text = CONVERT(nvarchar(max), PerformanceMonitorLite.query_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("JOIN sys.query_store_plan", sql, StringComparison.Ordinal);
 
         /* #2675: the plan is decompressed EXACTLY ONCE. query_plan is materialised to #plan_fetch, and the
-           budget/emit run over that column - so CONVERT(nvarchar(max), qsp.query_plan), the decompression,
+           budget/emit run over that column - so CONVERT(nvarchar(max), PerformanceMonitorLite.query_plan), the decompression,
            appears once, not the three references the prior inline CTE re-ran (~4.5x CPU on the rig). A revert
            to the inline form trips this. */
         Assert.Contains("INTO #plan_fetch", sql, StringComparison.Ordinal);
-        Assert.Equal(1, CountOf(sql, "CONVERT(nvarchar(max), qsp.query_plan)"));
+        Assert.Equal(1, CountOf(sql, "CONVERT(nvarchar(max), PerformanceMonitorLite.query_plan)"));
         Assert.Contains("SET NOCOUNT ON;", sql, StringComparison.Ordinal);
 
         /* The hash rides along without decompressing anything, rendered the way the runtime payload
            renders it — TouchAndProbeSql compares the two, so the formats must agree byte-for-byte. */
-        Assert.Contains("query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1)", sql, StringComparison.Ordinal);
+        Assert.Contains("query_plan_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_plan_hash, 1)", sql, StringComparison.Ordinal);
 
         Assert.Contains("ORDER BY b.plan_id", sql, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", sql, StringComparison.Ordinal);
@@ -174,8 +174,8 @@ public class QueryStorePlanFetchTests
         var sql = QueryStoreCollector.Instance.BuildTextFetchByIdsQuery(
             Db, context, SomeIds, budgetBytes: 12L * 1024 * 1024).Text;
 
-        Assert.Contains("WHERE qsq.query_id IN (900001, 900007, 900042)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("qsq.query_id > ", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE PerformanceMonitorLite.query_id IN (900001, 900007, 900042)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("PerformanceMonitorLite.query_id > ", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("SELECT TOP", sql, StringComparison.Ordinal);
 
         Assert.Contains("FROM sys.query_store_query_text AS qst", sql, StringComparison.Ordinal);
@@ -190,7 +190,7 @@ public class QueryStorePlanFetchTests
 
         /* query_id is only unique until a Query Store reset renumbers it; the stored hash is how the probe
            sees that id 5 now names a DIFFERENT statement. Same rendering as the runtime payload. */
-        Assert.Contains("query_hash = CONVERT(varchar(64), qsq.query_hash, 1)", sql, StringComparison.Ordinal);
+        Assert.Contains("query_hash = CONVERT(varchar(64), PerformanceMonitorLite.query_hash, 1)", sql, StringComparison.Ordinal);
 
         Assert.Contains("ORDER BY b.query_id", sql, StringComparison.Ordinal);
         Assert.Contains("OPTION(RECOMPILE)", sql, StringComparison.Ordinal);

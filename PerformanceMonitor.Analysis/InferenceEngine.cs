@@ -203,7 +203,7 @@ public class InferenceEngine
     /// root below the 0.5 incident line? <see cref="IsConfigAdvisoryFact"/> is the different, wider question the
     /// side-leaf sweep asks.
     /// </summary>
-    private static bool IsConfigAdvisoryRoot(string key) =>
+    internal static bool IsConfigAdvisoryRoot(string key) =>
         ConfigAdvisoryRootKeys.Contains(key) || PgTargetFactKeys.IsConfigAdvisoryRoot(key);
 
     /// <summary>
