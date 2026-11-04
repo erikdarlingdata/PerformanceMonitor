@@ -614,7 +614,9 @@ WHERE regression_factor >= 2
 -- regression_factor and the scorer.
 AND   latest_total_cpu_us >= 10000000
 -- #7417: and the regression must have LOST that much of it (PlanRegressionRanking.MinimumLostCpuMicroseconds).
-AND   lost_cpu_us >= " + PerformanceMonitor.Analysis.PlanRegressionRanking.MinimumLostCpuMicrosecondsSql + @"
+-- The floor is for the CPU path. A row that fired on the duration path (CPU under 2x, duration extreme and corroborated) keeps
+-- the bar it always had, the 10 CPU-seconds above, since its cost is time rather than the CPU lost.
+AND   (latest_cpu / NULLIF(best_cpu, 0) < 2 OR lost_cpu_us >= " + PerformanceMonitor.Analysis.PlanRegressionRanking.MinimumLostCpuMicrosecondsSql + @")
 -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')

@@ -24,7 +24,8 @@ public static class PlanRegressionRanking
     /// near-zero costs), applied now to the part of that total the regression added. A statement whose latest plan
     /// burned 10 seconds but lost less than 10 of them to the plan change is mostly the cost it always had, and a
     /// 455 us statement needs over 23,000 executions in the window to clear it, at which point it really is 10 seconds
-    /// of lost CPU and ranks below a larger loss.</summary>
+    /// of lost CPU and ranks below a larger loss. The floor binds the CPU path only: a regression that fired on the duration path
+    /// (CPU under 2x, duration extreme and corroborated) keeps the 10 CPU-second bar on the latest plan's total and no more.</summary>
     public static long MinimumLostCpuMicroseconds { get; } =
         long.Parse(MinimumLostCpuMicrosecondsSql, System.Globalization.CultureInfo.InvariantCulture);
 

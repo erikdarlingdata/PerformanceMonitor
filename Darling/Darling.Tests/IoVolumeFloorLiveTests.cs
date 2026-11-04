@@ -68,7 +68,7 @@ public sealed class IoVolumeFloorLiveTests
                 }
             }
 
-            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            await using var postgres = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString);
             var facts = await new PgFactCollector(postgres).CollectFactsAsync(new AnalysisContext
             {
                 ServerId = ServerId,
@@ -119,7 +119,7 @@ public sealed class IoVolumeFloorLiveTests
                 await InsertAsync(connection, end.AddMinutes(-11), "ROWS", 0, 0, 100_000, 6_000_000, ct);
             }
 
-            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            await using var postgres = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(connectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString);
             var facts = await new PgFactCollector(postgres).CollectFactsAsync(new AnalysisContext
             {
                 ServerId = ServerId,
@@ -141,7 +141,7 @@ public sealed class IoVolumeFloorLiveTests
     private static async Task InsertAsync(NpgsqlConnection connection, DateTime at, string fileType, long reads, long stallRead, long writes, long stallWrite, System.Threading.CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(
-            @"INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type,
+            @"INSERT INTO collect.file_io_stats (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type,
                   delta_reads, delta_writes, delta_stall_read_ms, delta_stall_write_ms)
               VALUES ($1, $2, $3, 'io-floor', 'AppDb', $4, $5, $6, $7, $8, $9)", connection);
         cmd.Parameters.AddWithValue(CollectionIdGenerator.Next());
@@ -158,7 +158,7 @@ public sealed class IoVolumeFloorLiveTests
 
     private static async Task DeleteAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
-        await using var cmd = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ServerId}", connection);
+        await using var cmd = new NpgsqlCommand($"DELETE FROM collect.file_io_stats WHERE server_id = {ServerId}", connection);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }
