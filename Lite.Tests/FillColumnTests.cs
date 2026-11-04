@@ -31,6 +31,9 @@ public class FillColumnTests
     private static ResourceDictionary Theme(string name) =>
         (ResourceDictionary)XamlReader.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Themes", name + ".xaml")));
 
+    /// <summary>A window narrower than any screen the tests run on; the grid under test is sized by its host, so the window only has to exist.</summary>
+    private const double ScreenProofWindowWidth = 600;
+
     /// <summary>Twelve 100 px columns and a fill column in a window themed as Lite themes it: what each column was given, and how far the grid scrolls sideways.</summary>
     private static (double[] Fixed, double Fill, double Scrollable, double Viewport) Lay(string theme, double width) =>
         StaTestThread.Run(() =>
@@ -42,7 +45,10 @@ public class FillColumnTests
             }
 
             grid.Columns.Add(new DataGridTextColumn { Header = "Fill", Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-            var window = new Window { Content = grid, Width = width, Height = 400 };
+            /* The grid is given its width by the canvas, not by the window: Windows clamps a window to the screen, and a small CI screen made a "wide" 1500 px window about 1000 px. */
+            grid.Width = width;
+            grid.Height = 300;
+            var window = new Window { Content = new Canvas { Children = { grid } }, Width = ScreenProofWindowWidth, Height = 400 };
             window.Resources.MergedDictionaries.Add(Theme(theme));
             window.Show();
             try

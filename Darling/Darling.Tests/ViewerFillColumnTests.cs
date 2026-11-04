@@ -123,7 +123,7 @@ public sealed class ViewerFillColumnTests
         Assert.True(laid.Scrollable > 1000, $"the grid should scroll sideways: {laid}");
     }
 
-    /// <summary>A plain grid of twelve 100 px columns and a fill column, in a window of <paramref name="width"/> themed as the app themes it.</summary>
+    /// <summary>A plain grid of twelve 100 px columns and a fill column, in a canvas <paramref name="width"/> wide, in a window themed as the app themes it.</summary>
     private static T OnPlainGrid<T>(string theme, double width, Func<Window, DataGrid, Dictionary<DataGridColumn, (double Declared, bool Fill)>, T> body) =>
         StaTestThread.Run(() =>
         {
@@ -135,7 +135,10 @@ public sealed class ViewerFillColumnTests
 
             grid.Columns.Add(new DataGridTextColumn { Header = "Fill", Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
             var declared = Declared(grid);
-            var window = new Window { Content = grid, Width = width, Height = 400 };
+            /* The grid is given its width by the canvas, not by the window: Windows clamps a window to the screen, and a small CI screen made a "wide" 1500 px window about 1000 px. */
+            grid.Width = width;
+            grid.Height = 300;
+            var window = new Window { Content = new Canvas { Children = { grid } }, Width = 600, Height = 400 };
             window.Resources.MergedDictionaries.Add(Theme(theme));
             window.Show();
             try
