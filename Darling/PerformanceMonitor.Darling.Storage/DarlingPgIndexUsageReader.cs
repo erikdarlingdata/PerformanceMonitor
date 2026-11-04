@@ -66,7 +66,9 @@ public static class DarlingPgIndexUsageReader
     /// rank least-used first. The clamp alone would then hide the reset, so <c>stats_were_reset_in_window</c>
     /// travels beside it, taken from the server's own <c>stats_reset</c> timestamp moving between the two
     /// samples rather than inferred from the counters — a reset followed by enough scans to climb back past
-    /// the old value leaves every difference positive and is invisible to the arithmetic.</para>
+    /// the old value leaves every difference positive and is invisible to the arithmetic. The timestamp is
+    /// NULL before and after a crash restart, which discards the counters without recording a reset (#7456),
+    /// so the flag is also set when the index's own counter fell between two consecutive samples.</para>
     ///
     /// <para><b><c>first_seen_at</c> and <c>sample_count</c> are what make the answer honest rather than
     /// confident.</b> An index created twenty minutes ago has zero scans for the same reason a genuinely
@@ -108,11 +110,25 @@ public static class DarlingPgIndexUsageReader
             ORDER BY database_name, schema_name, table_name, index_name, collection_time ASC
         ),
         samples AS (
-            SELECT database_name, schema_name, table_name, index_name, count(*) AS sample_count
-            FROM pg_index_usage_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
+            /* counter_fell (#7456): this index's scan counter was LOWER than the sample before it. Crash
+               recovery and an immediate shutdown discard every statistics counter without touching
+               pg_stat_database.stats_reset (it stays NULL on a database never reset by hand), so the
+               timestamp comparison below cannot see them; the counter itself can. LAG per index, so a
+               fall in the middle of the window shows even when the counter climbed back past its old value
+               before the last sample. */
+            SELECT database_name, schema_name, table_name, index_name,
+                   count(*) AS sample_count,
+                   COALESCE(bool_or(fell), false) AS counter_fell
+            FROM (
+                SELECT database_name, schema_name, table_name, index_name,
+                       index_scans < LAG(index_scans) OVER (
+                           PARTITION BY database_name, schema_name, table_name, index_name
+                           ORDER BY collection_time) AS fell
+                FROM pg_index_usage_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+            ) AS ordered
             GROUP BY database_name, schema_name, table_name, index_name
         )
         SELECT
@@ -150,7 +166,7 @@ public static class DarlingPgIndexUsageReader
                reset for the first time — so the first reset a database ever has moves the column
                NULL -> timestamp, and <> would evaluate to NULL and miss precisely the case the counters
                also cannot see. */
-            (l.stats_reset IS DISTINCT FROM e.first_stats_reset) AS stats_were_reset_in_window
+            (l.stats_reset IS DISTINCT FROM e.first_stats_reset OR s.counter_fell) AS stats_were_reset_in_window
         FROM latest AS l
         JOIN earliest AS e
           ON  e.database_name IS NOT DISTINCT FROM l.database_name

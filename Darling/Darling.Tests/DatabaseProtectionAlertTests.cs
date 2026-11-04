@@ -507,7 +507,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
         {
             await using var viewer = new ViewerDataService(postgres.ConnectionString);
             var (value, detail) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
-            Assert.Equal("2 overdue", value);
+            Assert.Equal("2 items on 1 database", value);
             Assert.Equal("Full backup: Sales (30 days old), CHECKDB: Sales (never checked)", detail);
 
             /* The Overview card itself carries the chip: the summary read fills both strings the XAML binds, so a chip read that is never

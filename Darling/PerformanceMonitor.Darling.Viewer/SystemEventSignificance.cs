@@ -36,7 +36,7 @@ public static class SystemEventSignificance
     /// <summary>The scheduler status text kept under warnings_only. See <see cref="SystemHealthSignificance.WarningStatus"/>.</summary>
     public const string WarningStatus = SystemHealthSignificance.WarningStatus;
 
-    /// <summary>The low-physical-memory notification kept under warnings_only. See <see cref="SystemHealthSignificance.LowMemoryNotification"/>.</summary>
+    /// <summary>The low-physical-memory notification kept under warnings_only for memory conditions (the broker gate uses SHRINK, #7466). See <see cref="SystemHealthSignificance.LowMemoryNotification"/>.</summary>
     public const string LowMemoryNotification = SystemHealthSignificance.LowMemoryNotification;
 
     /// <summary>error_reported numbers always excluded from severe errors. See <see cref="SystemHealthSignificance.IgnoredSevereErrorNumbers"/>.</summary>
@@ -54,7 +54,7 @@ public static class SystemEventSignificance
     /// <summary>A memory-conditions snapshot is significant under RESOURCE_MEMPHYSICAL_LOW. Delegates to <see cref="SystemHealthSignificance"/>.</summary>
     public static bool IsSignificant(MemoryConditionsRecord record) => SystemHealthSignificance.IsSignificant(record);
 
-    /// <summary>A memory-broker ratio change is significant under RESOURCE_MEMPHYSICAL_LOW. Delegates to <see cref="SystemHealthSignificance"/>.</summary>
+    /// <summary>A memory-broker ratio change is significant when its notification is SHRINK (#7466; the broker carries STABLE, GROW or SHRINK). Delegates to <see cref="SystemHealthSignificance"/>.</summary>
     public static bool IsSignificant(MemoryBrokerRecord record) => SystemHealthSignificance.IsSignificant(record);
 
     /// <summary>Every recorded memory-node OOM is significant. Delegates to <see cref="SystemHealthSignificance"/>.</summary>

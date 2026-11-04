@@ -52,7 +52,7 @@ public sealed class DarlingMcpPgServerStateTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the snapshot held more relations than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -83,11 +83,18 @@ public sealed class DarlingMcpPgServerStateTools
             }
 
             var newest = rows[0];
+            var pageBuffers = rows.Sum(r => r.Buffers);
+            /* #7455: counted in the read (relations_in_snapshot), not guessed from a full page. */
+            var truncated = rows.Count < newest.RelationsInSnapshot;
 
             var relations = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
                 relation_name = r.RelationName,
+                /* #7455: a word where the name is missing, null where there is one. relation_display is the
+                   column a table shows: the name when there is one, else the label, never a blank. */
+                relation_label = r.NameLabel,
+                relation_display = r.RelationName ?? r.NameLabel,
                 relation_kind = r.RelationKind,
                 buffers = r.Buffers,
                 buffer_mb = Math.Round(r.Buffers * 8.0 / 1024.0, 1),
@@ -107,13 +114,34 @@ public sealed class DarlingMcpPgServerStateTools
                 captured_at = newest.CaptureTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(newest.CaptureTime, windowEnd),
                 relation_count = rows.Count,
+                /* #7455: the real size of the snapshot this page was cut from, counted in the same read before
+                   the cut and never inferred from a full page. A page of `limit` rows is not the pool. Only
+                   relations of 8 buffers or more are stored, so this is the stored set. */
+                relations_in_snapshot = newest.RelationsInSnapshot,
+                truncated,
+                buffers_not_shown = Math.Max(0, newest.SnapshotBuffers - pageBuffers),
                 /* 8 kB is PostgreSQL's near-universal block size but it IS a compile-time setting, so the
                    buffer COUNT is the measurement and the megabyte figure is a convenience beside it. */
                 pool_buffers_total = newest.PoolBuffersTotal,
                 pool_buffers_used = newest.PoolBuffersUsed,
                 note = "Residency, not read volume — a small hot table and a large one scanned once can "
                      + "read alike and occupy the pool completely differently. avg_usage_count is what the "
-                     + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block.",
+                     + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block."
+                     + (truncated
+                         ? $" This page holds {rows.Count} of the {newest.RelationsInSnapshot} relations in the "
+                           + $"snapshot and leaves out {Math.Max(0, newest.SnapshotBuffers - pageBuffers)} buffers: "
+                           + "raise limit to see the rest."
+                         : " This page holds every relation in the snapshot.")
+                     + (rows.Any(r => r.NameLabel != null)
+                         ? " A relation_name of null is not an error: the pool is cluster-wide and the collector "
+                           + "names a relation only in the database it is connected to. relation_label says which "
+                           + "kind it is. "
+                           + DarlingPgBufferUsageReader.NotResolvedLabel + " is a buffer whose relation was not resolved here: usually a "
+                           + "buffer in another database, but the stored row does not say which database the collector "
+                           + "connected to, so a relation in that database that did not resolve reads the same. "
+                           + DarlingPgBufferUsageReader.SharedOrDroppedLabel + " is a buffer whose database is in "
+                           + "no pg_database row, the shared catalogs on a stock server."
+                         : string.Empty),
                 relations,
             }, McpHelpers.JsonOptions);
         }

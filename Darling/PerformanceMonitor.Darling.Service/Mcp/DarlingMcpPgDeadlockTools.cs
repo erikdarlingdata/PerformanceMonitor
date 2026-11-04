@@ -175,7 +175,7 @@ public sealed class DarlingMcpPgDeadlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("A deadlock_hash from get_pg_deadlocks. Omit for the most recent graphs.")] string? deadlock_hash = null,
-        [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5,
+        [Description("Maximum graphs to return when no hash is given. Default 5. Read truncated to know whether more graphs were recorded than were returned.")] int limit = 5,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -186,8 +186,11 @@ public sealed class DarlingMcpPgDeadlockTools
 
         try
         {
-            var rows = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
-                postgres, resolved.ServerId, deadlock_hash, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch, so the reply says whether more graphs exist
+               than the page holds. graph_count was the only size it gave. */
+            var fetched = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
+                postgres, resolved.ServerId, deadlock_hash, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -212,6 +215,7 @@ public sealed class DarlingMcpPgDeadlockTools
                 server = resolved.DisplayName,
                 status = "deadlock_detail",
                 graph_count = rows.Count,
+                truncated,
                 note = "graph is PostgreSQL's own DETAIL block, as written apart from stripped tab indenting and "
                      + "the statements' literals, each replaced by ?; a statement that cannot be read to its end "
                      + "is withheld. It reads as: one line per wait edge naming who waits for what and who "

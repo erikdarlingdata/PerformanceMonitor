@@ -476,11 +476,17 @@ let storeSizeStale = false;
 let storeSizeAttemptAt = 0;
 let storeSizeInFlight = false;
 
-/* The Viewer's wording (ViewerSeatIndicator): "Seat: read-write" / "Seat: read-only" / "Seat: not connected". */
+/* The Viewer's wording (ViewerSeatIndicator): "Access: read-write" / "Access: read-only" / "Access: not connected". The hover says what the word
+   means, because a bare "read-write" does not say what is written: #7416. */
+const ACCESS_HOVER = {
+  write: "What this browser's token may change. Read-write: it can change the monitoring store (alert rules, mutes, collector schedules, the server list). Nothing is ever written to a monitored SQL Server.",
+  read: "What this browser's token may change. Read-only: it can read everything but change nothing in the monitoring store. Nothing is ever written to a monitored SQL Server.",
+  none: "What this browser's token may change. The service could not say, so nothing is claimed about it.",
+};
 function seatLabel(session) {
   if (!session) return null;
-  if (session.probe_failed) return "Seat: not connected";
-  return session.can_edit ? "Seat: read-write" : "Seat: read-only";
+  if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
+  return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 
 /* The Viewer's FormatBytes: GB with one decimal from 1 GB up, whole MB below. */
@@ -562,7 +568,7 @@ function renderStatusBar() {
   if (storeSizeBytes != null) {
     items.push(el("span", { class: "sb-item sb-store-size" + (storeSizeStale ? " muted" : ""), text: "Database: " + formatStoreSize(storeSizeBytes) + (storeSizeStale ? " (stale)" : "") }));
   }
-  if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat }));
+  if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat.text, title: statusSeat.title }));
   if (statusCollection && NON_OK_COLLECTION_STATES.has(statusCollection)) {
     items.push(el("span", { class: "sb-item sb-collection sb-warn", text: "Collection: " + statusCollection[0].toUpperCase() + statusCollection.slice(1) }));
   }

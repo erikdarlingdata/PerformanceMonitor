@@ -119,6 +119,7 @@ public partial class AgentAlertsTab : UserControl
         var gaps = ViewerAgentAlertsText.GapRows(read);
         var alerts = ViewerAgentAlertsText.AlertRows(read);
         GapsDataGrid.ItemsSource = gaps;
+        GapWhichColumn.Visibility = gaps.Any(g => g.Which.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         AlertsDataGrid.ItemsSource = alerts;
         GapsEmptyMessage.Text = ViewerAgentAlertsText.GapsEmptyText(read);
         AlertsEmptyMessage.Text = ViewerAgentAlertsText.AlertsEmptyText(read);

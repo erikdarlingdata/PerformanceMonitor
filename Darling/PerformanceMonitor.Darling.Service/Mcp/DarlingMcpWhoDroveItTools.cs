@@ -163,6 +163,7 @@ public sealed class DarlingMcpWhoDroveItTools
                 statements_window = planRoute.Disclosure,
                 procedures_window = procRoute.Disclosure,
                 overlap_note = "cpu_ms counts every statement the plan cache sampled, including the statements inside procedures. procedure_cpu_ms is the procedures' own total for the same work: read it beside cpu_ms, never added to it.",
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 share_note = "share is a database's cpu_ms over server_cpu_ms, the CPU of every database in the window, so it does not change with top.",
                 databases_returned = databases.Count,
                 truncated = cut,

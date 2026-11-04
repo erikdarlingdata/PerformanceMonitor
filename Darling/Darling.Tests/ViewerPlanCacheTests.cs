@@ -134,45 +134,72 @@ public sealed class ViewerPlanCacheSqlTests
 }
 
 /// <summary>
-/// Pins the derived single-use plan-cache bloat badge (<see cref="ViewerDataService.ClassifyPlanCacheBloat"/>),
-/// a pure client-side CASE mirroring install/47's report.plan_cache_bloat: bloat_level banding on the
-/// single-use / total plan ratio (&gt; 50 CRITICAL / &gt; 30 HIGH / &gt; 20 MEDIUM / else NORMAL) and the
-/// paired forced-parameterization recommendation flipping at the same &gt; 20% threshold.
+/// Pins the derived single-use plan-cache bloat badge (<see cref="ViewerDataService.ClassifyPlanCacheBloat"/>), the
+/// shared <c>PlanCacheBloatRule</c> over the summary strip's figures (#7445): the ratio is over compiled plans only
+/// (&gt; 50 CRITICAL / &gt; 30 HIGH / &gt; 20 MEDIUM / else NORMAL), single-use plans under 100 MB are never bloat, and
+/// the recommendation above the floor names optimize for ad hoc workloads before Forced Parameterization.
 /// </summary>
 public sealed class ViewerPlanCacheBloatTests
 {
+    private static PlanCacheSummary Summary(long compiled, long singleUse, long singleUseMb) =>
+        new(compiled, singleUse, null, null, TotalSizeMb: 900, CompiledPlans: compiled, CompiledSingleUsePlans: singleUse, CompiledSingleUseSizeMb: singleUseMb);
+
     [Theory]
     [InlineData(100, 60, "CRITICAL")]   // 60% > 50
     [InlineData(100, 51, "CRITICAL")]
-    [InlineData(100, 50, "HIGH")]       // exactly 50 is NOT > 50 → HIGH
+    [InlineData(100, 50, "HIGH")]       // exactly 50 is NOT > 50 -> HIGH
     [InlineData(100, 40, "HIGH")]       // 40% > 30
     [InlineData(100, 31, "HIGH")]
-    [InlineData(100, 30, "MEDIUM")]     // exactly 30 → MEDIUM
+    [InlineData(100, 30, "MEDIUM")]     // exactly 30 -> MEDIUM
     [InlineData(100, 25, "MEDIUM")]     // 25% > 20
     [InlineData(100, 21, "MEDIUM")]
-    [InlineData(100, 20, "NORMAL")]     // exactly 20 → NORMAL
+    [InlineData(100, 20, "NORMAL")]     // exactly 20 -> NORMAL
     [InlineData(100, 5, "NORMAL")]
-    [InlineData(0, 0, "NORMAL")]        // empty cache → no divide-by-zero, NORMAL
-    public void ClassifyPlanCacheBloat_BandsOnSingleUsePercent(long total, long singleUse, string expectedLevel)
-        => Assert.Equal(expectedLevel, ViewerDataService.ClassifyPlanCacheBloat(total, singleUse).Level);
+    [InlineData(0, 0, "NORMAL")]        // empty cache -> no divide-by-zero, NORMAL
+    public void ClassifyPlanCacheBloat_BandsOnCompiledSingleUsePercent_AboveTheFloor(long compiled, long singleUse, string expectedLevel)
+        => Assert.Equal(expectedLevel, ViewerDataService.ClassifyPlanCacheBloat(Summary(compiled, singleUse, 100)).Level);
 
     [Theory]
-    [InlineData(100, 25, true)]         // > 20% → forced-parameterization hint
+    [InlineData(100, 25, true)]         // > 20% -> ad hoc workloads first, then forced parameterization
     [InlineData(100, 21, true)]
-    [InlineData(100, 20, false)]        // <= 20% → healthy
+    [InlineData(100, 20, false)]        // <= 20% -> healthy
     [InlineData(100, 0, false)]
-    [InlineData(0, 0, false)]
-    public void ClassifyPlanCacheBloat_RecommendationFlipsAtTwentyPercent(long total, long singleUse, bool expectHint)
+    public void ClassifyPlanCacheBloat_RecommendationFlipsAtTwentyPercent(long compiled, long singleUse, bool expectAdvice)
     {
-        var rec = ViewerDataService.ClassifyPlanCacheBloat(total, singleUse).Recommendation;
-        if (expectHint)
+        var rec = ViewerDataService.ClassifyPlanCacheBloat(Summary(compiled, singleUse, 100)).Recommendation;
+        if (expectAdvice)
         {
+            Assert.StartsWith("Optimize for ad hoc workloads", rec, StringComparison.Ordinal);
             Assert.Contains("Forced Parameterization", rec, StringComparison.Ordinal);
         }
         else
         {
             Assert.Equal("Plan cache composition is healthy", rec);
         }
+    }
+
+    /// <summary>#7445: a 49-plan, 11 MB cache that is 20% single use read MEDIUM and recommended Forced Parameterization.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ASmallCache_IsNormalAndSaysSo_WhateverTheRatio()
+    {
+        var bloat = ViewerDataService.ClassifyPlanCacheBloat(
+            new PlanCacheSummary(49, 10, null, null, TotalSizeMb: 11, CompiledPlans: 10, CompiledSingleUsePlans: 8, CompiledSingleUseSizeMb: 6));
+        Assert.Equal("NORMAL", bloat.Level);
+        Assert.Contains("too small to judge", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Forced Parameterization", bloat.Recommendation, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7445: 20,000 compiled plans in 3,000 MB with 50 MB single use is a well-parameterized server, not a small cache.</summary>
+    [Fact]
+    public void ClassifyPlanCacheBloat_ALargeCacheUnderTheFloor_IsNotCalledTooSmallToJudge()
+    {
+        var bloat = ViewerDataService.ClassifyPlanCacheBloat(
+            new PlanCacheSummary(20000, 1000, null, null, TotalSizeMb: 3000, CompiledPlans: 20000, CompiledSingleUsePlans: 1000, CompiledSingleUseSizeMb: 50));
+        Assert.Equal("NORMAL", bloat.Level);
+        Assert.DoesNotContain("too small", bloat.Recommendation, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("50 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("3,000 MB", bloat.Recommendation, StringComparison.Ordinal);
+        Assert.Contains("no action is needed", bloat.Recommendation, StringComparison.Ordinal);
     }
 }
 
@@ -186,6 +213,7 @@ public sealed class ViewerPlanCacheBloatTests
 public sealed class ViewerPlanCacheLivePostgresTests
 {
     private const int ServerId = -940004;
+    private const int SummaryServerId = -940005;
     private const string ServerName = "viewer-plancache-e2e";
 
     [Fact]
@@ -240,9 +268,53 @@ public sealed class ViewerPlanCacheLivePostgresTests
         }
     }
 
+    /// <summary>#7445: the summary's compiled-only figures leave out parse trees and extended procedures, which the
+    /// whole-cache totals keep.</summary>
+    [Fact]
+    public async Task Summary_CompiledFigures_LeaveOutParseTreesAndExtendedProcs_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteAsync(connection, SummaryServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-10));
+            await InsertAsync(connection, t1, "Compiled Plan", "Adhoc",
+                totalPlans: 10, totalSizeMb: 9, singlePlans: 8, singleMb: 6, multiPlans: 2, multiMb: 3, oldest: t1, serverId: SummaryServerId);
+            await InsertAsync(connection, t1, "Parse Tree", "View",
+                totalPlans: 38, totalSizeMb: 1, singlePlans: 2, singleMb: 1, multiPlans: 36, multiMb: 0, oldest: t1, serverId: SummaryServerId);
+            await InsertAsync(connection, t1, "Extended Proc", "Proc",
+                totalPlans: 1, totalSizeMb: 1, singlePlans: 1, singleMb: 1, multiPlans: 0, multiMb: 0, oldest: t1, serverId: SummaryServerId);
+
+            var summary = await viewer.GetPlanCacheSummaryAsync(SummaryServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
+            Assert.Equal(49L, summary.TotalPlans);
+            Assert.Equal(11L, summary.TotalSizeMb);
+            Assert.Equal(10L, summary.CompiledPlans);
+            Assert.Equal(8L, summary.CompiledSingleUsePlans);
+            Assert.Equal(6L, summary.CompiledSingleUseSizeMb);
+            Assert.Equal("NORMAL", ViewerDataService.ClassifyPlanCacheBloat(summary).Level);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteAsync(cleanup, SummaryServerId, cleanupCt));
+        }
+    }
+
     private static async Task InsertAsync(
         NpgsqlConnection connection, DateTime collectionTimeUtc, string cacheobjtype, string objtype,
-        int totalPlans, int totalSizeMb, int singlePlans, int singleMb, int multiPlans, int multiMb, DateTime oldest)
+        int totalPlans, int totalSizeMb, int singlePlans, int singleMb, int multiPlans, int multiMb, DateTime oldest, int serverId = ServerId)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO plan_cache_stats
@@ -252,7 +324,7 @@ INSERT INTO plan_cache_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1.5, 64, $13)", connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(cacheobjtype);
         command.Parameters.AddWithValue(objtype);

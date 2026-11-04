@@ -79,7 +79,7 @@ public sealed class DarlingMcpJobTools
                     ?? (read.LastGoodCollection is DateTime lastGood
                         ? McpHelpers.Status("unavailable", PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood))
                         : null)
-                    ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
+                    ?? McpHelpers.Status("empty", CollectorRuntimePrecondition.RunningJobsEmptyMessage(read.CollectorRan));
 
             var jobs = rows.Select(r => new
             {

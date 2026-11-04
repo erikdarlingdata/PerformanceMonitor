@@ -626,6 +626,9 @@ public sealed partial class DarlingCollectorRunner
             /* #5158: query_stats' main query leaves the plan out and the plan fetch below renders only the plans this
                host has not committed. */
             DeferPlanXmlFetch = planFetchFlags.DeferPlanXmlFetch,
+            /* #7419: query_stats' main query returns no statement text and the text fetch below reads it for only the
+               kept rows whose text this host has not committed. */
+            DeferTextFetch = ShouldDeferTextFetchFor(definition.Name, server.Target),
             /* #5158: procedure_stats' identity columns, so the host can recognize a module plan. Both flags come from one
                resolution of the mode (StampPlanFetchFlags); the reader close and the reuse pass read it back from here. */
             PlanIdentityColumns = planFetchFlags.PlanIdentityColumns,
@@ -2187,6 +2190,10 @@ public sealed partial class DarlingCollectorRunner
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
                 List<QueryStatsPlanKey>? pendingPlanKeys = null;
+                List<QueryStatsPlanKey>? pendingTextKeys = null;
+                /* #7419: query_stats' read advanced every candidate's delta baselines. Until the rows reach the store, a run that
+                   ends rolls them back, so the next run's delta covers both intervals. */
+                IBaselineRollback? baselineRollback = null;
                 List<ProcedureStatsPlanKey>? pendingProcedureKeys = null;
                 /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
                    Set before the read rather than after it so the wall-clock-budget catch below reports the
@@ -2194,7 +2201,7 @@ public sealed partial class DarlingCollectorRunner
                    most, and the one a trailing assignment would leave at zero. */
                 serverPhasesMeasured = true;
 
-                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(ItemBudgetOverrideForTests ?? definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
 
                 /* #2880: the out-of-band arm. Started BEFORE the open and on its own clock, because the
@@ -2292,6 +2299,7 @@ public sealed partial class DarlingCollectorRunner
                     try
                     {
                         rows = await definition.ReadAsync(counting, context, itemToken);
+                        baselineRollback = rows as IBaselineRollback;
                     }
                     finally
                     {
@@ -2352,6 +2360,14 @@ public sealed partial class DarlingCollectorRunner
 
                     /* #5158: the deferred plan fetch. After the main read is over and on this same target connection,
                        inside the same wall-clock budget (itemToken), so a slow fetch is cut by the budget like the read. */
+                    /* #7419: the deferred text fetch, before the plan fetch and under the same item budget. */
+                    if (context.DeferTextFetch && (object)rows is List<QueryStatsCollector.Row> textRows)
+                    {
+                        await reader.CloseAsync();
+                        pendingTextKeys = await FetchDeferredQueryStatsTextAsync(
+                            targetProvider, targetConnection, server, context, textRows, itemToken);
+                    }
+
                     if (context.DeferPlanXmlFetch && (object)rows is List<QueryStatsCollector.Row> deferredRows)
                     {
                         await reader.CloseAsync();
@@ -2386,6 +2402,7 @@ public sealed partial class DarlingCollectorRunner
                        watermark from moving. The provider's cancellation artifact (ex) is dropped in favour
                        of the budget message, the same as the per-item arm. */
                     _ = ex;
+                    baselineRollback?.RollBackBaselines();
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
@@ -2418,6 +2435,13 @@ public sealed partial class DarlingCollectorRunner
                         TargetSessionId: context.TargetSessionId);
                 }
 
+                catch
+                {
+                    /* #7419: any other end of the read or the target phases before the store (a stop, a fault) stores nothing. */
+                    baselineRollback?.RollBackBaselines();
+                    throw;
+                }
+
                 /* Optional best-effort second query on the same connection (server_properties'
                    health probe). Failure-isolated; skipped on an empty primary, matching Lite. */
                 var supplementalPlan = definition.BuildSupplementalQuery(context);
@@ -2437,7 +2461,18 @@ public sealed partial class DarlingCollectorRunner
                 sqlMs += sqlSlice.ElapsedMilliseconds;
 
                 var storageSlice = Stopwatch.StartNew();
-                await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                NpgsqlConnection openedConnection;
+                try
+                {
+                    openedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                }
+                catch
+                {
+                    baselineRollback?.RollBackBaselines();
+                    throw;
+                }
+
+                await using var pgConnection = openedConnection;
                 var committed = false;
                 try
                 {
@@ -2452,14 +2487,14 @@ public sealed partial class DarlingCollectorRunner
                     if (pendingPlanKeys is not null
                         && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
                     {
-                        if (committed)
-                        {
-                            planCache.ConfirmPending(pendingPlanKeys, DateTime.UtcNow);
-                        }
-                        else
-                        {
-                            planCache.DiscardPending(pendingPlanKeys);
-                        }
+                        planCache.Settle(pendingPlanKeys, committed, DateTime.UtcNow);
+                    }
+
+                    /* #7419: the same rule for the texts this run read. */
+                    if (pendingTextKeys is not null
+                        && _queryStatsTextCaches.TryGetValue(server.ServerId, out var textCache))
+                    {
+                        textCache.Settle(pendingTextKeys, committed, DateTime.UtcNow);
                     }
 
                     /* Two runs of one server's procedure_stats never overlap, so no other run can overwrite a pending entry
@@ -2473,14 +2508,7 @@ public sealed partial class DarlingCollectorRunner
                     if (pendingProcedureKeys is not null
                         && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var procedurePlanCache))
                     {
-                        if (committed)
-                        {
-                            procedurePlanCache.ConfirmPending(pendingProcedureKeys, DateTime.UtcNow);
-                        }
-                        else
-                        {
-                            procedurePlanCache.DiscardPending(pendingProcedureKeys);
-                        }
+                        procedurePlanCache.Settle(pendingProcedureKeys, committed, DateTime.UtcNow);
                     }
                 }
 

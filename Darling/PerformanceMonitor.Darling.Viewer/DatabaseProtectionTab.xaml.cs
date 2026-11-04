@@ -110,6 +110,7 @@ public partial class DatabaseProtectionTab : UserControl
         {
             StatusLine.Text = "";
             DatabasesDataGrid.ItemsSource = new List<ViewerDatabaseProtectionRow>();
+            PlatformColumn.Visibility = Visibility.Collapsed;
             EmptyMessage.Visibility = Visibility.Collapsed;
             return;
         }
@@ -117,6 +118,7 @@ public partial class DatabaseProtectionTab : UserControl
         StatusLine.Text = ViewerDatabaseProtectionText.StatusLine(read, clock ?? ViewerTimeHelper.ActiveServerClock);
         var rows = ViewerDatabaseProtectionText.Rows(read);
         DatabasesDataGrid.ItemsSource = rows;
+        PlatformColumn.Visibility = ViewerDatabaseProtectionText.ShowsPlatformColumn(rows) ? Visibility.Visible : Visibility.Collapsed;
         EmptyMessage.Text = ViewerDatabaseProtectionText.EmptyText(read);
         EmptyMessage.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
