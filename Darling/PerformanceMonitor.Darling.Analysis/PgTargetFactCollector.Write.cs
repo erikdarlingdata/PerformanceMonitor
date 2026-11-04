@@ -207,8 +207,9 @@ SELECT
     /// is NOT reported the fact is still emitted, as <c>unavailable = 1</c> with the reason flag (#7457 split them): an
     /// all-NULL window on Aurora is <c>reason_wal_stats_not_reported</c> (§A7: fifty clusters, fourteen days, no
     /// figure on every one); an all-NULL window on a registry major below 14 is <c>reason_pg_stat_wal_absent</c> (the
-    /// view does not exist there, with or without rows); zero bytes and records beside checkpoint buffers written, or
-    /// NULL columns with neither cause, is <c>reason_wal_stats_not_populated</c>. Zero bytes and records with nothing else
+    /// view does not exist there, with or without rows); zero bytes and records beside checkpoint buffers written is
+    /// <c>reason_wal_stats_not_populated</c>; NULL columns with neither cause known (no registry major to tell Aurora or
+    /// below 14 apart) is <c>reason_wal_cause_unknown</c>, which claims nothing about checkpoints. Zero bytes and records with nothing else
     /// written is a quiet server, not a gap: the fact is emitted TRACKED at 0 B/s. On a stock PostgreSQL 14+ with no rows
     /// the collector has not run and nothing is emitted — the coverage witness already describes that gap.</para>
     /// </summary>
@@ -333,7 +334,11 @@ SELECT
             if (major is > 0 and < 14)
                 fact.Metadata["reason_pg_stat_wal_absent"] = 1;
             else
-                fact.Metadata["wal_not_populated"] = 1;
+            {
+                /* NULL columns with neither cause known: the registry major is missing (Aurora and pre-14 are told apart
+                   by it), so the window proves nothing about checkpoints or writes. Its own flag, its own words. */
+                fact.Metadata["wal_cause_unknown"] = 1;
+            }
         }
 
         if (isAurora)
@@ -391,7 +396,7 @@ SELECT
         {
             var reason = isAurora ? "reason_wal_stats_not_reported"
                 : major is > 0 and < 14 ? "reason_pg_stat_wal_absent"
-                : "reason_wal_stats_not_populated";
+                : "reason_wal_cause_unknown";
             facts.Add(UnavailableWalVolume(context, reason, sampleCount));
             return;
         }

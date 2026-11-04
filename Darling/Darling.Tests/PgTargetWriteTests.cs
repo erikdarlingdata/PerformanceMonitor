@@ -659,9 +659,45 @@ public sealed class PgTargetWriteTests
         Assert.DoesNotContain("Aurora", advice.Investigation + advice.Remediation, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// All-NULL WAL columns with NO registry major (the row's <c>postgres_major_version</c> is unreadable, so Aurora and
+    /// below-14 cannot be told apart) and zero checkpoint buffers written. The window proves nothing about writes, so
+    /// neither fact may say checkpoints wrote buffers or that the counters are not populated, and no Aurora either: the
+    /// words say the cause could not be determined. Old code stamped <c>wal_not_populated</c> here.
+    /// </summary>
+    [Fact]
+    public async Task NullWalColumns_WithNoRegistryMajor_ReadCauseUnknown_AndNeverClaimCheckpointsWroteBuffers()
+    {
+        var facts = await CollectZeroWalFactsAsync(walBytesPerMinute: null, checkpointBuffersPerMinute: 0, major: null);
+        if (facts is null) return;
+
+        var pressure = Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+        Assert.Equal(0, pressure.Metadata["wal_tracked"]);
+        Assert.Equal(1, pressure.Metadata["wal_cause_unknown"]);
+        Assert.False(pressure.Metadata.ContainsKey("wal_not_populated"));
+        Assert.False(pressure.Metadata.ContainsKey("reason_pg_stat_wal_absent"));
+        Assert.False(pressure.Metadata.ContainsKey("not_applicable"));
+
+        var shift = Assert.Single(facts, f => f.Key == PgTargetFactKeys.WalVolumeShift);
+        Assert.Equal(1, shift.Metadata["unavailable"]);
+        Assert.Equal(1, shift.Metadata["reason_wal_cause_unknown"]);
+        Assert.False(shift.Metadata.ContainsKey("reason_wal_stats_not_populated"));
+
+        var advice = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(pressure))!;
+        var shiftAdvice = PgTargetAdvice.Compose(PgTargetFactKeys.WalVolumeShift, Lookup(shift))!;
+        Assert.Contains("could not be determined", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("could not be determined", shiftAdvice.Investigation, StringComparison.Ordinal);
+        foreach (var text in new[] { advice.Investigation + advice.Remediation, shiftAdvice.Headline + shiftAdvice.Investigation + shiftAdvice.Remediation })
+        {
+            Assert.DoesNotContain("checkpoints wrote buffers", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("not being populated", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("Aurora", text, StringComparison.Ordinal);
+        }
+    }
+
     /// <summary>Plants a four-hour, one-timed-checkpoint-a-minute write series for a stock server of registry
     /// <paramref name="major"/> and returns the write facts, or null when <c>DARLING_TEST_PG</c> is unset.</summary>
-    private static async Task<List<Fact>?> CollectZeroWalFactsAsync(long? walBytesPerMinute, int checkpointBuffersPerMinute, int major)
+    private static async Task<List<Fact>?> CollectZeroWalFactsAsync(long? walBytesPerMinute, int checkpointBuffersPerMinute, int? major)
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the write-family trackedness e2e.");

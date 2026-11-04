@@ -500,7 +500,14 @@ public sealed class PgTargetKnobsTests
         var third = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(old, knob))!;
         Assert.Contains("does not exist below PostgreSQL 14", third.Investigation, StringComparison.Ordinal);
 
-        foreach (var block in new[] { first, second, third })
+        var causeUnknown = Pressure(1.0, 240, requested: 240, timed: 0);
+        causeUnknown.Metadata["wal_tracked"] = 0;
+        causeUnknown.Metadata["wal_cause_unknown"] = 1;
+        var fourth = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(causeUnknown, knob))!;
+        Assert.Contains("could not be determined", fourth.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoints wrote buffers", fourth.Investigation + fourth.Remediation, StringComparison.Ordinal);
+
+        foreach (var block in new[] { first, second, third, fourth })
         {
             Assert.DoesNotContain("Aurora", block.Investigation + block.Remediation, StringComparison.Ordinal);
             Assert.DoesNotContain("this flavour", block.Investigation + block.Remediation, StringComparison.Ordinal);

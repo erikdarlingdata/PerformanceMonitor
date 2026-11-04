@@ -211,7 +211,7 @@ public static partial class PgTargetAdvice
     /// <summary>
     /// Why the WAL figures are absent from <c>PG_CHECKPOINT_PRESSURE</c> (#7457): each cause gets its own words, and only
     /// an Aurora target is told about Aurora. The collector stamps the cause (<c>not_applicable_on_aurora</c>,
-    /// <c>reason_pg_stat_wal_absent</c>, <c>wal_not_populated</c>); a fact with none of them is a gap of unknown cause.
+    /// <c>reason_pg_stat_wal_absent</c>, <c>wal_not_populated</c>, <c>wal_cause_unknown</c>); a fact with none of them is a gap of unknown cause.
     /// </summary>
     private static (string Investigation, string Remediation) WalGapWords(Fact? pressure)
     {
@@ -231,6 +231,11 @@ public static partial class PgTargetAdvice
                     "requested checkpoint cannot be stated. ",
                     "pg_stat_wal is not being populated here, so size from the requested share: raise max_wal_size and " +
                     "confirm the share falls on the next pass rather than computing a target from WAL bytes the server did not report. ");
+        if ((KnobMeta(pressure, "wal_cause_unknown") ?? 0) > 0)
+            return ("The WAL columns came back NULL for this window and the cause could not be determined, because this server's " +
+                    "engine and version are not known to the analysis, so the bytes behind each requested checkpoint cannot be stated here. ",
+                    "WAL volume is not available and its cause is not known, so size from the requested share: raise max_wal_size and " +
+                    "confirm the share falls on the next pass rather than computing a target from WAL bytes that were not reported. ");
         return ("WAL volume is not reported for this server, so the bytes behind each requested checkpoint cannot be stated here. ",
                 "WAL volume is not reported for this server, so size from the requested share: raise max_wal_size and " +
                 "confirm the share falls on the next pass rather than computing a target from bytes it does not report. ");
@@ -351,6 +356,20 @@ public static partial class PgTargetAdvice
                     Remediation:
                         "Check that pg_stat_wal answers on the server (SELECT wal_records, wal_bytes FROM pg_stat_wal) and that the " +
                         "writes are logged, and read get_pg_top_queries for the statements generating WAL.");
+            }
+
+            if ((KnobMeta(shift, "reason_wal_cause_unknown") ?? 0) > 0)
+            {
+                return new AdviceBlock(
+                    Headline: "WAL volume is not reported and the cause is not known",
+                    Investigation:
+                        "Cluster-wide WAL volume (wal_bytes / wal_records in pg_write_stats) came back NULL over the whole window, and " +
+                        "the cause could not be determined because this server's engine and version are not known to the analysis. " +
+                        "No rate is stated and nothing is graded - an absent counter is not a zero. Per-statement WAL volume is " +
+                        "collected from pg_stat_statements (wal_bytes per statement) and read by get_pg_top_queries.",
+                    Remediation:
+                        "Let the server's version be collected so the analysis can tell Aurora and PostgreSQL below 14 from a server " +
+                        "whose counters are broken, and read get_pg_top_queries for the statements generating WAL.");
             }
 
             var reason = (KnobMeta(shift, "reason_pg_stat_wal_absent") ?? 0) > 0
