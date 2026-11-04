@@ -1435,7 +1435,9 @@ function vizLine(data, desc) {
      a legend entry with no line would read as a flat zero. A chart left with no series says `noSeriesText` (or its emptyText). */
   const measured = (s) => points.some((p) => p && p[s.key] != null && p[s.key] !== "" && !Number.isNaN(Number(p[s.key])));
   const seriesCfg = desc.hideEmptySeries && points.length ? allSeriesCfg.filter(measured) : allSeriesCfg;
-  if (!seriesCfg.length) return emptyStrip(desc.noSeriesText || desc.emptyText || NO_FIELDS_MSG);
+  /* `noSeriesText` may be a function of the payload, for a sentence whose cause the payload itself can name. */
+  const noSeries = typeof desc.noSeriesText === "function" ? desc.noSeriesText(data) : desc.noSeriesText;
+  if (!seriesCfg.length) return emptyStrip(noSeries || desc.emptyText || NO_FIELDS_MSG);
   /* ZERO points is a different statement from ONE point, and only the descriptor knows which sentence is true.
      A read whose empty array means the thing simply did not happen must say so, not inherit a warming-up
      message about a condition it never had: get_blocking_trend and get_deadlock_trend used to return

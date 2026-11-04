@@ -147,7 +147,34 @@ public sealed class WebPgTrendChartsBehaviourTests
         var titles = Strings(r.GetProperty("titles"));
         Assert.DoesNotContain("I/O Avg Read (ms)", titles);
         Assert.Contains("I/O Trend", titles);
-        Assert.Contains(Strings(r.GetProperty("empties")), e => e.Contains("track_io_timing", StringComparison.Ordinal));
+        Assert.Contains(Strings(r.GetProperty("empties")), e => e.StartsWith("No read latency", StringComparison.Ordinal) && e.Contains("has track_io_timing off", StringComparison.Ordinal));
+        Assert.Contains(Strings(r.GetProperty("empties")), e => e.StartsWith("No read bytes", StringComparison.Ordinal) && e.Contains("no byte counters", StringComparison.Ordinal));
+    }
+
+    /* #7394: avg_read_ms is also null when the followed pair did no reads. A server with track_io_timing ON must not be told it is off. */
+    [Fact]
+    public void WithTrackIoTimingOn_AndAPairThatDidNoReads_TheStripsDoNotBlameTheSetting()
+    {
+        var r = Run("ioNoReads");
+
+        var empties = Strings(r.GetProperty("empties"));
+        Assert.DoesNotContain("I/O Avg Read (ms)", Strings(r.GetProperty("titles")));
+        Assert.Contains(empties, e => e.StartsWith("No read latency", StringComparison.Ordinal) && e.Contains("did no reads", StringComparison.Ordinal));
+        Assert.DoesNotContain(empties, e => e.Contains("track_io_timing", StringComparison.Ordinal));
+        Assert.Contains(empties, e => e.StartsWith("No read bytes", StringComparison.Ordinal) && e.Contains("did no reads", StringComparison.Ordinal));
+        Assert.DoesNotContain(empties, e => e.Contains("no byte counters", StringComparison.Ordinal));
+    }
+
+    /* The setting was never collected: io_timing_tracked false is only what the data showed, so the page names both causes and asserts neither. */
+    [Fact]
+    public void WhenTheTimingSettingWasNeverCollected_TheLatencyStripNamesBothCauses_AndDoesNotStateTheSetting()
+    {
+        var r = Run("ioTimingInferred");
+
+        var latency = Strings(r.GetProperty("empties")).Single(e => e.StartsWith("No read latency", StringComparison.Ordinal));
+        Assert.Contains("did no reads", latency, StringComparison.Ordinal);
+        Assert.Contains("cannot tell which", latency, StringComparison.Ordinal);
+        Assert.DoesNotContain("has track_io_timing off", latency, StringComparison.Ordinal);
     }
 
     [Fact]

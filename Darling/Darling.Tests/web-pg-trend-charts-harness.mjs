@@ -183,8 +183,22 @@ const scenarios = {
       empties: texts(root, "strip empty"),
     };
   },
+  /* The wire shape of get_pg_io_trend: io_timing_tracked is the setting (or, when the setting was never collected, an inference from the data),
+     io_timing_source says which, and bytes_source says whether read bytes can exist at all. */
   ioTimingOff: async () => {
-    bodies = { get_pg_io_trend: { points: ioPoints(false, false) } };
+    bodies = { get_pg_io_trend: { points: ioPoints(false, false), io_timing_tracked: false, io_timing_source: "the target's own track_io_timing, as collected into pg_server_config", bytes_source: "unavailable" } };
+    const root = await build("io");
+    return { titles: titles(), empties: texts(root, "strip empty") };
+  },
+  /* Timing is on but the followed pair did no reads (a write-only backend, or a checkpointer): avg_read_ms and read bytes are null on every point. */
+  ioNoReads: async () => {
+    bodies = { get_pg_io_trend: { points: ioPoints(false, false), io_timing_tracked: true, io_timing_source: "the target's own track_io_timing, as collected into pg_server_config", bytes_source: "measured" } };
+    const root = await build("io");
+    return { titles: titles(), empties: texts(root, "strip empty") };
+  },
+  /* The setting was never collected, so io_timing_tracked is only the data's answer and cannot say the setting is off. */
+  ioTimingInferred: async () => {
+    bodies = { get_pg_io_trend: { points: ioPoints(false, false), io_timing_tracked: false, io_timing_source: "inferred from the data - this server's configuration has not been collected, so track_io_timing is unknown", bytes_source: "estimated_from_block_size" } };
     const root = await build("io");
     return { titles: titles(), empties: texts(root, "strip empty") };
   },
