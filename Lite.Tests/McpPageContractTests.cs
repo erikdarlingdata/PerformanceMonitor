@@ -748,6 +748,14 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
         var tooHigh = Parse(await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, ServerName, 1, 2, min_dop: 16));
         Assert.Equal("empty", tooHigh.GetProperty("status").GetString());
         Assert.Contains("max_dop >= 16", tooHigh.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* #7522: Lite keeps no plans, so analyze_query_plan always answers not_collected there. The empty answer
+           must send the reader to a step that works on Lite instead. */
+        var tooHighMessage = tooHigh.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", tooHighMessage, StringComparison.Ordinal);
+        Assert.Contains("analyze_query_store_plan", tooHighMessage, StringComparison.Ordinal);
+        /* The page gives no plan_id, so the message names the read that does. */
+        Assert.Contains("get_query_store_top", tooHighMessage, StringComparison.Ordinal);
     }
 
     /// <summary>
