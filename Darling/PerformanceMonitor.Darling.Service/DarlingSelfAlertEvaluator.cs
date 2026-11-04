@@ -5150,7 +5150,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var now = _utcNow();
         var read = await ReadWithOneRetryAsync(
             token => DarlingIdentityCapacityReader.ReadNewestScansAsync(
-                postgres, serverId, DatabaseFilter.All, now - IdentityCapacityWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, token),
+                postgres, serverId, DatabaseFilter.All, now - IdentityCapacityWindow, now, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, logger: _logger, cancellationToken: token),
             serverId, IdentityCapacityReadName, cancellationToken);
         return read.HasScan ? read : null;
     }
