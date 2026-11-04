@@ -114,14 +114,29 @@ public sealed class PgOwnConnectionExclusionLiveTests
         var context = Context();
 
         var states = PgSessionStatesCollector.Instance;
-        await using (var command = new NpgsqlCommand(states.BuildQuery(context).Text, source))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        /* The collector reports a session only when it holds the oldest horizon, or has sat idle in a transaction for the floor
+           (10 s) or held one open for the floor (30 s). On a shared cluster another class's connection can hold an older xmin
+           for a moment, and then this fresh session is under both floors and rightly absent (CI leg 13 read one row, a DROP
+           from another class, with ReportableSessions = 1: not the row cap). So read again until this session is reported, which
+           it is once it becomes the oldest holder or crosses the 10 s idle floor. The service's two connections must be absent
+           on every read. */
+        var found = false;
+        for (var attempt = 0; attempt < 60 && !found; attempt++)
         {
+            if (attempt > 0)
+            {
+                await Task.Delay(500, ct);
+            }
+
+            await using var command = new NpgsqlCommand(states.BuildQuery(context).Text, source);
+            await using var reader = await command.ExecuteReaderAsync(ct);
             var rows = await states.ReadAsync(reader, context, ct);
-            Assert.Contains(rows, r => r.Pid == applicationPid);
             Assert.DoesNotContain(rows, r => r.Pid == monitoringPid);
             Assert.DoesNotContain(rows, r => r.Pid == remediationPid);
+            found = rows.Any(r => r.Pid == applicationPid);
         }
+
+        Assert.True(found, "the test's own idle-in-transaction session was never reported in 30 s");
 
         /* The cluster is shared with classes outside this collection, and one of their connections or an autovacuum worker
            can hold an older xmin for a moment, so read again until the oldest holder is this test's own. The service's two
