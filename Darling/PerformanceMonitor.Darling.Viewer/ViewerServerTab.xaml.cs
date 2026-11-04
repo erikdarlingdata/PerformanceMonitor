@@ -316,6 +316,9 @@ public partial class ViewerServerTab : UserControl
             await RefreshServerClockAsync();
             ApplyServerClockToHelper();
 
+            /* #7386: the server's data start, for the charts' X axis. One cached read for the whole tab. */
+            await RefreshServerDataStartAsync();
+
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
             await UpdateServerFreshnessLabelAsync();

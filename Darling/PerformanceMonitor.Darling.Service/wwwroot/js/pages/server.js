@@ -46,7 +46,7 @@
  */
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
-import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
+import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -133,7 +133,29 @@ onPageLeave(() => {
   setPanelSignal();
   renderGeneration++;
   current = { server: null, tab: null };
+  setChartDataStart(null);
 });
+
+/* #7386: when each server was first collected (UTC-epoch ms), so a chart over a range longer than the server's history starts its
+   axis where the data starts. One small read per server (/api/server-data-start, not the fleet roll-up), kept for ten minutes.
+   A failed read leaves what the page had, and with nothing it leaves every chart on the picked range. */
+const DATA_START_MAX_AGE_MS = 600000;
+const dataStarts = new Map();
+
+/** Give the charts the data start for `server` now (the kept answer, however old) and read it again when it is older than ten minutes. */
+function loadServerDataStart(server, generation) {
+  const kept = dataStarts.get(server);
+  setChartDataStart(kept ? kept.ms : null);
+  if (kept && Date.now() - kept.at < DATA_START_MAX_AGE_MS) return;
+  (async () => {
+    const res = await apiGet("/api/server-data-start?server=" + encodeURIComponent(server));
+    if (res.kind !== "data") return;
+    const ms = Date.parse(res.data && res.data.data_start_utc);
+    const answer = Number.isFinite(ms) ? ms : null;
+    dataStarts.set(server, { ms: answer, at: Date.now() });
+    if (generation === renderGeneration && current.server === server) setChartDataStart(answer);
+  })();
+}
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
@@ -313,6 +335,7 @@ export function renderServer(main, server, tabId, opts) {
   if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
   keepGrid = false;
   current = { server, tab: null };
+  loadServerDataStart(server, generation);
 
   const dot = el("span", { class: "dot" });
   /* The route's server KEY until the fleet card is known; fillServerHead then swaps in the display name. */

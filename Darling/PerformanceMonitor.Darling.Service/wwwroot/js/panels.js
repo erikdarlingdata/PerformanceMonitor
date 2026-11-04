@@ -1385,8 +1385,7 @@ function cell(row, c) {
     const full = getPath(row, c.detailKey);
     if (typeof full === "string" && full !== "") {
       const detail = el("p", { class: "cell-detail-text", text: plainText(full) });
-      const box = disclosure(text, detail, { max: c.detailMax || 60 });
-      box.classList.add("cell-detail");
+      const box = disclosure(text, detail, { max: c.detailMax || 60, cell: true });
       return el("td", { class: cls.join(" ") || null }, [box]);
     }
   }

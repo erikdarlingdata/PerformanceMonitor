@@ -354,6 +354,64 @@ public partial class ViewerServerTab
         RefreshRangePicker();
     }
 
+    /// <summary>When the server was first collected (#7386), the start the charts' X axis may not go before. Null until the first
+    /// read, or when the server has no row yet.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
+    private DateTime _serverDataStartReadUtc = DateTime.MinValue;
+
+    /// <summary>How long a read of the server's data start stands. The start only moves later, when old rows are purged, so the
+    /// charts re-read it with the normal refresh at most this often, not once per chart.</summary>
+    internal static readonly TimeSpan ServerDataStartMaxAge = TimeSpan.FromMinutes(10);
+
+    /// <summary>Reads the server's data start for the charts (#7386), one read for the whole tab, at most once per
+    /// <see cref="ServerDataStartMaxAge"/>. A failed read drops the start (null means the axis stays as picked), the same as Lite, and the next refresh reads again.</summary>
+    internal async Task RefreshServerDataStartAsync()
+    {
+        if (DateTime.UtcNow - _serverDataStartReadUtc < ServerDataStartMaxAge)
+        {
+            return;
+        }
+
+        try
+        {
+            ServerDataStartUtc = await _dataService.GetServerDataStartAsync(_server.ServerId, _server.IsPostgres);
+            _serverDataStartReadUtc = DateTime.UtcNow;
+            OverviewLanes.ServerDataStartUtc = ServerDataStartUtc;
+        }
+        catch
+        {
+            /* The start only trims empty width off a chart. A read that failed makes no claim, so the charts fall back to the
+               picked range (as Lite does) rather than trust a start the failed read could not confirm. The read time stays
+               old, so the next refresh tries again. */
+            ServerDataStartUtc = null;
+            OverviewLanes.ServerDataStartUtc = null;
+        }
+    }
+
+    /// <summary>The X axis start of a time chart over [start, end] (#7386), in the charts' OLE automation dates.</summary>
+    internal double ChartXStart(double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc);
+
+    /// <summary><see cref="ChartXStart(double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(DateTime startUtc, DateTime endUtc) => ChartXStart(startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>The X axis start of a chart whose series are already on <paramref name="plot"/> (#7386): never later than the earliest
+    /// point it drew, whichever relation fed it (an hourly tier, a collector with its own retention), so no plotted point is hidden.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, double startOa, double endOa) => ChartAxisStart.XStart(startOa, endOa, ServerDataStartUtc, plot);
+
+    /// <summary><see cref="ChartXStart(ScottPlot.Plot, double, double)"/> for a window held as instants.</summary>
+    internal double ChartXStart(ScottPlot.Plot plot, DateTime startUtc, DateTime endUtc) => ChartXStart(plot, startUtc.ToOADate(), endUtc.ToOADate());
+
+    /// <summary>For a chart a shared renderer drew with the axis start it was given up front: moves the left edge back when the
+    /// renderer plotted a point older than that start (#7386), and refreshes the chart.</summary>
+    internal void KeepPlottedInView(ScottPlot.WPF.WpfPlot chart, DateTime startUtc, DateTime endUtc)
+    {
+        if (ChartAxisStart.WidenToPlotted(chart.Plot, startUtc.ToOADate(), endUtc.ToOADate(), ServerDataStartUtc))
+        {
+            chart.Refresh();
+        }
+    }
+
     /// <summary>Pushes this tab's server clock onto the process-wide helper. Called before every render so
     /// the visible tab (only it renders) drives the conversions with its own server's clock.</summary>
     internal void ApplyServerClockToHelper() => ViewerTimeHelper.ActiveServerClock = _serverClock;

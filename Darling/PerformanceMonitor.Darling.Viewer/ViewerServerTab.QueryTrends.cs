@@ -261,7 +261,7 @@ public partial class ViewerServerTab
         MarkDiscontinuities(QueryDurationTrendChart, discontinuities);
 
         QueryDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        QueryDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        QueryDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryDurationTrendChart);
         QueryDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(QueryDurationTrendChart, 0, values.Max());
@@ -292,7 +292,7 @@ public partial class ViewerServerTab
         MarkDiscontinuities(ProcDurationTrendChart, discontinuities);
 
         ProcDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        ProcDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        ProcDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ProcDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ProcDurationTrendChart);
         ProcDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(ProcDurationTrendChart, 0, values.Max());
@@ -323,7 +323,7 @@ public partial class ViewerServerTab
         MarkDiscontinuities(QueryStoreDurationTrendChart, discontinuities);
 
         QueryStoreDurationTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        QueryStoreDurationTrendChart.Plot.Axes.SetLimitsX(ChartXStart(QueryStoreDurationTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(QueryStoreDurationTrendChart);
         QueryStoreDurationTrendChart.Plot.YLabel("Duration ms/s");
         SetChartYLimitsWithLegendPadding(QueryStoreDurationTrendChart, 0, values.Max());
@@ -354,7 +354,7 @@ public partial class ViewerServerTab
         MarkDiscontinuities(ExecutionCountTrendChart, discontinuities);
 
         ExecutionCountTrendChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        ExecutionCountTrendChart.Plot.Axes.SetLimitsX(ChartXStart(ExecutionCountTrendChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(ExecutionCountTrendChart);
         ExecutionCountTrendChart.Plot.YLabel("Executions/sec");
         SetChartYLimitsWithLegendPadding(ExecutionCountTrendChart, 0, values.Max());

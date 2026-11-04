@@ -27,8 +27,8 @@ public sealed class ConfigValueWhitespaceTests
     [Fact]
     public void ATrailingSpace_ShowsOnBothCells()
     {
-        Assert.Equal("“%m·[%p]·”", ConfigValueText.Shown("%m [%p] ", "%m [%p]"));
-        Assert.Equal("“%m·[%p]”", ConfigValueText.Shown("%m [%p]", "%m [%p] "));
+        Assert.Equal("“%m·[%p]·” (white space only)", ConfigValueText.Shown("%m [%p] ", "%m [%p]"));
+        Assert.Equal("“%m·[%p]” (white space only)", ConfigValueText.Shown("%m [%p]", "%m [%p] "));
     }
 
     [Theory]
@@ -44,8 +44,8 @@ public sealed class ConfigValueWhitespaceTests
     [Fact]
     public void ATabAndALineBreakAreNamed_AndANullStaysNull()
     {
-        Assert.Equal("“a→b”", ConfigValueText.Shown("a\tb", "a b"));
-        Assert.Equal("“a↵b”", ConfigValueText.Shown("a\nb", "ab"));
+        Assert.Equal("“a→b” (white space only)", ConfigValueText.Shown("a\tb", "a b"));
+        Assert.Equal("“a↵b” (white space only)", ConfigValueText.Shown("a\nb", "ab"));
         Assert.Null(ConfigValueText.Shown(null, " "));
     }
 
@@ -54,8 +54,8 @@ public sealed class ConfigValueWhitespaceTests
     {
         var row = new DatabaseConfigChangeRow(new ConfigChangeDiff.DatabaseConfigChange(DateTime.UtcNow, "Sales", "collation_name", "Latin1 ", "Latin1"));
 
-        Assert.Equal("“Latin1·”", row.OldValue);
-        Assert.Equal("“Latin1”", row.NewValue);
+        Assert.Equal("“Latin1·” (white space only)", row.OldValue);
+        Assert.Equal("“Latin1” (white space only)", row.NewValue);
     }
 
     [Fact]
@@ -85,14 +85,14 @@ public sealed class ConfigValueWhitespaceTests
 
             using var doc = JsonDocument.Parse(output.Split('\n')[0]);
             var cases = doc.RootElement;
-            Assert.Equal("“%m·[%p]·”", cases[0][0].GetString());
-            Assert.Equal("“%m·[%p]”", cases[0][1].GetString());
-            Assert.Equal("“a→b”", cases[1][0].GetString());
+            Assert.Equal("“%m·[%p]·” (white space only)", cases[0][0].GetString());
+            Assert.Equal("“%m·[%p]” (white space only)", cases[0][1].GetString());
+            Assert.Equal("“a→b” (white space only)", cases[1][0].GetString());
             Assert.Equal("FULL", cases[2][0].GetString());
             Assert.Equal("SIMPLE", cases[2][1].GetString());
             Assert.Equal(JsonValueKind.Null, cases[3][0].ValueKind);
-            Assert.Equal("“”", cases[4][0].GetString());
-            Assert.Equal("“·”", cases[4][1].GetString());
+            Assert.Equal("“” (white space only)", cases[4][0].GetString());
+            Assert.Equal("“·” (white space only)", cases[4][1].GetString());
         }
     }
 }

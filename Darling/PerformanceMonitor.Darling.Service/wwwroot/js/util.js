@@ -106,12 +106,23 @@ export function truncate(s, max = 120) {
  * A native <details> disclosure: a one-line truncated `summaryText` that expands to reveal `detail`. Built on
  * the platform <details>/<summary> so it is keyboard-accessible with no JS handlers; every piece of text goes
  * through el()/textContent (R4 — never innerHTML). `detail` may be a node, an array of nodes, or a string.
+ * `opts.cell` marks the disclosure as a grid cell's detail (#6154, #7482).
  */
 export function disclosure(summaryText, detail, opts = {}) {
   const summary = el("summary", { class: "disc-summary", title: opts.title || null }, [
     truncate(summaryText, opts.max || 120),
   ]);
-  return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
+  const body = el("div", { class: "disc-body" }, detail);
+  const box = el("details", { class: opts.cell ? "disclosure cell-detail" : "disclosure" }, [summary, body]);
+  /* #7482: a grid cell's detail opens in place. In a right-hand column of a grid that scrolls sideways the opened text
+     started at the cell and ran past the grid's edge, so it sat out of sight until the reader scrolled. Opening it
+     scrolls the grid just far enough to show the text, and does nothing when it is already in view. */
+  if (opts.cell && typeof box.addEventListener === "function") {
+    box.addEventListener("toggle", () => {
+      if (box.open && typeof body.scrollIntoView === "function") body.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+  return box;
 }
 
 /* Text longer than this many characters (or holding a line break) gets the expand toggle; shorter text fits a cell as is. */
@@ -847,6 +858,39 @@ export function windowFromHours(hours) {
   }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
+/* #7386: the shortest axis a data start may produce (two points of the slowest, 15 minute, collector cadence), and the run-in
+   left before the first collection (one fiftieth of the span) so the first marker is not cut by the plot edge. The same two
+   numbers as PerformanceMonitor.Ui.ChartAxisStart, which the desktop charts use. */
+const MIN_AXIS_SPAN_MS = 30 * 60000;
+const AXIS_RUN_IN_DIVISOR = 50;
+
+/**
+ * #7386: where the X axis of a time chart starts, in UTC-epoch ms: the LATER of the picked start and the server's data start,
+ * the first time the server was collected at all. The JS twin of ChartAxisStart.XStart. Returns the picked start when the data
+ * start is missing (no claim), at or before the picked start, at or after the picked end (a window the server was not collected
+ * in stays as picked), or when the axis it would give is shorter than 30 minutes. Otherwise the data start less its run-in,
+ * never earlier than the picked start. The picked start is the floor, so a data start never widens a window.
+ */
+export function xStartMs(pickedStart, pickedEnd, dataStart) {
+  if (typeof dataStart !== "number" || !isFinite(dataStart) || dataStart <= pickedStart || dataStart >= pickedEnd) return pickedStart;
+  const start = Math.max(pickedStart, dataStart - Math.floor((pickedEnd - dataStart) / AXIS_RUN_IN_DIVISOR));
+  return pickedEnd - start < MIN_AXIS_SPAN_MS ? pickedStart : start;
+}
+
+/* The server's data start for the server page on screen (UTC-epoch ms), or null. Set by the server page when its read answers
+   and dropped when the page is left, so a chart on any other page, and a chart on a server whose read failed, keeps the picked range. */
+let chartDataStartMs = null;
+
+/** #7386: tell every line chart where the server on screen was first collected (ms), or null for no claim. */
+export function setChartDataStart(ms) {
+  chartDataStartMs = typeof ms === "number" && isFinite(ms) ? ms : null;
+}
+
+/** #7386: the data start the charts use, or null. */
+export function chartDataStart() {
+  return chartDataStartMs;
 }
 
 /**

@@ -21,8 +21,8 @@ public sealed class ConfigValueWhitespaceRowTests
     {
         var row = new DatabaseConfigChangeRow(new ConfigChangeDiff.DatabaseConfigChange(DateTime.UtcNow, "Sales", "collation_name", "Latin1 ", "Latin1"));
 
-        Assert.Equal("“Latin1·”", row.OldValue);
-        Assert.Equal("“Latin1”", row.NewValue);
+        Assert.Equal("“Latin1·” (white space only)", row.OldValue);
+        Assert.Equal("“Latin1” (white space only)", row.NewValue);
     }
 
     [Fact]
