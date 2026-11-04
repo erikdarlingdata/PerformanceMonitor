@@ -310,10 +310,17 @@ public sealed class McpFilterSemanticsLivePostgresTests
             await PlantSnapshotAsync(connection, ct, t, 80, Db, "UPDATE Posts SET Score = 1", blockingSessionId: 81, cpuMs: 10);
             await PlantSnapshotAsync(connection, ct, t, 81, Db, "UPDATE Users SET Reputation = 0", blockingSessionId: 82, cpuMs: 10);
             await PlantSnapshotAsync(connection, ct, t, 82, Db, "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+            /* A session naming itself has nothing above it: with a victim it is the head, and alone it blocks nobody. */
+            await PlantSnapshotAsync(connection, ct, t, 90, Db, "UPDATE Votes SET BountyAmount = 1", blockingSessionId: 91, cpuMs: 10);
+            await PlantSnapshotAsync(connection, ct, t, 91, Db, "UPDATE Badges SET Name = N'x'", blockingSessionId: 91, cpuMs: 10);
+            await PlantSnapshotAsync(connection, ct, t, 92, Db, "UPDATE Comments SET Score = 1", blockingSessionId: 92, cpuMs: 10);
 
             var reply = JsonDocument.Parse(await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, 1, limit: 50)).RootElement;
             var rows = reply.GetProperty("queries").EnumerateArray().ToArray();
 
+            Assert.True(Row(rows, 91).GetProperty("is_head_blocker").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, Row(rows, 90).GetProperty("is_head_blocker").ValueKind);
+            Assert.Equal(JsonValueKind.Null, Row(rows, 92).GetProperty("is_head_blocker").ValueKind);
             Assert.True(Row(rows, 82).GetProperty("is_head_blocker").GetBoolean());
             Assert.Equal(JsonValueKind.Null, Row(rows, 81).GetProperty("is_head_blocker").ValueKind);
             Assert.Equal(82, Row(rows, 81).GetProperty("blocking_session_id").GetInt32());

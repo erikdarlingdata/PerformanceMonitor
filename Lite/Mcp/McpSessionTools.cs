@@ -111,7 +111,7 @@ public sealed class McpSessionTools
                 wait_time_ms = r.WaitTimeMs > 0 ? r.WaitTimeMs : (long?)null,
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
                 /* #3541 A13: the two blocking disclosures — see Darling's twin. */
-                is_head_blocker = r.IsHeadBlocker && r.BlockingSessionId <= 0 ? true : (bool?)null,
+                is_head_blocker = r.IsHeadBlocker && (r.BlockingSessionId <= 0 || r.BlockingSessionId == r.SessionId) ? true : (bool?)null,
                 blocker_not_shown = BlockerNotShown(r, onPage),
                 dop = r.Dop > 0 ? r.Dop : (int?)null,
                 parallel_worker_count = r.ParallelWorkerCount > 0 ? r.ParallelWorkerCount : (int?)null,

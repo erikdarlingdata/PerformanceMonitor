@@ -276,7 +276,7 @@ public sealed class DarlingMcpSessionTools
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
                 /* #3541 A13: the two blocking disclosures. is_head_blocker is why a WAITFOR row can be here;
                    blocker_not_shown names the ONE reason a victim's blocker is not, or is null when it is. */
-                is_head_blocker = r.IsHeadBlocker && r.BlockingSessionId <= 0 ? true : (bool?)null,
+                is_head_blocker = r.IsHeadBlocker && (r.BlockingSessionId <= 0 || r.BlockingSessionId == r.SessionId) ? true : (bool?)null,
                 blocker_not_shown = BlockerNotShown(r, onPage),
                 dop = r.Dop > 0 ? r.Dop : (int?)null,
                 parallel_worker_count = r.ParallelWorkerCount > 0 ? r.ParallelWorkerCount : (int?)null,

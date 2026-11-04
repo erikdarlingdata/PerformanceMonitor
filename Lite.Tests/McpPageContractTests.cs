@@ -830,10 +830,17 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
         await SeedSnapshotAsync(t, 80, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 81, cpuMs: 10);
         await SeedSnapshotAsync(t, 81, "Db", "UPDATE Users SET Reputation = 0", blockingSessionId: 82, cpuMs: 10);
         await SeedSnapshotAsync(t, 82, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+        /* A session naming itself has nothing above it: with a victim it is the head, and alone it blocks nobody. */
+        await SeedSnapshotAsync(t, 90, "Db", "UPDATE Votes SET BountyAmount = 1", blockingSessionId: 91, cpuMs: 10);
+        await SeedSnapshotAsync(t, 91, "Db", "UPDATE Badges SET Name = N'x'", blockingSessionId: 91, cpuMs: 10);
+        await SeedSnapshotAsync(t, 92, "Db", "UPDATE Comments SET Score = 1", blockingSessionId: 92, cpuMs: 10);
 
         var reply = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
         var rows = reply.GetProperty("queries").EnumerateArray().ToArray();
 
+        Assert.True(Row(rows, 91).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 90).GetProperty("is_head_blocker").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Row(rows, 92).GetProperty("is_head_blocker").ValueKind);
         Assert.True(Row(rows, 82).GetProperty("is_head_blocker").GetBoolean());
         Assert.Equal(JsonValueKind.Null, Row(rows, 81).GetProperty("is_head_blocker").ValueKind);
         Assert.Equal(82, Row(rows, 81).GetProperty("blocking_session_id").GetInt32());
