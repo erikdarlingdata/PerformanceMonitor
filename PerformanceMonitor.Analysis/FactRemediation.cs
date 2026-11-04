@@ -279,8 +279,9 @@ public static class FactRemediation
     /// <see cref="BuildRcsiAction"/> — a row qualifies only when its <c>rcsi</c> value is
     /// <c>false</c> (M2-1 polarity: RCSI is OFF) AND the §3.3 enrichment is present
     /// (<see cref="HasRcsiEnrichment"/>) — but additionally GATES on REAL contention: a row is
-    /// included only when it carries a positive <c>rcsi_blocking_events</c> OR
-    /// <c>rcsi_deadlocks</c> count. An RCSI-off database with NO observed blocking/deadlocks is
+    /// included only when its <c>rcsi_reader_writer_pct</c> reaches
+    /// <see cref="FactRiskDisclosure.ReaderWriterMeaningfulPct"/> (null, from a store that did not
+    /// measure it, never qualifies). An RCSI-off database with NO observed reader/writer blocking is
     /// NOT recommended: enabling RCSI there only adds tempdb version-store cost for no
     /// concurrency benefit. Unlike <see cref="BuildRcsiAction"/> (which stops at the first
     /// qualifying db for the singular alert action) this returns ALL qualifying databases, each
@@ -337,10 +338,10 @@ public static class FactRemediation
             // a reader's S lock). Writer/writer blocking (X/IX/U) and raw deadlock counts are NOT
             // helped by RCSI — recommending it there only adds tempdb version-store overhead. So
             // gate on the reader/writer SHARE (classified from the blocked-process report's lock
-            // modes in CollectRcsiInactionFigures), using the SAME threshold the consent disclosure
+            // modes in each store's DB_CONFIG drill-down, #7448, through RcsiFigureAccumulator), using the SAME threshold the consent disclosure
             // uses to say "RCSI eliminates this". An rcsi-off db whose contention is writer/writer-
-            // dominant (pct below the threshold) or where no reader/writer blocking was captured
-            // (pct null) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
+            // dominant (pct below the threshold) or where too little reader/writer blocking was captured
+            // to judge (pct null, under RcsiFigureAccumulator.MinReaderWriterWaits) gets NO card. The alert path and the cards share this gate (BuildRcsiAction
             // builds from this same list). The raw blocking/deadlock counts are still carried for
             // the consent dialog's magnitude context.
             var readerWriterPct = GetNullableInt(row, "rcsi_reader_writer_pct");
