@@ -933,7 +933,10 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
        MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat,
-       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count
+       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count,
+       /* #7417: the I/O OPERATIONS behind each side over this same window (the sample counts above count file rows, not I/Os), for IoVolumeFloor. */
+       CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
+       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
@@ -949,12 +952,15 @@ ORDER BY local_hour";
 
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
+            long windowReads = 0, windowWrites = 0;
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
                     writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+                    windowReads += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+                    windowWrites += reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8));
                 }
             }
 
@@ -963,7 +969,8 @@ ORDER BY local_hour";
             if (wholeRead.Samples == 0 && wholeWrite.Samples == 0) return;
 
             // Read latency anomaly — the reported value and sigma are the worst tile's PEAK, the pair decides.
-            if (wholeRead.Samples > 0)
+            // #7417: the I/Os behind the latency, from the rows the tiles came from (IoVolumeFloor).
+            if (wholeRead.Samples > 0 && IoVolumeFloor.ReadsClearFloor(windowReads))
             {
                 var readTv = AnomalyGate.EvaluateTiles(
                     readTiles, map,
@@ -1009,7 +1016,8 @@ ORDER BY local_hour";
                         ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = readDecision.FallbackExceedance,
                         ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = readBucketUsed.SampleCount
+                        ["baseline_samples"] = readBucketUsed.SampleCount,
+                        ["window_io_ops"] = windowReads
                     };
                     AddBaselineContext(metadata, readBucketUsed);
                     if (readTv is not null)
@@ -1029,7 +1037,7 @@ ORDER BY local_hour";
             }
 
             // Write latency anomaly — #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
-            if (wholeWrite.Samples > 0)
+            if (wholeWrite.Samples > 0 && IoVolumeFloor.WritesClearFloor(windowWrites))
             {
                 var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
                 var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
@@ -1079,7 +1087,8 @@ ORDER BY local_hour";
                         ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = writeDecision.FallbackExceedance,
                         ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = writeBucketUsed.SampleCount
+                        ["baseline_samples"] = writeBucketUsed.SampleCount,
+                        ["window_io_ops"] = windowWrites
                     };
                     AddBaselineContext(metadata, writeBucketUsed);
                     if (writeTv is not null)
