@@ -57,7 +57,7 @@ public sealed class DarlingPgPageTruncatedLiveTests
             var at = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-5));
 
             /* One snapshot of four stored relations, 600 buffers in all, in a pool of 1000:
-               - the largest row is another database's, with a database name and no relation name
+               - the largest row has a database name and no relation name (usually another database's buffers)
                - one row has neither name (shared catalogs, or a database that has since been dropped)
                - two rows are named relations in the connected database */
             await SeedBufferAsync(connection, ct, at, "appdb", "orders", "r", 150);
@@ -89,8 +89,8 @@ public sealed class DarlingPgPageTruncatedLiveTests
 
             var otherDatabase = rows.Single(r => r.GetProperty("database_name").GetString() == "otherdb");
             Assert.Equal(JsonValueKind.Null, otherDatabase.GetProperty("relation_name").ValueKind);
-            Assert.Equal(DarlingPgBufferUsageReader.OtherDatabaseLabel, otherDatabase.GetProperty("relation_label").GetString());
-            Assert.Equal(DarlingPgBufferUsageReader.OtherDatabaseLabel, otherDatabase.GetProperty("relation_display").GetString());
+            Assert.Equal(DarlingPgBufferUsageReader.NotResolvedLabel, otherDatabase.GetProperty("relation_label").GetString());
+            Assert.Equal(DarlingPgBufferUsageReader.NotResolvedLabel, otherDatabase.GetProperty("relation_display").GetString());
 
             var sharedOrDropped = rows.Single(r => r.GetProperty("database_name").ValueKind == JsonValueKind.Null);
             Assert.Equal(DarlingPgBufferUsageReader.SharedOrDroppedLabel, sharedOrDropped.GetProperty("relation_label").GetString());
@@ -181,6 +181,186 @@ VALUES ($1, $2, $3, $4, 'appdb', 'public', $5, 'id', -1, 0, 8, 0.1, $6, 3)",
         Assert.Contains("not about the page", verdict.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7455: the call site fetches <c>limit + 1</c> so the page can tell a cut from a whole. A site that passed
+    /// <c>limit</c> would hand <c>BoundPage</c> exactly <c>limit</c> rows and report <c>truncated = false</c>
+    /// forever, so each tool gets a seeded cut and a seeded whole.
+    /// </summary>
+    [Fact]
+    public async Task Blocking_Chains_SayWhenThePageIsCut()
+    {
+        await RunSeededAsync(async (dataSource, connection, ct, at) =>
+        {
+            /* Two captures, each one root blocker (pid 200) holding one victim (pid 100): two chains. */
+            await SeedBlockingEdgeAsync(connection, ct, at, 1, 100, 2, 200);
+            await SeedBlockingEdgeAsync(connection, ct, at.AddMinutes(1), 1, 100, 2, 200);
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgBlockingTools.GetPgBlocking(dataSource, ServerName, limit: 1)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean(),
+                "a page of 1 chain cut from 2 must say it was cut");
+            Assert.False(cut.GetProperty("cycles_truncated").GetBoolean());
+
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgBlockingTools.GetPgBlocking(dataSource, ServerName, limit: 25)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean(),
+                "a page that holds every chain must not say it was cut");
+        });
+    }
+
+    [Fact]
+    public async Task Blocking_Cycles_SayWhenThePageIsCut()
+    {
+        await RunSeededAsync(async (dataSource, connection, ct, at) =>
+        {
+            /* Two captures, each a two-session cycle (100 waits on 200, 200 waits on 100): two cycles and no chain. */
+            foreach (var when in new[] { at, at.AddMinutes(1) })
+            {
+                var collectionId = CollectionIdGenerator.Next();
+                await SeedBlockingEdgeAsync(connection, ct, when, 1, 100, 2, 200, collectionId);
+                await SeedBlockingEdgeAsync(connection, ct, when, 2, 200, 1, 100, collectionId);
+            }
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgBlockingTools.GetPgBlocking(dataSource, ServerName, limit: 1)).RootElement;
+            Assert.Equal("cycles_only", cut.GetProperty("status").GetString());
+            Assert.True(cut.GetProperty("cycles_truncated").GetBoolean(),
+                "a page of 1 cycle cut from 2 must say it was cut");
+
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgBlockingTools.GetPgBlocking(dataSource, ServerName, limit: 25)).RootElement;
+            Assert.False(whole.GetProperty("cycles_truncated").GetBoolean(),
+                "a page that holds every cycle must not say it was cut");
+        });
+    }
+
+    [Fact]
+    public async Task PredicateStats_SayWhenThePageIsCut()
+    {
+        await RunSeededAsync(async (dataSource, connection, ct, at) =>
+        {
+            foreach (var column in new[] { "c1", "c2" })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_predicate_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, column_name,
+     operator, query_id, sample_count, rows_evaluated, rows_filtered, worst_estimate_error_ratio, sample_rate)
+VALUES ($1, $2, $3, $4, 'app', 'public', 't', $5, '=', 7, 120, 1000, 900, 1.5, 0.01)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, column);
+            }
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgPredicateTools.GetPgPredicateStats(dataSource, ServerName, limit: 1)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean(),
+                "a page of 1 predicate cut from 2 must say it was cut");
+
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgPredicateTools.GetPgPredicateStats(dataSource, ServerName, limit: 25)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean(),
+                "a page that holds every predicate must not say it was cut");
+        });
+    }
+
+    [Fact]
+    public async Task ReplicationStats_SayWhenThePageIsCut()
+    {
+        await RunSeededAsync(async (dataSource, connection, ct, at) =>
+        {
+            foreach (var replica in new[] { "replica1", "replica2" })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_replication_stats
+    (collection_id, collection_time, server_id, server_name, application_name, client_addr, state, sync_state,
+     sync_priority, sent_bytes_behind, write_bytes_behind, flush_bytes_behind, replay_bytes_behind,
+     write_lag_ms, flush_lag_ms, replay_lag_ms, backend_start)
+VALUES ($1, $2, $3, $4, $5, '10.0.0.2', 'streaming', 'async', 0, 0, 0, 0, 0, 1.0, 1.0, 1.0, $2)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, replica);
+            }
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(dataSource, ServerName, limit: 1)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean(),
+                "a page of 1 replica cut from 2 must say it was cut");
+
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(dataSource, ServerName, limit: 25)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean(),
+                "a page that holds every replica must not say it was cut");
+        });
+    }
+
+    [Fact]
+    public async Task DeadlockDetail_SaysWhenThePageIsCut()
+    {
+        await RunSeededAsync(async (dataSource, connection, ct, at) =>
+        {
+            foreach (var (hash, minutesAgo) in new[] { ("AAAA0000AAAA0000AAAA0000AAAA0001", 0), ("AAAA0000AAAA0000AAAA0000AAAA0002", 1) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
+VALUES ($1, $2, $3, $4, $2, 4242, 2, $5, 'ShareLock', 'relation', 'UPDATE t SET x = 1', 'graph')",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at.AddMinutes(-minutesAgo)), ServerId, ServerName, hash);
+            }
+
+            var cut = JsonDocument.Parse(
+                await DarlingMcpPgDeadlockTools.GetPgDeadlockDetail(dataSource, ServerName, limit: 1)).RootElement;
+            Assert.True(cut.GetProperty("truncated").GetBoolean(),
+                "a page of 1 graph cut from 2 must say it was cut");
+
+            var whole = JsonDocument.Parse(
+                await DarlingMcpPgDeadlockTools.GetPgDeadlockDetail(dataSource, ServerName, limit: 5)).RootElement;
+            Assert.False(whole.GetProperty("truncated").GetBoolean(),
+                "a page that holds every graph must not say it was cut");
+        });
+    }
+
+    /// <summary>Registers the server, runs the body against a clean slate, and cleans up through the live helper.</summary>
+    private static async Task RunSeededAsync(
+        Func<NpgsqlDataSource, NpgsqlConnection, CancellationToken, DateTime, Task> body)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live page truncation tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await RegisterAsync(connection, ct);
+            await body(dataSource, connection, ct, DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-5)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static Task SeedBlockingEdgeAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime at,
+        int blockedBackend, int blockedPid, int blockingBackend, int blockingPid, long? collectionId = null) =>
+        DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_blocking_edges
+    (collection_id, collection_time, server_id, server_name, blocked_backend_id, blocked_pid, blocking_backend_id, blocking_pid,
+     database_name, blocked_username, blocked_application_name, blocked_client_addr, blocked_state, blocked_wait_event_type,
+     blocked_wait_event, blocked_query, blocked_xact_duration_ms, blocked_query_duration_ms, blocking_username,
+     blocking_application_name, blocking_client_addr, blocking_state, blocking_wait_event_type, blocking_wait_event,
+     blocking_query, blocking_xact_duration_ms, blocking_query_duration_ms, blocked_pid_count,
+     blocking_is_idle_in_transaction, query_text_may_be_truncated)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'appdb', 'user1', 'app', '10.0.0.1', 'active', 'Lock', 'relation', 'select 1',
+        100, 100, 'user2', 'app', '10.0.0.2', 'idle in transaction', NULL, NULL, 'select 2', 200, 200, 1, TRUE, FALSE)",
+            collectionId ?? CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName,
+            blockedBackend, blockedPid, blockingBackend, blockingPid);
+
     private static async Task RegisterAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
@@ -204,6 +384,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 2.5, 1000, 600)",
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_buffer_usage WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_column_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_blocking_edges WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_predicate_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_replication_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM pg_deadlocks WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }

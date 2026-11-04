@@ -65,8 +65,13 @@ public static class DarlingPgBufferUsageReader
         public string? NameLabel => RelationLabel(DatabaseName, RelationName);
     }
 
-    /// <summary>Shown for a buffer in a database other than the one the collector connected to.</summary>
-    public const string OtherDatabaseLabel = "(another database)";
+    /// <summary>
+    /// Shown for a buffer that has a database name and no relation name. The stored row does not record which
+    /// database the collector connected to, so this says only that the relation was not resolved: usually a
+    /// buffer in another database, but also a relation in the connected database that <c>pg_class</c> did not
+    /// resolve.
+    /// </summary>
+    public const string NotResolvedLabel = "(not resolved, usually another database)";
 
     /// <summary>Shown for a buffer whose database matches no row in <c>pg_database</c>.</summary>
     public const string SharedOrDroppedLabel = "(shared catalogs or a dropped database)";
@@ -74,14 +79,15 @@ public static class DarlingPgBufferUsageReader
     /// <summary>
     /// Why a name is missing, for a row without one (#7455). The pool is cluster-wide and <c>pg_class</c> is
     /// per-database, so the collector names a relation only in the database it is connected to. A row with a
-    /// database name and no relation is therefore another database's buffers. A row with neither name is a
+    /// database name and no relation was not resolved here: usually another database's buffers, but the row
+    /// does not say which database the collector connected to, so the label claims no more. A row with neither name is a
     /// buffer whose database id is in no <c>pg_database</c> row, which on a stock server is the shared
     /// catalogs (database id 0) and otherwise a database that has since been dropped. Neither is an error.
     /// </summary>
     public static string? RelationLabel(string? databaseName, string? relationName) =>
         !string.IsNullOrEmpty(relationName) ? null
         : string.IsNullOrEmpty(databaseName) ? SharedOrDroppedLabel
-        : OtherDatabaseLabel;
+        : NotResolvedLabel;
 
     /* Only the newest collection_time in the window, taken as a whole: the pool totals are consistent within
        one snapshot and not across snapshots, so mixing rows from two of them would produce shares that do

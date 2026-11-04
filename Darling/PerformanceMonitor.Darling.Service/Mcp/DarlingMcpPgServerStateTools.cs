@@ -136,7 +136,9 @@ public sealed class DarlingMcpPgServerStateTools
                          ? " A relation_name of null is not an error: the pool is cluster-wide and the collector "
                            + "names a relation only in the database it is connected to. relation_label says which "
                            + "kind it is. "
-                           + DarlingPgBufferUsageReader.OtherDatabaseLabel + " is a buffer in another database. "
+                           + DarlingPgBufferUsageReader.NotResolvedLabel + " is a buffer whose relation was not resolved here: usually a "
+                           + "buffer in another database, but the stored row does not say which database the collector "
+                           + "connected to, so a relation in that database that did not resolve reads the same. "
                            + DarlingPgBufferUsageReader.SharedOrDroppedLabel + " is a buffer whose database is in "
                            + "no pg_database row, the shared catalogs on a stock server."
                          : string.Empty),
