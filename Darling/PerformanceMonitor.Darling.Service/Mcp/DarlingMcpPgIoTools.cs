@@ -234,6 +234,15 @@ public sealed class DarlingMcpPgIoTools
         var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
         var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
 
+        /* #7409: nothing is busiest when no combination read anything. The first row of an all-zero window is only
+           the first of a tie (it read "autovacuum worker" on a server whose client backends did four times the buffer
+           hits), so the name is null and the tile draws a dash. When read time cannot rank (timing off, or every
+           measured time is zero) the read count ranked, and the tile says so. */
+        var busiest = totalReads > 0 || (timingTracked && totalReadTime > 0)
+            ? $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}"
+            : null;
+        var rankedByReads = !(timingTracked && totalReadTime > 0);
+
         return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
@@ -268,7 +277,10 @@ public sealed class DarlingMcpPgIoTools
             /* The key survives untracked timing for the web tile's sake; busiest_basis beside it says
                what the ranking actually used. The reader orders by read time and then by read count, so
                over a store of zero times the count IS the ordering rather than a tiebreak. */
-            busiest_by_read_time = $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}",
+            busiest_by_read_time = busiest,
+            /* #7409: a short tag the page draws beside the name when the ranking was the read COUNT, because the
+               busiest_basis sentence is too long for a tile. Null when read time ranked, and when nothing is busiest. */
+            busiest_rank_note = busiest is not null && rankedByReads ? "(by reads)" : null,
             busiest_basis = timingTracked
                 ? "total read time (read_time_ms), then read count"
                 : "read count (reads) — this server does not measure I/O time, so every read-time figure "
