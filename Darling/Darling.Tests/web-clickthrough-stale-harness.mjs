@@ -20,7 +20,19 @@ class FakeNode {
     this.className = "";
     this.listeners = {};
     this.text = text == null ? null : String(text);
-    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+    /* Reads and writes className, which is what the CSS reads (.detail.clamp-lines.open), so a scenario can see whether a class was set. */
+    const tokens = () => String(this.className).split(/\s+/).filter(Boolean);
+    const write = (list) => { this.className = list.join(" "); };
+    this.classList = {
+      add: (name) => { if (!tokens().includes(name)) write([...tokens(), name]); },
+      remove: (name) => write(tokens().filter((t) => t !== name)),
+      toggle: (name, force) => {
+        const on = force === undefined ? !tokens().includes(name) : !!force;
+        write(on ? (tokens().includes(name) ? tokens() : [...tokens(), name]) : tokens().filter((t) => t !== name));
+        return on;
+      },
+      contains: (name) => tokens().includes(name),
+    };
   }
   get firstChild() {
     return this.children[0] || null;
@@ -146,6 +158,65 @@ const scenarios = {
       agent_alert_gaps: [{ message: "No alert is set for severity 19 through 25 errors." }, { message: "No alert is set for error 823, 824 or 825 (corruption)." }],
     }))),
   }),
+  /* #7395: the server page passes the shared tiles through clampTileDetails. A detail past about three lines (the Protection tile
+     of a server with 20 overdue items) is clamped and opens on demand, with the full text on its title. A short one shows in
+     full. The fleet card's tiles, which never pass through it, stay exactly as metricBands built them. */
+  serverTiles: async () => {
+    const overdue = Array.from({ length: 20 }, (_, i) => ({ text: "AppDatabase" + i + " full backup 9 days" }));
+    const c = card({ last_collection: iso(1000), database_protection_overdue: overdue, agent_alert_gaps: [{ message: "No alert for severity 19." }] });
+    const detailOf = (chip) => (chip.children || []).find((d) => String(d.className).split(" ").includes("detail"));
+    const view = (root) => all(root, (n) => String(n.className).startsWith("metric-chip")).map((chip) => {
+      const d = detailOf(chip);
+      return d ? { label: chip.children[0].textContent, cls: d.className, role: d.getAttribute("role"), expanded: d.getAttribute("aria-expanded"), titleLen: (d.getAttribute("title") || "").length, textLen: d.textContent.length } : { label: chip.children[0].textContent };
+    });
+    const server = modules.util.clampTileDetails(modules.fleet.metricBands(c));
+    const fleetCard = modules.fleet.metricBands(c);
+    const protection = detailOf(all(server, (n) => String(n.className).startsWith("metric-chip")).find((chip) => chip.children[0].textContent.startsWith("Protection")));
+    let stopped = 0;
+    const press = (type, extra = {}) => (protection.listeners[type] || []).forEach((fn) => fn({ type, stopPropagation() { stopped++; }, preventDefault() {}, ...extra }));
+    const before = protection.getAttribute("aria-expanded");
+    press("click");
+    const afterClick = protection.getAttribute("aria-expanded");
+    press("keydown", { key: "Enter" });
+    const afterEnter = protection.getAttribute("aria-expanded");
+    return { server: view(server), fleetCard: view(fleetCard), before, afterClick, afterEnter, stopped };
+  },
+  /* #7395: the server page draws its head again on every poll and tab click. A tile the reader opened stays open across the redraw
+     (matched by label, not by text, which changes between polls), a tile that is now too short to clamp has nothing to reopen and
+     is closed if it grows back, and a tile the reader never opened stays closed. The Set is what server.js keeps for one server. */
+  serverTilesReopen: async () => {
+    const items = (n) => Array.from({ length: n }, (_, i) => ({ text: "AppDatabase" + i + " full backup 9 days" }));
+    const draw = (count, open) => modules.util.clampTileDetails(modules.fleet.metricBands(card({
+      last_collection: iso(1000), database_protection_overdue: items(count), agent_alert_gaps: [{ message: "No alert for severity 19." }],
+    })), undefined, open);
+    const detailOf = (root, label) => {
+      const chip = all(root, (n) => String(n.className).startsWith("metric-chip")).find((c) => c.children[0].textContent.startsWith(label));
+      const d = chip && (chip.children || []).find((x) => String(x.className).split(" ").includes("detail"));
+      return d ? { cls: d.className, expanded: d.getAttribute("aria-expanded") } : null;
+    };
+    const click = (root) => {
+      const d = all(root, (n) => String(n.className).includes("clamp-lines"))[0];
+      d.listeners.click.forEach((fn) => fn({ type: "click", stopPropagation() {} }));
+    };
+    const open = new Set();
+    const first = draw(20, open);
+    const closedAtFirst = detailOf(first, "Protection").expanded;
+    click(first);
+    const openedByClick = detailOf(first, "Protection").expanded;
+    const clsAfterClick = detailOf(first, "Protection").cls;
+    const labelsAfterClick = Array.from(open);
+    const poll = draw(25, open); // the next poll: different text, same tile
+    const afterPoll = detailOf(poll, "Protection");
+    const labelsAfterPoll = Array.from(open);
+    const short = draw(1, open); // one item overdue: the detail is short, so the tile is not clamped
+    const afterShort = detailOf(short, "Protection");
+    const labelsAfterShort = Array.from(open);
+    const regrown = draw(20, open); // overdue again: the reader closed nothing, but the tile went short in between, so it starts closed
+    const afterRegrown = detailOf(regrown, "Protection");
+    const another = draw(20, new Set()); // another server: its own empty set
+    const afterAnotherServer = detailOf(another, "Protection");
+    return { closedAtFirst, openedByClick, clsAfterClick, labelsAfterClick, afterPoll, labelsAfterPoll, afterShort, labelsAfterShort, afterRegrown, afterAnotherServer };
+  },
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({
     chips: chips(modules.fleet.metricBands(card({

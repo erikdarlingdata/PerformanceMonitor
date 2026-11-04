@@ -88,7 +88,7 @@ public static partial class PgTargetAdvice
                 "product does not collect host memory, so the number is yours. Counter-objective: set too high, the planner " +
                 "prefers index scans on data that is in fact cold and each one pays a real random read; set too low, it " +
                 "prefers sequential scans on data that was cached. Change it, then watch plan shapes on the top statements " +
-                "(get_pg_statement_stats) rather than assuming the move was free.");
+                "(get_pg_top_queries) rather than assuming the move was free.");
     }
 
     private static AdviceBlock ComposeRandomPageCost(IReadOnlyDictionary<string, Fact> facts)
@@ -117,6 +117,16 @@ public static partial class PgTargetAdvice
     {
         var fact = KnobFact(facts, PgTargetFactKeys.ConfigTrackIoTiming);
         var stated = fact is null ? "off" : (fact.Value == 0 ? "off" : "on");
+
+        /* #7447: the block below is written for the off case. With the setting on, audit_config still asks for it
+           (it renders every CONFIG_PG_* fact), and "not being measured" would be false. */
+        if (stated == "on")
+        {
+            return new AdviceBlock(
+                Headline: "track_io_timing is on",
+                Investigation: "With `track_io_timing` on, `blk_read_time` and `blk_write_time` in pg_stat_statements and pg_stat_database carry real block read and write times.",
+                Remediation: "Nothing to change for this setting.");
+        }
 
         return new AdviceBlock(
             Headline: $"track_io_timing is {stated} — block read and write times are not being measured",

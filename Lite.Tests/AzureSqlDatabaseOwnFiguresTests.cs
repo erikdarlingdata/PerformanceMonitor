@@ -225,7 +225,7 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         var parallel = FactAdvice.Compose("THREADPOOL_PARALLEL", Facts(hardware, Config("CONFIG_MAXDOP", 0), Config("CONFIG_CTFP", 5)))!;
         Assert.Contains("cost threshold for parallelism is 5 (cores per socket 4).", parallel.Remediation, StringComparison.Ordinal);
-        Assert.Contains("cap MAXDOP at 4 (this server's per-NUMA-node processor count, capped at 8)", parallel.Remediation, StringComparison.Ordinal);
+        Assert.Contains("cap MAXDOP at 4 (this server's cores-per-socket, capped at 8)", parallel.Remediation, StringComparison.Ordinal);
     }
 
     [Fact]
