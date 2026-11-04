@@ -95,7 +95,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
     const waitType = waitTypes[i];
     if (trend.kind !== "data") {
       if (trend.kind !== "empty") failed++;
-      notes.push(waitType + ": " + (trend.message || (trend.kind === "empty" ? "no trend data." : "the read failed.")));
+      notes.push(waitType + ": " + (trend.message || (trend.kind === "empty" ? "no trend data." : "could not be read.")));
       return;
     }
     if (trend.keptHours) {
