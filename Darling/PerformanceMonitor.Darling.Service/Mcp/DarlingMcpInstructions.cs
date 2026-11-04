@@ -272,6 +272,7 @@ internal static class DarlingMcpInstructions
         Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for past-time questions, not a wider `hours_back` (a different aggregate).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
+        - A stamp with no offset is UTC, unless the tool's note says that field is on the monitored server's clock.
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
         - The analysis family does take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
