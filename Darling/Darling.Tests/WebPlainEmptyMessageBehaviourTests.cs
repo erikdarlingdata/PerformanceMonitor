@@ -233,6 +233,59 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void TheQueryStoreMemoryClerk_SaysItsNoteOnce_AndTheOverheadNoteNamesNoCodeConstant()
+    {
+        var r = Run();
+        // The clerk never appeared: the note says why, and the panel adds no second empty sentence beneath it.
+        var clerk = r.GetProperty("qsClerk");
+        Assert.Equal(0, clerk.GetProperty("empties").GetInt32());
+        Assert.StartsWith("The clerk never appeared in the window.", clerk.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("No memory clerk figures", clerk.GetProperty("text").GetString(), StringComparison.Ordinal);
+
+        // The overhead note keeps its short line, and the full text behind "More detail" no longer names the collector's constant.
+        var overhead = r.GetProperty("qsOverview").GetProperty("text").GetString()!;
+        Assert.Contains("More detail", overhead, StringComparison.Ordinal);
+        Assert.DoesNotContain("IgnoredWaitDefaults", overhead, StringComparison.Ordinal);
+        Assert.DoesNotContain("SKUs", overhead, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheQueryHeatmap_TrueNegative_SaysOnePlainSentence_AndTheToolTextIsBehindAClick()
+    {
+        var r = Run();
+        var heatmap = r.GetProperty("heatmapEmpty");
+        var text = heatmap.GetProperty("text").GetString()!;
+        Assert.StartsWith("No query ran in this window.", text, StringComparison.Ordinal);
+        Assert.Equal(1, heatmap.GetProperty("details").GetInt32());
+        Assert.DoesNotContain("database_name", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("SECOND", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnEmptyAlertList_ThatHidDismissedAlerts_SaysSoInWords_AndAnyOtherEmptyReplyKeepsItsText()
+    {
+        var r = Run();
+        var many = r.GetProperty("alertsDismissed");
+        Assert.StartsWith("3 alerts in this range were dismissed, so they are hidden. Tick Show dismissed to see them.", many.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(r.GetProperty("alertsToolSaid").GetString(), many.GetProperty("detailBody").GetString());
+        Assert.StartsWith("1 alert in this range was dismissed, so it is hidden.", r.GetProperty("alertsDismissedOne").GetProperty("text").GetString(), StringComparison.Ordinal);
+        var quiet = r.GetProperty("alertsQuiet");
+        Assert.Equal("No alerts found in the specified time range.", quiet.GetProperty("text").GetString());
+        Assert.Equal(0, quiet.GetProperty("hasDetails").GetInt32());
+    }
+
+    [Fact]
+    public void TheAdminSettingsTab_WithNoSavedSettings_SaysSoInWords_AndAnyOtherReplyIsLeftToTheCaller()
+    {
+        var r = Run();
+        var shown = r.GetProperty("settingsUnavailable");
+        Assert.StartsWith("No alert settings have been saved yet, so the service is running on its defaults.", shown.GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, shown.GetProperty("hasDetails").GetInt32());
+        Assert.Equal(r.GetProperty("settingsToolSaid").GetString(), shown.GetProperty("detailBody").GetString());
+        Assert.True(r.GetProperty("settingsOtherReply").GetBoolean());
+    }
+
+    [Fact]
     public void ASmallSizeInMegabytes_IsWrittenInTheUnitThatFitsIt()
     {
         var fit = Run().GetProperty("fit");

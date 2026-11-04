@@ -218,6 +218,44 @@ public sealed class DarkPastRetentionReadsOfflineToolTests : IClassFixture<Share
         Assert.True(Math.Abs((parsed - collected).TotalSeconds) < 1, stamp);
     }
 
+    /// <summary>
+    /// #7527: a server with CPU rows and no collection_log row falls back to the CPU row's collection_time, the
+    /// store's UTC clock, not its sample_time, the monitored server's local clock. Seeded for a server five hours
+    /// east of UTC: sample_time is collection_time plus five hours, so reading it as UTC puts the stamp in the
+    /// future and the card Fresh for a collection that is really hours old.
+    /// </summary>
+    [Fact]
+    public async Task ListServers_WithCpuRowsAndNoCollectionLog_StampsTheCpuRowsUtcCollectionTime()
+    {
+        var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "EastSrv", IsEnabled = true, CreatedDate = DateTime.Now.AddDays(-10) };
+        _serverManager.AddServer(server);
+        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+        var collected = DateTime.UtcNow.AddHours(-3);
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES (96752701, $1, $2, 'EastSrv', $3, $1, 10, 2)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = collected });
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = collected.AddHours(5) });
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var service = new LocalDataService(_duckDb);
+        var row = Assert.Single(ListServersRows(await McpDiscoveryTools.ListServers(_serverManager, service)));
+        var parsed = DateTime.Parse(row.GetProperty("last_collection").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.True(Math.Abs((parsed - collected).TotalSeconds) < 1, "last_collection is not the CPU row's collection_time: " + parsed.ToString("o"));
+
+        var card = await service.GetServerSummaryAsync(serverId, "EastSrv", server.RegisteredAtUtc);
+        Assert.Equal(ServerHealthClassifier.ClassifyFreshness(collected, DateTime.UtcNow), card!.CollectionFreshness);
+        Assert.NotEqual(ServerFreshness.Fresh, card.CollectionFreshness);
+    }
+
     private static System.Collections.Generic.List<JsonElement> ListServersRows(string reply) =>
         JsonDocument.Parse(reply).RootElement.GetProperty("servers").EnumerateArray().ToList();
 

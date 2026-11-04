@@ -404,7 +404,8 @@ public sealed class ViewerPostgresTabsTests
         Assert.True(notes.Count >= ViewerPostgresTabs.All.Count,
             $"Only {notes.Count} PostgreSQL note elements found in the XAML; expected at least one per tab.");
 
-        var unfilled = notes.Where(n => !loaders.Contains($"{n}.Text", StringComparison.Ordinal)).ToList();
+        /* #7410: a note filled through ShowNote(Name, ...) is filled the same as one assigned to Name.Text. */
+        var unfilled = notes.Where(n => !loaders.Contains($"{n}.Text", StringComparison.Ordinal) && !loaders.Contains($"ShowNote({n},", StringComparison.Ordinal)).ToList();
         Assert.True(unfilled.Count == 0,
             "PostgreSQL panel note(s) are declared in the XAML and never filled, so those panels can be " +
             "blank with no explanation: " + string.Join(", ", unfilled));

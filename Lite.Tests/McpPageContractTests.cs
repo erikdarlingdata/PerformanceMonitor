@@ -420,6 +420,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("2 dismissed alerts were excluded", message, StringComparison.Ordinal);
         Assert.Contains("include_dismissed", message, StringComparison.Ordinal);
+        /* #7410: the count as a field at hints.dismissed_excluded_count, the path Darling's twin sends; the window notice shares the hints object. */
+        Assert.Equal(2L, root.GetProperty("hints").GetProperty("dismissed_excluded_count").GetInt64());
 
         /* And with nothing dismissed either, the plain sentence — the count is a measurement, not a hedge. */
         await ExecAsync("DELETE FROM config_alert_log");
