@@ -7,9 +7,11 @@
 --   * Every time is relative to ONE anchor: the store's own clock in UTC, cut to the minute, or the psql variable `anchor` when the
 --     caller sets it (-v anchor=...; run-ui-smoke.ps1 does, so the screenshot step knows it, #5744). Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
---   * The targets are the servers the config registers: "ui-sql" (SQL Server), "ui-pg" (PostgreSQL) and a long-name SQL
---     Server (#7479), all at an
---     address nothing listens on, so the service never collects and never overwrites what is seeded here.
+--   * The targets are the servers the config registers: "ui-sql" (SQL Server), "ui-pg" (PostgreSQL), a long-name SQL
+--     Server (#7479) and "ui-down-sql" (#7590), all at an
+--     address nothing listens on, so the service never collects and never overwrites what is seeded here. It does store each
+--     failed connect on the registry row (connect_down_since and two more columns, #7590), which would turn the first three
+--     cards Offline and overwrite the fourth's error: a trigger at the end of this file keeps those three columns as seeded.
 --   * To cover another table, add one more section below, in the same shape, and name what it feeds. Keep the
 --     collection_id / log_id ranges apart (the ranges are listed in each section) so rows never collide.
 --
@@ -23,6 +25,8 @@
 -- Seeded (PostgreSQL target "ui-pg"):
 --   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
 --   pg_statement_text 6 | collection_log 3 collectors x 72
+-- Seeded (the unreachable SQL Server "ui-down-sql", #7590): a stored failed connect (down 3 hours, retry in 4 minutes) over one cpu_utilization_stats row and one
+--   collection_log row from 3 hours back (the last collection before the outage), so the card reads Offline with its last values
 -- Seeded (the long-name SQL Server): collection_log 1 (cpu_utilization_stats at the anchor, #7569), so its card reads stale
 --   like the other two and not Offline
 
@@ -34,6 +38,8 @@ SELECT to_char(date_trunc('minute', now() AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:
 \gset
 \endif
 BEGIN;
+-- A rerun against a seeded store: the freeze trigger (end of this file) would hold the connect columns at the earlier values.
+DROP TRIGGER IF EXISTS ui_smoke_freeze_connect_state ON collect.servers;
 
 -- The registry row the config seed made. server_name in every collect table is the STORAGE name (the host, for a SQL
 -- Server entry without a database), the name in the sidebar and the URL is the config name "ui-sql".
@@ -62,6 +68,30 @@ VALUES (:lsid, :'lname', 'ui-long-name-sql-server-production-east-region-cluster
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
+
+-- A fourth SQL Server, seeded as unreachable (#7590): the registry row carries a stored failed connect, the way the service writes one when a
+-- connect fails. It reads Offline with "Server unreachable since ...", greyed last-known tiles and a Server Connection panel on Collection Health.
+-- Its last collection (one cpu_utilization_stats row, collection_id 6100000, and one collection_log row, log_id 8900001) is 3 hours back,
+-- the moment the outage began.
+SELECT server_id AS dsid, host AS dname
+FROM config.config_monitored_servers
+WHERE name = 'ui-down-sql'
+\gset
+INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date,
+    connect_down_since, last_connect_error, next_connect_attempt)
+VALUES (:dsid, :'dname', 'ui-down-sql', TRUE, 3, 16, 'sqlserver',
+        (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp,
+        (:'anchor'::timestamp) - interval '3 hours', 'Login failed for user ''pm_monitor''. Reason: Password did not match that for the login provided.',
+        (:'anchor'::timestamp) + interval '4 minutes')
+ON CONFLICT (server_id) DO UPDATE SET
+    server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,
+    sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date,
+    connect_down_since = EXCLUDED.connect_down_since, last_connect_error = EXCLUDED.last_connect_error, next_connect_attempt = EXCLUDED.next_connect_attempt;
+
+INSERT INTO collect.cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time_utc)
+VALUES (6100000, (:'anchor'::timestamp) - interval '3 hours', :dsid, :'dname', (:'anchor'::timestamp) - interval '3 hours', 38, 6, (:'anchor'::timestamp) - interval '3 hours');
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES (8900001, :dsid, :'dname', 'cpu_utilization_stats', (:'anchor'::timestamp) - interval '3 hours', 120, 'SUCCESS', 1);
 
 -- The minutes: m = 0 is the current minute, m = 359 is six hours earlier.
 CREATE TEMP TABLE ui_minutes ON COMMIT DROP AS
@@ -309,6 +339,19 @@ SELECT 23000000 + 1000 * cl.n + k.k, :pgid, :'pgname', cl.name,
        :'anchor'::timestamp - make_interval(mins => k.k * 5), 90 + k.k, 'SUCCESS', cl.rows_collected
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'pg_database_stats', 2), (2, 'pg_wait_stats', 3), (3, 'pg_statement_stats', 6)) AS cl(n, name, rows_collected);
+
+-- Keep the three connect-state columns as seeded (#7590). The service retries each unreachable server on a backoff of 1 to 4 minutes and writes the failure
+-- onto the registry row every time: the first three servers would turn Offline in the middle of the run and ui-down-sql's error and retry time would move.
+-- The trigger is part of the throwaway store only, and runs after the inserts above, so those still land.
+CREATE OR REPLACE FUNCTION collect.ui_smoke_freeze_connect_state() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.connect_down_since := OLD.connect_down_since;
+    NEW.last_connect_error := OLD.last_connect_error;
+    NEW.next_connect_attempt := OLD.next_connect_attempt;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER ui_smoke_freeze_connect_state BEFORE UPDATE ON collect.servers
+    FOR EACH ROW EXECUTE FUNCTION collect.ui_smoke_freeze_connect_state();
 
 COMMIT;
 

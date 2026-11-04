@@ -874,7 +874,9 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static string WaitingOnConnectionText(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc)
         {
-            var text = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. " + UnreachableReason(sinceUtc, lastError) + ".";
+            /* A SQL Server error text usually ends with its own period ("Login failed for user 'x'."): a second one reads as a typo. */
+            var reason = UnreachableReason(sinceUtc, lastError);
+            var text = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. " + reason + (reason.EndsWith('.') ? string.Empty : ".");
             if (!nextAttemptUtc.HasValue)
             {
                 return text;
