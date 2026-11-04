@@ -115,6 +115,28 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(24.0, neverRoot.GetProperty("effective_hours_back").GetDouble());
     }
 
+    /// <summary>#7498: a window whose points all read zero answers <c>empty</c>, as Darling does. A lone unrated collection stays a
+    /// series, and one point where something ran keeps the whole trend.</summary>
+    [Fact]
+    public async Task AWindowWhereNothingRan_AnswersEmpty_ButOnePointThatRanKeepsTheTrend()
+    {
+        var service = new LocalDataService(_duckDb);
+        var baseNow = Truncate(DateTime.UtcNow);
+
+        await SeedProcedureAsync(baseNow.AddMinutes(-30), executions: 0, elapsedUs: 0);
+        var lone = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.Equal(1, lone.GetProperty("trend").GetArrayLength());
+
+        await SeedProcedureAsync(baseNow.AddMinutes(-25), executions: 0, elapsedUs: 0);
+        await SeedProcedureAsync(baseNow.AddMinutes(-20), executions: 0, elapsedUs: 0);
+        var quiet = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.Equal("empty", quiet.GetProperty("status").GetString());
+
+        await SeedProcedureAsync(baseNow.AddMinutes(-15), executions: 2, elapsedUs: 600_000);
+        var busy = JsonDocument.Parse(await McpQueryTools.GetProcedureDurationTrend(service, _serverManager, ServerName, 4)).RootElement;
+        Assert.Equal(4, busy.GetProperty("trend").GetArrayLength());
+    }
+
     [Fact]
     public async Task QueryStoreEmpty_NamesTheCauseThePlanCacheTrendsDoNotHave()
     {
