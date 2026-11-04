@@ -439,7 +439,7 @@ public static class FactRemediation
     /// an AG with Query Store for secondary replicas enabled, one query can regress on the primary AND
     /// on a secondary and arrive as two rows differing in <c>replica_role</c>, each with its own
     /// <c>best_plan_id</c>. #1850 de-duped on (database, query_id) keeping the FIRST row — which, since
-    /// the SQL orders <c>regression_factor DESC</c>, is the worst regression on any replica — and
+    /// the SQL orders by the CPU the regression lost and then the factor (<see cref="PlanRegressionRanking"/>, #7417), is the worst regression on any replica — and
     /// deliberately left the product question open. It is answered here: <b>the primary's row wins when
     /// both exist</b>, and regression factor only breaks ties among rows of the same replica class.</para>
     ///
@@ -500,7 +500,8 @@ public static class FactRemediation
 
         /* Insertion order is kept separately from the winners so the emitted order stays what it always
            was — worst regression first, since a query's FIRST row is its worst and the rows arrive
-           regression_factor DESC. Upgrading a query to its primary row changes WHICH plan is forced, never
+           ordered by the CPU the regression lost, then the factor (PlanRegressionRanking, #7417), the order
+           of the PLAN_REGRESSION fact, so the first target is the fact's lead offender. Upgrading a query to its primary row changes WHICH plan is forced, never
            where the query sits in the list. */
         var order = new List<(string Database, long QueryId)>();
         var winners = new Dictionary<(string Database, long QueryId), ForcePlanTarget>();

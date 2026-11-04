@@ -367,7 +367,7 @@ AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)
        and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
        from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
        (0 local_hour, 1 peak_read, 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write,
-       6 write_sample_count) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
+       6 write_sample_count, 7 read_ops, 8 write_ops - #7417) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
 
        #4731: each side counts its OWN samples, as Lite's twin does. The one COUNT(*) over the (reads OR
        writes) rows counted a write-only row as a read sample (its read peak and mean NULL, read as 0), so the
@@ -382,7 +382,10 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
        MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat,
-       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count
+       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count,
+       /* #7417: the I/O OPERATIONS behind each side over this same window (the sample counts above count file rows, not I/Os), for IoVolumeFloor. */
+       CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
+       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
@@ -1060,6 +1063,11 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
     }
 
+    /// <summary>#7417: the read and write I/O operation counts of one <see cref="IoTileWindowSql"/> row (ordinals 7 and 8).
+    /// Not the sample counts at ordinals 3 and 6, which count file rows.</summary>
+    internal static (long Reads, long Writes) ReadIoOps(System.Data.IDataRecord reader) =>
+        (reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)), reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)));
+
     /// <summary>
     /// #4731: turns one <see cref="IoTileWindowSql"/> row into the read tile and the write tile, each with its
     /// OWN sample count (ordinals 3 and 6) - Lite's twin makes the same two <see cref="WindowTiles.ReadTile"/>
@@ -1090,6 +1098,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write, 6 write_sample_count - #4731).
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
+            long windowReads = 0, windowWrites = 0;
             using (var cmd = new NpgsqlCommand(IoTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 BindTiledWindow(cmd, context, readMap);
@@ -1097,6 +1106,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     ReadIoTiles(reader, readTiles, writeTiles);
+                    var (rowReads, rowWrites) = ReadIoOps(reader);
+                    windowReads += rowReads;
+                    windowWrites += rowWrites;
                 }
             }
 
@@ -1105,7 +1117,8 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // Read latency anomaly — the reported value and sigma are the worst tile's peak (#3653 A8 B).
             var wholeRead = WindowTiles.WholeWindow(readTiles);
-            if (wholeRead.Samples > 0)
+            // #7417: the I/Os behind the latency, from the rows the tiles came from (IoVolumeFloor).
+            if (wholeRead.Samples > 0 && IoVolumeFloor.ReadsClearFloor(windowReads))
             {
                 var readTv = AnomalyGate.EvaluateTiles(
                     readTiles, readMap,
@@ -1153,7 +1166,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                         ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = readDecision.FallbackExceedance,
                         ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = readBaseline.SampleCount
+                        ["baseline_samples"] = readBaseline.SampleCount,
+                        ["window_io_ops"] = windowReads
                     };
                     AddBaselineContext(metadata, readBaseline);
                     if (readTileMetadata is not null)
@@ -1179,7 +1193,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
             var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
             var wholeWrite = WindowTiles.WholeWindow(writeTiles);
-            if (wholeWrite.Samples > 0)
+            if (wholeWrite.Samples > 0 && IoVolumeFloor.WritesClearFloor(windowWrites))
             {
                 var writeTv = AnomalyGate.EvaluateTiles(
                     writeTiles, writeMap,
@@ -1227,7 +1241,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                         ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = writeDecision.FallbackExceedance,
                         ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = writeBaseline.SampleCount
+                        ["baseline_samples"] = writeBaseline.SampleCount,
+                        ["window_io_ops"] = windowWrites
                     };
                     AddBaselineContext(metadata, writeBaseline);
                     if (writeTileMetadata is not null)
