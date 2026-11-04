@@ -184,6 +184,25 @@ const out = {};
   out.zeroBacklogNotes = mutedOf({ ...base, window_truncated: true, backlog_hours_waiting: 0, hours_left_out: 0 });
 }
 
+/* #7376: a server (or a whole section) the read answers not_collected shows its message only, with no table of zeros under it. */
+{
+  const qs = { name: "query_store", title: "Query Store" };
+  const okServer = { server: "ok-one", status: "ok", rows: [{ tag: "Prod", tag_id: 1, executions: 5 }], total: { executions: 5 } };
+  const notCollectedServer = (name, message) => ({ server: name, status: "not_collected", message, rows: [], total: { executions: 0 }, untagged: { executions: 0 } });
+  const tablesAndText = (card) => ({ tables: all(card).filter((n) => n.tag === "table").length, text: all(card).filter((n) => n.className === "muted").map((n) => n.textContent) });
+  out.notCollectedMixed = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "ok", source: "collect.query_store_interval_wide",
+    servers: [okServer, notCollectedServer("sec-one", "Query Store is not collected for sec-one: it is a readable secondary.")], fleet_total: { executions: 5 },
+  }, () => {}));
+  out.notCollectedSingle = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "not_collected", message: "Query Store is not collected for sec-one: it is a readable secondary.", source: "collect.query_store_interval_wide", rows: [], total: { executions: 0 },
+  }, () => {}));
+  out.notCollectedAll = tablesAndText(modules.page.sectionCard(qs, {
+    section: "query_store", status: "not_collected", message: "each server says why.", source: "collect.query_store_interval_wide",
+    servers: [notCollectedServer("sec-one", "reason one"), notCollectedServer("sec-two", "reason two")], fleet_total: { executions: 0 },
+  }, () => {}));
+}
+
 /* #6831: the other edge cases, said from the fields. */
 out.edgeCases = [
   { tier: "hourly", window_edges_note: "n", served_start: "2026-10-26T13:00:00Z", window_end: "2026-10-27T11:00:00Z", start_dropped_from: "2026-10-26T12:59:00Z", materialized_to: null, end_hour_counted_whole: true },
