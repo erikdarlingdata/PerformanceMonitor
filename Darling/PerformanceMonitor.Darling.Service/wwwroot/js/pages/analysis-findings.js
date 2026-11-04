@@ -404,10 +404,9 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
-/** One folded chain, named under the card that stands for its root: its path, its band and when it was last seen. */
+/** One folded chain, named under the card that stands for its root: its facts in words (as the merged chains are, #7582), its band and when it was last seen. */
 function alsoText(f) {
-  const path = String(f.story_path || "").trim() || readableStory(rootKeyOf(f)) || "another chain";
-  return path + " (" + severityLabel(f.severity).toUpperCase() + ", last seen " + localTime(f.last_seen) + ")";
+  return plainChain(f) + " (" + severityLabel(f.severity) + ", last seen " + localTime(f.last_seen) + ")";
 }
 
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
@@ -428,7 +427,7 @@ function card(server, f, showTitle) {
     kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
   }
   if (f.also && f.also.length) {
-    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join("; ") }));
+    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join(" · ") }));
   }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));

@@ -159,7 +159,9 @@ public sealed class AnalysisFindingsTabTests
         Assert.Equal(1, r.GetProperty("cards").GetInt32());
         Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
-        Assert.Contains("also seen as: LATCH_EX → TEMPDB_USAGE (INFO", text, StringComparison.Ordinal);
+        Assert.Contains("also seen as: Latch ex, then Tempdb usage (Info, last seen", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("TEMPDB_USAGE", text, StringComparison.Ordinal);
     }
 
     [Fact]
