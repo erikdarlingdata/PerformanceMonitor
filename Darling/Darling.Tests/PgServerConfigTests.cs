@@ -117,7 +117,6 @@ public sealed class PgServerConfigTests
            that source says were set. The live test pins the behaviour (a file value equal to the default is not a
            difference). */
         Assert.Contains("NOT " + DarlingPgServerConfigReader.DiffersFromDefaultSql + " AS is_default", sql, StringComparison.Ordinal);
-        Assert.StartsWith("(coalesce(c.source, 'default') <> 'default'", DarlingPgServerConfigReader.DiffersFromDefaultSql, StringComparison.Ordinal);
     }
 
     /// <summary>

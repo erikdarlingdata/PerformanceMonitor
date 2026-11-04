@@ -138,8 +138,8 @@ public static class DarlingPgServerConfigReader
     /// #7409: true when the setting is not at its default. A source other than <c>default</c> is necessary, as
     /// before (PostgreSQL's own verdict still keeps <c>archive_command</c> and <c>commit_timestamp_buffers</c>
     /// default, whose displayed value differs from <c>boot_val</c> by convention), and no longer enough: a
-    /// setting that <c>initdb</c> wrote into the configuration file at the compiled-in value (<c>port</c> 5432,
-    /// <c>max_connections</c> 100) has source <c>configuration file</c> and the same value as the default, which
+    /// setting written into the configuration file at the compiled-in value (<c>max_connections</c> 100, which
+    /// <c>initdb</c> writes) has source <c>configuration file</c> and the same value as the default, which
     /// is not a difference. Compared as text after <see cref="DefaultAsSettingSql"/>'s conversion, because
     /// <c>setting</c> and <c>boot_val</c> are stored in the same form for every other setting, and an empty
     /// default compares against an empty value (NULL and '' are the same here).
@@ -194,16 +194,15 @@ public static class DarlingPgServerConfigReader
             coalesce(c.sourceline, 0),
             coalesce(c.pending_restart, false),
             c.short_desc,
-            /* PostgreSQL's OWN verdict, not a text comparison against boot_val. Comparing the strings
-                looks equivalent and is not, and the failures all point the same way — they invent
-                non-defaults on a server nobody has configured. Measured on the rig: data_directory_mode
-                reports setting '0700' against boot_val '448', the same value in octal and decimal;
-                archive_command reports '(disabled)' against an empty boot_val, which is a display
-                convention rather than a value; commit_timestamp_buffers reports 32 against a boot_val of 0,
-                because 0 means auto-tune and the server resolved it at startup. All three have
-                source = 'default', which is PostgreSQL saying plainly that nobody set them.
-                boot_val is still stored and returned — it is useful to SEE what the default is — it just
-                does not get to decide this. */
+            /* PostgreSQL's source decides first, and boot_val only decides among the rows source says were
+                set (#7409). A text comparison alone invents non-defaults on a server nobody has configured.
+                Measured: data_directory_mode reports setting '0700' against boot_val '448', the same value
+                in octal and decimal; archive_command reports '(disabled)' against an empty boot_val, which
+                is a display convention rather than a value; commit_timestamp_buffers reports 32 against a
+                boot_val of 0, because 0 means auto-tune and the server resolved it at startup. All three
+                have source = 'default', so the comparison never reaches them. Source alone is no longer
+                enough either: a value written into the file at the compiled-in default has source
+                'configuration file' and is not a difference. See DiffersFromDefaultSql. */
             NOT {{DiffersFromDefaultSql}} AS is_default,
             /* #3653: the stamp, on the row statement (see PgConfigRow.CollectionTimeUtc). */
             c.collection_time,
