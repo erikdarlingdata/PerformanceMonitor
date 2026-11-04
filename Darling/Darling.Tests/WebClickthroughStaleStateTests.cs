@@ -94,6 +94,40 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal(detail, agent.GetProperty("detailTitle").GetString());
     }
 
+    /// <summary>
+    /// #7395: on the server page a long tile detail (20 overdue backup items) stops at about three lines and opens on demand with the full text on its
+    /// title, a short one shows in full, and the fleet card's tiles are left as they were built.
+    /// </summary>
+    [Fact]
+    public void TheServerPageTiles_ClampALongDetailAndOpenItOnDemand_AndLeaveShortOnesAndTheFleetCardAlone()
+    {
+        var r = Run("serverTiles");
+        var server = r.GetProperty("server").EnumerateArray().ToArray();
+        var protection = server.Single(t => t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal));
+        Assert.Equal("detail clamp-lines", protection.GetProperty("cls").GetString());
+        Assert.Equal("button", protection.GetProperty("role").GetString());
+        Assert.Equal("false", protection.GetProperty("expanded").GetString());
+        Assert.Equal(protection.GetProperty("textLen").GetInt32(), protection.GetProperty("titleLen").GetInt32());
+
+        /* The short tiles (CPU, Threads, the one Agent alerts gap) are not clamped: no class, no button role. */
+        foreach (var t in server.Where(t => t.TryGetProperty("cls", out _) && !t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal)))
+        {
+            Assert.DoesNotContain("clamp-lines", t.GetProperty("cls").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, t.GetProperty("role").ValueKind);
+        }
+
+        /* The fleet card keeps its one-line ellipsis: the same long detail has no clamp class and no button role. */
+        var card = r.GetProperty("fleetCard").EnumerateArray().Single(t => t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal));
+        Assert.Equal("detail", card.GetProperty("cls").GetString());
+        Assert.Equal(JsonValueKind.Null, card.GetProperty("role").ValueKind);
+
+        /* A click opens it, Enter closes it again, and each stops its event so a card around the tile is not also activated. */
+        Assert.Equal("false", r.GetProperty("before").GetString());
+        Assert.Equal("true", r.GetProperty("afterClick").GetString());
+        Assert.Equal("false", r.GetProperty("afterEnter").GetString());
+        Assert.Equal(2, r.GetProperty("stopped").GetInt32());
+    }
+
     /// <summary>#6828: the server header's Collectors chip counts a WARNING collector as a warning, not as healthy.</summary>
     [Fact]
     public void TheCollectorsChip_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()

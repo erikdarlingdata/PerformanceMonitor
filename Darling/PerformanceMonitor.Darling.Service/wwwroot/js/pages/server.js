@@ -46,7 +46,7 @@
  */
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
-import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
+import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -647,6 +647,6 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
 
   mount(whySlot, [
     reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
-    metricBands(card),
+    clampTileDetails(metricBands(card)),
   ]);
 }

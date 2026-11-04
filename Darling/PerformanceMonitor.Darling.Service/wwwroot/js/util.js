@@ -130,6 +130,15 @@ export function clampText(text, opts = {}) {
   const node = el("span", { class: "clamp-text", title: full || null, text: full });
   const long = full.length > CLAMP_MIN_CHARS || /[\r\n]/.test(full);
   if (opts.expandable === false || !long) return node;
+  return makeClampToggle(node);
+}
+
+/**
+ * Make `node` open and close in place on a click, or Enter/Space (`.open` and aria-expanded): the one toggle every clamped text
+ * shares (clampText's one-line cell, a tile's three-line detail). The click that ends a text selection is the reader copying,
+ * not opening, and the toggle stops its event so a clickable row or card around it is not also activated.
+ */
+export function makeClampToggle(node) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.setAttribute("aria-expanded", "false");
@@ -152,6 +161,30 @@ export function clampText(text, opts = {}) {
     }
   });
   return node;
+}
+
+/* A server page tile's detail longer than this many characters is clamped to about three lines (#7395). A tile is at least 13rem
+   wide and a line holds about 36 characters there, so three lines show about 100: a shorter detail shows in full. */
+const TILE_DETAIL_CLAMP_CHARS = 100;
+
+/**
+ * #7395: the server page's metric tiles let a detail wrap, so a long one (the Protection tile names every overdue backup and
+ * CHECKDB, and grows with the number of databases) pushed every tab down. A detail past TILE_DETAIL_CLAMP_CHARS stops at about
+ * three lines (`.clamp-lines`) and opens on demand like clampText; its title keeps the full text. A shorter detail is left as it
+ * is, and so is every tile the caller does not pass through here (the fleet cards keep their one-line ellipsis). Returns `root`.
+ */
+export function clampTileDetails(root, minChars = TILE_DETAIL_CLAMP_CHARS) {
+  const walk = (n) => {
+    if (!n || typeof n !== "object") return;
+    if (typeof n.className === "string" && (" " + n.className + " ").includes(" detail ") && String(n.textContent || "").length > minChars) {
+      n.className += " clamp-lines";
+      makeClampToggle(n);
+      return;
+    }
+    Array.from(n.children || []).forEach(walk);
+  };
+  walk(root);
+  return root;
 }
 
 /*

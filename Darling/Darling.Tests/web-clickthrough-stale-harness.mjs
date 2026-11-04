@@ -144,6 +144,29 @@ const scenarios = {
       agent_alert_gaps: [{ message: "No alert is set for severity 19 through 25 errors." }, { message: "No alert is set for error 823, 824 or 825 (corruption)." }],
     }))),
   }),
+  /* #7395: the server page passes the shared tiles through clampTileDetails. A detail past about three lines (the Protection tile
+     of a server with 20 overdue items) is clamped and opens on demand, with the full text on its title. A short one shows in
+     full. The fleet card's tiles, which never pass through it, stay exactly as metricBands built them. */
+  serverTiles: async () => {
+    const overdue = Array.from({ length: 20 }, (_, i) => ({ text: "AppDatabase" + i + " full backup 9 days" }));
+    const c = card({ last_collection: iso(1000), database_protection_overdue: overdue, agent_alert_gaps: [{ message: "No alert for severity 19." }] });
+    const detailOf = (chip) => (chip.children || []).find((d) => String(d.className).split(" ").includes("detail"));
+    const view = (root) => all(root, (n) => String(n.className).startsWith("metric-chip")).map((chip) => {
+      const d = detailOf(chip);
+      return d ? { label: chip.children[0].textContent, cls: d.className, role: d.getAttribute("role"), expanded: d.getAttribute("aria-expanded"), titleLen: (d.getAttribute("title") || "").length, textLen: d.textContent.length } : { label: chip.children[0].textContent };
+    });
+    const server = modules.util.clampTileDetails(modules.fleet.metricBands(c));
+    const fleetCard = modules.fleet.metricBands(c);
+    const protection = detailOf(all(server, (n) => String(n.className).startsWith("metric-chip")).find((chip) => chip.children[0].textContent.startsWith("Protection")));
+    let stopped = 0;
+    const press = (type, extra = {}) => (protection.listeners[type] || []).forEach((fn) => fn({ type, stopPropagation() { stopped++; }, preventDefault() {}, ...extra }));
+    const before = protection.getAttribute("aria-expanded");
+    press("click");
+    const afterClick = protection.getAttribute("aria-expanded");
+    press("keydown", { key: "Enter" });
+    const afterEnter = protection.getAttribute("aria-expanded");
+    return { server: view(server), fleetCard: view(fleetCard), before, afterClick, afterEnter, stopped };
+  },
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({
     chips: chips(modules.fleet.metricBands(card({
