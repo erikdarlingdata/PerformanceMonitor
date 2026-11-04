@@ -39,7 +39,7 @@ public static partial class PgTargetAdvice
             "bands are the fleet ladder repeated on the same quantity and are fleet-measured: 80% is about the 99.8th " +
             "and 95% about the 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1).",
         Remediation:
-            "Find what is consuming the capacity before buying more of it: get_pg_statement_stats over this window " +
+            "Find what is consuming the capacity before buying more of it: get_pg_top_queries over this window " +
             "ranks statements by total execution time, and the top few are where the CPU went. Raising the maximum " +
             "ACU (or the instance class) is the fast lever and costs money for every hour it is provisioned while " +
             "leaving the query that needs it in place; fixing that query is durable and takes finding it. If the " +
