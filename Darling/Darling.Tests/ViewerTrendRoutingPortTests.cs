@@ -372,12 +372,11 @@ public sealed class ViewerTrendRoutingPortTests
         Assert.EndsWith(" because the corrected Query Store rollup has not materialized the rest of this window (--backfill-rollups reaches it).", unserved, StringComparison.Ordinal);
         Assert.DoesNotContain("no longer holds", unserved, StringComparison.Ordinal);
 
-        /* Same frame as the siblings — "Source: {served}. Data begins yyyy-MM-dd HH:mm" — because both go through one
-           composer; the siblings now state what is known (#7386), this route still has its own reason. */
+        /* Same sentence shape as the siblings — "Source: {served}. Data begins yyyy-MM-dd HH:mm because {why}." — because
+           both go through one composer; the two slots differ, the frame does not. */
         var sibling = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, head, true));
         var frame = new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+\. Data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2} because [^;—]+\.$");
-        var siblingFrame = new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+\. Data begins \d{4}-\d{2}-\d{2} \d{2}:\d{2}\. The store holds nothing earlier in this window at this tier\.$");
-        Assert.Matches(siblingFrame, sibling);
+        Assert.Matches(frame, sibling);
         Assert.Matches(frame, unserved);
         Assert.Matches(new System.Text.RegularExpressions.Regex(@"^Source: [^—;]+$"), served);
 
