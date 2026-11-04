@@ -52,13 +52,12 @@ export const PG_BLOCKING_STATS = [
    is OBSERVED by the read (a limit + 1 fetch), not inferred from the cap. */
 export const PG_DATABASE_STATS = [
   { key: "database_count", label: "Databases active", format: "int" },
-  { key: "databases_returned", label: "Databases returned", format: "int" },
   { key: "total_temp_files", label: "Temp files", format: "int" },
   { key: "total_temp_bytes", label: "Temp bytes", format: "int" },
   { key: "top_spiller", label: "Biggest spiller", format: "text", small: true },
   { key: "total_deadlocks", label: "Deadlocks", format: "int" },
   { key: "cache_hit_pct", label: "Cache hit %", format: "num2" },
-  { key: "truncated", label: "Window held more", format: "bool" },
+  { key: "truncated", pageCut: "The window held more databases than the grid below lists.", label: "Truncated", format: "bool" },
   /* Named on the tile rather than only per row: every total beside it is a LOWER BOUND when this is true,
      and a reader has to see that before drawing a conclusion from any of them. */
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },

@@ -19,7 +19,7 @@
  */
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
-import { plainText } from "./plain-text.js";
+import { plainText, shortEmptyLine } from "./plain-text.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -185,6 +185,20 @@ export function errorStrip(message) {
 }
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
+}
+/**
+ * #7410: an empty reply as the page shows it. When the reply names a setup step in its structured `hints` (shortEmptyLine) the strip
+ * says one plain sentence and the tool's full text sits behind a click ("More detail", the native disclosure above). A reply with no
+ * such field shows its text as emptyStrip always did. `line` (optional) is the sentence to use in place of the one built from `hints`.
+ */
+export function plainEmptyStrip(res, line) {
+  const short = line === undefined ? shortEmptyLine(res) : line;
+  if (!short) return emptyStrip(res.message);
+  const nodes = [localizeIsoText(short)];
+  if (typeof res.message === "string" && res.message && res.message !== short) {
+    nodes.push(disclosure("More detail", localizeIsoText(res.message), { title: "What the read said, in full" }));
+  }
+  return el("div", { class: "strip empty plain-empty" }, nodes);
 }
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
@@ -842,6 +856,13 @@ export function fmtBytes(v) {
   if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
   return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
 }
+/* A size given in megabytes, written in the unit that fits it (#7410): a table that holds 140 KB read "0 MB" under fmtMb, which prints whole
+   megabytes. Null is the dash and 0 is a real 0 B, as fmtBytes. */
+export function fmtMbFit(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  return isFinite(n) ? fmtBytes(n * 1024 * 1024) : "—";
+}
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
@@ -859,6 +880,7 @@ export const FORMATTERS = {
   ms: fmtMs,
   mb: fmtMb,
   bytes: fmtBytes,
+  mbfit: fmtMbFit,
   time: localTime,
   reltime: relTime,
   bool: fmtBool,

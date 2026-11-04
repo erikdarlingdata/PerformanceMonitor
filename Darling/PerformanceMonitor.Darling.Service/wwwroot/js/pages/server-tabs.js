@@ -1357,7 +1357,7 @@ export const POSTGRES_TABS = [
           rowsKey: "cycles",
           columns: PG_BLOCKING_CYCLE_COLUMNS,
           emptyText:
-            "No lock cycle was sampled in this window — the healthy state. A cycle has no root blocker to attribute, which is why it is a separate grid rather than a chain with a missing root.",
+            "No lock cycle was sampled in this window.",
         },
       ]),
       /* One fetch, two panels: the eviction pass count and the statement cap in a tile (the figures the desktop
@@ -1447,7 +1447,7 @@ export const POSTGRES_TABS = [
           rowsKey: "databases",
           columns: PG_DATABASE_COLUMNS,
           emptyText:
-            "No per-database activity in this window. These are changes over the window, so one snapshot is not enough.",
+            "No databases to list.",
         },
       ]),
       /* #2663 the same counters over TIME, directly under the window they summarise. This is where the
@@ -1576,8 +1576,10 @@ export const POSTGRES_TABS = [
           viz: "stat",
           stats: PG_SESSION_STATE_STATS,
           span: 2,
+          /* #7410: the read's empty message explains its sampling for an MCP client; the page says the one sentence. */
+          emptyWins: true,
           emptyText:
-            "No session held a transaction open past the collector's floor in this window. Sessions are sampled, so one that opened and closed between two captures left no trace.",
+            "No session held a transaction open in this window, as far as the samples show.",
         },
         {
           title: "By Session",
@@ -1585,8 +1587,9 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "sessions",
           columns: PG_SESSION_STATE_COLUMNS,
+          emptyWins: true,
           emptyText:
-            "No session held a transaction open past the collector's floor. Sessions are sampled, so one that opened and closed between two captures is not shown.",
+            "No sessions to list.",
         },
       ]),
       ...fanout("get_pg_xmin_horizon", { server, hours: ctx.hours }, [
@@ -1607,7 +1610,7 @@ export const POSTGRES_TABS = [
           rowsKey: "holders",
           columns: PG_XMIN_COLUMNS,
           emptyText:
-            "No holder in this window. Four unrelated causes produce the same symptom — a long-running session, a replication slot, standby feedback, a prepared transaction — so this grid names the cause rather than repeating that the horizon is old.",
+            "No holder to list: nothing held the horizon back in this window.",
         },
       ]),
       ...fanout("get_pg_autovacuum_health", { server, hours: ctx.hours, limit: 20 }, [
@@ -1618,7 +1621,7 @@ export const POSTGRES_TABS = [
           stats: PG_AUTOVACUUM_STATS,
           span: 2,
           emptyText:
-            "No table has dead tuples, pending analyze work, inserts since its last vacuum, or autovacuum disabled — the healthy answer.",
+            "No table is behind on vacuum or analyze.",
         },
         {
           title: "Tables Behind",
@@ -1627,7 +1630,7 @@ export const POSTGRES_TABS = [
           rowsKey: "tables",
           columns: PG_AUTOVACUUM_COLUMNS,
           emptyText:
-            "No table is behind on vacuum or analyze. The collector records only tables with pending work, so an empty grid is the healthy case rather than a collector that has not run.",
+            "No tables to list.",
         },
       ]),
       ...fanout("get_pg_wraparound_risk", { server, hours: ctx.hours }, [
@@ -1657,7 +1660,7 @@ export const POSTGRES_TABS = [
           rowsKey: "databases",
           columns: PG_WRAPAROUND_COLUMNS,
           emptyText:
-            "No per-database freeze headroom in this window. Both counters are tracked: a database can be comfortable on XIDs and in trouble on MultiXacts, which is why they are separate columns rather than one worst-of.",
+            "No per-database freeze headroom in this window.",
         },
       ]),
     ],
@@ -1809,7 +1812,7 @@ export const POSTGRES_TABS = [
           stats: PG_SLOT_STATS,
           span: 2,
           emptyText:
-            "This server has no replication slots. A slot is the thing that retains WAL indefinitely, so none is one fewer way to fill a disk.",
+            "This server has no replication slots.",
         },
         {
           title: "Slots",
@@ -1818,7 +1821,7 @@ export const POSTGRES_TABS = [
           rowsKey: "slots",
           columns: PG_SLOT_COLUMNS,
           emptyText:
-            "No replication slots on this server. An inactive slot retains WAL forever and is the usual way a PostgreSQL instance fills its disk with nobody watching, so an empty grid here is good news.",
+            "No slots to list.",
         },
       ]),
       /* #2629: the connected replicas, beside the slots. Two different questions and the DANGEROUS case is
@@ -1855,7 +1858,7 @@ export const POSTGRES_TABS = [
           stats: PG_BLOAT_STATS,
           span: 2,
           emptyText:
-            "No table of at least 1 MB was measured on this server. Below that floor bloat is not an actionable amount of space, so an empty panel here is the healthy answer rather than a missing read.",
+            "No table of at least 1 MB was measured on this server, and below that floor bloat is not worth acting on.",
         },
         {
           title: "By Table",
@@ -1864,7 +1867,7 @@ export const POSTGRES_TABS = [
           rowsKey: "tables",
           columns: PG_BLOAT_COLUMNS,
           emptyText:
-            "No table of at least 1 MB was measured on this server. Bloat under a megabyte is not worth a maintenance window, so the collector does not store it.",
+            "No tables to list.",
         },
       ]),
       ...fanout("get_pg_index_usage", { server, hours: ctx.hours, limit: 25 }, [
@@ -1884,7 +1887,7 @@ export const POSTGRES_TABS = [
           rowsKey: "indexes",
           columns: PG_INDEX_USAGE_COLUMNS,
           emptyText:
-            "No index of at least 64 KB was recorded on this server, so there is nothing here to judge. This collector runs daily and is gated off on read replicas, where scan counts are the replica's own rather than the writer's.",
+            "No indexes to list.",
         },
       ]),
       /* #2629: index bloat, beside the table bloat above and the usage counts. The three answer one
@@ -1958,7 +1961,7 @@ export const POSTGRES_TABS = [
         "changes",
         PG_CONFIG_CHANGE_COLUMNS,
         ctx.label + ", newest first; the collector runs hourly unless its schedule was changed, so a change happened in the collection interval before it was seen",
-        "No configuration parameter changed value in this window. This compares consecutive snapshots, so an unchanged server is legitimately empty here - it is a finding, not missing data."
+        "No configuration parameter changed value in this window."
       ),
       tablePanel(
         "Settings",

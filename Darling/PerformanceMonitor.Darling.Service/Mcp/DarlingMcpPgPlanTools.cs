@@ -329,7 +329,9 @@ public sealed class DarlingMcpPgPlanTools
                 + string.Join(" | ", unmet)
                 + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
                 + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
-                + "satisfied or not, in the order they have to be fixed in.");
+                + "satisfied or not, in the order they have to be fixed in.",
+                /* #7410: the page's plain sentence is built from the count, not from the message. */
+                new { reason = "plan_capture_not_ready", unsatisfied_count = unmet.Count });
         }
 
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
