@@ -37,6 +37,14 @@ namespace PerformanceMonitor.Common
             (524288, "database reached disk size limit"),
         };
 
+        /// <summary>The bits that mean Query Store hit one of its own limits (65536 storage cap, 131072 statement
+        /// memory, 262144 persist backlog, 524288 disk size): the store filled up and stopped, which is the
+        /// terminal state of clutter (#7454).</summary>
+        public const int CapacityBits = 65536 | 131072 | 262144 | 524288;
+
+        /// <summary>True when a capacity bit is set, whatever else is: the capacity bit decides.</summary>
+        public static bool HasCapacityBit(int readonlyReason) => (readonlyReason & CapacityBits) != 0;
+
         /// <summary>Human-readable decode of the bitmask; empty string when 0 (not read-only).</summary>
         public static string Decode(int readonlyReason)
         {
