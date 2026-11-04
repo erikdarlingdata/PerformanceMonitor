@@ -52,16 +52,12 @@ public static class DarlingPgStatementReader
            ago genuinely has none, and after a major-version upgrade re-keys queryid the new ids have none until
            the next refresh. Distinguishing "not captured yet" from "" is what stops a caller reading an empty
            string as the query. */
-        string? QueryText = null)
-    {
-        /// <summary>
-        /// #7567: true when the statement is one of this service's own collector statements (the trailing
-        /// <see cref="PerformanceMonitor.Collectors.PgOwnStatement.Marker"/> comment in its stored text). Derived from the
-        /// text, so it is false for a statement whose text has not been captured yet, and for one another client ran first
-        /// since the last <c>pg_stat_statements_reset()</c>: both err toward showing it as the application's.
-        /// </summary>
-        public bool IsServiceStatement => PerformanceMonitor.Collectors.PgOwnStatement.IsOwn(QueryText);
-    }
+        string? QueryText = null,
+        /* #7567: true when every user entry that fed this row is one of the monitoring service's own (its collectors' reads,
+           the wait sampler's sleep): the entry's (user_id, database_id) is in the list the hourly text fetch stored for the
+           queryid (PgOwnStatement). Per ENTRY, so the application's statement under another login is false even when it
+           shares the queryid. False for a statement whose text has not been read yet. */
+        bool IsServiceStatement = false);
 
     /// <summary>
     /// One page of the top-queries read, plus the denominator its shares are taken over.
@@ -97,6 +93,16 @@ public static class DarlingPgStatementReader
     /// </summary>
     public const string WalBytesWindowSql =
         "CASE WHEN COUNT(raw_wal_bytes) = 0 THEN NULL ELSE CAST(coalesce(SUM(d_wal_bytes), 0) AS bigint) END";
+
+    /// <summary>
+    /// #7567: whether a (queryid, database_id) group is the monitoring service's own statement, as one aggregate over the
+    /// differenced entries that carried time: every one's <c>(user_id, database_id)</c> must be in the <c>own_entries</c>
+    /// list the text fetch stored for the queryid. Per entry, so the application's statement under another login is false.
+    /// </summary>
+    private const string IsServiceStatementSql =
+        "coalesce(bool_and(coalesce(jsonb_contains(t.own_entries, "
+        + "jsonb_build_array(jsonb_build_array(differenced.user_id, differenced.database_id))), false)) "
+        + "FILTER (WHERE delta_total_exec_time_ms > 0), false)";
 
     /// <summary>
     /// Every counter is reported for the WINDOW, never as a lifetime total. Summing the cumulative
@@ -138,6 +144,7 @@ public static class DarlingPgStatementReader
             SELECT
                 queryid,
                 database_id,
+                user_id,
                 delta_calls,
                 delta_total_exec_time_ms,
                 delta_rows,
@@ -203,13 +210,19 @@ public static class DarlingPgStatementReader
             MAX(t.query_text) AS query_text,
             /* #3541 A7: the WINDOW's total, not the page's - see the remarks. Window aggregate over the
                grouped rows, so it is evaluated before LIMIT and is the same on every row. */
-            CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms
+            CAST(SUM(SUM(delta_total_exec_time_ms)) OVER () AS bigint) AS window_total_exec_time_ms,
+            /* #7567: the service's own statement, decided per (user_id, database_id) ENTRY against the list the text fetch
+               stored, over the entries that carried time in the window. Every one must be the service's, so a queryid the
+               application also runs under another login is not flagged. */
+            {IsServiceStatementSql} AS is_service_statement
         FROM differenced
         LEFT JOIN collect.pg_statement_text AS t
                ON  t.server_id = $1
                AND t.queryid = differenced.queryid
         GROUP BY differenced.queryid, database_id
         HAVING SUM(delta_total_exec_time_ms) > 0
+        /* $5 = include the service's own statements. Change Watch passes false, so the sampler cannot take one of its top-N slots (#7567). */
+        AND   ($5 OR NOT {IsServiceStatementSql})
         ORDER BY SUM(delta_total_exec_time_ms) DESC
         LIMIT $4
         """;
@@ -228,9 +241,18 @@ public static class DarlingPgStatementReader
     /// The paged read: <paramref name="limit"/> rows, heaviest first, and the whole window's execution time
     /// beside them. The MCP tool asks for <c>limit + 1</c> so it can OBSERVE truncation rather than infer it.
     /// </summary>
+    public static Task<PgTopQueriesPage> GetPgTopQueriesPageAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken = default) =>
+        GetPgTopQueriesPageAsync(postgres, serverId, startUtc, endUtc, limit, includeServiceStatements: true, cancellationToken);
+
+    /// <summary>
+    /// The paged read with the service's own statements (#7567) optionally left out BEFORE the cap, so they cannot take a
+    /// slot of the <paramref name="limit"/>. Change Watch passes <c>false</c>.
+    /// </summary>
     public static async Task<PgTopQueriesPage> GetPgTopQueriesPageAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
-        CancellationToken cancellationToken = default)
+        bool includeServiceStatements, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgStatementRow>();
         long windowTotalExecTimeMs = 0;
@@ -245,6 +267,7 @@ public static class DarlingPgStatementReader
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(limit);
+        command.Parameters.AddWithValue(includeServiceStatements);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -268,7 +291,8 @@ public static class DarlingPgStatementReader
                 reader.IsDBNull(12) ? null : reader.GetInt64(12),
                 reader.IsDBNull(13) ? null : reader.GetInt64(13),
                 /* #2219: null stays null — see PgStatementRow.QueryText for why an empty string would be a lie. */
-                reader.IsDBNull(14) ? null : reader.GetString(14)));
+                reader.IsDBNull(14) ? null : reader.GetString(14),
+                !reader.IsDBNull(16) && reader.GetBoolean(16)));
         }
 
         return new PgTopQueriesPage(rows, windowTotalExecTimeMs);

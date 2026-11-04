@@ -329,7 +329,7 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
    reply holds 0 or nothing, which the reply says, so no engine name is tested. */
 export const PG_TOP_QUERY_COLUMNS = [
   { key: "queryid", label: "Query ID", mono: true },
-  { key: "query_text", label: "Query", wrap: true, valueList: false, cellClass: () => "query-cell", render: (row) => codeDisclosure(row.query_text) },
+  { key: "query_text", label: "Query", wrap: true, valueList: false, cellClass: () => "query-cell", render: (row) => codeDisclosure(row.service_statement && row.query_text ? "[Performance Monitor's own statement] " + row.query_text : row.query_text) },
   { key: "calls", label: "Calls", format: "int" },
   { key: "total_exec_time_ms", label: "Total", format: "ms" },
   { key: "avg_exec_time_ms", label: "Avg", format: "ms" },

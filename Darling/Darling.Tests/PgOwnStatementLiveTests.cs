@@ -36,6 +36,10 @@ public sealed class PgOwnStatementLiveTests
     private const string ServerName = "pg-own-statement-e2e";
     private const long ServiceQueryId = -7567000000000000001L;
     private const long AppQueryId = -7567000000000000002L;
+    private const long SharedQueryId = -7567000000000000003L;
+    private const long ServiceUserId = 10;
+    private const long AppUserId = 20;
+    private const long DatabaseId = 16384;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -69,18 +73,26 @@ public sealed class PgOwnStatementLiveTests
         /* A batch the way the wait sampler sends one: every statement is stored on its own row. */
         var batch = PgOwnStatement.MarkBatch(new[]
         {
-            "SELECT 7567 + 2 AS pm7567_first",
+            "SELECT 7567 + 2 AS pm7567_first, 1 AS a",
             "SELECT pg_sleep(0.01)",
             "SELECT pg_stat_clear_snapshot()",
-            "SELECT 7567 + 3 AS pm7567_last",
+            "SELECT 7567 + 3 AS pm7567_last, 1 AS a, 2 AS b",
         });
         await using (var batchCommand = new NpgsqlCommand(batch, connection))
         {
             await batchCommand.ExecuteNonQueryAsync(ct);
         }
 
+        /* A named parameter, the way ResolvePgExtensionSchemasAsync binds @functions: Npgsql rewrites it to $1 before the server sees it. */
+        await using (var named = new NpgsqlCommand(
+            PgOwnStatement.Mark("SELECT @functions::text AS pm7567_named"), connection))
+        {
+            named.Parameters.AddWithValue("functions", "x");
+            await named.ExecuteNonQueryAsync(ct);
+        }
+
         /* The control: the same shape with no marker, which must read as the application's. */
-        await using (var plain = new NpgsqlCommand("SELECT 7567 + 4 AS pm7567_plain", connection))
+        await using (var plain = new NpgsqlCommand("SELECT 7567 + 4 AS pm7567_plain, 1 AS a, 2 AS b, 3 AS c", connection))
         {
             await plain.ExecuteNonQueryAsync(ct);
         }
@@ -103,6 +115,7 @@ public sealed class PgOwnStatementLiveTests
         Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_single")), Stored("pm7567_single"));
         Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_first")), Stored("pm7567_first"));
         Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_last")), Stored("pm7567_last"));
+        Assert.True(PgOwnStatement.IsOwn(Stored("pm7567_named")), Stored("pm7567_named"));
         Assert.True(PgOwnStatement.IsOwn(Stored("pg_sleep(")), Stored("pg_sleep("));
         Assert.True(PgOwnStatement.IsOwn(Stored("pg_stat_clear_snapshot")), Stored("pg_stat_clear_snapshot"));
         Assert.False(PgOwnStatement.IsOwn(Stored("pm7567_plain")), Stored("pm7567_plain"));
@@ -221,6 +234,121 @@ public sealed class PgOwnStatementLiveTests
     }
 
     /// <summary>
+    /// The shared-queryid case (#7567 round 2): the service's marked entry and an application entry under ANOTHER login share
+    /// one queryid, as <c>pg_stat_statements</c> keeps them (one entry per userid). Own-ness is per entry, so the application's
+    /// rows stay in the bad-actor candidates and the shares, and the service's do not.
+    /// </summary>
+    [Fact]
+    public async Task AnApplicationEntryUnderAnotherLogin_SharingTheServiceQueryId_StaysInAnalysis_AndTheServicesEntryDoesNot()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            /* One text for the queryid (the first call's, the service's, marked), and the list says only user 10's entry is the service's. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen, own_entries)
+VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
+                ServerId, SharedQueryId, PgOwnStatement.Mark("SELECT pg_sleep($1)"), DarlingMcpTestData.Naive(DateTime.UtcNow), OwnEntries(ServiceUserId));
+            for (var i = 6; i >= 1; i--)
+            {
+                var at = DateTime.UtcNow.AddMinutes(-i);
+                await SeedStatsAsync(connection, ct, at, SharedQueryId, ServiceUserId, deltaCalls: 30, deltaTimeMs: 30_000);
+                await SeedStatsAsync(connection, ct, at, SharedQueryId, AppUserId, deltaCalls: 10, deltaTimeMs: 200);
+            }
+
+            var from = DateTime.UtcNow.AddHours(-1);
+            var to = DateTime.UtcNow.AddMinutes(1);
+            var naiveFrom = DateTime.SpecifyKind(from, DateTimeKind.Unspecified);
+            var naiveTo = DateTime.SpecifyKind(to, DateTimeKind.Unspecified);
+
+            /* The bad-actor candidates: the shared queryid is there, with the application's time only (6 x 200 ms), never the service's. */
+            await using (var top = new NpgsqlCommand(PgTargetFactCollector.PgTargetTopStatementsSql, connection))
+            {
+                top.Parameters.AddWithValue(ServerId);
+                top.Parameters.AddWithValue(naiveFrom);
+                top.Parameters.AddWithValue(naiveTo);
+                top.Parameters.AddWithValue(5);
+                await using var reader = await top.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(SharedQueryId, reader.GetInt64(reader.GetOrdinal("queryid")));
+                Assert.Equal(1200, reader.GetInt64(reader.GetOrdinal("total_exec_ms")));
+                Assert.Equal(1200, reader.GetInt64(reader.GetOrdinal("window_total_exec_ms")));
+                Assert.False(await reader.ReadAsync(ct));
+            }
+
+            /* The shares: the application's entry holds the whole of the (application) window. */
+            await using (var share = new NpgsqlCommand(PgTargetAnomalyDetector.StatementShareWindowSql, connection))
+            {
+                share.Parameters.AddWithValue(ServerId);
+                share.Parameters.AddWithValue(naiveFrom);
+                share.Parameters.AddWithValue(naiveTo);
+                share.Parameters.AddWithValue(5);
+                await using var reader = await share.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(SharedQueryId, reader.GetInt64(0));
+                Assert.Equal(1.0, reader.GetDouble(1), 6);
+                Assert.False(await reader.ReadAsync(ct));
+            }
+
+            /* The top-queries read groups the two logins into one row, so it is NOT flagged as the service's (not every entry is). */
+            var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, from, to, 10, ct);
+            Assert.False(Assert.Single(page.Rows, r => r.QueryId == SharedQueryId).IsServiceStatement);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// Change Watch reads the top queries without the service's statements (#7567): the service's sleep is the heaviest
+    /// statement, and with a cap of one the application's statement is still the row returned.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_WithServiceStatementsExcluded_DoNotLetTheSamplerTakeTheSlot()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the own-statement tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await SeedAsync(connection, ct, busy: false);
+            var from = DateTime.UtcNow.AddHours(-1);
+            var to = DateTime.UtcNow.AddMinutes(1);
+
+            var withService = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(dataSource, ServerId, from, to, 1, ct);
+            Assert.Equal(ServiceQueryId, Assert.Single(withService.Rows).QueryId);
+
+            var withoutService = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(
+                dataSource, ServerId, from, to, 1, includeServiceStatements: false, ct);
+            Assert.Equal(AppQueryId, Assert.Single(withoutService.Rows).QueryId);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// The application statement (20 ms a call) every minute for the last 30 minutes, and the service's sampler sleep
     /// (1000 ms a call) on a few of them. Text for both, the service's carrying the marker the way the collector's
     /// statements are stored.
@@ -229,39 +357,44 @@ public sealed class PgOwnStatementLiveTests
     {
         await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
-INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen)
-VALUES ($1, $2, $3, $5, $5), ($1, $4, $6, $5, $5)
-ON CONFLICT (server_id, queryid) DO UPDATE SET query_text = EXCLUDED.query_text",
+INSERT INTO pg_statement_text (server_id, queryid, query_text, first_seen, last_seen, own_entries)
+VALUES ($1, $2, $3, $5, $5, $7::jsonb), ($1, $4, $6, $5, $5, NULL)
+ON CONFLICT (server_id, queryid) DO UPDATE SET query_text = EXCLUDED.query_text, own_entries = EXCLUDED.own_entries",
             ServerId, ServiceQueryId, PgOwnStatement.Mark("SELECT pg_sleep($1)"), AppQueryId,
-            DarlingMcpTestData.Naive(DateTime.UtcNow), "SELECT id FROM orders WHERE customer_id = $1");
+            DarlingMcpTestData.Naive(DateTime.UtcNow), "SELECT id FROM orders WHERE customer_id = $1",
+            OwnEntries(ServiceUserId));
 
         var minutes = busy ? 30 : 6;
         for (var i = minutes; i >= 1; i--)
         {
             var at = DateTime.UtcNow.AddMinutes(-i);
-            await SeedStatsAsync(connection, ct, at, AppQueryId, deltaCalls: 10, deltaTimeMs: 200);
+            await SeedStatsAsync(connection, ct, at, AppQueryId, AppUserId, deltaCalls: 10, deltaTimeMs: 200);
             if (!busy || i % 5 == 0)
             {
-                await SeedStatsAsync(connection, ct, at, ServiceQueryId, deltaCalls: 30, deltaTimeMs: 30_000);
+                await SeedStatsAsync(connection, ct, at, ServiceQueryId, ServiceUserId, deltaCalls: 30, deltaTimeMs: 30_000);
             }
         }
     }
 
     private static async Task SeedStatsAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
-        long queryId, long deltaCalls, long deltaTimeMs) =>
+        long queryId, long userId, long deltaCalls, long deltaTimeMs) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
      calls, total_exec_time_ms, max_exec_time_ms, rows_returned,
      shared_blks_hit, shared_blks_read, temp_blks_read, temp_blks_written,
      delta_calls, delta_total_exec_time_ms, delta_rows)
-VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
+VALUES ($1, $2, $3, $4, $5, 16384, $8, TRUE,
         100, 5000, 91.5, 250,
         10, 5, 0, 0,
         $6, $7, 0)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
-            queryId, deltaCalls, deltaTimeMs);
+            queryId, deltaCalls, deltaTimeMs, userId);
+
+    /// <summary>The JSON the text fetch stores for the service's own entries: [[user_id, database_id]].</summary>
+    private static string OwnEntries(long userId) =>
+        string.Create(CultureInfo.InvariantCulture, $"[[{userId},{DatabaseId}]]");
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {

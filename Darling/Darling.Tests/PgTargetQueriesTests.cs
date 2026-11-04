@@ -839,10 +839,6 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("FILTER (WHERE p.interval_seconds IS NOT NULL)", sql, StringComparison.Ordinal);
         /* Units: the ≥ 13 column name is the collector's; no pre-13 branch exists to write. */
         Assert.DoesNotContain("total_time", sql.Replace("total_exec_time", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
-        /* No text is READ here — the text is the drill-down's. The one mention is the anti-join that leaves the service's own
-           statements out (#7567), which compares the stored text's tail and projects nothing. */
-        Assert.DoesNotContain("JOIN pg_statement_text", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_text AS", sql, StringComparison.Ordinal);
 
         Assert.Equal(5, PgTargetFactCollector.TopStatementCount);
 
