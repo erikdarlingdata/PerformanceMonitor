@@ -212,14 +212,16 @@ public sealed class McpMemoryTools
         [Description("Newest events to return, still oldest first. Default 200, max 1000. summary counts the whole window; read truncated.")] int limit = 200,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
+        /* limit is refused before the server is resolved, the same order as Darling, so a bad server name with a bad limit
+           gets the same refusal on both products. */
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         try
         {
-            var limitError = McpHelpers.ValidateTop(limit);
-            if (limitError != null) return limitError;
-
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
