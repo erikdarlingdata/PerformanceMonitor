@@ -190,6 +190,12 @@ public sealed class DarlingMcpPgBlockingTools
                     hints = emptyNotice.AsHints(),
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = 0,
+                    /* #7409: captures and none of them blocked proves these three are zero, so they are sent as 0 and the
+                       page draws 0 rather than a dash. The unavailable reply above (no captures at all) proves nothing and
+                       keeps them out. */
+                    pct_of_captures_with_blocking = 0,
+                    worst_chain_victims = 0,
+                    cycles_sampled = 0,
                     first_capture_at = captures.FirstCaptureAt,
                     last_capture_at = captures.LastCaptureAt,
                     finding = $"No blocking was present in any of the {captures.CapturesTotal} captures in this "

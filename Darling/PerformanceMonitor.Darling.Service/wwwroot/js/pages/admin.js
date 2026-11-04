@@ -1765,7 +1765,7 @@ function noteWriteForm(servers) {
     [el("option", { value: "", text: "Fleet (every server)" })].concat(
       servers.filter((s) => Number.isInteger(s.server_id)).map((s) => el("option", { value: String(s.server_id), text: s.display_name || s.server_name || "server " + s.server_id }))));
   const metric = el("input", { type: "text", class: "tag-input", "data-note-field": "metric_name", placeholder: "optional, such as Blocking", "aria-label": "Metric the note is about" });
-  const text = el("textarea", { "data-note-field": "note_text", rows: "3", maxlength: String(NOTE_MAX_LENGTH), "aria-label": "Note text" });
+  const text = el("textarea", { class: "tag-input", "data-note-field": "note_text", rows: "3", maxlength: String(NOTE_MAX_LENGTH), "aria-label": "Note text" });
   const days = el("input", { type: "number", class: "tag-input", "data-note-field": "days", min: "1", max: String(NOTE_MAX_DAYS), "aria-label": "Keep for days" });
   server.value = noteDraft.server_id;
   metric.value = noteDraft.metric_name;

@@ -2759,7 +2759,7 @@ public static class FactAdvice
 
     /// <summary>
     /// CONFIG_MAX_MEMORY_MB composed with the server's physical RAM, so the card states a concrete
-    /// suggested cap (total − max(4 GB, 10%)) instead of a formula and an audit_config deferral. The
+    /// suggested cap (total − the OS reserve: the larger of 4 GB and 10%, never over half of RAM, #7400) instead of a formula and an audit_config deferral. The
     /// fact only fires when max server memory is at its ~2 PB default. Falls back to the static block
     /// when total RAM was not collected (nothing concrete to compute).
     /// </summary>
@@ -2770,8 +2770,8 @@ public static class FactAdvice
         if (total is not > 0)
             return fallback;
 
-        var osReserve = Math.Max(4096, (long)(total.Value * 0.10));
-        var suggested = total.Value - osReserve;
+        var osReserve = ConfigAuditGuidance.OsReserveMb(total.Value);
+        var suggested = ConfigAuditGuidance.SuggestedMaxMemoryMb(total.Value);
         return fallback with
         {
             Investigation =

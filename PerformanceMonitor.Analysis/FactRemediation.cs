@@ -175,11 +175,11 @@ public static class FactRemediation
         /// <summary>The parenthetical that states the figure, such as "(cores per socket 4)" or "(4 vCores)"; empty when unknown.</summary>
         public string Note => Cores <= 0 ? string.Empty : FromVcores ? $"({Cores} vCores)" : $"(cores per socket {Cores})";
 
-        /// <summary>What the recommended MAXDOP is capped from, as a noun phrase: "this server's per-NUMA-node processor count" or "this database's vCores".</summary>
-        public string Source => FromVcores ? "this database's vCores" : "this server's per-NUMA-node processor count";
+        /// <summary>What the recommended MAXDOP is capped from, as a noun phrase: "this server's cores-per-socket" or "this database's vCores". The cores-per-socket figure stands in for the per-NUMA-node processor count.</summary>
+        public string Source => FromVcores ? "this database's vCores" : "this server's cores-per-socket";
 
-        /// <summary>The same figure named without "this server's" / "this database's": "the per-NUMA-node processor count" or "the database's vCores".</summary>
-        public string Bare => FromVcores ? "the database's vCores" : "the per-NUMA-node processor count";
+        /// <summary>The same figure named without "this server's" / "this database's": "the cores-per-socket" or "the database's vCores".</summary>
+        public string Bare => FromVcores ? "the database's vCores" : "the cores-per-socket";
     }
 
     /// <summary>Reads the <see cref="MaxdopBasis"/> off the SERVER_HARDWARE fact; <c>cores_per_socket</c> when it carries one, else <c>vcore_count</c>.</summary>

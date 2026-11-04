@@ -461,7 +461,7 @@ public sealed class ProposalWebRouteLiveTests(PostgresKillLiveTests.ScramTlsClus
             Assert.Equal(200, read.Status);
             Assert.False((bool)read.Body!["can_press"]!);
             var note = (string?)read.Body["press_note"];
-            Assert.Contains("read-only access to the bundled store", note);
+            Assert.Contains("Changes from this page are turned off", note);
             Assert.Contains("web.allowAdminWrites", note);
             Assert.DoesNotContain("Sign in", note);
 

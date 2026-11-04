@@ -26,6 +26,37 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingPgSessionStatesReader
 {
+    /// <summary>
+    /// A session must have been seen holding the horizon in at least this share of the samples that saw it
+    /// before it is called a sustained holder rather than a passing one.
+    /// <para>Half. Every session with an open write transaction is momentarily the oldest holder at some
+    /// point, which is what a transaction IS, so a single sighting proves nothing beyond "this instance
+    /// does writes". Sustained holding is the finding, and the MCP tool reports the raw sample counts beside
+    /// the verdict so a caller can disagree with the threshold rather than having to trust it.</para>
+    /// </summary>
+    public const double SustainedHolderSampleShare = 0.5;
+
+    /// <summary>
+    /// The fewest holder samples a session needs before it can be called a sustained holder (#7381). The
+    /// share rule alone is met by 1 of 1, and one sighting is a passing statement on a quiet instance, not a
+    /// hold.
+    /// </summary>
+    public const int MinSustainedHolderSamples = 2;
+
+    /// <summary>
+    /// The one rule behind the MCP Critical band, the "PINS THE XMIN HORIZON" text and the viewer's red row
+    /// (#7381): at least <see cref="MinSustainedHolderSamples"/> holder samples, at least
+    /// <see cref="SustainedHolderSampleShare"/> of the samples that saw the session, and a peak horizon age
+    /// above 0. Age 0 means the session held the newest xid or snapshot, so nothing waited behind it: being
+    /// the oldest on a quiet instance is not the same as holding anything. This also covers rows stored
+    /// before the collector stopped reporting the service's own connections.
+    /// </summary>
+    public static bool IsSustainedHolder(PgSessionStateRow r) =>
+        r.SampleCount > 0
+        && r.PeakHorizonAge > 0
+        && r.HorizonHolderSamples >= Math.Max(
+            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+
     public sealed record PgSessionStateRow(
         long BackendId,
         int Pid,

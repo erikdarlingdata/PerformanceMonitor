@@ -331,7 +331,7 @@ export function renderLineChart(spec) {
     }
     if (dataMax === -Infinity) {
       /* With a series hidden the legend must stay on screen to bring it back, so draw an empty axis instead. */
-      if (legendHidden.size === 0) return el("div", { class: "chart" }, [emptyStrip("No numeric values to chart.")]);
+      if (legendHidden.size === 0) return el("div", { class: "chart" }, [emptyStrip("No point in this period holds a value, so there is nothing to draw.")]);
       dataMax = 1;
     }
     dataMin = Math.min(0, dataMin);
