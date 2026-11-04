@@ -13,7 +13,6 @@
     <PackageVersion Include="AWSSDK.S3" Version="4.0.103.4" />
     <PackageVersion Include="AWSSDK.SecurityToken" Version="4.0.101.7" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.1.0" />
-    <PackageVersion Include="Azure.Identity" Version="1.21.0" />
     <PackageVersion Include="Azure.Storage.Blobs" Version="12.30.1" />
     <PackageVersion Include="CredentialManagement" Version="1.0.2" />
     <PackageVersion Include="FlaUI.UIA3" Version="5.0.0" />
