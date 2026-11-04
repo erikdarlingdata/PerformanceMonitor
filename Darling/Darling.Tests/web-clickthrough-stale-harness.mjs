@@ -167,6 +167,41 @@ const scenarios = {
     const afterEnter = protection.getAttribute("aria-expanded");
     return { server: view(server), fleetCard: view(fleetCard), before, afterClick, afterEnter, stopped };
   },
+  /* #7395: the server page draws its head again on every poll and tab click. A tile the reader opened stays open across the redraw
+     (matched by label, not by text, which changes between polls), a tile that is now too short to clamp has nothing to reopen and
+     is closed if it grows back, and a tile the reader never opened stays closed. The Set is what server.js keeps for one server. */
+  serverTilesReopen: async () => {
+    const items = (n) => Array.from({ length: n }, (_, i) => ({ text: "AppDatabase" + i + " full backup 9 days" }));
+    const draw = (count, open) => modules.util.clampTileDetails(modules.fleet.metricBands(card({
+      last_collection: iso(1000), database_protection_overdue: items(count), agent_alert_gaps: [{ message: "No alert for severity 19." }],
+    })), undefined, open);
+    const detailOf = (root, label) => {
+      const chip = all(root, (n) => String(n.className).startsWith("metric-chip")).find((c) => c.children[0].textContent.startsWith(label));
+      const d = chip && (chip.children || []).find((x) => String(x.className).split(" ").includes("detail"));
+      return d ? { cls: d.className, expanded: d.getAttribute("aria-expanded") } : null;
+    };
+    const click = (root) => {
+      const d = all(root, (n) => String(n.className).includes("clamp-lines"))[0];
+      d.listeners.click.forEach((fn) => fn({ type: "click", stopPropagation() {} }));
+    };
+    const open = new Set();
+    const first = draw(20, open);
+    const closedAtFirst = detailOf(first, "Protection").expanded;
+    click(first);
+    const openedByClick = detailOf(first, "Protection").expanded;
+    const labelsAfterClick = Array.from(open);
+    const poll = draw(25, open); // the next poll: different text, same tile
+    const afterPoll = detailOf(poll, "Protection");
+    const labelsAfterPoll = Array.from(open);
+    const short = draw(1, open); // one item overdue: the detail is short, so the tile is not clamped
+    const afterShort = detailOf(short, "Protection");
+    const labelsAfterShort = Array.from(open);
+    const regrown = draw(20, open); // overdue again: the reader closed nothing, but the tile went short in between, so it starts closed
+    const afterRegrown = detailOf(regrown, "Protection");
+    const another = draw(20, new Set()); // another server: its own empty set
+    const afterAnotherServer = detailOf(another, "Protection");
+    return { closedAtFirst, openedByClick, labelsAfterClick, afterPoll, labelsAfterPoll, afterShort, labelsAfterShort, afterRegrown, afterAnotherServer };
+  },
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({
     chips: chips(modules.fleet.metricBands(card({

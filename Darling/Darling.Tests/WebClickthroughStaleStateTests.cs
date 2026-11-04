@@ -128,6 +128,30 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal(2, r.GetProperty("stopped").GetInt32());
     }
 
+    /// <summary>
+    /// #7395: a tile the reader opened stays open when the server head is drawn again (every poll and tab click), matched by its label
+    /// since its text changes. A tile that went short has nothing to reopen and starts closed if it grows back, and another server's head
+    /// (its own remembered set) starts closed.
+    /// </summary>
+    [Fact]
+    public void AnOpenedServerTile_StaysOpenWhenTheHeadIsDrawnAgain_AndStartsClosedOnAnotherServerOrAfterItWentShort()
+    {
+        var r = Run("serverTilesReopen");
+        Assert.Equal("false", r.GetProperty("closedAtFirst").GetString());
+        Assert.Equal("true", r.GetProperty("openedByClick").GetString());
+        Assert.Equal(["Protection"], r.GetProperty("labelsAfterClick").EnumerateArray().Select(l => l.GetString()).ToArray());
+
+        var poll = r.GetProperty("afterPoll");
+        Assert.Equal("true", poll.GetProperty("expanded").GetString());
+        Assert.Contains("clamp-lines", poll.GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Single(r.GetProperty("labelsAfterPoll").EnumerateArray());
+
+        Assert.DoesNotContain("clamp-lines", r.GetProperty("afterShort").GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Empty(r.GetProperty("labelsAfterShort").EnumerateArray());
+        Assert.Equal("false", r.GetProperty("afterRegrown").GetProperty("expanded").GetString());
+        Assert.Equal("false", r.GetProperty("afterAnotherServer").GetProperty("expanded").GetString());
+    }
+
     /// <summary>#6828: the server header's Collectors chip counts a WARNING collector as a warning, not as healthy.</summary>
     [Fact]
     public void TheCollectorsChip_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()

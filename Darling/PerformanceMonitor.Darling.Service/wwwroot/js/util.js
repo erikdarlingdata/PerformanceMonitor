@@ -138,7 +138,7 @@ export function clampText(text, opts = {}) {
  * shares (clampText's one-line cell, a tile's three-line detail). The click that ends a text selection is the reader copying,
  * not opening, and the toggle stops its event so a clickable row or card around it is not also activated.
  */
-export function makeClampToggle(node) {
+export function makeClampToggle(node, onToggle) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.setAttribute("aria-expanded", "false");
@@ -152,6 +152,7 @@ export function makeClampToggle(node) {
     const open = node.getAttribute("aria-expanded") !== "true";
     node.setAttribute("aria-expanded", open ? "true" : "false");
     node.classList.toggle("open", open);
+    if (typeof onToggle === "function") onToggle(open);
   };
   node.addEventListener("click", toggle);
   node.addEventListener("keydown", (e) => {
@@ -173,18 +174,44 @@ const TILE_DETAIL_CLAMP_CHARS = 100;
  * three lines (`.clamp-lines`) and opens on demand like clampText; its title keeps the full text. A shorter detail is left as it
  * is, and so is every tile the caller does not pass through here (the fleet cards keep their one-line ellipsis). Returns `root`.
  */
-export function clampTileDetails(root, minChars = TILE_DETAIL_CLAMP_CHARS) {
-  const walk = (n) => {
+export function clampTileDetails(root, minChars = TILE_DETAIL_CLAMP_CHARS, openLabels) {
+  const hasClass = (n, name) => typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+  const remember = openLabels instanceof Set ? openLabels : null;
+  const stillOpen = [];
+  const walk = (n, label) => {
     if (!n || typeof n !== "object") return;
-    if (typeof n.className === "string" && (" " + n.className + " ").includes(" detail ") && String(n.textContent || "").length > minChars) {
+    if (hasClass(n, "detail") && String(n.textContent || "").length > minChars) {
       n.className += " clamp-lines";
-      makeClampToggle(n);
+      /* #7395: a tile the reader opened stays open when the head is drawn again. The tile is told apart by its label, since its
+         text changes between polls. A detail that is now short enough not to clamp is not here, so there is nothing to reopen. */
+      const open = remember !== null && label !== null && remember.has(label);
+      makeClampToggle(n, remember === null || label === null ? undefined : (isOpen) => (isOpen ? remember.add(label) : remember.delete(label)));
+      if (open) {
+        n.setAttribute("aria-expanded", "true");
+        n.classList.add("open");
+        stillOpen.push(label);
+      }
       return;
     }
-    Array.from(n.children || []).forEach(walk);
+    const here = hasClass(n, "metric-chip") ? tileLabel(n) : label;
+    Array.from(n.children || []).forEach((c) => walk(c, here));
   };
-  walk(root);
+  walk(root, null);
+  /* What is remembered is what is open on screen now: a label whose tile went short or went away is forgotten. */
+  if (remember !== null) {
+    remember.clear();
+    stillOpen.forEach((l) => remember.add(l));
+  }
   return root;
+}
+
+/** A metric tile's label (its first line, without the severity badge beside it), or null when the tile has none. */
+function tileLabel(chip) {
+  const first = Array.from(chip.children || [])[0];
+  if (!first) return null;
+  const named = Array.from(first.children || [])[0];
+  const text = String((named || first).textContent || "").trim();
+  return text === "" ? null : text;
 }
 
 /*

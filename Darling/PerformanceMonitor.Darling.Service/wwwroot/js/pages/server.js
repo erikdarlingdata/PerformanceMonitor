@@ -140,6 +140,15 @@ onPageLeave(() => {
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
 
+/* #7395: the header tiles the reader opened on this server (the Protection tile's list of overdue databases), by label. The head is
+   drawn again on every poll and every tab click, and a tile that snapped shut on each one could not be read. Moving to another
+   server starts closed. */
+let openTiles = { server: null, labels: new Set() };
+function openTilesFor(server) {
+  if (openTiles.server !== server) openTiles = { server, labels: new Set() };
+  return openTiles.labels;
+}
+
 /** How long a tab click may reuse the remembered card (#6310): the 60 s poll's cadence, so a click never shows a header older than one poll. */
 export const REMEMBERED_CARD_MAX_AGE_MS = 60000;
 
@@ -647,6 +656,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
 
   mount(whySlot, [
     reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
-    clampTileDetails(metricBands(card)),
+    /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
+    clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);
 }
