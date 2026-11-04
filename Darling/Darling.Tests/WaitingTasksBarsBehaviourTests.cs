@@ -97,8 +97,18 @@ public sealed class WaitingTasksBarsBehaviourTests
         foreach (var chart in new[] { run.GetProperty("waiting"), run.GetProperty("blocked") })
         {
             var widths = Ints(chart, "widths");
+            Assert.NotEmpty(widths);
             Assert.All(widths, w => Assert.InRange(w, 8, 64));
         }
+    }
+
+    [Fact]
+    public void CollectionsAMinuteApartInADayWindow_StillDrawBarsYouCanSee()
+    {
+        var waiting = Run("close").GetProperty("waiting");
+
+        Assert.Equal(3, waiting.GetProperty("barColumns").GetInt32());
+        Assert.All(Ints(waiting, "widths"), w => Assert.InRange(w, 8, 64));
     }
 
     [Fact]

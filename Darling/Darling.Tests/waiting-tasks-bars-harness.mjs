@@ -75,11 +75,17 @@ const BLOCKED = [
 const TASKS = [
   { collection_time: ago(3), session_id: 61, wait_type: "CXCONSUMER", wait_duration_ms: 82, thread_count: 2, blocking_session_id: 0, database_name: "Sales" },
 ];
+/* Two collections a minute apart and one far from them: the tightest gap is a hairline in a 24 hour window. */
+const closeWaits = [
+  { collection_time: ago(6), wait_type: "CXCONSUMER", total_wait_ms: 40 },
+  { collection_time: ago(1), wait_type: "CXCONSUMER", total_wait_ms: 30 },
+  { collection_time: new Date(Date.parse(ago(1) + "Z") + 60000).toISOString().replace("Z", "0000"), wait_type: "CXCONSUMER", total_wait_ms: 20 },
+];
 const manyWaits = Array.from({ length: 10 }, (_, i) => ({ collection_time: ago(3), wait_type: "W" + i, total_wait_ms: 100 - i }));
 
 const answerFor = (name) => {
   if (name === "get_current_waits_trend") {
-    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : WAITS, blocked_sessions: BLOCKED };
+    return { server: "a", waiting_tasks: scenario === "many" ? manyWaits : scenario === "close" ? closeWaits : WAITS, blocked_sessions: BLOCKED };
   }
   if (name === "get_waiting_tasks") return { server: "a", tasks: TASKS };
   return {};
@@ -130,7 +136,7 @@ const chartReport = (panel) => {
 };
 
 const out = {};
-if (scenario === "default" || scenario === "many") {
+if (scenario === "default" || scenario === "many" || scenario === "close") {
   const root = await draw("blocking");
   out.waiting = chartReport(panelOf(root, "Waiting Tasks"));
   out.blocked = chartReport(panelOf(root, "Blocked Sessions"));
