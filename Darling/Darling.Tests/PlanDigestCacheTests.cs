@@ -214,30 +214,31 @@ public sealed class PlanDigestCacheTests
         Assert.DoesNotContain("dm_exec_text_query_plan", deferred, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The end of a batch: the entries a run read are proved only when its write committed. A failed write leaves nothing
+    /// cached, so the next run reads those plans and texts again instead of sending a digest the store never received.
+    /// </summary>
     [Fact]
-    public void TheRunnerConfirmsOnlyAfterTheCommitAndDiscardsOnFailure()
+    public void ABatchThatFailed_DiscardsItsPendingEntries_AndACommittedOneConfirmsThem()
     {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")
-            .ReplaceLineEndings("\n");
+        var cache = new PlanDigestCache<QueryStatsPlanKey>();
+        var failed = Key();
+        cache.AddPending(failed, "AB", 10, Now);
+        cache.Settle(new[] { failed }, committed: false, Now);
+        /* Discarded, not merely still pending: a later confirm finds nothing to prove. */
+        cache.ConfirmPending(new[] { failed }, Now);
+        Assert.False(cache.TryGet(failed, Now, out _));
 
-        var write = source.IndexOf("rowsWritten = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);", StringComparison.Ordinal);
-        var committedSet = source.IndexOf("committed = true;", write, StringComparison.Ordinal);
-        var confirm = source.IndexOf("planCache.ConfirmPending(", StringComparison.Ordinal);
-        var discard = source.IndexOf("planCache.DiscardPending(", StringComparison.Ordinal);
+        var stored = Key(handle: 0x0B);
+        cache.AddPending(stored, "CD", 10, Now);
+        Assert.False(cache.TryGet(stored, Now, out _));
+        cache.Settle(new[] { stored }, committed: true, Now);
+        Assert.True(cache.TryGet(stored, Now, out var confirmed));
+        Assert.True(confirmed.Confirmed);
 
-        Assert.True(write > 0 && committedSet > write, "the commit flag is set only after WriteBatchAsync returns");
-        Assert.True(confirm > committedSet, "ConfirmPending runs after the commit");
-        Assert.True(discard > confirm, "DiscardPending covers the failed write");
-        /* One confirm per cache: query_stats' plans, query_stats' texts (#7419) and procedure_stats', each after the same commit flag. */
-        Assert.Equal(3, Count(source, "ConfirmPending("));
-        var textConfirm = source.IndexOf("textCache.ConfirmPending(", StringComparison.Ordinal);
-        var textDiscard = source.IndexOf("textCache.DiscardPending(", StringComparison.Ordinal);
-        Assert.True(textConfirm > committedSet, "the text cache confirms only after the commit");
-        Assert.True(textDiscard > textConfirm, "and discards when the write failed");
-        var procedureConfirm = source.IndexOf("procedurePlanCache.ConfirmPending(", StringComparison.Ordinal);
-        var procedureDiscard = source.IndexOf("procedurePlanCache.DiscardPending(", StringComparison.Ordinal);
-        Assert.True(procedureConfirm > committedSet, "procedure_stats confirms only after the commit");
-        Assert.True(procedureDiscard > procedureConfirm, "and discards when the write failed");
+        /* A confirmed entry is never dropped by a later failed batch. */
+        cache.Settle(new[] { stored }, committed: false, Now);
+        Assert.True(cache.TryGet(stored, Now, out _));
     }
 
     [Fact]

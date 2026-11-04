@@ -2191,6 +2191,9 @@ public sealed partial class DarlingCollectorRunner
                 List<TRow> rows;
                 List<QueryStatsPlanKey>? pendingPlanKeys = null;
                 List<QueryStatsPlanKey>? pendingTextKeys = null;
+                /* #7419: query_stats' read advanced every candidate's delta baselines. Until the rows reach the store, a run that
+                   ends rolls them back, so the next run's delta covers both intervals. */
+                IBaselineRollback? baselineRollback = null;
                 List<ProcedureStatsPlanKey>? pendingProcedureKeys = null;
                 /* #2851: this branch IS the server-scoped path, so its phases are measured from here on.
                    Set before the read rather than after it so the wall-clock-budget catch below reports the
@@ -2296,6 +2299,7 @@ public sealed partial class DarlingCollectorRunner
                     try
                     {
                         rows = await definition.ReadAsync(counting, context, itemToken);
+                        baselineRollback = rows as IBaselineRollback;
                     }
                     finally
                     {
@@ -2398,6 +2402,7 @@ public sealed partial class DarlingCollectorRunner
                        watermark from moving. The provider's cancellation artifact (ex) is dropped in favour
                        of the budget message, the same as the per-item arm. */
                     _ = ex;
+                    baselineRollback?.RollBackBaselines();
                     var budgetSeconds = (int)definition.PerItemWallClockBudget!.Value.TotalSeconds;
                     _logger?.LogWarning(
                         "{Collector} on '{Server}' reached its {Budget}s wall-clock budget mid-collection — abandoned this cycle, will retry next (#2673).",
@@ -2430,6 +2435,13 @@ public sealed partial class DarlingCollectorRunner
                         TargetSessionId: context.TargetSessionId);
                 }
 
+                catch
+                {
+                    /* #7419: any other end of the read or the target phases before the store (a stop, a fault) stores nothing. */
+                    baselineRollback?.RollBackBaselines();
+                    throw;
+                }
+
                 /* Optional best-effort second query on the same connection (server_properties'
                    health probe). Failure-isolated; skipped on an empty primary, matching Lite. */
                 var supplementalPlan = definition.BuildSupplementalQuery(context);
@@ -2449,7 +2461,18 @@ public sealed partial class DarlingCollectorRunner
                 sqlMs += sqlSlice.ElapsedMilliseconds;
 
                 var storageSlice = Stopwatch.StartNew();
-                await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                NpgsqlConnection openedConnection;
+                try
+                {
+                    openedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                }
+                catch
+                {
+                    baselineRollback?.RollBackBaselines();
+                    throw;
+                }
+
+                await using var pgConnection = openedConnection;
                 var committed = false;
                 try
                 {
@@ -2464,28 +2487,14 @@ public sealed partial class DarlingCollectorRunner
                     if (pendingPlanKeys is not null
                         && _queryStatsPlanCaches.TryGetValue(server.ServerId, out var planCache))
                     {
-                        if (committed)
-                        {
-                            planCache.ConfirmPending(pendingPlanKeys, DateTime.UtcNow);
-                        }
-                        else
-                        {
-                            planCache.DiscardPending(pendingPlanKeys);
-                        }
+                        planCache.Settle(pendingPlanKeys, committed, DateTime.UtcNow);
                     }
 
                     /* #7419: the same rule for the texts this run read. */
                     if (pendingTextKeys is not null
                         && _queryStatsTextCaches.TryGetValue(server.ServerId, out var textCache))
                     {
-                        if (committed)
-                        {
-                            textCache.ConfirmPending(pendingTextKeys, DateTime.UtcNow);
-                        }
-                        else
-                        {
-                            textCache.DiscardPending(pendingTextKeys);
-                        }
+                        textCache.Settle(pendingTextKeys, committed, DateTime.UtcNow);
                     }
 
                     /* Two runs of one server's procedure_stats never overlap, so no other run can overwrite a pending entry
@@ -2499,14 +2508,7 @@ public sealed partial class DarlingCollectorRunner
                     if (pendingProcedureKeys is not null
                         && _procedureStatsPlanCaches.TryGetValue(server.ServerId, out var procedurePlanCache))
                     {
-                        if (committed)
-                        {
-                            procedurePlanCache.ConfirmPending(pendingProcedureKeys, DateTime.UtcNow);
-                        }
-                        else
-                        {
-                            procedurePlanCache.DiscardPending(pendingProcedureKeys);
-                        }
+                        procedurePlanCache.Settle(pendingProcedureKeys, committed, DateTime.UtcNow);
                     }
                 }
 

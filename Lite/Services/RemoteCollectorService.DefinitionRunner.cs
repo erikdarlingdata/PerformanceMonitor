@@ -1558,29 +1558,40 @@ public partial class RemoteCollectorService
         }
 
         var rowsWritten = 0;
-        using (var appender = duckConnection.CreateAppender(definition.TargetTable))
+        try
         {
-            var writer = new AppenderCollectorRowWriter();
-
-            foreach (var item in rows)
+            using (var appender = duckConnection.CreateAppender(definition.TargetTable))
             {
-                var row = appender.CreateRow();
+                var writer = new AppenderCollectorRowWriter();
 
-                if (definition.IncludesCollectionId)
+                foreach (var item in rows)
                 {
-                    row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
+                    var row = appender.CreateRow();
+
+                    if (definition.IncludesCollectionId)
+                    {
+                        row.AppendValue(GenerateCollectionId()); /* collection_id BIGINT */
+                    }
+
+                    row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
+                       .AppendValue(serverId)                    /* server_id INTEGER */
+                       .AppendValue(serverName);                 /* server_name VARCHAR */
+
+                    writer.CurrentRow = row;
+                    definition.WritePayload(item, writer, context);
+                    row.EndRow();
+
+                    rowsWritten++;
                 }
-
-                row.AppendValue(collectionTime)              /* collection_time TIMESTAMP */
-                   .AppendValue(serverId)                    /* server_id INTEGER */
-                   .AppendValue(serverName);                 /* server_name VARCHAR */
-
-                writer.CurrentRow = row;
-                definition.WritePayload(item, writer, context);
-                row.EndRow();
-
-                rowsWritten++;
             }
+        }
+        catch when (rowsWritten == 0)
+        {
+            /* #7419: a read that advanced baselines for rows it then failed to store (the appender never opened, or the first
+               row failed) hands them back, so the next run's delta covers both intervals. Once a row is appended the
+               appender may flush it, so the baselines stay advanced as they always did. */
+            (rows as IBaselineRollback)?.RollBackBaselines();
+            throw;
         }
 
         /* #5990: the batch's query-tag sightings go to an in-memory buffer. No store write happens here; the map pass

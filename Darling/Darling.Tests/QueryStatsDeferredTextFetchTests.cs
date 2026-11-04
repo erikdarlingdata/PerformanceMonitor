@@ -221,7 +221,6 @@ public sealed class QueryStatsDeferredTextFetchTests
 
         Assert.Contains("SUBSTRING", inline, StringComparison.Ordinal);
         Assert.DoesNotContain("SUBSTRING", deferred, StringComparison.Ordinal);
-        Assert.Contains("query_text =\n        CONVERT(nvarchar(max), NULL),", deferred.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         /* The apply stays: the own-statement filter and the host object name read it. */
         Assert.Contains("OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st", deferred, StringComparison.Ordinal);

@@ -193,6 +193,12 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// </summary>
     internal static List<Row> SkipIdleAndRank(List<Row> fetched, CollectorContext context)
     {
+        /* #7419: the loop below advances every candidate's baselines, stored or not. Capture them first, so a host that ends
+           the run before the rows are stored (the item budget fires in the text or plan fetch, the store cannot be reached,
+           the write fails before it starts) rolls them back and the next run's delta spans both intervals. */
+        var snapshot = context.Deltas.CaptureBaselines(
+            context.ServerId, BaselineGroups, fetched.Select(DeltaKeyOf).ToList(), context.CollectionTime);
+
         var candidates = new List<RankedRow>(fetched.Count);
         foreach (var row in fetched)
         {
@@ -225,15 +231,34 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         }
 
         /* The order the plan fetch spends its slots in. A total order, so the same input is written the same way. */
-        return candidates
+        var kept = new QueryStatsRows(snapshot);
+        kept.AddRange(candidates
             .Where(keep.Contains)
             .OrderByDescending(c => c.Elapsed)
             .ThenBy(c => c.Row.PlanHandle, StringComparer.Ordinal)
             .ThenBy(c => c.Row.StatementStartOffset)
             .ThenBy(c => c.Row.StatementEndOffset)
             .ThenBy(c => c.Row.SqlHandle, StringComparer.Ordinal)
-            .Select(c => c.Row)
-            .ToList();
+            .Select(c => c.Row));
+        return kept;
+    }
+
+    private static readonly string[] BaselineGroups =
+        { ExecGroup, WorkerGroup, ElapsedGroup, ReadsGroup, WritesGroup, PhysReadsGroup, RowsGroup, SpillsGroup };
+
+    /// <summary>#7419: the rows <see cref="SkipIdleAndRank"/> keeps, carrying the baselines the read advanced.</summary>
+    private sealed class QueryStatsRows : List<Row>, IBaselineRollback
+    {
+        private IDeltaBaselineSnapshot? _snapshot;
+
+        public QueryStatsRows(IDeltaBaselineSnapshot? snapshot) => _snapshot = snapshot;
+
+        public void RollBackBaselines()
+        {
+            var snapshot = _snapshot;
+            _snapshot = null;
+            snapshot?.Restore();
+        }
     }
 
     private sealed record RankedRow(Row Row, long Cpu, long Elapsed, long Exec, long Reads);

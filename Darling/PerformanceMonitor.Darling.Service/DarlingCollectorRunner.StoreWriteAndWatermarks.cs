@@ -172,19 +172,35 @@ public sealed partial class DarlingCollectorRunner
            every non-Azure target and declares no WatermarkColumn, so it both fans out and cannot re-read a
            sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
            at a time on that server rather than one, for the rest of the cycle. */
-        var outcome = await StoreWriteReattempt.RunAsync(
-            write: async token => pgConnection.State == ConnectionState.Open
-                ? await CopyBatchOnceAsync(
-                    pgConnection, definition, rows, server, collectionTime, context, token)
-                : await CopyOnAFreshConnectionAsync(
+        StoreWriteOutcome outcome;
+        try
+        {
+            outcome = await StoreWriteReattempt.RunAsync(
+                write: async token => pgConnection.State == ConnectionState.Open
+                    ? await CopyBatchOnceAsync(
+                        pgConnection, definition, rows, server, collectionTime, context, token)
+                    : await CopyOnAFreshConnectionAsync(
+                        definition, rows, server, collectionTime, context, token),
+                rewrite: token => CopyOnAFreshConnectionAsync(
                     definition, rows, server, collectionTime, context, token),
-            rewrite: token => CopyOnAFreshConnectionAsync(
-                definition, rows, server, collectionTime, context, token),
-            onReattempt: firstAttempt => _logger?.LogWarning(
-                firstAttempt,
-                StoreWriteReattemptLogTemplate,
-                definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
-            cancellationToken);
+                onReattempt: firstAttempt => _logger?.LogWarning(
+                    firstAttempt,
+                    StoreWriteReattemptLogTemplate,
+                    definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
+                cancellationToken);
+        }
+        catch (Exception fault) when (RollsBackBaselines(fault))
+        {
+            /* #7419: a read that advanced baselines for rows it then failed to store hands them back, so the next run's
+               delta covers both intervals. Before the read advanced them, a batch that never started its COPY left every
+               baseline alone, and a COPY that failed under its row loop advanced only the rows it reached. A COPY that fails
+               stores nothing, so putting them all back loses nothing. The one cost: a fault while the commit's
+               acknowledgment is in flight can leave the server committed, and then the next delta counts that interval
+               twice, where before it lost it. A fault after the COPY (the dimension flush or the commit, phase Unknown)
+               keeps the advanced baselines, as it always did. */
+            (rows as IBaselineRollback)?.RollBackBaselines();
+            throw;
+        }
 
         if (outcome.Reattempted)
         {
@@ -204,6 +220,10 @@ public sealed partial class DarlingCollectorRunner
 
         return outcome.RowsWritten;
     }
+
+    /// <summary>#7419: whether a failed write stored nothing, so the baselines its read advanced may be put back.</summary>
+    internal static bool RollsBackBaselines(Exception fault) =>
+        CollectorFaultCopyPhase.For(fault) != StoreCopyPhase.Unknown;
 
     /// <summary>
     /// The keyed pre-insert dedupe (#4487): reads the batch's own natural keys back from
