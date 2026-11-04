@@ -121,9 +121,11 @@ public sealed class DarlingMcpPgIoTools
                     postgres, resolved.ServerId, "pg_io_stats", now.AddHours(-hours_back), now, cancellationToken);
                 var (emptyStatus, emptyFinding) = EmptyWindowAnswer(runFacts, hours_back);
 
-                /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. */
+                /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. #7459: the unavailable word
+                   is the same read with nothing found, so it asks the same probe (emptyAnswer is about the rows, not the word): with no
+                   row and no run in the window the notice then says the window was not covered, instead of hints that call it covered. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
-                    postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: emptyStatus == "empty", logger, cancellationToken);
+                    postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,

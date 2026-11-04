@@ -420,7 +420,7 @@ public sealed class DarlingQueryHeatmapLiveTests
             await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
 
             var noWindow = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
-            Assert.Equal("empty", noWindow.GetProperty("status").GetString());
+            Assert.Equal("unavailable", noWindow.GetProperty("status").GetString());
             var noWindowText = noWindow.GetProperty("message").GetString()!;
             Assert.Contains("Widen hours_back", noWindowText, StringComparison.Ordinal);
             Assert.DoesNotContain("EVER", noWindowText, StringComparison.Ordinal);
@@ -757,7 +757,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             await SeedAsync(connection, ct, baseNow.AddHours(-40), "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
 
             var outside = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
-            Assert.Equal("empty", outside.GetProperty("status").GetString());
+            /* #7459: rows only outside the window mean nobody collected IN it, so the word is unavailable, with the not-covered hints. */
+            Assert.Equal("unavailable", outside.GetProperty("status").GetString());
             var outsideHints = outside.GetProperty("hints");
             Assert.True(outsideHints.GetProperty("window_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, outsideHints.GetProperty("effective_start").ValueKind);
