@@ -44,7 +44,7 @@ public sealed partial class PgTargetFactCollector
     /// <c>GREATEST(NULL, 0)</c> sums to 0 and <c>wal_tracked</c> is what separates "no WAL" from "no
     /// <c>pg_stat_wal</c>" — the fact carries it and the advice says which. <c>wal_records</c> rides beside the
     /// bytes (the last column, appended so the earlier ordinals did not move) because NULL-ness is only ONE of the
-    /// store's ways of saying "not reported": the trackedness decision itself is <see cref="WalIsTracked"/>, shared
+    /// store's ways of saying "not reported": the classification itself is <see cref="ClassifyWal"/>, shared
     /// with the WAL-volume read, and it needs both sums.</para>
     ///
     /// <para><b>A restart-spanning interval's checkpoint figures are unknown, not pressure (#3955).</b> A clean restart
@@ -116,10 +116,11 @@ FROM sampled";
     /// <c>wal_tracked</c> is <c>bool_or(wal_bytes IS NOT NULL)</c>: the collector types the WAL columns NULL on
     /// Aurora (<c>pg_stat_wal</c> raises <c>0A000</c> there) and below PG 14 (no view), so an all-NULL window is
     /// the flavour or major saying so. <c>wal_records</c> rides beside <c>wal_bytes</c> so a window in which BOTH
-    /// summed to zero across every sample can be told from a merely idle server: a live <c>pg_stat_wal</c> writes
-    /// a record for every commit, and a PostgreSQL that ran checkpoints (the sibling read proves it did) while
-    /// writing zero WAL records is a counter that is not being populated, not a quiet one. The fact says which.
-    /// The decision over those columns is <see cref="WalIsTracked"/>, the one predicate both reads apply.</para>
+    /// summed to zero across every sample can be classified (#7457): zero beside checkpoint buffers written is a
+    /// counter that is not being populated, zero with nothing else written is a server that wrote no WAL. Checkpoints
+    /// RUNNING prove nothing - a timed checkpoint skipped because the server was idle still counts in <c>num_timed</c>.
+    /// The fact says which.
+    /// The decision over those columns is <see cref="ClassifyWal"/>, the one classification both reads apply.</para>
     /// </summary>
     public const string PgTargetWalVolumeSql = @"
 WITH sampled AS (
@@ -203,10 +204,12 @@ SELECT
     /// <c>PgTargetAnomalyDetector.Wal.cs</c>): WAL volume is a server-relative quantity — 9 MiB/s is routine on
     /// one server and a deployment gone wrong on another — so there is deliberately no absolute bar and the fact
     /// carries <c>threshold_lineage = 1</c>: not "measured", but "no bar was chosen to have a lineage". Where WAL
-    /// is NOT reported the fact is still emitted, as <c>unavailable = 1</c> with the reason flag: an all-NULL or
-    /// all-zero <c>wal_bytes</c> AND <c>wal_records</c> window is <c>reason_wal_stats_not_reported</c> (Aurora —
-    /// §A7: fifty clusters, fourteen days, zero bytes on every one); a registry major below 14 with no rows at all
-    /// is <c>reason_pg_stat_wal_absent</c> (the view does not exist there). On a stock PostgreSQL 14+ with no rows
+    /// is NOT reported the fact is still emitted, as <c>unavailable = 1</c> with the reason flag (#7457 split them): an
+    /// all-NULL window on Aurora is <c>reason_wal_stats_not_reported</c> (§A7: fifty clusters, fourteen days, no
+    /// figure on every one); an all-NULL window on a registry major below 14 is <c>reason_pg_stat_wal_absent</c> (the
+    /// view does not exist there, with or without rows); zero bytes and records beside checkpoint buffers written, or
+    /// NULL columns with neither cause, is <c>reason_wal_stats_not_populated</c>. Zero bytes and records with nothing else
+    /// written is a quiet server, not a gap: the fact is emitted TRACKED at 0 B/s. On a stock PostgreSQL 14+ with no rows
     /// the collector has not run and nothing is emitted — the coverage witness already describes that gap.</para>
     /// </summary>
     private async partial Task CollectWriteFactsAsync(AnalysisContext context, List<Fact> facts)
@@ -221,8 +224,8 @@ SELECT
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            await ReadCheckpointPressureAsync(context, facts, connection, isAurora);
-            await ReadWalVolumeAsync(context, facts, connection, major);
+            var checkpointBuffers = await ReadCheckpointPressureAsync(context, facts, connection, isAurora, major);
+            await ReadWalVolumeAsync(context, facts, connection, isAurora, major, checkpointBuffers);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -233,8 +236,10 @@ SELECT
     }
 
     /// <summary>The checkpoint read and the <c>PG_CHECKPOINT_PRESSURE</c> fact — the body documented on
-    /// <see cref="CollectWriteFactsAsync"/>, with the Aurora <c>not_applicable</c> stamp at the end.</summary>
-    private async Task ReadCheckpointPressureAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, bool isAurora)
+    /// <see cref="CollectWriteFactsAsync"/>, with the Aurora <c>not_applicable</c> stamp at the end. Returns the
+    /// checkpoint-buffer sum the WAL classification used (0 when no fact was emitted), so the WAL-volume read judges
+    /// the same window by the same evidence (#7457).</summary>
+    private async Task<long> ReadCheckpointPressureAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, bool isAurora, int major)
     {
         using var cmd = new NpgsqlCommand(PgTargetCheckpointSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
@@ -242,15 +247,15 @@ SELECT
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-        if (!await reader.ReadAsync(context.CancellationToken)) return;
+        if (!await reader.ReadAsync(context.CancellationToken)) return 0;
 
         var sampleCount = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
-        if (sampleCount < 2) return;
+        if (sampleCount < 2) return 0;
 
         var requested = ToInt64(reader.GetValue(0));
         var timed = ToInt64(reader.GetValue(1));
         var total = requested + timed;
-        if (total <= 0) return;
+        if (total <= 0) return 0;
 
         var writeMs = Convert.ToDouble(reader.GetValue(2));
         var syncMs = Convert.ToDouble(reader.GetValue(3));
@@ -261,7 +266,8 @@ SELECT
         var walResets = Convert.ToInt32(reader.GetValue(8));
         var walAnyNonNull = !reader.IsDBNull(9) && reader.GetBoolean(9);
         var walRecords = ToInt64(reader.GetValue(11));
-        var walTracked = WalIsTracked(walAnyNonNull, walBytes, walRecords);
+        var walReport = ClassifyWal(walAnyNonNull, walBytes, walRecords, buffersWritten);
+        var walTracked = walReport is WalReport.Reported or WalReport.NoneWritten;
         /* #3955: the intervals that spanned a postmaster restart, which the requested, write, sync and checkpoint-buffer
            sums above left out. */
         var postmasterRestarts = Convert.ToInt32(reader.GetValue(12));
@@ -318,6 +324,18 @@ SELECT
             }
         }
 
+        /* #7457: an untracked window says WHY, so the advice names the cause that is true of THIS server instead of
+           blaming Aurora for every gap. Aurora already carries its own flags below. */
+        if (walReport == WalReport.NotPopulated)
+            fact.Metadata["wal_not_populated"] = 1;
+        else if (walReport == WalReport.NotReported && !isAurora)
+        {
+            if (major is > 0 and < 14)
+                fact.Metadata["reason_pg_stat_wal_absent"] = 1;
+            else
+                fact.Metadata["wal_not_populated"] = 1;
+        }
+
         if (isAurora)
         {
             /* #3691 §A4: Aurora storage owns checkpointing; the counters are synthetic (sixty timed an hour,
@@ -330,11 +348,12 @@ SELECT
         }
 
         facts.Add(fact);
+        return buffersWritten;
     }
 
     /// <summary>The WAL-volume read and the <c>PG_WAL_VOLUME_SHIFT</c> context fact — the body documented on
     /// <see cref="CollectWriteFactsAsync"/>: tracked, or <c>unavailable</c> with the reason flag.</summary>
-    private async Task ReadWalVolumeAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, int major)
+    private async Task ReadWalVolumeAsync(AnalysisContext context, List<Fact> facts, NpgsqlConnection connection, bool isAurora, int major, long checkpointBuffersWritten)
     {
         using var cmd = new NpgsqlCommand(PgTargetWalVolumeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
@@ -360,11 +379,20 @@ SELECT
         var walBytes = Convert.ToDouble(reader.GetValue(3));
         var walRecords = ToInt64(reader.GetValue(4));
 
-        /* The one trackedness decision (WalIsTracked) — the same three inputs the checkpoint read handed it a moment
-           ago, over the same window, so the two facts cannot disagree about whether WAL is reported. */
-        if (!WalIsTracked(walAnyNonNull, walBytes, walRecords))
+        /* The one classification (ClassifyWal) - the same inputs the checkpoint read handed it a moment ago, over the
+           same window, so the two facts cannot disagree about whether WAL is reported (#7457). */
+        var report = ClassifyWal(walAnyNonNull, walBytes, walRecords, checkpointBuffersWritten);
+        if (report == WalReport.NotPopulated)
         {
-            facts.Add(UnavailableWalVolume(context, "reason_wal_stats_not_reported", sampleCount));
+            facts.Add(UnavailableWalVolume(context, "reason_wal_stats_not_populated", sampleCount));
+            return;
+        }
+        if (report == WalReport.NotReported)
+        {
+            var reason = isAurora ? "reason_wal_stats_not_reported"
+                : major is > 0 and < 14 ? "reason_pg_stat_wal_absent"
+                : "reason_wal_stats_not_populated";
+            facts.Add(UnavailableWalVolume(context, reason, sampleCount));
             return;
         }
 
@@ -399,32 +427,42 @@ SELECT
         });
     }
 
+    /// <summary>What a window's WAL columns say. #7457 split the old two-way "tracked" decision, whose zero rule read an
+    /// idle server as a broken counter.</summary>
+    public enum WalReport
+    {
+        /// <summary>Every WAL column is NULL: the flavour or major has no view (Aurora raises 0A000, below 14 it does not exist).</summary>
+        NotReported,
+        /// <summary>The columns are non-NULL and zero, and nothing else shows writes: the server wrote no WAL in this window.</summary>
+        NoneWritten,
+        /// <summary>The columns are non-NULL and zero while checkpoints wrote buffers: the counters are not being populated.</summary>
+        NotPopulated,
+        /// <summary>Bytes or records moved.</summary>
+        Reported,
+    }
+
     /// <summary>
-    /// Whether <c>pg_write_stats</c> is REPORTING WAL over a window — the one definition of "WAL tracked", applied by
+    /// Classifies <c>pg_write_stats</c> WAL columns over a window - the one definition, applied by
     /// <see cref="ReadCheckpointPressureAsync"/> (the <c>wal_tracked</c> flag and the per-second / per-checkpoint WAL
     /// figures on <c>PG_CHECKPOINT_PRESSURE</c>) and by <see cref="ReadWalVolumeAsync"/> (the tracked vs
-    /// <c>unavailable</c> shape of <c>PG_WAL_VOLUME_SHIFT</c>) alike.
+    /// <c>unavailable</c> shape of <c>PG_WAL_VOLUME_SHIFT</c>) alike, so the two facts cannot contradict each other
+    /// (#3691 exit check).
     ///
-    /// <para><b>Why one predicate (#3691 exit check).</b> Lane 15 shipped two: the checkpoint read decided from NULL-ness
-    /// alone (<c>bool_or(wal_bytes IS NOT NULL)</c>) while the WAL-volume read also required a non-zero byte OR record
-    /// sum. On a window whose <c>wal_bytes</c> is 0-not-NULL the two disagreed on one pass over one table —
-    /// <c>PG_CHECKPOINT_PRESSURE</c> said <c>wal_tracked 1, wal_bytes 0, wal_bytes_per_sec 0</c> while
-    /// <c>PG_WAL_VOLUME_SHIFT</c> beside it said <c>unavailable, reason_wal_stats_not_reported</c>. That shape is a
-    /// planted store's: the REAL collector types the WAL columns NULL where <c>pg_stat_wal</c> is not implemented
-    /// (Aurora) or does not exist (below 14), so on the fleet it is unreachable — but a read that can contradict its
-    /// sibling on any input is two definitions, and the advice reads the pressure fact's flag to decide whether to
-    /// state WAL figures at all.</para>
-    ///
-    /// <para><b>The decision.</b> Tracked when some row in the window carried a non-NULL <c>wal_bytes</c>
-    /// (<paramref name="anyNonNull"/>) AND the window's reset-clamped sums are not both zero: a live
-    /// <c>pg_stat_wal</c> writes a record per commit and a checkpoint record per checkpoint, so a window in which
-    /// checkpoints ran (the pressure read only reaches here when they did) while the counters summed to zero bytes
-    /// AND zero records is a counter nobody is populating, not an idle server. A window with bytes but no records
-    /// (an older fixture, or a collector that stored one column) is tracked — either sum moving is the counter
-    /// moving. Untracked leaves the pressure fact's WAL figures ABSENT, not zero — the same posture as before.</para>
+    /// <para><b>The decision (#7457).</b> All-NULL <c>wal_bytes</c> is <see cref="WalReport.NotReported"/> whatever the
+    /// sums coalesced to. Bytes or records moving is <see cref="WalReport.Reported"/>. Non-NULL zeros are then split by
+    /// other evidence of writing: <paramref name="checkpointBuffersWritten"/> above zero means checkpoints flushed dirty
+    /// buffers while the WAL counters stayed at zero (<see cref="WalReport.NotPopulated"/>; an unlogged table writes
+    /// buffers without WAL, so the advice words it as "not populated, or the writes were unlogged"). Otherwise it is
+    /// <see cref="WalReport.NoneWritten"/>: the old rule read "checkpoints ran" as proof of writes, but PostgreSQL counts
+    /// a timed checkpoint it skipped because the server was idle in <c>num_timed</c>, and a skipped one writes no record,
+    /// so a quiet stock server over a day showed 288 timed checkpoints, 0 buffers and 0 WAL and was blamed on Aurora.</para>
     /// </summary>
-    internal static bool WalIsTracked(bool anyNonNull, double walBytes, long walRecords) =>
-        anyNonNull && (walBytes > 0 || walRecords > 0);
+    internal static WalReport ClassifyWal(bool anyNonNull, double walBytes, long walRecords, long checkpointBuffersWritten)
+    {
+        if (!anyNonNull) return WalReport.NotReported;
+        if (walBytes > 0 || walRecords > 0) return WalReport.Reported;
+        return checkpointBuffersWritten > 0 ? WalReport.NotPopulated : WalReport.NoneWritten;
+    }
 
     /// <summary>The <c>PG_WAL_VOLUME_SHIFT</c> fact in its <c>unavailable</c> shape: value 0, <c>wal_tracked = 0</c>,
     /// <c>unavailable = 1</c> and exactly one reason flag (<paramref name="reason"/>, a metadata KEY — the

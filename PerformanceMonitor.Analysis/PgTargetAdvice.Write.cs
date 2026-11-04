@@ -38,8 +38,9 @@ namespace PerformanceMonitor.Analysis;
 ///
 /// <para><b>WAL volume (lane 15, design §3.11): the context fact states, the anomaly grades.</b>
 /// <c>PG_WAL_VOLUME_SHIFT</c>'s block states the window's mean and peak bytes per second, or — where WAL is not
-/// reported — which reason (<c>pg_stat_wal</c> not implemented on Aurora; absent below PG 14) and where the
-/// per-statement WAL figures still live. <c>ANOMALY_PG_WAL_VOLUME</c>'s block is the deviation family's shape
+/// reported — which reason (<c>pg_stat_wal</c> not implemented on Aurora; absent below PG 14; zero while checkpoints
+/// wrote buffers, so not populated) and where the per-statement WAL figures still live; a quiet server that wrote
+/// no WAL is not a gap and states 0 B/s (#7457). <c>ANOMALY_PG_WAL_VOLUME</c>'s block is the deviation family's shape
 /// (<c>ComposeDeviation</c>: peak, sigmas, the hour-of-week centre, sample count; first-occurrence wording on a
 /// thin bucket) plus the ratio to the routine rate and the deployment-correlation framing: WAL volume is the
 /// leading edge of checkpoint pressure and slot retention, so the first question is what changed. Levers with
@@ -207,17 +208,51 @@ public static partial class PgTargetAdvice
             Remediation: MaxWalSizeRemediation(knob, pressure));
     }
 
-    /// <summary>The WAL-volume sentence, or the honest gap: Aurora does not implement <c>pg_stat_wal</c>.</summary>
+    /// <summary>
+    /// Why the WAL figures are absent from <c>PG_CHECKPOINT_PRESSURE</c> (#7457): each cause gets its own words, and only
+    /// an Aurora target is told about Aurora. The collector stamps the cause (<c>not_applicable_on_aurora</c>,
+    /// <c>reason_pg_stat_wal_absent</c>, <c>wal_not_populated</c>); a fact with none of them is a gap of unknown cause.
+    /// </summary>
+    private static (string Investigation, string Remediation) WalGapWords(Fact? pressure)
+    {
+        if ((KnobMeta(pressure, "not_applicable_on_aurora") ?? 0) > 0)
+            return ("WAL volume is not reported on this Aurora target (pg_stat_wal is not implemented on Aurora), so the bytes " +
+                    "behind each requested checkpoint cannot be stated here. ",
+                    "WAL volume is not reported on Aurora, so size from the requested share: raise max_wal_size and " +
+                    "confirm the share falls on the next pass rather than computing a target from bytes this product cannot see. ");
+        if ((KnobMeta(pressure, "reason_pg_stat_wal_absent") ?? 0) > 0)
+            return ("WAL volume is not reported because pg_stat_wal does not exist below PostgreSQL 14, so the bytes " +
+                    "behind each requested checkpoint cannot be stated here. ",
+                    "WAL volume is not reported below PostgreSQL 14, so size from the requested share: raise max_wal_size and " +
+                    "confirm the share falls on the next pass rather than computing a target from bytes this server cannot report. ");
+        if ((KnobMeta(pressure, "wal_not_populated") ?? 0) > 0)
+            return ("pg_stat_wal reports no WAL for this window although checkpoints wrote buffers, so its counters are not " +
+                    "being populated here (or the writes were to unlogged tables, which write no WAL), and the bytes behind each " +
+                    "requested checkpoint cannot be stated. ",
+                    "pg_stat_wal is not being populated here, so size from the requested share: raise max_wal_size and " +
+                    "confirm the share falls on the next pass rather than computing a target from WAL bytes the server did not report. ");
+        return ("WAL volume is not reported for this server, so the bytes behind each requested checkpoint cannot be stated here. ",
+                "WAL volume is not reported for this server, so size from the requested share: raise max_wal_size and " +
+                "confirm the share falls on the next pass rather than computing a target from bytes it does not report. ");
+    }
+
+    /// <summary>The WAL-volume sentence, or the honest gap: <see cref="WalGapWords"/> names which one, and a tracked zero
+    /// says no WAL was written rather than that WAL cannot be reported.</summary>
     private static void AppendWalSentence(StringBuilder sb, Fact pressure)
     {
         if ((KnobMeta(pressure, "wal_tracked") ?? 0) <= 0)
         {
-            sb.Append("WAL volume is not reported on this flavour (pg_stat_wal is not implemented on Aurora), so the bytes " +
-                      "behind each requested checkpoint cannot be stated here. ");
+            sb.Append(WalGapWords(pressure).Investigation);
             return;
         }
 
         var walBytes = KnobMeta(pressure, "wal_bytes") ?? 0;
+        if (walBytes <= 0)
+        {
+            sb.Append("No WAL was written in this window, so there is no WAL volume to size from. ");
+            return;
+        }
+
         var perSec = KnobMeta(pressure, "wal_bytes_per_sec") ?? 0;
         var perCheckpoint = KnobMeta(pressure, "wal_bytes_per_checkpoint");
         sb.Append("It wrote ").Append(KnobBytes(walBytes)).Append(" of WAL over the window — ")
@@ -257,9 +292,13 @@ public static partial class PgTargetAdvice
         }
         else if (pressure is not null && !tracked)
         {
+            sb.Append("max_wal_size is ").Append(current).Append(". ").Append(WalGapWords(pressure).Remediation);
+        }
+        else if (pressure is not null && (KnobMeta(pressure, "wal_bytes") ?? 0) <= 0)
+        {
             sb.Append("max_wal_size is ").Append(current)
-              .Append(". WAL volume is not reported on this flavour, so size from the requested share: raise max_wal_size and " +
-                      "confirm the share falls on the next pass rather than computing a target from bytes this product cannot see. ");
+              .Append(". No WAL was written in this window, so there is no volume to size against: read the next window that " +
+                      "has write activity before changing it. ");
         }
         else
         {
@@ -300,9 +339,25 @@ public static partial class PgTargetAdvice
 
         if (shift is not null && (KnobMeta(shift, "unavailable") ?? 0) > 0)
         {
+            if ((KnobMeta(shift, "reason_wal_stats_not_populated") ?? 0) > 0)
+            {
+                return new AdviceBlock(
+                    Headline: "pg_stat_wal reports no WAL, but checkpoints wrote buffers",
+                    Investigation:
+                        "Cluster-wide WAL volume (wal_bytes / wal_records in pg_write_stats) read zero over the whole window while " +
+                        "checkpoints wrote buffers, so the counters are not being populated on this server (or the writes were to " +
+                        "unlogged tables, which write no WAL). No rate is stated and nothing is graded. Per-statement WAL volume is " +
+                        "collected from pg_stat_statements (wal_bytes per statement) and read by get_pg_top_queries.",
+                    Remediation:
+                        "Check that pg_stat_wal answers on the server (SELECT wal_records, wal_bytes FROM pg_stat_wal) and that the " +
+                        "writes are logged, and read get_pg_top_queries for the statements generating WAL.");
+            }
+
             var reason = (KnobMeta(shift, "reason_pg_stat_wal_absent") ?? 0) > 0
                 ? "this server's registry major is below 14, and pg_stat_wal does not exist there"
-                : "pg_stat_wal is not implemented on Aurora — pg_stat_get_wal() raises 0A000 — so the collector types the WAL columns NULL";
+                : (KnobMeta(shift, "reason_wal_stats_not_reported") ?? 0) > 0
+                    ? "pg_stat_wal is not implemented on Aurora — pg_stat_get_wal() raises 0A000 — so the collector types the WAL columns NULL"
+                    : "the collector stored no WAL figures for it";
             return new AdviceBlock(
                 Headline: "WAL volume is not reported by this engine",
                 Investigation:
@@ -328,6 +383,18 @@ public static partial class PgTargetAdvice
 
         var peak = KnobMeta(shift, "peak_wal_bytes_per_sec") ?? mean;
         var total = KnobMeta(shift, "wal_bytes") ?? 0;
+        if (total <= 0 && mean <= 0 && peak <= 0)
+        {
+            return new AdviceBlock(
+                Headline: "No WAL was written this window",
+                Investigation:
+                    $"pg_stat_wal reported no WAL (bytes and records both zero) across {KnobNum(KnobMeta(shift, "rated_samples") ?? 0)} rated " +
+                    "collections, and no checkpoint wrote buffers, so this server was quiet and there is no WAL volume to size " +
+                    "from. Context, not a finding: it is a measured zero, not a gap in the counters.",
+                Remediation:
+                    "Nothing to change on WAL volume. Read a window with write activity before sizing max_wal_size or " +
+                    "wal_compression.");
+        }
         var resets = KnobMeta(shift, "wal_reset_count") ?? 0;
         var sb = new StringBuilder(480);
         sb.Append("Over the observed window this server wrote ").Append(KnobBytes(total)).Append(" of WAL — a mean of ")
