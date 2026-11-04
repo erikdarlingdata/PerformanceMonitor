@@ -214,6 +214,25 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     }
 
     [Fact]
+    public void TheWaitAndDurationTrends_SayOnePlainSentenceForATrueNegative_AndKeepTheToolTextOtherwise()
+    {
+        var r = Run();
+        var message = r.GetProperty("trendMessage").GetString()!;
+
+        var wait = Bodies(r, "waitTrendEmpty");
+        Assert.StartsWith("No samples for this wait event in this window.", wait[0], StringComparison.Ordinal);
+        Assert.Contains(message, wait[0], StringComparison.Ordinal);
+
+        var duration = Bodies(r, "durationTrendEmpty");
+        Assert.StartsWith("No statement execution time to chart in this window.", duration[0], StringComparison.Ordinal);
+        Assert.Contains(message, duration[0], StringComparison.Ordinal);
+
+        // An answer that is not a true negative has no plain sentence: the tool's text is shown as it is.
+        Assert.Equal(message, Bodies(r, "waitTrendUnavailable")[0]);
+        Assert.Equal(message, Bodies(r, "durationTrendUnavailable")[0]);
+    }
+
+    [Fact]
     public void ASmallSizeInMegabytes_IsWrittenInTheUnitThatFitsIt()
     {
         var fit = Run().GetProperty("fit");

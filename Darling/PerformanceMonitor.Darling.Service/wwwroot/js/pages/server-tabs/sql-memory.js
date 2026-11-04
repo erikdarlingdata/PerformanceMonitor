@@ -291,7 +291,7 @@ export function memoryPressurePanels(server, ctx) {
       mount(chart.body, readErrorStrip(res.message));
       return mount(grid.body, readErrorStrip(res.message));
     }
-    const empty = "No memory pressure events in this window — the healthy state for this read. " + PRESSURE_COVERAGE_CAVEAT;
+    const empty = "No memory pressure events in this window, which is the healthy state. " + PRESSURE_COVERAGE_CAVEAT;
     if (res.kind === "empty") {
       mount(chart.body, [keptWindowStrip(res), emptyStrip(empty)]);
       return mount(grid.body, [keptWindowStrip(res), windowFloorStrip(res.data, { viz: "table" }), emptyStrip(res.message)]);
