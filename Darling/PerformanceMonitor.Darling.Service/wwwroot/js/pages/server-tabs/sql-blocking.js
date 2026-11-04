@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { routeHash, el, mount, disclosure, noticeStrip, getActiveDatabaseFilter, readTool } from "../../util.js";
+import { routeHash, el, mount, disclosure, noticeStrip, getActiveDatabaseFilter, readToolWithinKeptHistory } from "../../util.js";
 import { VIZ } from "../../panels.js";
 import { windowParams } from "../../time-slicer.js";
 import { downloadText } from "../../grid-tools.js";
@@ -302,7 +302,7 @@ function sameReport(a, b) {
 export function loadReportXml(row) {
   if (row.blocked_process_report_xml) return Promise.resolve(row.blocked_process_report_xml);
   if (row.xmlLoading) return row.xmlLoading;
-  const pending = readTool("get_blocked_process_xml", { server: row.server, hours: 1, as_of: row.event_time, limit: 5 })
+  const pending = readToolWithinKeptHistory("get_blocked_process_xml", { server: row.server, hours: 1, as_of: row.event_time, limit: 5 })
     .then((res) => {
       const data = res && res.kind === "data" && res.data ? res.data : null;
       const reports = data && Array.isArray(data.reports) ? data.reports : [];
