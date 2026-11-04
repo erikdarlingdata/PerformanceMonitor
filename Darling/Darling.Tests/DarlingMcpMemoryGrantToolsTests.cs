@@ -13,6 +13,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -79,7 +80,10 @@ public sealed class DarlingMcpMemoryGrantToolsSurfaceAndSqlTests
         /* #6299: get_memory_grants also takes chart + bucket_minutes, the whole-window series the web's two grant charts draw. */
         var expected = toolName == "get_memory_grants"
             ? new[] { "server_name", "hours_back", "as_of", "chart", "bucket_minutes" }
-            : new[] { "server_name", "hours_back", "as_of" };
+            : toolName == "get_memory_pressure_events"
+                /* #7516: the page cap. */
+                ? new[] { "server_name", "hours_back", "limit", "as_of" }
+                : new[] { "server_name", "hours_back", "as_of" };
         Assert.Equal(expected, p.Select(x => x.Name).ToArray());
         Assert.All(p, x => Assert.True(x.Optional, $"{toolName}.{x.Name} must be optional"));
     }
@@ -444,6 +448,95 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectedAt), ServerIdHelper.GetDeterministicHashCode(WindowName(window)), WindowName(window),
             DarlingMcpTestData.Naive(sampleTime), "RESOURCE_MEMPHYSICAL_LOW", 3, 1);
+
+    /* #7516: a server under memory pressure writes thousands of samples a day, so the tool pages them. 205 samples, one a minute, ending
+       one minute before the window's end: g = 1 is the newest. Even g is a LOW notification, odd g is STEADY. Every fifth sample has the
+       process indicator at 3 and every seventh has the system indicator at 2, so those are the samples at 2 or more (the chart's bar). */
+    private const int PagedSamples = 205;
+
+    private static Task SeedPagedEventsAsync(NpgsqlConnection c, string window, DateTime end) =>
+        DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+            @"INSERT INTO memory_pressure_events (collection_id, collection_time, server_id, server_name, sample_time, memory_notification, memory_indicators_process, memory_indicators_system)
+SELECT $1::bigint + g, $2::timestamp, $3::int, $4::text, $5::timestamp - (g * interval '1 minute'),
+       CASE WHEN g % 2 = 0 THEN 'RESOURCE_MEMPHYSICAL_LOW' ELSE 'RESOURCE_MEM_STEADY' END,
+       CASE WHEN g % 5 = 0 THEN 3 ELSE 0 END,
+       CASE WHEN g % 7 = 0 THEN 2 ELSE 1 END
+FROM generate_series(1, " + PagedSamples + ") g",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(end), ServerIdHelper.GetDeterministicHashCode(WindowName(window)), WindowName(window),
+            DarlingMcpTestData.Naive(end));
+
+    private static int PagedMediumOrWorse(Func<int, bool> include) =>
+        Enumerable.Range(1, PagedSamples).Count(g => include(g) && (g % 5 == 0 || g % 7 == 0));
+
+    [Fact]
+    public async Task AWindowOverTheLimit_ReturnsTheNewestRows_TheTrueTotal_AndTheTrueCounts_AgainstDevPostgres() =>
+        await RunWindowAsync("paged", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "paged", end.AddDays(-2), end.AddDays(-2), 30, end);
+            await SeedPagedEventsAsync(c, "paged", end);
+            var asOf = WebDataStartNote.FormatWindowEnd(end);
+
+            /* The default read: the newest 200, oldest first, and the summary names the 5 left out. */
+            var root = WindowFloorLiveHarness.Parse(await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, as_of: asOf));
+            var events = root.GetProperty("events").EnumerateArray().ToList();
+            Assert.Equal(DarlingMcpMemoryGrantTools.DefaultPressureEventsLimit, events.Count);
+            Assert.Equal(200, root.GetProperty("limit").GetInt32());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.Equal(200, root.GetProperty("events_returned").GetInt32());
+            Assert.Contains("newest 200 of 205", root.GetProperty("limit_note").GetString(), StringComparison.Ordinal);
+            var times = events.Select(e => DateTime.Parse(e.GetProperty("sample_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
+            Assert.Equal(times.OrderBy(t => t).ToList(), times);
+            Assert.Equal(end.AddMinutes(-200), times[0]);
+            Assert.Equal(end.AddMinutes(-1), times[^1]);
+            Assert.Equal(McpHelpers.FormatEffectiveStart(times[0]), root.GetProperty("oldest_returned_at").GetString());
+            Assert.Equal(McpHelpers.FormatEffectiveStart(times[^1]), root.GetProperty("newest_returned_at").GetString());
+
+            var summary = root.GetProperty("summary");
+            Assert.Equal(PagedSamples, summary.GetProperty("total_events").GetInt64());
+            Assert.Equal(PagedMediumOrWorse(_ => true), summary.GetProperty("medium_or_worse_events").GetInt64());
+            var byNotification = summary.GetProperty("by_notification").EnumerateArray().ToDictionary(n => n.GetProperty("memory_notification").GetString()!);
+            Assert.Equal(Enumerable.Range(1, PagedSamples).Count(g => g % 2 == 0), byNotification["RESOURCE_MEMPHYSICAL_LOW"].GetProperty("events").GetInt64());
+            Assert.Equal(Enumerable.Range(1, PagedSamples).Count(g => g % 2 != 0), byNotification["RESOURCE_MEM_STEADY"].GetProperty("events").GetInt64());
+            Assert.Equal(PagedMediumOrWorse(g => g % 2 == 0), byNotification["RESOURCE_MEMPHYSICAL_LOW"].GetProperty("medium_or_worse_events").GetInt64());
+            Assert.Equal(PagedMediumOrWorse(g => g % 2 != 0), byNotification["RESOURCE_MEM_STEADY"].GetProperty("medium_or_worse_events").GetInt64());
+
+            /* A smaller limit cuts the page and nothing else. */
+            var small = WindowFloorLiveHarness.Parse(await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 3, asOf));
+            Assert.Equal(3, small.GetProperty("events").GetArrayLength());
+            Assert.True(small.GetProperty("truncated").GetBoolean());
+            Assert.Equal(PagedSamples, small.GetProperty("summary").GetProperty("total_events").GetInt64());
+            Assert.StartsWith(end.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss"), small.GetProperty("events")[2].GetProperty("sample_time").GetString(), StringComparison.Ordinal);
+
+            /* A window under the limit is unchanged apart from the summary: every row, not truncated, no note. */
+            var all = WindowFloorLiveHarness.Parse(await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 1000, asOf));
+            Assert.Equal(PagedSamples, all.GetProperty("events").GetArrayLength());
+            Assert.False(all.GetProperty("truncated").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, all.GetProperty("limit_note").ValueKind);
+            Assert.Equal(PagedSamples, all.GetProperty("summary").GetProperty("total_events").GetInt64());
+
+            /* A limit outside 1-1000 is refused by name. */
+            Assert.Contains("limit", await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 0), StringComparison.Ordinal);
+            Assert.Contains("exceeds maximum", await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(ds, WindowName("paged"), 24, 1001), StringComparison.Ordinal);
+        });
+
+    [Fact]
+    public async Task TheWebRead_ReturnsEveryRowItsChartCounts_NotTheToolsDefaultPage_AgainstDevPostgres() =>
+        await RunWindowAsync("webpaged", async (c, ds, end) =>
+        {
+            await SeedWindowAsync(c, "webpaged", end.AddDays(-2), end.AddDays(-2), 30, end);
+            await SeedPagedEventsAsync(c, "webpaged", end);
+
+            var context = new DefaultHttpContext();
+            context.Request.QueryString = new QueryString("?server=" + Uri.EscapeDataString(WindowName("webpaged")) + "&hours=24&as_of=" + Uri.EscapeDataString(WebDataStartNote.FormatWindowEnd(end)));
+            var root = WindowFloorLiveHarness.Parse(await DarlingWebEndpoints.BuildReadDispatch()["get_memory_pressure_events"](context, ds, null!));
+
+            Assert.Equal(PagedSamples, root.GetProperty("events").GetArrayLength());
+            Assert.False(root.GetProperty("truncated").GetBoolean());
+            Assert.Equal(PagedSamples, root.GetProperty("summary").GetProperty("total_events").GetInt64());
+            /* The chart's own count: samples with either indicator at 2 or more, which an unpaged read reproduces row for row. */
+            Assert.Equal(PagedMediumOrWorse(_ => true),
+                root.GetProperty("events").EnumerateArray().Count(e => e.GetProperty("memory_indicators_process").GetInt32() >= 2 || e.GetProperty("memory_indicators_system").GetInt32() >= 2));
+        });
 
     [Fact]
     public async Task ARowsAnswer_ForAServerAddedTwoDaysAgo_NamesWhereCoverageStarts_AgainstDevPostgres() =>
