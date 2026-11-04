@@ -224,4 +224,50 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         var row = Assert.Single(rows);
         Assert.Equal(DateTime.MinValue, row.SampleTime);
     }
+
+    /// <summary>
+    /// #7441: the ring buffer record that is already stored comes back on the next poll with a stamp a few
+    /// milliseconds ABOVE the stored one (SYSUTCDATETIME() and ms_ticks drift apart), which a strict
+    /// `&lt;= watermark` test stored again on every poll. The same record drifted 8 ms and 18 ms above the
+    /// watermark, and the watermark exactly, are dropped. A record 1.5 s later still lands.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_AlreadyStoredRecordWithDriftedStamp_IsNotStoredAgain()
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { watermark, "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMilliseconds(8), "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMilliseconds(18), "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMilliseconds(1500), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 });
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
+        Assert.Equal(watermark.AddMilliseconds(1500), row.SampleTime);
+    }
+
+    /// <summary>
+    /// #7441: the tolerance is 1 s and no wider. A record just past it lands, and so does one a minute later.
+    /// A NULL stamp (read as DateTime.MinValue) is still skipped under a watermark, as before.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_RecordPastTheTolerance_IsStored_AndNullStampStillSkipped()
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        using var reader = new FakeCollectorDataReader(
+            new object[] { DBNull.Value, "RESOURCE_MEM_STEADY", 3, 1 },
+            new object[] { watermark.AddMilliseconds(1000), "RESOURCE_MEM_STEADY", 0, 0 },
+            new object[] { watermark.AddMilliseconds(1001), "RESOURCE_MEMPHYSICAL_LOW", 2, 0 },
+            new object[] { watermark.AddMinutes(1), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0 });
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark), CancellationToken.None);
+
+        Assert.Equal(
+            new[] { "RESOURCE_MEMPHYSICAL_LOW", "RESOURCE_MEMPHYSICAL_HIGH" },
+            rows.Select(r => r.MemoryNotification).ToArray());
+    }
 }

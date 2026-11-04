@@ -103,6 +103,24 @@ OPTION(RECOMPILE);";
         new CollectorColumn("memory_indicators_system", CollectorColumnType.Integer),
     };
 
+    /// <summary>
+    /// #7441: how far past the watermark a recomputed stamp may sit and still be the record the watermark
+    /// already holds. The query derives <c>sample_time</c> on every poll from <c>SYSUTCDATETIME()</c> minus
+    /// <c>ms_ticks - timestamp</c>, two clocks that run slightly apart, so re-reading the newest stored record
+    /// lands a few milliseconds ABOVE its stored stamp (1 to 18 ms between polls on a 5-minute interval),
+    /// clears a strict <c>&lt;= watermark</c> test and is stored again, once per poll for as long as the record
+    /// stays in the ring buffer. The store keeps no record id, so the watermark is the only memory.
+    /// This is the tolerance <see cref="CpuUtilizationCollector"/> got in #5644, with a smaller value: CPU
+    /// records are 60 s apart, these can be 1 ms apart, so 20 s is wrong here. 1 s must stay above the drift
+    /// between polls, and a longer poll interval drifts further.
+    /// The cost: a genuinely new record within 1 s of the newest stored one is dropped when a poll lands in the
+    /// middle of a burst. That is a small part of one burst and far less wrong than the repeats.
+    /// </summary>
+    internal static readonly TimeSpan RingBufferResampleTolerance = TimeSpan.FromSeconds(1);
+
+    private static DateTime WithRingBufferTolerance(DateTime watermark) =>
+        watermark > DateTime.MaxValue - RingBufferResampleTolerance ? watermark : watermark + RingBufferResampleTolerance;
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -111,8 +129,11 @@ OPTION(RECOMPILE);";
         {
             var sampleTime = reader.IsDBNull(0) ? DateTime.MinValue : reader.GetDateTime(0);
 
-            /* Client-side dedup: computed sample_time can't be filtered server-side. */
-            if (context.Watermark.HasValue && sampleTime <= context.Watermark.Value)
+            /* Client-side dedup: computed sample_time can't be filtered server-side. The watermark and this
+               stamp are both UTC (the column is stored from SYSUTCDATETIME(), see @now above), so the
+               tolerance is added in the same frame. A skipped row is never stored, so the watermark the host
+               caches (the max stored sample_time) does not move. */
+            if (context.Watermark.HasValue && sampleTime <= WithRingBufferTolerance(context.Watermark.Value))
             {
                 continue;
             }
