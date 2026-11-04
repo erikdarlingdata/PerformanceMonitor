@@ -502,6 +502,87 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#7376: the newest server_properties row marks the server a readable secondary (the facts get_query_store_top judges), and no
+    /// query_store_replica is set, so Darling never collects its Query Store.</summary>
+    private static Task MarkReadableSecondaryAsync(Ctx c, int server) =>
+        ExecAsync(c.Store,
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) " +
+            "VALUES ($1, $2, $3, 'x', 'Enterprise', '16.0.1000.6', 'RTM', 3, 'Secondary')",
+            c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow, server);
+
+    /// <summary>#7376: on a readable secondary Darling does not collect Query Store from, the query_store section reads not_collected with the
+    /// reason get_query_store_top gives (the gate's "no coverage row" says the gap will close, and it never does). The other five sections keep
+    /// their rows, the secondary is not named under "Sections not served", and the normal server beside it is what it was.</summary>
+    [Fact]
+    public async Task AFleetRead_AnswersAReadableSecondaryNotCollected_InQueryStoreOnly_AndNeverNamesItAsNotServed()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerOne);
+
+            using var doc = await ReadAsync(c, null);
+            var queryStore = Section(doc, "query_store");
+            var qs = queryStore.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("not_collected", qs["srv-two"].GetProperty("status").GetString());
+            Assert.Contains("readable secondary", qs["srv-two"].GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("coverage row", qs["srv-two"].GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("ok", qs["srv-one"].GetProperty("status").GetString());
+            var plan = Section(doc, "plan_cache").GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("ok", plan["srv-two"].GetProperty("status").GetString());
+            Assert.Equal("ok", plan["srv-one"].GetProperty("status").GetString());
+            Assert.False(doc.RootElement.TryGetProperty("message", out var top) && (top.GetString() ?? string.Empty).Contains("srv-two", StringComparison.Ordinal));
+            Assert.DoesNotContain("interval table", queryStore.GetProperty("message").GetString() ?? string.Empty, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#7376: the one-server form of the same server: query_store is not_collected with the reason and no section is named as not served.</summary>
+    [Fact]
+    public async Task AServerRead_AnswersAReadableSecondaryNotCollected_InQueryStoreOnly()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+
+            using var doc = await ReadAsync(c, "srv-two");
+            var qs = Section(doc, "query_store");
+            Assert.Equal("not_collected", qs.GetProperty("status").GetString());
+            Assert.Contains("readable secondary", qs.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("ok", Section(doc, "plan_cache").GetProperty("status").GetString());
+            Assert.False(doc.RootElement.TryGetProperty("message", out _), "no section is not served");
+        });
+    }
+
+    /// <summary>#7376: the readable-secondary question is asked after the read, so a readable secondary that DOES hold Query Store rows in the
+    /// window keeps them (a former primary, a re-registration), in the one-server form and the fleet form.</summary>
+    [Fact]
+    public async Task AReadableSecondaryThatHoldsQueryStoreRows_KeepsThem()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await QueryStoreAsync(c, ServerTwo, "0xB1", 1, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerTwo);
+
+            using var one = await ReadAsync(c, "srv-two");
+            Assert.Equal("ok", Section(one, "query_store").GetProperty("status").GetString());
+            using var fleet = await ReadAsync(c, null);
+            var qs = Section(fleet, "query_store").GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("ok", qs["srv-two"].GetProperty("status").GetString());
+        });
+    }
+
     /// <summary>#7374: a fleet of PostgreSQL servers only has nothing to read, so the whole answer is not_collected with the engine reason.</summary>
     [Fact]
     public async Task AFleetOfOnlyPostgresServers_AnswersNotCollected()
