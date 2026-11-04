@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Collectors;
 
@@ -96,7 +97,7 @@ public sealed class McpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
+    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting, so its flips are listed apart in status_changes and never in changes. NOTE: config is captured on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two.")]
     public static async Task<string> GetDatabaseConfigChanges(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -116,9 +117,13 @@ public sealed class McpConfigHistoryTools
             /* #5244: database_name appended LAST (H1). The reader filters the snapshots in SQL before the diff, the way Darling's
                does; a blank is "no filter". The empty answer names the database it looked at instead of speaking for the server. */
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
-            var rows = await dataService.GetDatabaseConfigChangesAsync(
-                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd);
-            if (rows.Count == 0)
+            var allRows = await dataService.GetDatabaseConfigChangesAsync(
+                resolved.ServerId, hours_back, databaseNames: database is null ? null : new[] { database }, asOfUtc: windowEnd, includeStatusColumns: true);
+            /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
+               status_changes so the history is kept without calling it a configuration change. */
+            var rows = allRows.Where(r => ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
+            var statusRows = allRows.Where(r => !ConfigChangeAttribution.IsAttributableDatabaseSetting(r.SettingName)).ToList();
+            if (allRows.Count == 0)
                 return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "database_config", awsRdsKind: AwsRdsKind.None), database)
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         $"No database configuration changes detected in the last {hours_back}h{McpDatabaseSelection.ForChosen(database is null ? null : new[] { database })}. Config is captured on connect, so at least two snapshots are needed to detect a change.",
@@ -146,6 +151,15 @@ public sealed class McpConfigHistoryTools
                     old_value = r.OldValue,
                     new_value = r.NewValue,
                     change_description = r.ChangeDescription
+                }),
+                status_change_count = statusRows.Count,
+                status_changes = statusRows.Select(r => new
+                {
+                    change_time = r.ChangeTime.ToString("o"),
+                    database_name = r.DatabaseName,
+                    setting_name = r.SettingName,
+                    old_value = r.OldValue,
+                    new_value = r.NewValue
                 })
             }, McpHelpers.JsonOptions);
         }

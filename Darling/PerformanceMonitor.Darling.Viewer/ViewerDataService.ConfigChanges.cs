@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -150,7 +151,10 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endUtc, databaseNames, cancellationToken);
+        /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting an operator changed.
+           The grid lists settings only (Change Watch and the analysis engine drop it the same way). */
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc)
+            .Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
     }
@@ -324,8 +328,9 @@ public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChang
     public DateTime ChangeTime => change.ChangeTime;
     public string DatabaseName => change.DatabaseName;
     public string SettingName => change.SettingName;
-    public string? OldValue => change.OldValue;
-    public string? NewValue => change.NewValue;
+    /* #7416 item 3: a pair that differs only in whitespace shows it, so the two cells never read the same. */
+    public string? OldValue => ConfigValueText.Shown(change.OldValue, change.NewValue);
+    public string? NewValue => ConfigValueText.Shown(change.NewValue, change.OldValue);
 
     public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
     public string ChangeDescription => change.ChangeDescription;

@@ -107,8 +107,8 @@ public sealed class DarlingMcpHealthParserTools
                 system_cpu_note = SystemHealthHostCpu.NoteFor(hostOs),
                 source_observed = true,
                 last_captured_at = Stamp(c.LastCapturedAt),
-                total_entries = rows.Count,
-                shown = Math.Min(rows.Count, limit),
+                total_entries = c.Rows.Count,
+                shown = Math.Min(c.Rows.Count, limit),
                 entries = rows.Take(limit).Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
