@@ -143,6 +143,74 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
         });
     }
 
+    /* #7442: a reply that counts the collector's runs in the window is a covered window. The probe finds no row because the runs stored
+       none, and the note that says the store holds no collection contradicted the sentence beside it. */
+    private static void AssertCovered(JsonElement answer, DateTime requestedStart)
+    {
+        var hints = answer.GetProperty("hints");
+        Assert.Equal(McpHelpers.FormatEffectiveStart(requestedStart), hints.GetProperty("effective_start").GetString());
+        Assert.False(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, hints.GetProperty("truncation_note").ValueKind);
+    }
+
+    private static void AssertNotCovered(JsonElement answer)
+    {
+        var hints = answer.GetProperty("hints");
+        Assert.Equal(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("The store holds no collection of ", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueryStats_RanInTheWindow_CarriesTheCoveredWindowNote_AndNoRunKeepsTheNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            /* No run in the window: the note is true here. */
+            var none = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+            AssertNotCovered(none);
+
+            await PlantRunAsync(connection, ct, "query_stats", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertCovered(ran, now.AddHours(-1));
+        });
+    }
+
+    [Fact]
+    public async Task QueryStoreTop_RanInTheWindow_CarriesTheCoveredWindowNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertCovered(ran, now.AddHours(-1));
+        });
+    }
+
+    [Fact]
+    public async Task TopProcedures_RanInTheWindow_CarriesTheCoveredWindowNote_AndNoRunKeepsTheNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            /* Two runs, both before the window: the collector is not new, but it did not look at this window. */
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddHours(-5), "SUCCESS", rows: 0);
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddHours(-4), "SUCCESS", rows: 0);
+            var none = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+            AssertNotCovered(none);
+
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            AssertCovered(ran, now.AddHours(-1));
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
     {
         var cs = ConnectionString;

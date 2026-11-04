@@ -36,6 +36,12 @@ internal readonly record struct McpWindowNotice(string? EffectiveStart, bool Win
     /// </summary>
     internal static McpWindowNotice Unavailable { get; } = new(null, false, null) { IsUnavailable = true };
 
+    /// <summary>
+    /// The notice of a window a collector ran in (#7442): the start that was asked for, not truncated, no note. For an empty answer
+    /// whose own words count the collector's successful runs in the window, where the probe has no row to find because the runs stored none.
+    /// </summary>
+    internal static McpWindowNotice CoveredAt(DateTime requestedStart) => new(McpHelpers.FormatEffectiveStart(requestedStart), false, null);
+
     /// <summary>True for <see cref="Unavailable"/>: the probe failed, so no key and no hint may be written.</summary>
     internal bool IsUnavailable { get; init; }
 

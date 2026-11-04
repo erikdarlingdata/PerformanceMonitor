@@ -92,13 +92,30 @@ public sealed class DarlingMcpDataTools
     /// #7010: an <c>empty</c> or <c>unavailable</c> status answer with the window floor under <c>hints</c>, merged into the hints it already
     /// has. Any other status (not_collected, precondition, an error) is permanent or not about the window and is left as it is, as is an
     /// answer whose hints already say <c>window_truncated</c>, and so is every answer when the probe failed.
+    ///
+    /// <para>#7442: an <c>empty</c> answer that counts the collector's successful runs in the window (its <c>successful_runs_in_window</c>
+    /// hint is above zero) is a covered window, whatever the probe found: a collector that ran and stored nothing leaves no row for the
+    /// probe to find, and a note that says the store holds no collection beside a sentence that counts the runs contradicts it. Such an
+    /// answer carries the start that was asked for, no truncation and no note, as Lite's does. The decision lives here, beside the one
+    /// place the keys are written, so a call site cannot pair a run count with the not-covered note. <paramref name="requestedStart"/>
+    /// is the window's start. The procedure tools need none of this: their probe reads the collector's logged runs as coverage (#5449).</para>
     /// </summary>
-    private static string WithWindowHints(string statusJson, McpWindowNotice notice)
+    private static string WithWindowHints(string statusJson, McpWindowNotice notice, DateTime requestedStart)
     {
-        if (notice.IsUnavailable
-            || JsonNode.Parse(statusJson) is not JsonObject node
+        if (JsonNode.Parse(statusJson) is not JsonObject node
             || node["status"]?.GetValue<string>() is not ("empty" or "unavailable")
             || node["hints"] is JsonObject { } existing && existing.ContainsKey("window_truncated"))
+        {
+            return statusJson;
+        }
+
+        var ran = node["status"]?.GetValue<string>() == "empty"
+            && node["hints"] is JsonObject { } runs && runs["successful_runs_in_window"] is JsonValue count && count.TryGetValue<long>(out var n) && n > 0;
+        if (ran)
+        {
+            notice = McpWindowNotice.CoveredAt(requestedStart);
+        }
+        else if (notice.IsUnavailable)
         {
             return statusJson;
         }
@@ -374,7 +391,7 @@ public sealed class DarlingMcpDataTools
                    the window floor under hints (merged into the collected_wait_types hint); not_collected is permanent and carries none. */
                 var missNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
                 /* #7167: an empty miss from an offline server answers unavailable, as the get_pg_* reads do. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice, start), cancellationToken);
             }
 
             var waitNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
@@ -993,7 +1010,7 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
-                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true)), cancellationToken);
+                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), requestedStart), cancellationToken);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1320,7 +1337,7 @@ public sealed class DarlingMcpDataTools
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
                             hours_back, leftOut?.Count ?? 0));
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(
-                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken);
+                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true), requestedStart), leftOut)!, cancellationToken);
             }
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
@@ -1714,7 +1731,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true)), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), requestedStart), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
