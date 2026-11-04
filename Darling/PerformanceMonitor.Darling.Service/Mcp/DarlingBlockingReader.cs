@@ -246,7 +246,7 @@ internal static class DarlingBlockingReader
     /// collected late (after an outage) still lists. Private so the
     /// executable statements stay the two public consts the tests pin.
     ///
-    /// <para>The last two columns (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>. The plan
+    /// <para>Columns 35 and 36 (#5236) are the row's store key, <c>collection_time</c> and <c>blocked_report_id</c>; <c>blocking_open_transaction_count</c> (#7497) is last. The plan
     /// columns are deliberately NOT in this projection. In a compressed chunk every column a statement names is
     /// decompressed for each batch it scans, and the list scans every row from the floor to now (there is no
     /// <c>event_time</c> index) and sorts. A flag computed here was evaluated only after the per-chunk sorts, so each row's whole

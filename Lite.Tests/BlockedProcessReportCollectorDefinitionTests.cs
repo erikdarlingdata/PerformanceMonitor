@@ -185,7 +185,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         BlockedProcessReportCollector.Instance.WritePayload(Assert.Single(rows), writer, context);
 
-        Assert.Equal(40, writer.Values.Count);
+        Assert.Equal(41, writer.Values.Count);
         Assert.Equal("<ShowPlanXML>blocked</ShowPlanXML>", writer.Values[38]);
         Assert.Equal("<ShowPlanXML>blocking</ShowPlanXML>", writer.Values[39]);
     }
@@ -309,7 +309,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
     }
 
     [Fact]
-    public async Task ReadAsync_SkipsEmptyAndUnparseable_WritePayloadPins40ColumnOrder()
+    public async Task ReadAsync_SkipsEmptyAndUnparseable_WritePayloadPins41ColumnOrder()
     {
         var context = MakeContext();
         var eventTime = new DateTime(2026, 7, 2, 11, 59, 30, DateTimeKind.Utc);
@@ -324,7 +324,7 @@ public sealed class BlockedProcessReportCollectorDefinitionTests
         var writer = new RecordingCollectorRowWriter();
         BlockedProcessReportCollector.Instance.WritePayload(row, writer, context);
 
-        Assert.Equal(40, writer.Values.Count);
+        Assert.Equal(41, writer.Values.Count);
         Assert.Equal(eventTime, writer.Values[0]);
         Assert.Equal("SO", writer.Values[1]);
         Assert.Equal(55, writer.Values[2]);
