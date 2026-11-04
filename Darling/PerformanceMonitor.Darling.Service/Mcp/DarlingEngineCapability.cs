@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -79,7 +80,7 @@ WHERE server_id = $1";
         {
             (engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
@@ -92,6 +93,62 @@ WHERE server_id = $1";
 
         /* #6554: the collectors skip every readable-secondary database, so on a secondary these reads are empty by design. */
         return await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, serverId, serverName, cancellationToken);
+    }
+
+    /// <summary>
+    /// #7374: the engine facts of several servers in ONE registry read, the columns <see cref="ServerEngineSql"/> reads for one. $1 the
+    /// server ids.
+    /// </summary>
+    public const string ServersEngineSql = @"
+SELECT server_id, sql_engine_edition, engine_kind, is_aws_rds, is_aws_rds_web_or_express
+FROM servers
+WHERE server_id = ANY($1)";
+
+    /// <summary>
+    /// #7374: which of <paramref name="servers"/> cannot run <paramref name="collectorName"/> on their engine (a PostgreSQL target for
+    /// a read of SQL Server sources), with the reason each one's <see cref="NotCollectedStatusAsync"/> envelope gives (the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/> words), so a fleet read can answer <c>not_collected</c> per server as
+    /// the one-server form does. One registry read for all of them. A server it can run on, or whose registry row is missing, is left out
+    /// of the answer (no claim), and so is every server when the read fails, exactly as <see cref="NotCollectedStatusAsync"/> answers
+    /// null. A fleet read calls it AFTER its read, for the servers that came back with no rows (the contract in this class's summary).
+    /// </summary>
+    public static async Task<System.Collections.Generic.Dictionary<int, string>> NotCollectedReasonsAsync(
+        NpgsqlDataSource postgres,
+        System.Collections.Generic.IReadOnlyCollection<(int ServerId, string ServerName)> servers,
+        string collectorName,
+        CancellationToken cancellationToken = default)
+    {
+        var reasons = new System.Collections.Generic.Dictionary<int, string>();
+        if (servers.Count == 0)
+        {
+            return reasons;
+        }
+
+        var names = servers.ToDictionary(s => s.ServerId, s => s.ServerName);
+        try
+        {
+            await using var command = postgres.CreateCommand(ServersEngineSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = names.Keys.ToArray() });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var serverId = reader.GetInt32(0);
+                var edition = reader.IsDBNull(1) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(1);
+                var kind = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var awsRdsKind = CollectorEngineCapability.AwsRdsKindOf(!reader.IsDBNull(3) && reader.GetBoolean(3), !reader.IsDBNull(4) && reader.GetBoolean(4));
+                if (CollectorEngineCapability.NotCollectedMessage(names[serverId], edition, kind, collectorName, awsRdsKind) is { } message)
+                {
+                    reasons[serverId] = message;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            reasons.Clear();
+        }
+
+        return reasons;
     }
 
     /// <summary>The collectors that skip a readable secondary's databases (bit 8 of readonly_reason), so a read of what they store can be empty by design there (#6554).</summary>
