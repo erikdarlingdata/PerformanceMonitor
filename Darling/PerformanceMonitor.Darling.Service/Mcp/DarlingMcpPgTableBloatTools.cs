@@ -294,9 +294,14 @@ public sealed class DarlingMcpPgTableBloatTools
                 "heap_bytes_growth_in_window and first_seen_at cover only effective_start onward, so a short history understates how much the waste grew.",
                 logger: logger, cancellationToken: cancellationToken);
 
-            var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
-            var trusted = rows.Where(r => EstimateSuppressionReason(r) == null).ToList();
-            var trustedBloatBytes = trusted.Sum(r => Math.Max(r.BloatBytesEstimate, 0));
+            /* #7551: the tally is over the WHOLE window, not the page. Suppressed rows sort last, so a page cut at the limit is all
+               suppressed rows on a server whose published estimates are few, and "25 suppressed" then described the page. */
+            var totals = await DarlingPgTableBloatReader.GetPgTableBloatTotalsAsync(
+                postgres, resolved.ServerId, start, end, cancellationToken);
+            var suppressedCount = totals.SuppressedCount;
+            var trustedCount = totals.TrustedCount;
+            /* Null when no estimate was published, never 0: a sum over no estimates is not a measured nothing, and 0 reads as an all-clear. */
+            long? trustedBloatBytes = trustedCount > 0 ? totals.TrustedBloatBytes : null;
             var anyPgstattuple = rows.Any(r => r.PgstattupleAvailable);
             var permissionsSuspected = rows.Count(r => r.EstimateUnavailable);
 
@@ -412,8 +417,12 @@ public sealed class DarlingMcpPgTableBloatTools
                 /* Named for what it is: a sum of ESTIMATES over the tables whose estimates were fit to
                    publish. Not "reclaimable bytes", which is a promise the arithmetic cannot make. */
                 estimated_bloat_bytes_over_trusted_rows = trustedBloatBytes,
-                estimated_bloat_mb_over_trusted_rows = Math.Round(trustedBloatBytes / 1024.0 / 1024, 2),
-                trusted_estimate_count = trusted.Count,
+                estimated_bloat_mb_over_trusted_rows = trustedBloatBytes is { } sum ? Math.Round(sum / 1024.0 / 1024, 2) : (double?)null,
+                /* What a viewer shows in place of the null above (#7551). */
+                estimated_bloat_state = trustedBloatBytes is null ? "No estimate published" : null,
+                /* The three counts are over every table the window held (#7551); tables_returned is the page. */
+                tables_in_window = totals.TableCount,
+                trusted_estimate_count = trustedCount,
                 suppressed_estimate_count = suppressedCount,
                 pgstattuple_available_anywhere = anyPgstattuple,
                 truncated,
@@ -435,8 +444,12 @@ public sealed class DarlingMcpPgTableBloatTools
                          + "SELECT is the only route."
                          : string.Empty)
                      + (truncated
-                         ? $" TRUNCATED: the server held more measured tables than the {limit} returned, so the "
-                         + "totals cover only the tables returned. Raise limit for the full picture."
+                         ? $" TRUNCATED: the server held more measured tables than the {limit} returned. The estimate "
+                         + "totals and counts cover every table in the window, and only the tables list is cut. Raise limit for more rows."
+                         : string.Empty)
+                     + (trustedBloatBytes is null
+                         ? " NO ESTIMATE WAS PUBLISHED for any table in the window, so the estimated bloat total is null: that is "
+                         + "not a zero. Nothing here says the tables are free of bloat."
                          : string.Empty),
                 tables,
             }, McpHelpers.JsonOptions), notice);

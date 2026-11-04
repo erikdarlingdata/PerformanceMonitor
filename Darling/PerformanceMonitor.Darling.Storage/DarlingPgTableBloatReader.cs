@@ -47,6 +47,14 @@ public static class DarlingPgTableBloatReader
         int SampleCount);
 
     /// <summary>
+    /// The suppression rule as SQL, over a <c>l</c> alias: the one copy that both the page's ORDER BY and the whole-window tally splice in
+    /// (a raw string cannot call C#). It is the twin of <see cref="EstimateIsUnpublishable"/>.
+    /// </summary>
+    public const string UnpublishableConditionSql =
+        "l.estimate_unavailable OR l.live_tuples < 0 OR l.last_analyzed IS NULL "
+        + "OR (l.live_tuples >= 0 AND l.mods_since_analyze > l.live_tuples * 0.2)";
+
+    /// <summary>
     /// Latest state per table, joined to that table's earliest reading in the window.
     ///
     /// <para><b>The estimate is not filtered or ranked on here beyond ordering</b> — the decision about
@@ -69,7 +77,7 @@ public static class DarlingPgTableBloatReader
     ///
     /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
     /// </summary>
-    public const string PgTableBloatSql = """
+    public const string PgTableBloatSql = $"""
         WITH latest AS (
             SELECT DISTINCT ON (database_name, schema_name, table_name)
                 database_name, schema_name, table_name, collection_time,
@@ -151,15 +159,64 @@ public static class DarlingPgTableBloatReader
            cannot call into C#. TheSortKeyCoversEverySuppressionReason pins the two together by asserting
            each condition appears here, so dropping one goes red rather than quietly re-ranking. */
         ORDER BY
-            (   l.estimate_unavailable
-             OR l.live_tuples < 0
-             OR l.last_analyzed IS NULL
-             OR (l.live_tuples >= 0 AND l.mods_since_analyze > l.live_tuples * 0.2)
-            ) ASC,
+            ({UnpublishableConditionSql}) ASC,
             l.bloat_bytes_estimate DESC,
             l.heap_bytes DESC
         LIMIT $4
         """;
+
+    /// <summary>
+    /// The whole window's tally of published and suppressed estimates (#7551), over the same latest-row-per-table
+    /// the page read walks and with the same suppression rule as its ORDER BY. The page tallies cannot stand in:
+    /// the page is cut at the caller's limit and suppressed rows sort last, so a full page of suppressed rows
+    /// counted "25 suppressed" for a server that held more tables than that, and a page with no published row
+    /// summed to 0 bytes, which reads as no bloat when it means no estimate.
+    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string PgTableBloatTotalsSql = $"""
+        WITH latest AS (
+            SELECT DISTINCT ON (database_name, schema_name, table_name)
+                database_name, schema_name, table_name,
+                bloat_bytes_estimate, estimate_unavailable, live_tuples, last_analyzed, mods_since_analyze
+            FROM pg_table_bloat_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            ORDER BY database_name, schema_name, table_name, collection_time DESC
+        )
+        SELECT
+            count(*) AS table_count,
+            count(*) FILTER (WHERE NOT ({UnpublishableConditionSql})) AS trusted_count,
+            COALESCE(sum(GREATEST(COALESCE(bloat_bytes_estimate, 0), 0))
+                     FILTER (WHERE NOT ({UnpublishableConditionSql})), 0) AS trusted_bytes
+        FROM latest AS l
+        """;
+
+    /// <summary>
+    /// The whole window's tally behind <see cref="PgTableBloatTotalsSql"/>. Trusted plus suppressed is the table count.
+    /// </summary>
+    public sealed record PgTableBloatTotals(long TableCount, long TrustedCount, long TrustedBloatBytes)
+    {
+        public long SuppressedCount => TableCount - TrustedCount;
+    }
+
+    public static async Task<PgTableBloatTotals> GetPgTableBloatTotalsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(PgTableBloatTotalsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new PgTableBloatTotals(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+        }
+
+        return new PgTableBloatTotals(0, 0, 0);
+    }
 
     /// <summary>
     /// The churn ratio as it is WRITTEN INTO the ORDER BY above. A raw string literal cannot be spliced,
