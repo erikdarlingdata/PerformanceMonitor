@@ -612,7 +612,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     /// A later, completed <c>delete_mute_rule</c> the journal holds for this rule (any actor), as text naming who and when, or null when none. A person's
     /// delete through the web page, the Viewer or an operator token journals nothing, so null does not prove the expired rule purge removed the row.
     /// </summary>
-    private static async Task<string?> RecordedDeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId, long calledId, CancellationToken cancellationToken)
+    private async Task<string?> RecordedDeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId, long calledId, CancellationToken cancellationToken)
     {
         await using var command = Command(connection, transaction, @"
 SELECT c.actor, c.event_time FROM config.investigation_journal c
