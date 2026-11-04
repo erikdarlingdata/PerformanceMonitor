@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Helpers;
 
@@ -77,8 +78,9 @@ public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChang
     public DateTime ChangeTime => change.ChangeTime;
     public string DatabaseName => change.DatabaseName;
     public string SettingName => change.SettingName;
-    public string? OldValue => change.OldValue;
-    public string? NewValue => change.NewValue;
+    /* #7416 item 3: a pair that differs only in whitespace shows it, so the two cells never read the same. */
+    public string? OldValue => ConfigValueText.Shown(change.OldValue, change.NewValue);
+    public string? NewValue => ConfigValueText.Shown(change.NewValue, change.OldValue);
     public string ChangeDescription => change.ChangeDescription;
 }
 
@@ -116,14 +118,19 @@ public partial class LocalDataService
 
     /// <summary>Database-configuration changes over the tab window, newest first. Reads every sys.databases
     /// snapshot up to the window end then UNPIVOTs the wide row per (database, setting) whose value moved via
-    /// the shared <see cref="ConfigChangeDiff"/>. #1319: the global database filter is pushed into SQL.</summary>
+    /// the shared <see cref="ConfigChangeDiff"/>. #1319: the global database filter is pushed into SQL.
+    /// #7416 item 2: the rows are settings only. <c>log_reuse_wait_desc</c> is the engine's live reason the log cannot truncate, not
+    /// a setting an operator changed, so the grid leaves it out (Change Watch and the analysis engine already do). The MCP tool passes
+    /// <paramref name="includeStatusColumns"/> to report those rows apart, so the history is not lost.</summary>
     public async Task<List<DatabaseConfigChangeRow>> GetDatabaseConfigChangesAsync(
-        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null,
+        bool includeStatusColumns = false)
     {
         using var _q = TimeQuery("GetDatabaseConfigChangesAsync", "v_database_config snapshot diff");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endTime, databaseNames);
         return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startTime, endTime)
+            .Where(c => includeStatusColumns || ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
     }

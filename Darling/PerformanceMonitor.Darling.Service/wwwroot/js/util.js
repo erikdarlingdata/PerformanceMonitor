@@ -874,6 +874,15 @@ export function fmtBytes(v) {
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
+/** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
+    and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
+    starts with a capital, and a word the service already capitalised is left as it is. */
+export function fmtStatusWord(v) {
+  if (typeof v !== "string" || !v.trim()) return fmtText(v);
+  const word = v.trim();
+  if (word.toLowerCase() === "ok") return "OK";
+  return /^[a-z][a-z_ ]*$/.test(word) ? word[0].toUpperCase() + word.slice(1).replace(/_/g, " ") : word;
+}
 export function fmtBool(v) {
   return v === true ? "yes" : v === false ? "no" : "—";
 }
@@ -892,6 +901,7 @@ export const FORMATTERS = {
   reltime: relTime,
   bool: fmtBool,
   text: fmtText,
+  status: fmtStatusWord,
 };
 
 export function applyFormat(name, value, opts) {

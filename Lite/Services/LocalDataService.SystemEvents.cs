@@ -730,7 +730,28 @@ FROM " + StoredEventCopies.SystemHealthEvents("server_id = $1 AND event_time >= 
                 records.Add(record);
         }
         records.Sort((a, b) => Nullable.Compare(a.EventTime, b.EventTime));
-        return records;
+        /* #7416 item 1: SQL Server on Linux reports no usable host CPU, so System CPU is null there rather than a flat 100. */
+        return SystemHealthHostCpu.Apply(records, await GetHostOsVersionAsync(serverId));
+    }
+
+    /// <summary>
+    /// The host platform the newest <c>server_properties</c> row that carries one recorded (#7416 item 1): the one stored
+    /// fact that says whether this is SQL Server on Linux. Null when none was ever stored. Darling twin:
+    /// <c>DarlingSystemHealthReader.GetHostOsVersionAsync</c>.
+    /// </summary>
+    public async Task<string?> GetHostOsVersionAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = @"
+SELECT host_os_version
+FROM v_server_properties
+WHERE server_id = $1
+AND   host_os_version IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync() as string;
     }
 
     // ── Severe-Errors database name resolution ──

@@ -159,6 +159,25 @@ public sealed class WebWaitsActivityTrendsBehaviourTests
         }
     }
 
+    /// <summary>
+    /// Every trend read goes through the kept-history read (replaces a source-text pin that named the call): a range wider than the reads
+    /// take is narrowed once to the widest window they take, the panel says so, and the chart still draws. A read that skipped it would
+    /// show the "pick a shorter range" notice and no chart.
+    /// </summary>
+    [Fact]
+    public void ARangeWiderThanTheReadsTake_IsNarrowedOnce_OnAllThreeTrendPanels_AndStillCharts()
+    {
+        var r = Run("tooWide");
+        foreach (var kind in new[] { "latch", "spinlock", "session" })
+        {
+            var panel = r.GetProperty(kind);
+            Assert.Contains("reads at most 168 hours", Strings(panel.GetProperty("notices")).First(), System.StringComparison.Ordinal);
+            Assert.Empty(panel.GetProperty("errors").EnumerateArray());
+            Assert.Equal(JsonValueKind.Object, panel.GetProperty("chart").ValueKind);
+            Assert.Equal(new[] { "300", "168" }, Strings(panel.GetProperty("hours")));
+        }
+    }
+
     [Fact]
     public void WithNoLatchRows_NoTrendReadIsSent()
     {

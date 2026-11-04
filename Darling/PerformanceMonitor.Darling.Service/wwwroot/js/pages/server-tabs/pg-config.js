@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { configValueCell } from "./config-values.js";
+
 
 export const PG_SERVER_CONFIG_COLUMNS = [
   { key: "name", label: "Setting" },
@@ -21,8 +23,9 @@ export const PG_SERVER_CONFIG_COLUMNS = [
 export const PG_CONFIG_CHANGE_COLUMNS = [
   { key: "changed_at", label: "Seen at", format: "time" },
   { key: "name", label: "Setting" },
-  { key: "old_value", label: "From" },
-  { key: "new_value", label: "To" },
+  /* #7416 item 3: a value that only gained or lost whitespace shows it (log_line_prefix), so From and To never read the same. */
+  { key: "old_value", label: "From", display: (r) => configValueCell(r, "old_value", "new_value") },
+  { key: "new_value", label: "To", display: (r) => configValueCell(r, "new_value", "old_value") },
   { key: "unit", label: "Unit", small: true },
   { key: "source", label: "Source", small: true },
 ];

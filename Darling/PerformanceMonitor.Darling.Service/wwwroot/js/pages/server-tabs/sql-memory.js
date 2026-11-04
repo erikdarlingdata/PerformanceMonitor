@@ -10,6 +10,7 @@ import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
+import { poolName } from "../memory-grant-charts.js";
 import { panelShell, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./shared.js";
 
 /* On an Azure SQL Database (engine_edition 5) the collector fills total_physical_memory_mb from the database's own committed
@@ -37,7 +38,7 @@ export const PLAN_CACHE_STATS = [
   { key: "summary.total_size_mb", label: "Cached plans size", format: "mb" },
   { key: "summary.single_use_size_mb", label: "Single-use size", format: "mb" },
   { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
-  { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true },
+  { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true, sentence: true },
 ];
 
 export const MEMORY_SERIES = [
@@ -57,8 +58,11 @@ export const CLERK_COLUMNS = [
    grant, and when" is the question the window exists to answer; the sums come last because they are the
    per-interval deltas added up across the window, not a counter read at one instant. `snapshots_in_window`
    is the denominator that says how much of the window the peaks were taken over. */
+/* #7416: 1 and 2 are the internal and default pools, named as the grant charts name them. Any other pool keeps its number. */
+const POOL_COLUMN = { key: "pool_id", label: "Pool", display: (r) => (r.pool_id == null ? "" : poolName(r.pool_id)) };
+
 export const GRANT_WINDOW_COLUMNS = [
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
   { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
@@ -80,7 +84,7 @@ export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: 
    instant itself. */
 export const GRANT_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "granted_memory_mb", label: "Granted", format: "mb" },
   { key: "used_memory_mb", label: "Used", format: "mb" },
   { key: "available_memory_mb", label: "Available", format: "mb" },
@@ -92,7 +96,7 @@ export const GRANT_COLUMNS = [
 
 export const SEMAPHORE_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
-  { key: "pool_id", label: "Pool", format: "int" },
+  POOL_COLUMN,
   { key: "target_memory_mb", label: "Target", format: "mb" },
   { key: "total_memory_mb", label: "Total", format: "mb" },
   { key: "granted_memory_mb", label: "Granted", format: "mb" },
