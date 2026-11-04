@@ -602,6 +602,6 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         Assert.Contains("var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);", tool, StringComparison.Ordinal);
         Assert.Contains("var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);", tool, StringComparison.Ordinal);
-        Assert.Contains("(maxdopBasis.FromVcores ? \"this database's vCores\" : \"this server's cores-per-socket\")", tool, StringComparison.Ordinal);
+        Assert.Contains("ConfigAuditGuidance.MaxdopUnlimitedMessage(recommended, maxdopBasis)", tool, StringComparison.Ordinal);
     }
 }
