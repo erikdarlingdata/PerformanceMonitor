@@ -368,8 +368,7 @@ public static partial class PgTargetAdvice
                         "No rate is stated and nothing is graded - an absent counter is not a zero. Per-statement WAL volume is " +
                         "collected from pg_stat_statements (wal_bytes per statement) and read by get_pg_top_queries.",
                     Remediation:
-                        "Let the server's version be collected so the analysis can tell Aurora and PostgreSQL below 14 from a server " +
-                        "whose counters are broken, and read get_pg_top_queries for the statements generating WAL.");
+                        "Let the server's engine and version be collected so the analysis can name the cause of the gap, and read get_pg_top_queries for the statements generating WAL.");
             }
 
             var reason = (KnobMeta(shift, "reason_pg_stat_wal_absent") ?? 0) > 0
