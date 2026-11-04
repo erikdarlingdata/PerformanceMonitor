@@ -107,9 +107,17 @@ export const SEMAPHORE_COLUMNS = [
 const PRESSURE_COLUMNS = [
   { key: "sample_time", label: "Time", format: "time" },
   { key: "memory_notification", label: "Notification" },
-  { key: "memory_indicators_process", label: "Process", format: "int" },
-  { key: "memory_indicators_system", label: "System", format: "int" },
+  { key: "memory_indicators_process", label: "SQL Server process", display: (r) => pressureLevelWord(r.memory_indicators_process), sortValue: (r) => r.memory_indicators_process },
+  { key: "memory_indicators_system", label: "Operating system", display: (r) => pressureLevelWord(r.memory_indicators_system), sortValue: (r) => r.memory_indicators_system },
 ];
+
+/** The resource monitor's indicator as words (#7416): 0 and 1 are normal, 2 is medium, 3 and above are severe, the collector's own reading of the number. */
+export function pressureLevelWord(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  if (value >= 3) return "Severe";
+  if (value >= 2) return "Medium";
+  return "Normal";
+}
 
 /** Both memory-pressure severities as the desktop chart counts them: indicator 2 is medium, 3 and above severe. */
 const PRESSURE_LINES = [
@@ -270,7 +278,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
  */
 export function memoryPressurePanels(server, ctx) {
   const chart = panelShell("Memory Pressure Events per Hour", ctx.label, 2, "get_memory_pressure_events");
-  const grid = panelShell("Memory Pressure Events", ctx.label, 1, "get_memory_pressure_events");
+  const grid = panelShell("Memory Pressure Events", ctx.label, 2,"get_memory_pressure_events");
   const signal = getPanelSignal();
   (async () => {
     const res = await readToolWithinKeptHistory("get_memory_pressure_events", { server, hours: ctx.hours }, signal);

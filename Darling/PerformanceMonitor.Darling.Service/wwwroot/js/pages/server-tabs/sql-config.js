@@ -198,8 +198,13 @@ export function identityCapacityPanels(server) {
    the same ones the Viewer shows. A gap names either the alerts it is about or the severities and errors that have no alert. */
 function agentAlertGapWhich(r) {
   const alerts = Array.isArray(r && r.alerts) ? r.alerts : [];
-  const missing = Array.isArray(r && r.missing) ? r.missing : [];
-  return alerts.length ? alerts.join(", ") : missing.join(", ");
+  return alerts.join(", ");
+}
+/* #7416: the Alerts column names the alerts a gap is about. A gap about missing severities or errors lists them in its own sentence, so a
+   second column repeating the numbers said nothing new, and the first gap (no alert defined at all) had a blank cell. The column is drawn
+   only when some gap names an alert. */
+export function withAgentAlertNames(rows) {
+  return (rows || []).map((r) => ({ ...r, alert_names: agentAlertGapWhich(r) }));
 }
 const AGENT_ALERT_STAT_COLUMNS = [
   { key: "instance_status", label: "Alert setup", format: "text", small: true },
@@ -208,7 +213,7 @@ const AGENT_ALERT_STAT_COLUMNS = [
 ];
 const AGENT_ALERT_GAP_COLUMNS = [
   { key: "message", label: "What is wrong" },
-  { key: "which", label: "Which", render: (r) => el("span", { text: agentAlertGapWhich(r) }), sortValue: agentAlertGapWhich },
+  { key: "alert_names", label: "Alerts", hideWhenEmpty: true },
 ];
 const AGENT_ALERT_COLUMNS = [
   { key: "name", label: "Alert" },
@@ -238,6 +243,7 @@ export const AGENT_ALERT_SPECS = [
     viz: "table",
     rowsKey: "gaps",
     columns: AGENT_ALERT_GAP_COLUMNS,
+    orderRows: withAgentAlertNames,
     emptyText: "No gaps. Every severity from 19 to 25 and every error from 823 to 825 has an enabled alert that tells an operator.",
   },
   {
@@ -279,7 +285,7 @@ const DATABASE_PROTECTION_COLUMNS = [
   { key: "excluded_reason", label: "Not judged because", small: true },
 ];
 const DATABASE_PROTECTION_STATS = [
-  { key: "summary.text", label: "Overdue", format: "text", small: true },
+  { key: "summary.text", label: "Overdue", format: "text", small: true, sentence: true },
   { key: "captured_at", label: "Captured", format: "time", small: true },
 ];
 const overdueFirst = (rows) => [...rows].sort((a, b) => {

@@ -1646,3 +1646,12 @@ table.data tr[aria-pressed]:focus-visible { outline: 2px solid var(--accent); ou
 /* #7109: a proposal's detail lines (a plan handle, a request id, a JSON fact) have no break points, so they wrap anywhere instead of pushing a 390 px page wider than the screen. */
 .fact-list { padding-left: 1.2rem; }
 .fact-list li, .kv { overflow-wrap: anywhere; }
+
+/* #7416: a stat that is a sentence (Health Checks) is a line of text across the panel, and the tiles beside it keep their natural width
+   instead of stretching to fill the row. */
+.stat-block { display: flex; flex-direction: column; gap: 0.6rem; }
+.stat-sentence { margin: 0; line-height: 1.4; overflow-wrap: anywhere; }
+.stats.natural { grid-template-columns: repeat(auto-fill, minmax(150px, 14rem)); }
+.metric-chip.clickable { cursor: pointer; }
+.metric-chip.clickable:hover { filter: brightness(1.15); }
+.metric-chip.clickable:focus-visible { outline: 2px solid var(--accent, #4fc3f7); outline-offset: 1px; }

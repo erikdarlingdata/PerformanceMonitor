@@ -759,7 +759,7 @@ export const PROPERTY_STATS = [
   { key: "physical_memory_mb", label: "Physical memory", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "is_clustered", label: "Clustered", format: "bool" },
   { key: "is_hadr_enabled", label: "Always On", format: "bool" },
-  { key: "service_objective", label: "Service objective", format: "text", small: true },
+  { key: "service_objective", label: "Service objective", format: "text", small: true, showWhen: AZURE_SQL_DATABASE },
   { key: "vcore_count", label: "vCores", format: "int", showWhen: AZURE_SQL_DATABASE },
 ];
 

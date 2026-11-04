@@ -1059,7 +1059,8 @@ GROUP BY server_id, collector_name";
     /// and one index scan of <c>idx_identity_capacity_time</c> per kept marker (246 loops): 9 to 11.5 ms and 10,800 buffers, the same 246 rows.</para>
     /// </summary>
     internal const string FleetIdentityCapacitySql = $@"
-SELECT c.server_id, c.percent_used
+SELECT c.server_id, c.percent_used, c.database_name, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
+       c.last_value::text, c.seed_value::text, c.increment_value::text
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -1083,7 +1084,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var counts = new Dictionary<int, (int Columns, bool Critical)>();
+        var counts = new Dictionary<int, (int Columns, bool Critical, IdentityColumnFact? Worst, double WorstPercent)>();
         await using var command = postgres.CreateCommand(FleetIdentityCapacitySql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
@@ -1104,12 +1105,25 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
             var serverId = reader.GetInt32(0);
             counts.TryGetValue(serverId, out var seen);
-            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical);
+            var percent = reader.GetDouble(1);
+            /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
+            var isWorst = seen.Worst is null || percent > seen.WorstPercent;
+            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical,
+                isWorst ? ColumnOf(reader, percent, nowUtc) : seen.Worst, isWorst ? percent : seen.WorstPercent);
         }
 
         return counts.ToDictionary(
             c => c.Key,
-            c => new FleetIdentityCapacity(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns));
+            c => FleetIdentityCapacity.Of(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.Worst));
+    }
+
+    private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
+    {
+        string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+        System.Numerics.BigInteger? Big(int i) => reader.IsDBNull(i) ? null : System.Numerics.BigInteger.Parse(reader.GetString(i), CultureInfo.InvariantCulture);
+        return new IdentityColumnFact(
+            Text(2) ?? "", Text(3), Text(4), Text(5), Text(6), reader.IsDBNull(7) ? null : reader.GetInt32(7),
+            Big(8), Big(9), Big(10), percent, nowUtc, null, null);
     }
 
     internal static FleetServerCard BuildCard(
@@ -3227,7 +3241,24 @@ public sealed class FleetServerCard
 /// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>
 public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_band")] string WorstBand,
-    [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar);
+    [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
+    /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
+       does not fit a JSON number) and null when the collector did not store the value. */
+    [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
+    [property: JsonPropertyName("worst_table")] string? WorstTable = null,
+    [property: JsonPropertyName("worst_column")] string? WorstColumn = null,
+    [property: JsonPropertyName("worst_percent_used")] double? WorstPercentUsed = null,
+    [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null)
+{
+    internal static FleetIdentityCapacity Of(string band, int columns, IdentityColumnFact? worst) =>
+        worst is null
+            ? new FleetIdentityCapacity(band, columns)
+            : new FleetIdentityCapacity(
+                band, columns, worst.DatabaseName,
+                string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
+                worst.ColumnName, worst.StoredPercent,
+                worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture));
+}
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.
 /// <c>colour</c> is the stored <c>#RRGGBB</c> or null (null renders as a neutral pill, matching the desktop

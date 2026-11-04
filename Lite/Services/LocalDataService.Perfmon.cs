@@ -38,7 +38,8 @@ SELECT
     delta_cntr_value,
     collection_time,
     cntr_type,
-    sample_interval_seconds
+    sample_interval_seconds,
+    object_name
 FROM {perfmonRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {perfmonRelation} WHERE server_id = $1)
@@ -59,7 +60,8 @@ ORDER BY counter_name";
                 DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 CollectionTime = reader.GetDateTime(4),
                 CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6)
+                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                ObjectName = reader.IsDBNull(7) ? null : reader.GetString(7)
             });
         }
 
@@ -381,6 +383,9 @@ public class PerfmonRow
     /// <summary>The seconds <see cref="DeltaValue"/> covers under the three-state rule (0 = no delta knowable, null
     /// on a gauge): the denominator of a rate row's per-second figure.</summary>
     public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>The perfmon object the counter belongs to (#7416). The same counter and instance can come from two objects, and the tool shows which.</summary>
+    public string? ObjectName { get; set; }
 }
 
 public class PerfmonTrendPoint
