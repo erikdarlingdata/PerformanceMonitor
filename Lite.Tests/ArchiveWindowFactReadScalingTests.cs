@@ -224,7 +224,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'AppDb', 'AppDb_dat
     [Fact]
     public async Task IoLatencyAndDatabaseSizeFacts_AWindowNewerThanTheArchive_OpenNoArchiveFile()
     {
-        await ExecuteAsync(FileIoRow(Old, 1000, 10, 1000), FileIoRow(Recent, 50, 10, 20));
+        await ExecuteAsync(FileIoRow(Old, 1000, 1000, 100000), FileIoRow(Recent, 50, 1000, 2000)); // #7417: 1000 reads a row clears the read volume floor
         await ArchiveAndBreakAsync("file_io_stats");
 
         var facts = await FactsAsync(ShortWindow);
@@ -240,7 +240,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'AppDb', 'AppDb_dat
     [Fact]
     public async Task IoLatencyFact_AWindowThatReachesIntoTheArchive_StillCountsTheArchivedRows()
     {
-        await ExecuteAsync(FileIoRow(Old, 1000, 10, 1000), FileIoRow(Recent, 50, 10, 20));
+        await ExecuteAsync(FileIoRow(Old, 1000, 1000, 100000), FileIoRow(Recent, 50, 1000, 2000)); // #7417: 1000 reads a row clears the read volume floor
         await ArchiveAsync("file_io_stats");
 
         var latency = Find(await FactsAsync(ReachingWindow), "IO_READ_LATENCY_MS");
