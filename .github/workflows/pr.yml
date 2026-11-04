@@ -418,7 +418,7 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.exporter == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -462,13 +462,16 @@ jobs:
 
           dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category!=Slow" --blame-hang-timeout 300s
 
+      # The two million-row state store tests take about a minute each on a developer machine and about four minutes
+      # each on this runner (inferred from a 9.5-minute slow run), which is close to a 300 s hang timeout. 900 s still stops a real hang well inside the step.
+      # Normal verbosity prints each test's duration, so a test that grows slower shows in the log before it times out.
       - name: Test the exporter (slow)
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         run: |
           set -euo pipefail
 
-          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 300s --blame-hang-dump-type full
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 900s --blame-hang-dump-type full --logger "console;verbosity=normal"
 
       # A hang leaves its dumps and the blame sequence file in TestResults/. Without this upload they die with the runner.
       - name: Upload the exporter test results

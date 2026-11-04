@@ -8,9 +8,9 @@ using Xunit;
 namespace PerformanceMonitor.Exporter.Tests;
 
 /// <summary>
-/// The state store's two million-row tests time a DuckDB build and measure the managed heap with
-/// <see cref="GC.GetTotalMemory(bool)"/>, which counts every thread's allocations. Run beside the Docker-backed
-/// suites, they were slow enough on a CI runner to trip the hang timeout. This collection runs the class alone.
+/// The state store's memory test measures the managed heap with <see cref="GC.GetTotalMemory(bool)"/>, which counts
+/// every thread's allocations, so a test running beside it in parallel inflates the measurement. This collection runs
+/// the class alone.
 /// </summary>
 [CollectionDefinition(Name, DisableParallelization = true)]
 public sealed class StateStoreRunsAlone
