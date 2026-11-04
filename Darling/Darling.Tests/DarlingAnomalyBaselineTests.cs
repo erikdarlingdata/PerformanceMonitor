@@ -1493,6 +1493,17 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.DoesNotContain(quiet, f => f.Key == "ANOMALY_READ_LATENCY");
             Assert.Empty(quiet);
 
+            /* #7417: the same 40 ms a read, but 16 rows of 5 reads is 80 I/Os in the window, under the 250 floor: it must not fire. */
+            await using (var clearSparse = new NpgsqlCommand(
+                $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
+            {
+                clearSparse.Parameters.AddWithValue(analysisTime);
+                await clearSparse.ExecuteNonQueryAsync(ct);
+            }
+            for (var i = 0; i < 16; i++)
+                await InsertAsync(connection, insertIo, id++, analysisTime.AddMinutes(5 * (i + 1)), ioServerId, ioServerName, 5L, 0L, 200L);
+            Assert.Empty(await detector.DetectAnomaliesAsync(context));
+
             /* Window B: the whole window ran high. */
             await using (var clearWindow = new NpgsqlCommand(
                 $"DELETE FROM file_io_stats WHERE server_id = {ioServerId} AND collection_time > $1;", connection))
@@ -1518,6 +1529,7 @@ public sealed class DarlingAnomalyBaselineTests
             var tileMean = ((tileRows - 1) * 40.0 + 60.0) / tileRows;
             Assert.Equal(tileMean, fact.Metadata["avg_latency_ms"], 0.001);
             Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
+            Assert.Equal(320.0, fact.Metadata["window_io_ops"]); // #7417: I/Os (16 rows x 20 reads), not the 16 samples
             Assert.Equal(60.0, fact.Metadata["window_peak"], 0.001);
             Assert.Equal(0.0, fact.Metadata["baseline_low_quality"]);               // the z path
             Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);         // 23.2σ, the peak's
