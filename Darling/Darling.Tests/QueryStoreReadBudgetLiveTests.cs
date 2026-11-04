@@ -1184,7 +1184,7 @@ public sealed class QueryStoreReadBudgetLiveTests
         protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
         {
             var cutoff = query.Parameters?.FirstOrDefault(static p => p.Name == "@cutoff_time")?.Value as DateTime?;
-            if (cutoff is null && query.Text.Contains("FROM sys.query_store_plan AS qsp", StringComparison.Ordinal))
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_plan AS PerformanceMonitorLite", StringComparison.Ordinal))
             {
                 /* #5813: the plan-XML fetch by ids. Like the real statement it spends DecompressPerPlan on every
                    requested plan before the first row, then ships the plans in ascending plan_id order. */
@@ -1216,7 +1216,7 @@ public sealed class QueryStoreReadBudgetLiveTests
                 return new PlanReader(target, ids);
             }
 
-            if (cutoff is null && query.Text.Contains("FROM sys.query_store_query AS qsq", StringComparison.Ordinal))
+            if (cutoff is null && query.Text.Contains("FROM sys.query_store_query AS PerformanceMonitorLite", StringComparison.Ordinal))
             {
                 /* #6102: the statement-text fetch by ids. Like the real statement it spends MaterialisePerText on every
                    requested id before the first row, then ships the texts in ascending query_id order. */
