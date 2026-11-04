@@ -82,8 +82,8 @@ export const BLOCKING_BY_SOURCE = { "DMV snapshot": { title: "Blocking snapshot 
 /* Stays local: this page labels the series "Lock wait (ms/sec)", not the catalog's label. */
 export const LOCK_WAIT_SERIES = [{ key: "wait_time_ms_per_second", label: "Lock wait (ms/sec)" }];
 
-/* #2484: the two Current Waits series. Each charts ONE numeric key; the wait type and database name are
-   the grouping the read already applied, not extra axes. */
+/* #2484: the two Current Waits series. Each charts ONE numeric key. The read returns one row per (time, wait type) and per
+   (time, database), so the panels name the group field (#7571) and the chart stacks one segment per group in a bar per time. */
 export const WAITING_TASK_SERIES = [{ key: "total_wait_ms", label: "Total Wait (ms)" }];
 export const BLOCKED_SESSION_SERIES = [{ key: "blocked_count", label: "Blocked Sessions" }];
 

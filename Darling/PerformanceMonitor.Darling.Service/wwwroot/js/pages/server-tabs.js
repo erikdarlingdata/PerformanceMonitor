@@ -398,6 +398,9 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           dbScope: "server",
           viz: "line",
+          /* #7571: one row per (time, wait type), so one bar per time with a segment per wait type, not a line through every row. */
+          mode: "stacked-bar",
+          groupKey: "wait_type",
           rowsKey: "waiting_tasks",
           xKey: "collection_time",
           series: WAITING_TASK_SERIES,
@@ -408,6 +411,9 @@ export const SERVER_TABS = [
           title: "Blocked Sessions",
           subtitle: ctx.label,
           viz: "line",
+          /* #7571: one row per (time, database): a bar per time, a segment per database. */
+          mode: "stacked-bar",
+          groupKey: "database_name",
           rowsKey: "blocked_sessions",
           xKey: "collection_time",
           series: BLOCKED_SESSION_SERIES,

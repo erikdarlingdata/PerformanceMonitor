@@ -1467,10 +1467,47 @@ function vizStat(data, desc) {
 
 /* line: desc = { rowsKey, xKey, series:[{key,label,color?}], format?, emptyText? }. `format: "int"` declares the
    series are COUNTS, so the chart also puts its gridlines on whole numbers (see integerTicks in charts.js). */
+/* #7571: a read that answers one row per (time, group) -- a wait type, a database -- is drawn one series per group, not one line
+   through every row. `groupKey` names the row field that holds the group and the descriptor's one `series` entry names the number.
+   Rows at one time fold into one point, a group repeated at one time adds up, and past MAX_GROUP_SERIES groups the smallest by
+   total fold into "(other)" so the stack's height at each time is still the whole figure the grid beside it adds up to. */
+const MAX_GROUP_SERIES = 8;
+const OTHER_GROUP = "(other)";
+export function groupedPoints(rows, xKey, groupKey, valueKey) {
+  const totals = new Map();
+  for (const r of rows) {
+    if (!r || r[xKey] == null) continue;
+    const g = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
+    totals.set(g, (totals.get(g) || 0) + (Number(r[valueKey]) || 0));
+  }
+  const ranked = [...totals.keys()].sort((a, b) => totals.get(b) - totals.get(a) || (a < b ? -1 : a > b ? 1 : 0));
+  const kept = ranked.length > MAX_GROUP_SERIES ? ranked.slice(0, MAX_GROUP_SERIES - 1) : ranked;
+  const folded = ranked.length > kept.length;
+  const byTime = new Map();
+  for (const r of rows) {
+    if (!r || r[xKey] == null) continue;
+    const g0 = r[groupKey] == null || r[groupKey] === "" ? "(none)" : String(r[groupKey]);
+    const g = kept.includes(g0) ? g0 : OTHER_GROUP;
+    const v = Number(r[valueKey]);
+    if (!Number.isFinite(v)) continue;
+    if (!byTime.has(r[xKey])) byTime.set(r[xKey], { [xKey]: r[xKey] });
+    const pt = byTime.get(r[xKey]);
+    pt[g] = (pt[g] || 0) + v;
+  }
+  const names = folded ? [...kept, OTHER_GROUP] : kept;
+  return {
+    points: [...byTime.values()].sort((a, b) => String(a[xKey]).localeCompare(String(b[xKey]))),
+    series: names.map((n, i) => ({ key: n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] })),
+  };
+}
+
 function vizLine(data, desc) {
-  const allSeriesCfg = Array.isArray(desc.series) ? desc.series : [];
-  if (!allSeriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
-  const points = getPath(data, desc.rowsKey) || [];
+  const baseSeriesCfg = Array.isArray(desc.series) ? desc.series : [];
+  if (!baseSeriesCfg.length) return emptyStrip(NO_FIELDS_MSG);
+  const rawPoints = getPath(data, desc.rowsKey) || [];
+  const grouped = desc.groupKey && Array.isArray(rawPoints) ? groupedPoints(rawPoints, desc.xKey, desc.groupKey, baseSeriesCfg[0].key) : null;
+  const points = grouped ? grouped.points : rawPoints;
+  const allSeriesCfg = grouped ? grouped.series : baseSeriesCfg;
   /* #7394: `hideEmptySeries` drops a series with no measured value at any point, as the desktop's PostgreSQL trend charts do: a
      latency that is null on every point (avg read ms with track_io_timing off, the default) is a fact about the configuration, and
      a legend entry with no line would read as a flat zero. A chart left with no series says `noSeriesText` (or its emptyText). */
@@ -1531,6 +1568,8 @@ function vizLine(data, desc) {
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
        whole-number formatter as the same label several times over ("1 1 1 0 0 0" on a blocking-events axis). */
     integerTicks: desc.format === "int",
+    /* #7571: "stacked-bar" draws a grouped read as one bar per time, one segment per group. Absent: the chart's default line. */
+    mode: desc.mode || undefined,
     /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). */
     sizeUnit: desc.format === "mb" ? "mb" : null,
     unit: desc.unit ?? null,
