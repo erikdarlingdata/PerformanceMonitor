@@ -193,7 +193,7 @@ internal static class DarlingMcpAgentActions
             throw new AgentToolOutcomeException(answer);
     }
 
-    private static string? Serialize(MuteRule? rule) =>
+    internal static string? Serialize(MuteRule? rule) =>
         rule is null ? null : JsonSerializer.Serialize(DarlingMcpAlertTools.BuildMuteRulePayload(rule), McpHelpers.JsonOptions);
 
     private static async Task<AgentActionTarget> ServerTargetAsync(NpgsqlDataSource postgres, int serverId, string? id)

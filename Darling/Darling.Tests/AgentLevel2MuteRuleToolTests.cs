@@ -101,7 +101,7 @@ public sealed class AgentLevel2ToolPolicyTests
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains($"the write tools are off, so the {writes + admin - ActionTools.Length} that change monitoring configuration are not served", text, StringComparison.Ordinal);
-        Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)", text, StringComparison.Ordinal);
+        Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -235,12 +235,13 @@ public sealed class AgentMuteStartRefusalTests
     {
         await using var unused = NpgsqlDataSource.Create("Host=127.0.0.1;Port=1;Database=none;Username=none;Timeout=1");
 
+        /* An agent_action present is the claim path (#7414): action stays refused there, so a mute made under a claim always mutes. */
         var create = await DarlingMcpAlertTools.CreateMuteRule(unused, metric_name: "Blocking Detected", server_id: 7,
-            agentSeat: Seat, action: "digest");
+            agent_action: "{\"request_id\":\"claim path\"}", agentSeat: Seat, action: "digest");
         var update = await DarlingMcpAgentActions.UpdateMuteAsync(Seat, unused, null, null, "rule-1",
             "{\"action\":\"digest\"}", TestContext.Current.CancellationToken);
         var schedule = await DarlingMcpAlertTools.CreateMuteRule(unused, metric_name: "Blocking Detected", server_id: 7,
-            agentSeat: Seat, recur_start: "22:00");
+            agent_action: "{\"request_id\":\"claim path\"}", agentSeat: Seat, recur_start: "22:00");
 
         Assert.Equal("invalid", System.Text.Json.Nodes.JsonNode.Parse(create)!["status"]!.GetValue<string>());
         Assert.Contains("action is not available", create, StringComparison.Ordinal);
@@ -479,7 +480,8 @@ VALUES ('{id}', {(enabled ? "TRUE" : "FALSE")}, now() AT TIME ZONE 'utc', {(serv
     {
         await RunAsync(async c =>
         {
-            Assert.Equal(AgentActionCodes.Required, (string?)Parse(await CreateMute(c, arg: ""))["reason"]);
+            /* #7414: a call with no agent_action is the no-claim path now, so a mute with no expires_at is refused for the bound, not for the claim. */
+            Assert.Equal(DarlingMcpAgentMuteDirect.ExpiryCode, (string?)Parse(await CreateMute(c, arg: ""))["reason"]);
 
             var wrongAgent = AgentActionArgumentTests.Arg(c.Request.ToString(), Guid.NewGuid().ToString());
             Assert.Equal(AgentActionCodes.ClaimNotLive, (string?)Parse(await CreateMute(c, arg: wrongAgent))["reason"]);
