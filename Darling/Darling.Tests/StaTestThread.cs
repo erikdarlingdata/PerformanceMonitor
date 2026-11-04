@@ -185,6 +185,7 @@ internal sealed class StaHost
     private long _lastStartedTick;
     private volatile DispatcherOperation? _lastStarted;
     private int _nativeThreadId;
+    private volatile Thread? _thread;
 
     internal string? StuckTest => _stuckTest;
 
@@ -362,9 +363,13 @@ internal sealed class StaHost
             var stepAgo = Environment.TickCount64 - Interlocked.Read(ref _stepTick);
             var startedBefore = Interlocked.Read(ref _opsStarted);
             var cpuBefore = ReadThread(out _, out _);
+            var countersBefore = ReadProbe(StaThreadProbe.ReadCounters);
+            var stackBefore = ReadText(() => StaThreadProbe.NativeStack(_nativeThreadId));
             Darling.Tests.TestWait.Elapse(s_sampleWindow);
             var startedAfter = Interlocked.Read(ref _opsStarted);
             var cpuAfter = ReadThread(out var threadState, out var inWait);
+            var countersAfter = ReadProbe(StaThreadProbe.ReadCounters);
+            var stackAfter = ReadText(() => StaThreadProbe.NativeStack(_nativeThreadId));
             var running = startedAfter - Interlocked.Read(ref _opsCompleted);
             var last = _lastStarted;
             var lastName = last is null
@@ -385,13 +390,56 @@ internal sealed class StaHost
             return $"Where it was: the body's last step was \"{step}\", named {stepAgo} ms ago. "
                 + $"The dispatcher started {startedBefore - opsAtStart} operations during the body and {ran} more in the next {s_sampleWindow.TotalMilliseconds:0} ms, "
                 + $"{running} of them still running; the last it started was {lastName}. "
-                + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216).";
+                + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216). "
+                + DescribeWhere(stackBefore, stackAfter, countersBefore, countersAfter);
         }
         catch (Exception ex)
         {
             return $"(where the body was could not be read: {ex.GetType().Name}: {ex.Message}) (#6216)";
         }
     }
+
+    /// <summary>
+    /// #7600: the two hangs of 11-04 were slow bodies (126 s and 68 s, then they returned) waiting with no CPU, which the step names could not
+    /// explain. This adds what names the wait: the runtime's own state for the thread (WaitSleepJoin is a .NET wait on a lock, an event or a
+    /// task; Running with an operating-system wait is a native call or a message wait), its native stack at the start and the end of the
+    /// sample (the same frames twice is a thread parked in one call, not one that makes slow progress), and the process counters around it.
+    /// </summary>
+    private string DescribeWhere(string stackBefore, string stackAfter, Result<StaThreadProbe.Counters> before, Result<StaThreadProbe.Counters> after)
+    {
+        var managed = _thread is { } thread ? thread.ThreadState.ToString() : "(the thread object was not kept)";
+        var counters = before.Failure is null && after.Failure is null
+            ? StaThreadProbe.Describe(before.Value, after.Value, s_sampleWindow)
+            : $"(the process counters could not be read: {before.Failure ?? after.Failure})";
+        var moved = stackBefore == stackAfter ? "the same at the start of the sample" : $"different at the start of the sample: {stackBefore}";
+        return $"The runtime's state for the thread is {managed}. Its native stack, leaf first, was {stackAfter}, and it was {moved}. {counters}";
+    }
+
+    private static string ReadText(Func<string> read)
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception ex)
+        {
+            return $"(could not be read: {ex.GetType().Name}: {ex.Message})";
+        }
+    }
+
+    private static Result<T> ReadProbe<T>(Func<T> read)
+    {
+        try
+        {
+            return new Result<T>(read(), null);
+        }
+        catch (Exception ex)
+        {
+            return new Result<T>(default!, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private readonly record struct Result<T>(T Value, string? Failure);
 
     /// <summary>The host thread's CPU time and state, read from the process's thread list by the native id taken when the thread started.</summary>
     private TimeSpan ReadThread(out string state, out bool inWait)
@@ -453,6 +501,7 @@ internal sealed class StaHost
                     Interlocked.Increment(ref _opsCompleted);
                 };
                 _nativeThreadId = (int)GetCurrentThreadId();
+                _thread = Thread.CurrentThread;
                 made = dispatcher;
                 ready.Set();
                 Dispatcher.Run();
