@@ -97,6 +97,30 @@ public sealed class QueryStoreSelfKeysLiveTests
         Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = {Own}", ct));
     }
 
+    /// <summary>#7443: in a PARAMETERIZATION FORCED database SQL Server stores the normalized text, which has no comments, so the marker
+    /// reaches the store only as the alias the collectors now put in each statement. The text writer records a key for that text, and not
+    /// for the same statement with an ordinary alias.</summary>
+    [Fact]
+    public async Task TheTextWriter_RecordsTheKeyOfTheNormalizedTextWhereTheMarkerIsAnAlias()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #6750 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var normalized = "(@2 int,@1 int,@0 int,@3 int,@4 int)select 'Db' where exists ( select 1 from sys . database_query_store_options as "
+            + QueryStoreCollector.SelfQueryMarker + " where actual_state in ( @0 , @1 , @2 ) and readonly_reason & @3 = @4 )";
+        var ordinary = normalized.Replace(QueryStoreCollector.SelfQueryMarker, "qso", StringComparison.Ordinal);
+
+        await QueryStoreTextWriter.WriteAsync(connection, ServerId, Db,
+            [new FetchedQueryText(Own, normalized, "0x01"), new FetchedQueryText(40, ordinary, "0x02")], DateTime.UtcNow, 30, cancellationToken: ct);
+
+        Assert.Equal(1L, await KeysAsync(connection, ct));
+        Assert.Equal(1L, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_self_keys WHERE query_id = {Own}", ct));
+    }
+
     /// <summary>The rig: three ordinary queries and the monitor's own statement, each tripling its CPU from the baseline to the recent
     /// window. The stats rows carry ordinary inline text for all four, so only the text table says which one is the monitor's.</summary>
     private static async Task<QueryStoreRegressionsFailureGroupsLiveTests.Rig> OpenRigAsync(DateTime now, CancellationToken ct) =>

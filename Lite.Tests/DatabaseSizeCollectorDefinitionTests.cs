@@ -41,7 +41,7 @@ public sealed class DatabaseSizeCollectorDefinitionTests
         Assert.Equal(2, Regex.Matches(plan.Text, Regex.Escape("AND d.name NOT IN (@excl_db_0)")).Count);
         Assert.DoesNotContain("/*EXCLUSION_FILTER", plan.Text, StringComparison.Ordinal);
         Assert.Contains("CURSOR LOCAL FAST_FORWARD", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("FILEPROPERTY(df.name, N''''SpaceUsed'''')", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("FILEPROPERTY(PerformanceMonitorLite.name, N''''SpaceUsed'''')", plan.Text, StringComparison.Ordinal);
         Assert.Contains("sys.dm_os_volume_stats", plan.Text, StringComparison.Ordinal);
         Assert.Equal("SO", Assert.Single(plan.Parameters).Value);
     }
@@ -65,7 +65,7 @@ public sealed class DatabaseSizeCollectorDefinitionTests
 
         Assert.Contains("current_size_mb decimal(19,2) NULL", plan.Text, StringComparison.Ordinal);
         Assert.Contains("INSERT #file_space (database_id, file_id, used_size_mb, current_size_mb)", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(decimal(19,2), PerformanceMonitorLite.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
 
         /* The fallback is load-bearing: a database whose probe failed (mid-restore, permissions) still
            reports a total from master_files rather than NULL, so it degrades in precision and never

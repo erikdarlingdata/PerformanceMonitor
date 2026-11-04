@@ -101,12 +101,12 @@ OPTION(RECOMPILE);" + NoDatabaseAccessNote.ScopeResults;
     /// </summary>
     private const string PayloadBodyText = @"
 SELECT /* PerformanceMonitorLite */
-    configuration_name = dsc.name,
-    value = CONVERT(nvarchar(256), dsc.value),
-    value_for_secondary = CONVERT(nvarchar(256), dsc.value_for_secondary)
-FROM sys.database_scoped_configurations AS dsc
+    configuration_name = PerformanceMonitorLite.name,
+    value = CONVERT(nvarchar(256), PerformanceMonitorLite.value),
+    value_for_secondary = CONVERT(nvarchar(256), PerformanceMonitorLite.value_for_secondary)
+FROM sys.database_scoped_configurations AS PerformanceMonitorLite
 WHERE (DB_ID() > 4 OR DB_ID() = 2)
-ORDER BY dsc.name
+ORDER BY PerformanceMonitorLite.name
 OPTION(RECOMPILE);";
 
     public override string Name => "database_scoped_config";

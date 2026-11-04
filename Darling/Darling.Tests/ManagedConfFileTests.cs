@@ -396,6 +396,30 @@ public sealed class ManagedConfFileTests
         }
     }
 
+    /// <summary>#7446: TimescaleDB's telemetry level is rendered exactly once, as off, in the managed body and in the
+    /// full file text a start writes. A line the operator already assigns above the include is left out, and a store
+    /// that migrates off the legacy blocks gets it through the managed-only keys.</summary>
+    [Fact]
+    public void RenderBody_ContainsTelemetryLevelOff_ExactlyOnce_AndLeavesAnOperatorsLineAlone()
+    {
+        var inputs = SampleInputs();
+        foreach (var text in new[] { ManagedConfFile.RenderBody(inputs), ManagedConfFile.Render(inputs) })
+        {
+            var lines = text.Split('\n').Where(l => l.StartsWith("timescaledb.telemetry_level", StringComparison.Ordinal)).ToList();
+            Assert.Single(lines);
+            Assert.Equal("timescaledb.telemetry_level = 'off'", lines[0]);
+        }
+
+        Assert.Equal("off", ManagedConfFile.ManagedOnlyKeys["timescaledb.telemetry_level"]);
+
+        var pinned = new Dictionary<string, ManagedConfFile.OperatorPinnedLine>
+        {
+            ["timescaledb.telemetry_level"] = new(5, "basic"),
+        };
+        var pinnedBody = ManagedConfFile.RenderBody(inputs with { OperatorPinned = pinned });
+        Assert.DoesNotContain("timescaledb.telemetry_level", pinnedBody, StringComparison.Ordinal);
+    }
+
     /// <summary>A file the previous version wrote (the same body without the page-cost line, with a header hash
     /// that matches it) is not a hand edit, and a start replaces it with the new render.</summary>
     [Fact]
