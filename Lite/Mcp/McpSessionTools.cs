@@ -81,7 +81,8 @@ public sealed class McpSessionTools
                         $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(filter, blocking_only, waitFilter)
                         + (tagScope.Active ? $" (query tag '{tagScope.Requested}')" : "")
-                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
+                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds."
+                        + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
                         notice.AsHints()));
                 }
 

@@ -169,14 +169,17 @@ public sealed partial class ViewerDataService
     /// The "Latest Snapshot" button read — the newest STORED capture only (all rows sharing
     /// MAX(collection_time) for the server). Erik's decision: the viewer reads only what the collector
     /// stored, so this replaces Lite's live-server query with the newest persisted snapshot batch —
-    /// the closest stored analogue of Lite's point-in-time "currently running" view. $1 server_id.
+    /// the closest stored analogue of Lite's point-in-time "currently running" view. $1 server_id, $2 database filter, $3 include the monitor's statements.
+    /// The anchor applies the $3 predicate too (#7573): "latest" is the newest capture that has rows the grid shows, so a capture holding only the monitor's
+    /// statements does not empty the read and read as "No snapshots stored" while older captures hold application rows.
     /// </summary>
     public static readonly string LatestQuerySnapshotBatchSql = $"""
         SELECT
         {QuerySnapshotColumns}
         FROM query_snapshots
         WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1)
+        AND   collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1
+                                 AND ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}))
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
         AND   ($3::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
         AND   query_text NOT LIKE 'WAITFOR%'

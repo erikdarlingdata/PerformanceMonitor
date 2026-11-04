@@ -107,6 +107,31 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #7573: the live read runs the collector's own query, which no longer drops the monitor's other sessions, so the Current Active Queries list follows the
+    /// Active Queries page's Monitor statements switch: left out unless <paramref name="includeMonitor"/> asks, by the same program-name prefix rule
+    /// (<see cref="PerformanceMonitor.Common.MonitorApplicationNames"/>). A row with no program name is never hidden.
+    /// </summary>
+    public static List<ViewerQuerySnapshotRow> LeaveOutMonitorRows(IReadOnlyList<ViewerQuerySnapshotRow> rows, bool includeMonitor)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        if (includeMonitor)
+        {
+            return new List<ViewerQuerySnapshotRow>(rows);
+        }
+
+        var kept = new List<ViewerQuerySnapshotRow>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (!PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(row.ProgramName))
+            {
+                kept.Add(row);
+            }
+        }
+
+        return kept;
+    }
+
+    /// <summary>
     /// Parses the <c>fetch_active_queries</c> <c>result_json</c> (built by the service's
     /// <c>ActiveQueriesLivePayload.Serialize</c>) into <see cref="ViewerQuerySnapshotRow"/>s — the SAME row model
     /// the stored Active Queries grid binds, so the live and stored views render identically. Each row's

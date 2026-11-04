@@ -250,7 +250,7 @@ export function activeQueriesPanel(server, ctx) {
     );
   });
   /* #6386: the live read ("Run live now") sits above the stored snapshots, in the stored grid's columns. */
-  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS), card]);
+  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS, activeQueriesMonitor.include), card]);
   wrap.style.display = "contents";
   return wrap;
 }

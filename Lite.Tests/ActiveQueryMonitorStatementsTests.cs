@@ -106,6 +106,31 @@ VALUES ($1, $2, $3, $4, $5, 'TestDb', $6, 'running', 0, 1000, 1500, $7, 0)",
         Assert.Equal(6, all.Sum(b => b.SessionCount));
     }
 
+    /* The live bar runs the collector's own query, which no longer drops the monitor's other sessions, so it follows the page's switch. Three live rows:
+       the monitor's, an application's and one with no program name (never hidden). Program name is column 22 of the snapshot query. */
+    [Fact]
+    public async Task TheLiveBar_LeavesTheMonitorOut_ByDefault_AndKeepsThemWhenAsked()
+    {
+        static object[] Live(int session, string? program)
+        {
+            var row = new object[35];
+            Array.Fill(row, DBNull.Value);
+            row[0] = session;
+            row[22] = program ?? (object)DBNull.Value;
+            return row;
+        }
+
+        object[][] Rows() => new[] { Live(61, "PerformanceMonitorLite"), Live(62, "Orders.Api"), Live(63, null) };
+
+        using var def = new Lite.Tests.Helpers.FakeCollectorDataReader(Rows());
+        var kept = await PerformanceMonitorLite.Controls.ServerTab.ReadLiveSnapshotRowsAsync(def, new DateTime(2026, 11, 4, 12, 0, 0));
+        Assert.Equal(new[] { 62, 63 }, kept.Select(r => r.SessionId).ToArray());
+
+        using var asked = new Lite.Tests.Helpers.FakeCollectorDataReader(Rows());
+        var all = await PerformanceMonitorLite.Controls.ServerTab.ReadLiveSnapshotRowsAsync(asked, new DateTime(2026, 11, 4, 12, 0, 0), includeMonitor: true);
+        Assert.Equal(3, all.Count);
+    }
+
     private async Task ExecAsync(string sql, params object?[] values)
     {
         using var readLock = _duckDb.AcquireReadLock();

@@ -62,10 +62,6 @@ public partial class ViewerServerTab
         }
     }
 
-    /// <summary>
-    /// #7416 item 11: the grid leaves the monitor's own statements out until this box is ticked (on an idle server every
-    /// long completion is the monitor's). A change reads the grid again; before the tab has loaded there is nothing to redo.
-    /// </summary>
     /// <summary>#7573: whether the Active Queries grid and strip include the monitor's own statements (off by default, the same switch as Long Query Completions).</summary>
     private bool ActiveQueriesIncludeMonitor => ActiveQueriesIncludeMonitorCheckBox.IsChecked == true;
 
@@ -86,6 +82,10 @@ public partial class ViewerServerTab
         }
     }
 
+    /// <summary>
+    /// #7416 item 11: the grid leaves the monitor's own statements out until this box is ticked (on an idle server every
+    /// long completion is the monitor's). A change reads the grid again; before the tab has loaded there is nothing to redo.
+    /// </summary>
     private async void LongQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded)

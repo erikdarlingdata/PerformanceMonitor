@@ -222,6 +222,14 @@ ORDER BY bucket";
         : " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate(column);
 
     /// <summary>
+    /// <see cref="MonitorSnapshotClause"/> for the get_active_queries page, where a monitor session that heads a blocking chain stays (as a WAITFOR head does,
+    /// via <c>h.session_id IS NOT NULL</c>): a monitor query that blocks has to be findable, and its victim's blocker is then named rather than reported as filtered.
+    /// </summary>
+    internal static string MonitorSnapshotPageClause(string column, bool includeMonitor) => includeMonitor
+        ? ""
+        : " AND (h.session_id IS NOT NULL OR " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate(column) + ")";
+
+    /// <summary>
     /// Gets query snapshots (currently running queries) for a server.
     /// </summary>
     public async Task<List<QuerySnapshotRow>> GetLatestQuerySnapshotsAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, bool includeMonitor = false)
@@ -472,7 +480,7 @@ LIMIT 1";
 
         var dbClause = BuildDbInClause(
             string.IsNullOrWhiteSpace(databaseName) ? null : new[] { databaseName.Trim() }, "w.database_name", 5, out var dbValues)
-            + MonitorSnapshotClause("w.program_name", includeMonitor);
+            + MonitorSnapshotPageClause("w.program_name", includeMonitor);
         var blockingClause = blockingOnly ? " AND (w.blocking_session_id > 0 OR h.session_id IS NOT NULL)" : "";
         var waitFilter = string.IsNullOrWhiteSpace(waitType) ? null : waitType.Trim();
         var waitClause = waitFilter == null ? "" : $" AND upper(w.wait_type) IN (upper(${5 + dbValues.Count}), upper(${5 + dbValues.Count}) || ' ')";

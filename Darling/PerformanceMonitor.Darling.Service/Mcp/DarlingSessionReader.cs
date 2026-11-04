@@ -166,8 +166,10 @@ internal static class DarlingSessionReader
             /*TAG:hash:w.query_hash*/
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
             AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
-            /* #7573: the monitor's own statements, left out unless $8 asks. The rows stay stored; a NULL program name is never hidden. */
-            AND   ($8::boolean OR {{PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("w.program_name")}})
+            /* #7573: the monitor's own statements, left out unless $8 asks. The rows stay stored; a NULL program name is never hidden.
+               A monitor session that heads a blocking chain stays, as a WAITFOR head does: a monitor query that blocks has to be findable,
+               and its victim's blocker is then named instead of reading as filtered. */
+            AND   ($8::boolean OR h.session_id IS NOT NULL OR {{PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("w.program_name")}})
         )
         """;
 
