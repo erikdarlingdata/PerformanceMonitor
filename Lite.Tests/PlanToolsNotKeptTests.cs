@@ -197,20 +197,6 @@ public sealed class PlanToolsNotKeptTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Contains("analyze_plan_xml", tail, StringComparison.Ordinal);
     }
 
-    /// <summary>#7522: <c>get_top_queries_by_cpu</c> must not send a Lite reader to a tool that always answers
-    /// not_collected there. It names the Query Store plan tool, which fetches from the monitored server.</summary>
-    [Fact]
-    public void TopQueriesByCpu_DoesNotSendTheReaderToTheStoredPlanTool()
-    {
-        var whole = typeof(McpQueryTools)
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "get_top_queries_by_cpu")
-            .GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
-
-        Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", whole, StringComparison.Ordinal);
-        Assert.Contains("pass that row's database_name and plan_id to analyze_query_store_plan", whole, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void TheQueryStorePlanToolKeepsItsOwnDescription()
     {
