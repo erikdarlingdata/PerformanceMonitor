@@ -525,7 +525,6 @@ public class DarlingPgTableBloatReaderTests
 
         Assert.Contains("l.estimate_unavailable", order, StringComparison.Ordinal);
         Assert.Contains("l.live_tuples < 0", order, StringComparison.Ordinal);
-        Assert.Contains("l.last_analyzed IS NULL", order, StringComparison.Ordinal);
         Assert.Contains("l.mods_since_analyze > l.live_tuples", order, StringComparison.Ordinal);
 
         /* And the zero case, which is the whole point of the sibling fix above: >= rather than >. */

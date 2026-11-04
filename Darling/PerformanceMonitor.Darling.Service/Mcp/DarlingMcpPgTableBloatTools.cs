@@ -229,8 +229,7 @@ public sealed class DarlingMcpPgTableBloatTools
     [Description(
         "PostgreSQL per-table bloat. ESTIMATE, NOT MEASUREMENT: about 2 points off with current "
         + "statistics, up to 81 when stale - so it is SUPPRESSED (nulled), not shown, when statistics "
-        + "are stale, the table was never analyzed, PostgreSQL lost the record of its last analyze (a crash "
-        + "restart does that), or the login lacks SELECT (pg_monitor alone does "
+        + "are stale, the table was never analyzed, or the login lacks SELECT (pg_monitor alone does "
         + "not grant it; unsuppressed this silently misreports). Sizes, dead-tuple pct and growth are "
         + "always reported. Every row ships the exact pgstattuple command. PAGE BOUNDED BY limit: "
         + "tables_returned/truncated. empty: every table under the 1 MB floor, real all-clear. "

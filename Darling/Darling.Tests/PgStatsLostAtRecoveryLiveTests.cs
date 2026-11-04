@@ -290,6 +290,57 @@ public sealed class PgStatsLostAtRecoveryLiveTests
         }
     }
 
+    /// <summary>
+    /// A row whose record of the last analyze was lost keeps an untrustworthy, possibly huge <c>bloat_bytes_estimate</c>. It must sort
+    /// behind a publishable row, so a <c>limit</c> that keeps one row returns the publishable one (#7456). Store only: the monitored
+    /// server is not needed to test the ordering.
+    /// </summary>
+    [Fact]
+    public async Task ARowWhoseLastAnalyzeWasLostSortsBehindAPublishableRow_UnderALimit()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(storeConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the sort-order live test.");
+
+        await using var scratch = await ScratchPostgres.CreateAsync(storeConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = new NpgsqlConnection(scratch.ConnectionString);
+            await store.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(store, ct);
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await DarlingMcpTestData.RegisterServerAsync(store, ServerId, ServerName, ct);
+
+            var at = DateTime.UtcNow.AddHours(-1);
+            /* Lost: no last_analyzed, a real row estimate, no unavailable flag, no churn - only the NULL sets it apart - and the biggest estimate. */
+            await SeedBloatAsync(store, at, "lost_record", lastAnalyzed: null, bloatBytes: 900_000_000_000L, ct);
+            await SeedBloatAsync(store, at, "publishable", lastAnalyzed: at.AddHours(-2), bloatBytes: 1_000_000L, ct);
+
+            var rows = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
+                dataSource, ServerId, DateTime.UtcNow.AddHours(-24), DateTime.UtcNow, 1, ct);
+
+            var row = Assert.Single(rows);
+            Assert.Equal("publishable", row.TableName);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static Task SeedBloatAsync(NpgsqlConnection store, DateTime at, string table, DateTime? lastAnalyzed, long bloatBytes, CancellationToken ct) =>
+        DarlingMcpTestData.ExecAsync(store, ct,
+            @"INSERT INTO pg_table_bloat_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, heap_bytes, heap_pages, toast_bytes,
+     index_bytes, live_tuples, dead_tuples, mods_since_analyze, last_analyzed, estimated_tuple_bytes, estimated_heap_pages, fillfactor,
+     bloat_bytes_estimate, bloat_pct_estimate, estimate_unavailable, alignment_bytes, pgstattuple_available)
+VALUES ($1,$2,$3,$4,'postgres','public',$5, 1000000000,122070,0, 0, 1000,0,0, $6, 100,100, 100, $7, 50.00, false, 8, false)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, table,
+            lastAnalyzed is { } analyzed ? DarlingMcpTestData.Naive(analyzed) : null, bloatBytes);
+
     private sealed record IndexSample(long Scans, long IndexBytes, long TableBytes, DateTime? StatsReset);
 
     private static async Task<IndexSample> ReadIndexAsync(string connectionString, CancellationToken ct)
