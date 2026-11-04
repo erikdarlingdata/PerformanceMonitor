@@ -244,7 +244,13 @@ public sealed class PgLogNamedZoneTests
     {
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenPinnedAsync();
-        await using var counter = new NpgsqlConnection(Environment.GetEnvironmentVariable("DARLING_TEST_PG"));
+        /* The counter reads pg_stat_statements from a scratch database of its own, not from the shared store: CREATE
+           EXTENSION below is a persistent, database-level change, and in the shared store it is residue the live-postgres
+           collection's cleanup check fails the whole leg on (#7415). The view lists the statements of every database on the
+           cluster, so the scans the pinned connection above runs in the shared store are still counted. */
+        await using var scratch = await ScratchPostgres.CreateAsync(
+            Environment.GetEnvironmentVariable("DARLING_TEST_PG")!, ct, emptyStore: true);
+        await using var counter = new NpgsqlConnection(scratch.ConnectionString);
         await counter.OpenAsync(ct);
 
         long? ZoneScans()
