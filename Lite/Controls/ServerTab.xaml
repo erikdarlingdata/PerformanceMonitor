@@ -338,28 +338,14 @@
                 <Grid Margin="8">
                     <TabControl x:Name="QueriesSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Performance Trends">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="*"/>
-                                </Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Row="0" Grid.Column="0" Margin="0,0,4,4">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                <ui:ChartGridPanel MaxColumns="2">
                                     <ScottPlot:WpfPlot x:Name="QueryDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="ProcDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="1" Grid.Column="0" Margin="0,4,4,0">
                                     <ScottPlot:WpfPlot x:Name="QueryStoreDurationTrendChart"/>
-                                </Border>
-                                <Border Grid.Row="1" Grid.Column="1" Margin="4,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="ExecutionCountTrendChart"/>
-                                </Border>
-                            </Grid>
+                                </ui:ChartGridPanel>
+                            </ScrollViewer>
                         </TabItem>
                         <TabItem Header="Active Queries">
                             <Grid>
@@ -1636,14 +1622,15 @@
 
                     <!-- Memory Grants Sub-Tab -->
                     <TabItem Header="Memory Grants">
-                        <Grid Margin="8">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                        <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                             <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                             </Grid.RowDefinitions>
                             <ScottPlot:WpfPlot Grid.Row="0" x:Name="MemoryGrantSizingChart" Margin="0,0,0,4"/>
                             <ScottPlot:WpfPlot Grid.Row="1" x:Name="MemoryGrantActivityChart" Margin="0,4,0,0"/>
-                        </Grid>
+                        </Grid></ScrollViewer>
                     </TabItem>
 
                     <!-- Memory Pressure Events Sub-Tab -->
@@ -1673,10 +1660,11 @@
                     <TabControl Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <!-- File I/O Latency sub-tab -->
                         <TabItem Header="File I/O Latency">
-                            <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="300">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
                                 <Border Grid.Row="0" Margin="0,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="FileIoReadChart"/>
@@ -1684,15 +1672,16 @@
                                 <Border Grid.Row="1" Margin="0,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
                                 </Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                         </TabItem>
 
                         <!-- File I/O Throughput sub-tab -->
                         <TabItem Header="File I/O Throughput">
-                            <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
                                 <Border Grid.Row="0" Margin="0,0,0,4">
                                     <ScottPlot:WpfPlot x:Name="FileIoReadThroughputChart"/>
@@ -1700,7 +1689,7 @@
                                 <Border Grid.Row="1" Margin="0,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
                                 </Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -1708,11 +1697,12 @@
 
             <!-- tempdb Tab -->
             <TabItem Header="tempdb">
-                <Grid Margin="8">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="450">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0" Margin="0,0,0,4">
@@ -1739,7 +1729,7 @@
                             Visibility="{Binding Visibility, ElementName=TempDbNoDataMessage}">
                         <TextBlock x:Name="TempDbNoDataMessage" Visibility="Collapsed" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                     </Border>
-                </Grid>
+                </Grid></ScrollViewer>
             </TabItem>
 
             <!-- Blocking Tab -->
@@ -1747,14 +1737,15 @@
                 <Grid Margin="8">
                     <TabControl x:Name="BlockingSubTabControl" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                         <TabItem Header="Trends">
-                            <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="540">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                 </Grid.RowDefinitions>
                                 <!-- One "Showing since" note per chart (#4966): the three charts draw from three different floors
                                      (wait_stats, the blocked-process-report sources, deadlocks), so no one note is true of all of them. -->
@@ -1779,14 +1770,15 @@
                                 <Border Grid.Row="5" Margin="0,4,0,0">
                                     <ScottPlot:WpfPlot x:Name="DeadlockTrendChart"/>
                                 </Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                         </TabItem>
                         <TabItem Header="Current Waits">
-                            <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="460">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <!-- Where the stored waiting-task rows start, when that is after the window's start (the same
@@ -1805,7 +1797,7 @@
                                 <TextBlock Grid.Row="3" x:Name="CurrentWaitsSparseNote" Padding="8,4" FontStyle="Italic" TextWrapping="Wrap"
                                            Foreground="{DynamicResource ForegroundDimBrush}"
                                            Text="Points appear only when a collection found waiting or blocked tasks. A gap means nothing was waiting at that time."/>
-                            </Grid>
+                            </Grid></ScrollViewer>
                         </TabItem>
                         <TabItem Header="Blocked Process Reports">
                             <Grid>
@@ -2060,12 +2052,13 @@
                                  blocking Total, row 1 = deadlock Max/Avg | deadlock Total, so each plot area
                                  stays tall enough that the X-axis time labels don't collide. The summary strip
                                  spans both columns below. -->
-                            <Grid>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="480">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
@@ -2111,7 +2104,7 @@
                                         <TextBlock x:Name="BlockingStatsDeadlockWaitText" Text="--" VerticalAlignment="Center"/>
                                     </StackPanel>
                                 </Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                         </TabItem>
                     </TabControl>
                 </Grid>
@@ -2507,13 +2500,14 @@
                  collapsed Expander holding its per-class latest-snapshot grid. Loads on tab activation via
                  the RefreshVisibleTabAsync switch (index 13), mirroring the tempdb tab. -->
             <TabItem Header="Latches &amp; Spinlocks">
-                <Grid Margin="8">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                <Grid ui:ChartGroup.IsAligned="True" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="500">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
@@ -2602,7 +2596,7 @@
                             </DataGrid.Columns>
                         </DataGrid>
                     </Expander>
-                </Grid>
+                </Grid></ScrollViewer>
             </TabItem>
 
             <!-- CPU Scheduler Tab — the Lite port of Darling's CPU Scheduler surface (cpu_scheduler_stats,
@@ -2840,14 +2834,15 @@
                                 <TextBlock Text="Corruption Events (bad pages, dump requests, access violations)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                             </StackPanel>
-                            <Grid Grid.Row="1" x:Name="CorruptionEventsCharts">
-                                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="1"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" x:Name="CorruptionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                                <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="BadPagesChart"/></Border>
                                 <Border Grid.Row="0" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="DumpRequestsChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="AccessViolationsChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="WriteAccessViolationsChart"/></Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                             <TextBlock Grid.Row="1" x:Name="CorruptionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
@@ -2860,14 +2855,15 @@
                                 <TextBlock Text="Contention Events (non-yielding tasks, latches, spinlocks, CPU)" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="14" Foreground="{DynamicResource ForegroundBrush}"/>
                                 <Button Content="Refresh" Click="SystemEventsRefresh_Click" Margin="12,0,0,0" Padding="12,4" MinWidth="70"/>
                             </StackPanel>
-                            <Grid Grid.Row="1" x:Name="ContentionEventsCharts">
-                                <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Grid.Row="1"><!-- #7385: scrolls when the charts cannot all keep their minimum height -->
+                            <Grid ui:ChartGroup.IsAligned="True" x:Name="ContentionEventsCharts" Height="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType=ScrollViewer}}" MinHeight="420">
+                                <Grid.RowDefinitions><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/><RowDefinition Height="*" MinHeight="{x:Static ui:ChartLayout.MinPlotHeight}"/></Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <Border Grid.Row="0" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="NonYieldingTasksChart"/></Border>
                                 <Border Grid.Row="0" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="LatchWarningsChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="0" Margin="2"><ScottPlot:WpfPlot x:Name="SickSpinlocksChart"/></Border>
                                 <Border Grid.Row="1" Grid.Column="1" Margin="2"><ScottPlot:WpfPlot x:Name="CpuComparisonChart"/></Border>
-                            </Grid>
+                            </Grid></ScrollViewer>
                             <TextBlock Grid.Row="1" x:Name="ContentionEventsNoDataMessage" Visibility="Collapsed" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap" MaxWidth="520" FontStyle="Italic" Foreground="{DynamicResource ForegroundDimBrush}"/>
                         </Grid>
                     </TabItem>
