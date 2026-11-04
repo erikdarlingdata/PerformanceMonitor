@@ -43,6 +43,8 @@ const BAR_LABEL_CHARS = 30;
 const BAR_CHAR_PX = 7.6;
 const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
 const BAR_TRACK_MIN = 40;
+const STACKED_BAR_MIN_PX = 8;
+const STACKED_BAR_MAX_PX = 64;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 /* The margins as declared; a chart whose tick labels are wider than the left margin keeps a copy of its own named M (#6158). */
@@ -505,6 +507,11 @@ export function renderLineChart(spec) {
       } else {
         barW = Math.max(1, (plotW / rows.length) * 0.7);
       }
+      /* #7571: a window with a few far-apart (or close-together) collections drew hairlines when the tightest gap was small and
+         plotW-wide slabs when the only gap was huge. A bar is at least STACKED_BAR_MIN_PX wide (but never more than the tiling
+         width, so a dense chart does not overlap itself more than before), and in a windowed chart at most STACKED_BAR_MAX_PX. */
+      barW = Math.max(barW, Math.min(STACKED_BAR_MIN_PX, (plotW / rows.length) * 0.7));
+      if (hasWindow) barW = Math.min(barW, STACKED_BAR_MAX_PX);
       for (let i = 0; i < rows.length; i++) {
         const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
         for (let k = 0; k < series.length; k++) {
