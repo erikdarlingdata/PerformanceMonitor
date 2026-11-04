@@ -51,10 +51,10 @@ ON CONFLICT (server_id) DO UPDATE SET
 -- has an observed-registry row and nothing else: like the other two it is at an address nothing listens on.
 SELECT server_id AS lsid, host AS lname
 FROM config.config_monitored_servers
-WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-node-01-primary'
+WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary'
 \gset
 INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, sql_major_version, engine_kind, created_date, modified_date)
-VALUES (:lsid, :'lname', 'ui-long-name-sql-server-production-east-region-cluster-node-01-primary', TRUE, 3, 16, 'sqlserver',
+VALUES (:lsid, :'lname', 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary', TRUE, 3, 16, 'sqlserver',
         (:'anchor'::timestamp) - interval '7 days', :'anchor'::timestamp)
 ON CONFLICT (server_id) DO UPDATE SET
     server_name = EXCLUDED.server_name, display_name = EXCLUDED.display_name, is_enabled = TRUE,

@@ -12,7 +12,7 @@
   "servers": [
     "ui-sql",
     "ui-pg",
-    "ui-long-name-sql-server-production-east-region-cluster-node-01-primary"
+    "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary"
   ],
   "pages": [
     {
@@ -413,7 +413,7 @@
         ]
       }
     },
-    { "name": "long-name-overview", "hash": "#/server/ui-long-name-sql-server-production-east-region-cluster-node-01-primary", "server": "ui-long-name-sql-server-production-east-region-cluster-node-01-primary", "expect": {} },
+    { "name": "long-name-overview", "hash": "#/server/ui-long-name-sql-server-production-east-region-cluster-demo-01-primary", "server": "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary", "expect": {} },
     { "name": "ui-sql-iotrends", "hash": "#/server/ui-sql/iotrends", "server": "ui-sql", "expect": {} },
     { "name": "finops-recommendations", "hash": "#/finops/ui-sql/recommendations", "nav": "finops", "expect": {} },
     { "name": "investigations", "hash": "#/investigations", "nav": "investigations", "expect": {} },

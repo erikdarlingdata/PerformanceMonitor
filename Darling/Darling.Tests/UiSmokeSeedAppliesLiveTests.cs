@@ -59,7 +59,7 @@ public sealed class UiSmokeSeedAppliesLiveTests
 INSERT INTO config.config_monitored_servers (server_id, name, host, auth, is_enabled, created_at, engine)
 VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver'),
        (102, 'ui-pg',  '127.0.0.1',   'sql',        TRUE, now() AT TIME ZONE 'UTC', 'postgres'),
-       (103, 'ui-long-name-sql-server-production-east-region-cluster-node-01-primary', '127.0.0.2,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver')"))
+       (103, 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary', '127.0.0.2,1', 'integrated', TRUE, now() AT TIME ZONE 'UTC', 'sqlserver')"))
         {
             await command.ExecuteNonQueryAsync(ct);
         }
