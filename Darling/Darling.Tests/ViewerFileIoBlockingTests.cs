@@ -188,7 +188,6 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.DoesNotContain("v_waiting_tasks", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
         Assert.Contains("blocking_session_id > 0", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
         Assert.Contains("database_name IS NOT NULL", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) AS blocked_count", ViewerDataService.BlockedSessionTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]

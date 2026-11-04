@@ -7,7 +7,8 @@
 --   * Every time is relative to ONE anchor: the store's own clock in UTC, cut to the minute, or the psql variable `anchor` when the
 --     caller sets it (-v anchor=...; run-ui-smoke.ps1 does, so the screenshot step knows it, #5744). Nothing is dated.
 --   * Every count is fixed: the same rows on every run, whatever the minute.
---   * The targets are the two servers the config registers: "ui-sql" (SQL Server) and "ui-pg" (PostgreSQL), both at an
+--   * The targets are the servers the config registers: "ui-sql" (SQL Server), "ui-pg" (PostgreSQL) and a long-name SQL
+--     Server (#7479), all at an
 --     address nothing listens on, so the service never collects and never overwrites what is seeded here.
 --   * To cover another table, add one more section below, in the same shape, and name what it feeds. Keep the
 --     collection_id / log_id ranges apart (the ranges are listed in each section) so rows never collide.
@@ -22,6 +23,8 @@
 -- Seeded (PostgreSQL target "ui-pg"):
 --   pg_database_stats 2 databases x 360 | pg_wait_stats 3 events x 360 | pg_statement_stats 6 queries x 36 (every 10 minutes)
 --   pg_statement_text 6 | collection_log 3 collectors x 72
+-- Seeded (the long-name SQL Server): collection_log 1 (cpu_utilization_stats at the anchor, #7569), so its card reads stale
+--   like the other two and not Offline
 
 \set ON_ERROR_STOP on
 -- The anchor, as UTC text. Set by the caller (-v anchor='2026-01-01 12:00:00'), else taken once here, from the store's clock.
@@ -48,7 +51,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     sql_engine_edition = 3, sql_major_version = 16, engine_kind = 'sqlserver', modified_date = EXCLUDED.modified_date;
 
 -- A third SQL Server with a 70-character name (#7479), so the sidebar, the fleet card and the page header have a long name to lay out. It
--- has an observed-registry row and nothing else: like the other two it is at an address nothing listens on.
+-- has an observed-registry row and one collection_log row (below, #7569): like the other two it is at an address nothing listens on.
 SELECT server_id AS lsid, host AS lname
 FROM config.config_monitored_servers
 WHERE name = 'ui-long-name-sql-server-production-east-region-cluster-demo-01-primary'
@@ -172,6 +175,12 @@ SELECT 8000000 + 1000 * cl.n + k.k, :sid, :'sname', cl.name,
 FROM generate_series(0, 71) AS k(k)
 CROSS JOIN (VALUES (1, 'wait_stats', 4), (2, 'cpu_utilization_stats', 1), (3, 'memory_stats', 1), (4, 'file_io_stats', 2), (5, 'query_stats', 12))
     AS cl(n, name, rows_collected);
+
+-- collection_log, the long-name server (#7569): one successful row at the anchor. With none, the fleet reads that card Offline from the first poll
+-- (registered, never collected), so the screenshot step, which waits for every card to be collection stale, took it for a fleet that had aged
+-- past 30 minutes. With one row it turns stale 2 minutes after the anchor and Offline 30 minutes after, like the other two. log_id 8900000.
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES (8900000, :lsid, :'lname', 'cpu_utilization_stats', :'anchor'::timestamp, 120, 'SUCCESS', 1);
 
 -- blocked_process_reports: Blocking tab. Two reports, 1 and 2 hours back. blocked_report_id 9000001 and 9000002.
 INSERT INTO collect.blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocking_spid,

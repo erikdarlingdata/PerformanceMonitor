@@ -355,10 +355,29 @@ public sealed class ViewerBlockingTrendBucketingLivePostgresTests
             await InsertWaitingTaskAsync(connection, BlockedSessionSingletonServerId, t2,
                 sessionId: 73, waitType: "LCK_M_X", waitDurationMs: 100, blockingSessionId: 91, databaseName: "AppDb");
 
-            var rows = await viewer.GetBlockedSessionTrendAsync(BlockedSessionSingletonServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+            /* #7577: t3 holds session 75 blocked by 90 on three threads (one blocked session) next to session 74's four
+               parallel-exchange threads that wait on session 74 itself (not blocked). t4 holds only the parallel threads,
+               so it draws no point: a quiet server must not show a blocked count, and the gap stays a gap. */
+            var t3 = t1.AddMinutes(10);
+            var t4 = t1.AddMinutes(15);
+            for (var thread = 0; thread < 3; thread++)
+            {
+                await InsertWaitingTaskAsync(connection, BlockedSessionSingletonServerId, t3,
+                    sessionId: 75, waitType: "LCK_M_X", waitDurationMs: 100, blockingSessionId: 90, databaseName: "AppDb");
+            }
+            foreach (var at in new[] { t3, t4 })
+            {
+                for (var thread = 0; thread < 4; thread++)
+                {
+                    await InsertWaitingTaskAsync(connection, BlockedSessionSingletonServerId, at,
+                        sessionId: 74, waitType: "CXCONSUMER", waitDurationMs: 100, blockingSessionId: 74, databaseName: "AppDb");
+                }
+            }
 
-            Assert.Equal(new[] { t1.Ticks, t2.Ticks }, rows.Select(r => r.CollectionTime.Ticks));
-            Assert.Equal(new[] { 2, 1 }, rows.Select(r => r.BlockedCount));
+            var rows = await viewer.GetBlockedSessionTrendAsync(BlockedSessionSingletonServerId, t1.AddMinutes(-1), t4.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, rows.Select(r => r.CollectionTime.Ticks));
+            Assert.Equal(new[] { 2, 1, 1 }, rows.Select(r => r.BlockedCount));
 
             bodySucceeded = true;
         }

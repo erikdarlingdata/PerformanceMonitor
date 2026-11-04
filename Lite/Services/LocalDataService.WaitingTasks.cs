@@ -213,6 +213,8 @@ ORDER BY
 
     /// <summary>
     /// Gets blocked session count trend grouped by database for charting.
+    /// <para>#7577: counts DISTINCT sessions with a waiting task blocked by ANOTHER session (<c>blocking_session_id &lt;> session_id</c>);
+    /// a parallel query's exchange threads wait on their own session and are not blocked.</para>
     /// <para>#4349: bucketed (matching #4234/#4340's shape). A blocked-session count is a PER-SNAPSHOT
     /// gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it covers
     /// (rounded, matching the CPU tab's gauge-averaging idiom), never their SUM: summing would double (or
@@ -239,10 +241,11 @@ WITH per_collection AS
     SELECT
         collection_time,
         database_name,
-        COUNT(*) AS blocked_count
+        COUNT(DISTINCT session_id) AS blocked_count
     FROM v_waiting_tasks
     WHERE server_id = $1
     AND   blocking_session_id > 0
+    AND   blocking_session_id <> session_id
     AND   collection_time >= $2
     AND   collection_time <= $3" + dbClause + $@"
     AND   database_name IS NOT NULL
