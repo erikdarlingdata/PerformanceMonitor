@@ -223,7 +223,7 @@ internal static class DarlingBlockingReader
     public static readonly string BlockedProcessReportsSql = $$"""
         {{BlockedProcessReportsBody}}
         {{DatabaseFilter.All.Clause("database_name", 6)}}
-        ORDER BY event_time DESC
+        ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
         LIMIT $4
         """;
 
