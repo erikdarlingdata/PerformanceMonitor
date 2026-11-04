@@ -2159,7 +2159,8 @@ public static class FactAdvice
     /// note says the two are different units instead of claiming they match.
     /// </summary>
     private const string BlockingSpikeDmvUnitNote =
-        " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports, and " +
+        " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports for the " +
+        "databases this target covers, and " +
         "the snapshot job adds a row at every sample a session keeps waiting, so one long wait adds several. It is not " +
         "the blocking event count, which counts each wait once; the two figures for the same window will differ. " +
         "The baseline it is compared with is built from blocked process report rows, not snapshot rows, so it does " +
