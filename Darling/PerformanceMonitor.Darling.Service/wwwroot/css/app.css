@@ -560,6 +560,8 @@ table.data th {
 }
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* #7392: a number column's header sits over its right-aligned values, not beside the next column's header. */
+table.data th.num { text-align: right; }
 table.data td.wrap { white-space: normal; max-width: 620px; }
 /* A long text cell on one line, the rest on demand (#5644 W11). The full text stays in the node; the clip is only paint. */
 table.data td.clamp { max-width: 28rem; }
