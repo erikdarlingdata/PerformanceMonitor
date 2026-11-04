@@ -291,7 +291,11 @@ a:hover { text-decoration: underline; }
    .grid is shared with the triage page, whose span-2 cards and notice strips want the full width. */
 .server-grid {
   /* #7402: the cards start at the left edge, under the Servers heading, instead of floating in the middle with a gutter on each side. */
-  grid-template-columns: repeat(auto-fit, minmax(260px, 460px));
+  /* #7559: auto-fill with a 1fr max fills the row at every width. The old 260px-460px track counted columns by the 460px max, so a third
+     column needed another full 460px and a 1536px window left about 285px empty beside two cards. 380px is the narrowest a card reads
+     well at, min(100%, 380px) lets a window narrower than that take one full-width column, and the empty tracks auto-fill keeps stop a
+     lone server from stretching across the page. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
   justify-content: start;
 }
 
