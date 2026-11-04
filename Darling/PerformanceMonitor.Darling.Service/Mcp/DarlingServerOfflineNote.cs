@@ -164,6 +164,19 @@ internal static class DarlingServerOfflineNote
         return lead is null ? answer : OfflineInsteadOfEmpty(lead);
     }
 
+    /// <summary>
+    /// #7459: <see cref="EmptyAsync"/> for a read whose own answer to a window nobody looked at is already <c>unavailable</c>. That answer
+    /// reports a gap in collection, and on an offline server the reason is known, so the offline answer replaces it whichever of the two
+    /// words the read chose. Judged as of the window end, as <see cref="EmptyAsync"/> is, so a window inside collected history keeps the
+    /// read's own answer.
+    /// </summary>
+    internal static async Task<string> UnavailableOrEmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken)
+    {
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
+        return lead is null ? answer : OfflineInsteadOfEmpty(lead);
+    }
+
     /// <summary>The <c>unavailable</c> answer that replaces an offline server's empty read.</summary>
     internal static string OfflineInsteadOfEmpty(string lead) =>
         McpHelpers.Status("unavailable", lead + " An empty result here is missing data, not a finding.", null);

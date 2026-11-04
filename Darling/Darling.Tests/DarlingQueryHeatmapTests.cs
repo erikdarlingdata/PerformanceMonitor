@@ -586,6 +586,49 @@ public sealed class DarlingQueryHeatmapLiveTests
         }
     }
 
+    /// <summary>#7459: "nothing collected in this window" says unavailable by itself, and on a server that has stopped being collected it still says why.</summary>
+    [Fact]
+    public async Task NothingCollectedInTheWindow_OnAnOfflineServer_SaysItIsOffline_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var lastCollection = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddDays(-10);
+            await SeedAsync(connection, ct, lastCollection, "0xOLD", deltaExec: 4, deltaElapsed: 200_000);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT COALESCE(MAX(log_id), 0) + 1, $1, $2, 'query_stats', $3, 12, 'SUCCESS', 0 FROM collection_log",
+                ServerId, ServerName, DarlingMcpTestData.Naive(lastCollection));
+
+            var root = Root(await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 2));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            var message = root.GetProperty("message").GetString()!;
+            Assert.StartsWith(ServerName + " is offline: ", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Widen hours_back", message, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
     private static DateTime ParseUtc(string value) => DateTime.Parse(
@@ -612,6 +655,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
     }
