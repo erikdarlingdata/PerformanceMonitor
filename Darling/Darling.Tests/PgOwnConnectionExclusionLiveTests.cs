@@ -123,13 +123,28 @@ public sealed class PgOwnConnectionExclusionLiveTests
             Assert.DoesNotContain(rows, r => r.Pid == remediationPid);
         }
 
+        /* The cluster is shared with classes outside this collection, and one of their connections or an autovacuum worker
+           can hold an older xmin for a moment, so read again until the oldest holder is this test's own. The service's two
+           connections are older than it and must never be named, on any read. */
         var horizon = PgXminHorizonCollector.Instance;
-        await using (var command = new NpgsqlCommand(horizon.BuildQuery(context).Text, source))
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        var applicationHolder = applicationPid.ToString(invariant);
+        string? holder = null;
+        for (var attempt = 0; attempt < 60 && holder != applicationHolder; attempt++)
         {
+            if (attempt > 0)
+            {
+                await Task.Delay(500, ct);
+            }
+
+            await using var command = new NpgsqlCommand(horizon.BuildQuery(context).Text, source);
+            await using var reader = await command.ExecuteReaderAsync(ct);
             var rows = await horizon.ReadAsync(reader, context, ct);
-            var session = rows.Single(r => r.Source == "session");
-            Assert.Equal(applicationPid.ToString(System.Globalization.CultureInfo.InvariantCulture), session.Holder);
+            holder = rows.Single(r => r.Source == "session").Holder;
+            Assert.NotEqual(monitoringPid.ToString(invariant), holder);
+            Assert.NotEqual(remediationPid.ToString(invariant), holder);
         }
+
+        Assert.Equal(applicationHolder, holder);
     }
 }
