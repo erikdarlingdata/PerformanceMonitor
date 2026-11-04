@@ -140,6 +140,9 @@ public sealed partial class DarlingCollectorRunner
     /// <summary>Called with the database name just before its batch is written, inside the loop's try. Null in production.</summary>
     internal Action<string>? PerDatabaseWriteFaultForTests { get; set; }
 
+    /// <summary>#7419: a shorter item budget for the server-scoped path, so a test can let the budget fire in a target phase.</summary>
+    internal TimeSpan? ItemBudgetOverrideForTests { get; set; }
+
     /// <summary>
     /// The databases one Azure SQL DB registration's per-database sweep covers.
     ///

@@ -2201,7 +2201,7 @@ public sealed partial class DarlingCollectorRunner
                    most, and the one a trailing assignment would leave at zero. */
                 serverPhasesMeasured = true;
 
-                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(definition.PerItemWallClockBudget, cancellationToken);
+                using var itemBudget = EnumeratedCollectorDriver.StartItemBudget(ItemBudgetOverrideForTests ?? definition.PerItemWallClockBudget, cancellationToken);
                 var itemToken = itemBudget?.Token ?? cancellationToken;
 
                 /* #2880: the out-of-band arm. Started BEFORE the open and on its own clock, because the
