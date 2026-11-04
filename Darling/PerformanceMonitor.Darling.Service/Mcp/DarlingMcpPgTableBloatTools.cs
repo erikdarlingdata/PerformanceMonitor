@@ -275,8 +275,8 @@ public sealed class DarlingMcpPgTableBloatTools
             var start = end.AddHours(-hours_back);
             /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
                (the #3594 dialect), replacing `limit_reached = tables.Count >= limit` — which read a server with
-               exactly `limit` measured tables as a cut page. Bound BEFORE the aggregates below, so every count and
-               every estimate sum is over the page. */
+               exactly `limit` measured tables as a cut page. The table list is the page; the counts and the estimate sum
+               below come from the whole-window totals read (#7551), not from this page. */
             var fetched = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
                 postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
@@ -302,8 +302,9 @@ public sealed class DarlingMcpPgTableBloatTools
             var trustedCount = totals.TrustedCount;
             /* Null when no estimate was published, never 0: a sum over no estimates is not a measured nothing, and 0 reads as an all-clear. */
             long? trustedBloatBytes = trustedCount > 0 ? totals.TrustedBloatBytes : null;
-            var anyPgstattuple = rows.Any(r => r.PgstattupleAvailable);
-            var permissionsSuspected = rows.Count(r => r.EstimateUnavailable);
+            /* Whole window as well: suppressed rows sort last, so a cut page drops the estimate_unavailable rows this hint counts. */
+            var anyPgstattuple = totals.PgstattupleAvailableAnywhere;
+            var permissionsSuspected = totals.EstimateUnavailableCount;
 
             var tables = rows.Select(r =>
             {

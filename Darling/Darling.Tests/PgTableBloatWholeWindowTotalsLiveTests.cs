@@ -161,13 +161,88 @@ VALUES ($1,$2,$3,$4,'postgres','public','widget',$5, 0, 0,0,0,0, 1000000, 200000
         }
     }
 
-    private static Task SeedAsync(NpgsqlConnection store, DateTime at, string table, DateTime? lastAnalyzed, long bloatBytes, CancellationToken ct) =>
+    [Fact]
+    public async Task UnavailableRowsPastThePage_StillGiveTheGrantHint_AndTheWindowsCount()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(storeConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+
+        await using var scratch = await ScratchPostgres.CreateAsync(storeConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Suppressed rows sort by estimated bytes, so the never-analyzed rows (bigger) fill the page of 3 and the
+               three estimate_unavailable rows sit past it, one of them with pgstattuple installed. */
+            using var json = await ReadAsync(scratch.ConnectionString, 3, async (store, at) =>
+            {
+                for (var i = 0; i < 5; i++)
+                    await SeedAsync(store, at, "never_analyzed_" + i, lastAnalyzed: null, bloatBytes: 5_000_000L, ct);
+                await SeedAsync(store, at, "no_stats_a", lastAnalyzed: at.AddHours(-2), bloatBytes: 1_000L, ct, estimateUnavailable: true, pgstattuple: true);
+                await SeedAsync(store, at, "no_stats_b", lastAnalyzed: at.AddHours(-2), bloatBytes: 1_000L, ct, estimateUnavailable: true);
+                await SeedAsync(store, at, "no_stats_c", lastAnalyzed: at.AddHours(-2), bloatBytes: 1_000L, ct, estimateUnavailable: true);
+            }, ct);
+            var root = json.RootElement;
+
+            Assert.Equal(3, root.GetProperty("tables_returned").GetInt32());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
+            foreach (var table in root.GetProperty("tables").EnumerateArray())
+                Assert.StartsWith("never_analyzed_", table.GetProperty("table").GetString(), StringComparison.Ordinal);
+            Assert.Equal(8, root.GetProperty("suppressed_estimate_count").GetInt64());
+            Assert.True(root.GetProperty("pgstattuple_available_anywhere").GetBoolean());
+            Assert.Contains("3 table(s) have NO usable column statistics", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task ANullModsSinceAnalyze_IsPublished_InTheTallyAndTheGrid()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(storeConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+
+        await using var scratch = await ScratchPostgres.CreateAsync(storeConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            using var json = await ReadAsync(scratch.ConnectionString, 25, async (store, at) =>
+            {
+                await SeedAsync(store, at, "null_mods", lastAnalyzed: at.AddHours(-2), bloatBytes: 3_145_728L, ct, modsSinceAnalyze: null);
+            }, ct);
+            var root = json.RootElement;
+
+            /* The page reader maps a NULL mods_since_analyze to 0, so the grid publishes the row; the tally must say the same. */
+            var row = root.GetProperty("tables")[0];
+            Assert.False(row.GetProperty("estimate_suppressed").GetBoolean());
+            Assert.Equal(3_145_728L, row.GetProperty("bloat_bytes_estimate").GetInt64());
+            Assert.Equal(1, root.GetProperty("trusted_estimate_count").GetInt64());
+            Assert.Equal(0, root.GetProperty("suppressed_estimate_count").GetInt64());
+            Assert.Equal(3_145_728L, root.GetProperty("estimated_bloat_bytes_over_trusted_rows").GetInt64());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static Task SeedAsync(
+        NpgsqlConnection store, DateTime at, string table, DateTime? lastAnalyzed, long bloatBytes, CancellationToken ct,
+        bool estimateUnavailable = false, long? modsSinceAnalyze = 0, bool pgstattuple = false) =>
         DarlingMcpTestData.ExecAsync(store, ct,
             @"INSERT INTO pg_table_bloat_stats
     (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, heap_bytes, heap_pages, toast_bytes,
      index_bytes, live_tuples, dead_tuples, mods_since_analyze, last_analyzed, estimated_tuple_bytes, estimated_heap_pages, fillfactor,
      bloat_bytes_estimate, bloat_pct_estimate, estimate_unavailable, alignment_bytes, pgstattuple_available)
-VALUES ($1,$2,$3,$4,'postgres','public',$5, 1000000000,122070,0, 0, 1000,0,0, $6, 100,100, 100, $7, 50.00, false, 8, false)",
+VALUES ($1,$2,$3,$4,'postgres','public',$5, 1000000000,122070,0, 0, 1000,0,$8, $6, 100,100, 100, $7, 50.00, $9, 8, $10)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, table,
-            lastAnalyzed is { } analyzed ? DarlingMcpTestData.Naive(analyzed) : null, bloatBytes);
+            lastAnalyzed is { } analyzed ? DarlingMcpTestData.Naive(analyzed) : null, bloatBytes,
+            modsSinceAnalyze, estimateUnavailable, pgstattuple);
 }
