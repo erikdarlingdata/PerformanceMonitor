@@ -178,12 +178,19 @@ export function dragSelection(mode, anchor, cur, sel, minFrac) {
 export function stripPaths(points, win, peak = null) {
   const span = win.endMs - win.startMs;
   const usable = (points || []).filter((p) => p && Number.isFinite(p.t) && Number.isFinite(p.v) && p.t >= win.startMs - 1 && p.t <= win.endMs + 1).sort((x, y) => x.t - y.t);
-  if (!usable.length || !(span > 0)) return { line: "", area: "", peak: 0 };
+  if (!usable.length || !(span > 0)) return { line: "", area: "", peak: 0, dots: [] };
   const top = peak || Math.max(...usable.map((p) => p.v), 0) || 1;
+  /* #7416: ONE sample (or several at one instant) has no line to draw: "M x y" alone paints nothing. It is a stem from the baseline up to the
+     sample, with a mark on top (`dots`, drawn by the control as a round dot, since this SVG is stretched and would squash a circle). */
+  if (usable.every((p) => p.t === usable[0].t)) {
+    const x = ((usable[0].t - win.startMs) / span) * VB_W;
+    const y = VB_H - 2 - Math.max(0, Math.max(...usable.map((p) => p.v)) / top) * (VB_H - 6);
+    return { line: "M" + x.toFixed(2) + " " + VB_H + " L" + x.toFixed(2) + " " + y.toFixed(2), area: "", peak: top, dots: [{ x, y }] };
+  }
   const xy = usable.map((p) => [((p.t - win.startMs) / span) * VB_W, VB_H - 2 - Math.max(0, p.v / top) * (VB_H - 6)]);
   const line = xy.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(2) + " " + y.toFixed(2)).join(" ");
   const area = line + " L" + xy[xy.length - 1][0].toFixed(2) + " " + VB_H + " L" + xy[0][0].toFixed(2) + " " + VB_H + " Z";
-  return { line, area, peak: top };
+  return { line, area, peak: top, dots: [] };
 }
 
 /* ───────────────────────────── the control ───────────────────────────── */
@@ -230,6 +237,7 @@ export function timeSlicer(o) {
   const line = svgNode("path", { class: "slicer-line" });
   const area = svgNode("path", { class: "slicer-area" });
   const overlayLine = svgNode("path", { class: "slicer-overlay" });
+  const dotLayer = el("div", { class: "slicer-dots" });
   const svg = svgNode("svg", { class: "slicer-svg", viewBox: "0 0 " + VB_W + " " + VB_H, preserveAspectRatio: "none", "aria-hidden": "true", focusable: "false" });
   svg.appendChild(area);
   svg.appendChild(line);
@@ -240,7 +248,7 @@ export function timeSlicer(o) {
   const hStart = el("div", { class: "slicer-handle slicer-handle-start", role: "slider", tabindex: "0", "aria-label": "Start of the narrowed range" });
   const hEnd = el("div", { class: "slicer-handle slicer-handle-end", role: "slider", tabindex: "0", "aria-label": "End of the narrowed range" });
   const body = el("div", { class: "slicer-sel", role: "group", tabindex: "0", "aria-label": "Narrowed range. Arrow keys move it, Home and End jump it, Escape resets it." }, [hStart, hEnd]);
-  const track = el("div", { class: "slicer-track" }, [svg, shadeL, shadeR, body]);
+  const track = el("div", { class: "slicer-track" }, [svg, dotLayer, shadeL, shadeR, body]);
   const readout = el("span", { class: "slicer-readout", role: "status", "aria-live": "polite" });
   const reset = el("button", { type: "button", class: "btn slicer-reset", text: "Reset", title: "Back to the whole range" });
   const overlayNote = el("span", { class: "slicer-overlay-note" });
@@ -279,6 +287,14 @@ export function timeSlicer(o) {
     const p = stripPaths(points, win);
     line.setAttribute("d", p.line);
     area.setAttribute("d", p.area);
+    /* #7416: a single sample's mark. */
+    dotLayer.textContent = "";
+    for (const d of p.dots || []) {
+      const dot = el("span", { class: "slicer-dot", title: "One sample" });
+      dot.style.left = (d.x / VB_W) * 100 + "%";
+      dot.style.top = (d.y / VB_H) * 100 + "%";
+      dotLayer.appendChild(dot);
+    }
     const q = overlay ? stripPaths(overlay, win) : { line: "" };
     overlayLine.setAttribute("d", q.line);
     overlayNote.textContent = overlay && q.line ? "Overlay: " + overlayLabel : "";

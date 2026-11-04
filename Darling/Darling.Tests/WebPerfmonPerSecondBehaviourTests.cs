@@ -81,7 +81,7 @@ public sealed class WebPerfmonPerSecondBehaviourTests
         if (!TryRun("mixed", out var r)) return;
 
         Assert.Equal(new[] { "Counter", "Instance", "Per second", "Total since counter start", "Value", "Delta" }, Strings(r.GetProperty("headers")));
-        Assert.Equal(new[] { "Batch Requests/sec", "—", "0.22", "11,641", "—", "66.00" }, Row(r, "Batch Requests/sec"));
+        Assert.Equal(new[] { "Batch Requests/sec", "—", "0.22", "11,641", "—", "66" }, Row(r, "Batch Requests/sec"));
 
         /* The four number columns line up on the right, as every number column in the grids does. */
         Assert.Equal(
@@ -107,7 +107,7 @@ public sealed class WebPerfmonPerSecondBehaviourTests
     {
         if (!TryRun("mixed", out var r)) return;
 
-        Assert.Equal(new[] { "Number of Deadlocks/sec", "—", "0.0033", "37", "—", "1.00" }, Row(r, "Number of Deadlocks/sec"));
+        Assert.Equal(new[] { "Number of Deadlocks/sec", "—", "0.0033", "37", "—", "1" }, Row(r, "Number of Deadlocks/sec"));
     }
 
     /// <summary>The rate format's digit rules, in the grid cell. A rate below 1 keeps two significant digits: 0.2333 (70 in
@@ -118,8 +118,8 @@ public sealed class WebPerfmonPerSecondBehaviourTests
     {
         if (!TryRun("digits", out var r)) return;
 
-        Assert.Equal(new[] { "Page Splits/sec", "—", "0.23", "1,113,211", "—", "70.00" }, Row(r, "Page Splits/sec"));
-        Assert.Equal(new[] { "Transactions/sec", "—", "1,234.57", "4,000,000", "—", "1,111,111.00" }, Row(r, "Transactions/sec"));
+        Assert.Equal(new[] { "Page Splits/sec", "—", "0.23", "1,113,211", "—", "70" }, Row(r, "Page Splits/sec"));
+        Assert.Equal(new[] { "Transactions/sec", "—", "1,234.57", "4,000,000", "—", "1,111,111" }, Row(r, "Transactions/sec"));
     }
 
     /// <summary>A gauge's value is its reading, and an average's numerator keeps its value and delta: only a rate's
@@ -129,8 +129,8 @@ public sealed class WebPerfmonPerSecondBehaviourTests
     {
         if (!TryRun("mixed", out var r)) return;
 
-        Assert.Equal(new[] { "Total Server Memory (KB)", "—", "—", "—", "8,000,000.00", "—" }, Row(r, "Total Server Memory (KB)"));
-        Assert.Equal(new[] { "Lock waits", "Average wait time (ms)", "—", "—", "5,000.00", "40.00" }, Row(r, "Lock waits"));
+        Assert.Equal(new[] { "Total Server Memory (KB)", "—", "—", "—", "8,000,000", "—" }, Row(r, "Total Server Memory (KB)"));
+        Assert.Equal(new[] { "Lock waits", "Average wait time (ms)", "—", "—", "5,000", "40" }, Row(r, "Lock waits"));
     }
 
     [Fact]

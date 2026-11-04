@@ -326,9 +326,10 @@ ORDER BY s.index_scans ASC, s.index_bytes DESC";
            scanned since the reset" and "last scanned in March", which is the distinction that decides
            whether a zero is evidence of anything. */
         new CollectorColumn("last_scan", CollectorColumnType.Timestamp),
-        /* The denominator for every counter in the row. NULL means never reset, which is the ordinary state
-           and means the counters run back to the start of the statistics system - NOT that the value is
-           unknown. The read has to say which of those it is looking at. */
+        /* The denominator for every counter in the row. NULL means no reset was RECORDED (#7456). It is the
+           ordinary state, but it does not prove the counters run back to the start of the statistics system:
+           crash recovery and an immediate shutdown discard them without writing a reset, and from PG15 the
+           column then stays NULL. The read has to say so, and has to watch the counter itself fall. */
         new CollectorColumn("stats_reset", CollectorColumnType.Timestamp),
     };
 

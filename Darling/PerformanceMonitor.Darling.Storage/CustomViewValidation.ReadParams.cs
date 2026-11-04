@@ -80,7 +80,7 @@ public static partial class CustomViewValidation
             ["get_load_by_caller"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("statements", false), new("as_of", false) },
             ["get_query_pileups"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("min_sessions", false), new("top", false), new("as_of", false) },
             ["get_query_store_top"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("database_name", false), new("as_of", false), new("execution_type", false), new("module_name", false), new("full_text", false), new("tag", false) },
-            ["get_long_query_completions"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false), new("database_name", false), new("tag", false) },
+            ["get_long_query_completions"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("limit", false), new("as_of", false), new("database_name", false), new("tag", false), new("include_monitor", false) },
             ["get_server_properties"] = new ReadPanelParam[] { new("server", false) },
             ["get_tempdb_trend"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("bucket_minutes", false) },
             ["get_top_procedures_by_cpu"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("database_name", false), new("order_by", false), new("as_of", false), new("detail", false), new("tag", false) },

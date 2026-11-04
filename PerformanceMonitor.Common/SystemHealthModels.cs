@@ -124,17 +124,17 @@ namespace PerformanceMonitor.Common
         /// <summary>First <c>memoryReport/@name</c> (e.g. "Process/System Counts").</summary>
         public string? Name { get; init; }
 
-        /// <summary>memoryReport entry "Available Physical Memory" (bytes), / 1024^3 = GB.</summary>
-        public long? AvailablePhysicalMemoryGb { get; init; }
+        /// <summary>memoryReport entry "Available Physical Memory" (bytes), / 1024^3 = GB (2 decimals).</summary>
+        public decimal? AvailablePhysicalMemoryGb { get; init; }
 
-        /// <summary>memoryReport entry "Available Virtual Memory" (bytes), / 1024^3 = GB.</summary>
-        public long? AvailableVirtualMemoryGb { get; init; }
+        /// <summary>memoryReport entry "Available Virtual Memory" (bytes), / 1024^3 = GB (2 decimals).</summary>
+        public decimal? AvailableVirtualMemoryGb { get; init; }
 
-        /// <summary>memoryReport entry "Available Paging File" (bytes), / 1024^3 = GB.</summary>
-        public long? AvailablePagingFileGb { get; init; }
+        /// <summary>memoryReport entry "Available Paging File" (bytes), / 1024^3 = GB (2 decimals).</summary>
+        public decimal? AvailablePagingFileGb { get; init; }
 
-        /// <summary>memoryReport entry "Working Set" (bytes), / 1024^3 = GB.</summary>
-        public long? WorkingSetGb { get; init; }
+        /// <summary>memoryReport entry "Working Set" (bytes), / 1024^3 = GB (2 decimals).</summary>
+        public decimal? WorkingSetGb { get; init; }
 
         /// <summary>memoryReport entry "Percent of Committed Memory in WS" (raw).</summary>
         public long? PercentOfCommittedMemoryInWs { get; init; }
@@ -154,11 +154,11 @@ namespace PerformanceMonitor.Common
         /// <summary>memoryReport entry "Process virtual memory low" (raw).</summary>
         public long? ProcessVirtualMemoryLow { get; init; }
 
-        /// <summary>memoryReport entry "VM Reserved" (KB), / 1024^2 = GB.</summary>
-        public long? VmReservedGb { get; init; }
+        /// <summary>memoryReport entry "VM Reserved" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? VmReservedGb { get; init; }
 
-        /// <summary>memoryReport entry "VM Committed" (KB), / 1024^2 = GB.</summary>
-        public long? VmCommittedGb { get; init; }
+        /// <summary>memoryReport entry "VM Committed" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? VmCommittedGb { get; init; }
 
         /// <summary>memoryReport entry "Locked Pages Allocated" (raw).</summary>
         public long? LockedPagesAllocated { get; init; }
@@ -166,17 +166,17 @@ namespace PerformanceMonitor.Common
         /// <summary>memoryReport entry "Large Pages Allocated" (raw).</summary>
         public long? LargePagesAllocated { get; init; }
 
-        /// <summary>memoryReport entry "Emergency Memory" (KB), / 1024^2 = GB.</summary>
-        public long? EmergencyMemoryGb { get; init; }
+        /// <summary>memoryReport entry "Emergency Memory" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? EmergencyMemoryGb { get; init; }
 
-        /// <summary>memoryReport entry "Emergency Memory In Use" (KB), / 1024^2 = GB.</summary>
-        public long? EmergencyMemoryInUseGb { get; init; }
+        /// <summary>memoryReport entry "Emergency Memory In Use" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? EmergencyMemoryInUseGb { get; init; }
 
-        /// <summary>memoryReport entry "Target Committed" (KB), / 1024^2 = GB.</summary>
-        public long? TargetCommittedGb { get; init; }
+        /// <summary>memoryReport entry "Target Committed" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? TargetCommittedGb { get; init; }
 
-        /// <summary>memoryReport entry "Current Committed" (KB), / 1024^2 = GB.</summary>
-        public long? CurrentCommittedGb { get; init; }
+        /// <summary>memoryReport entry "Current Committed" (KB), / 1024^2 = GB (2 decimals).</summary>
+        public decimal? CurrentCommittedGb { get; init; }
 
         /// <summary>memoryReport entry "Pages Allocated" (raw).</summary>
         public long? PagesAllocated { get; init; }

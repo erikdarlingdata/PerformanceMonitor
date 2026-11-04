@@ -285,7 +285,8 @@ public sealed class RecommendationCardViewModel
     /// </summary>
     public bool ShowOpenInActiveQueries =>
         IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue
-        && LinkTarget != RecommendationLinkTarget.None;
+        && LinkTarget != RecommendationLinkTarget.None
+        && !FactKinds.IsStandingStateKey(Item.RootFactKey); // #7416: no running query explains a setting or a volume's free space
 
     /// <summary>
     /// Where the deep-link goes for this finding's engine (#6134): Active Queries on SQL Server, the PostgreSQL

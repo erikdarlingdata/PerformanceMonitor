@@ -20,7 +20,7 @@
  * An open panel is kept at module scope under its row's key, so the page's 60 s rebuild draws it again without a second read. The
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
-import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText } from "../util.js";
+import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 import { historyWindow } from "../time-slicer.js";
@@ -141,9 +141,7 @@ function panelFor(kind, key, state, hours, onMetric) {
   const notes = [];
   if (state.widened) notes.push(state.widened);
   if (d.window_truncated) {
-    notes.push(
-      "History starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for: earlier samples have aged out of the tier that answered."
-    );
+    notes.push(trendHeadNote(d, "History"));
   }
   /* #6359: the facts only. The read's own `aggregate_note` is written for an MCP caller ("pass bucket_minutes (1-1440) for
      another width, or narrow hours_back"), advice a browser reader cannot act on, so the panel says what a point covers itself (util.js chartNoteText). */

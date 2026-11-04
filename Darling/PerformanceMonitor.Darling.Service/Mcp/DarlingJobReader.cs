@@ -149,7 +149,9 @@ internal static class DarlingJobReader
         """;
 
     /// <summary>The running jobs, and the last good collection's time when no job is listed because it is older than the freshness bound.</summary>
-    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+    /// <remarks>#7416: <paramref name="CollectorRan"/> is false only when the store holds no running_jobs run and no snapshot at all, so an empty answer can say
+    /// "no job is running" when the collector has run and "the collector has not run" when it has not.</remarks>
+    public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection, bool CollectorRan = true);
 
     public static async Task<List<RunningJobRow>> GetRunningJobsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
@@ -193,7 +195,7 @@ internal static class DarlingJobReader
         DarlingMcpReadParameters.AddInt(lastGood, serverId);
         var last = await lastGood.ExecuteScalarAsync(cancellationToken);
         DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
-        return new RunningJobsRead(rows, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
+        return new RunningJobsRead(rows, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff), lastGoodTime is not null);
     }
 
     /// <summary>Maps one row of <see cref="RunningJobsSql"/> (11 columns, in the SELECT's order).</summary>

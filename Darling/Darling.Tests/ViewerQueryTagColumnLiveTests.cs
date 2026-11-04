@@ -194,12 +194,12 @@ public sealed class ViewerQueryTagColumnLiveTests
         Assert.Equal(["usp_VTagPlain"], (await viewer.GetTopProceduresByCpuRoutedAsync(ServerId, start, end, 10, null, untagged, ct)).Rows.Select(r => r.ObjectName));
 
         var storedLongRows = await CountRowsAsync("long_query_completions", start, end, ct);
-        var longs = await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, null, ct);
+        var longs = await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, null, cancellationToken: ct);
         var batchLongRow = longs.SingleOrDefault(r => r.QueryHash == Bat);
         Assert.True(batchLongRow is not null,
             $"{Bat} was not in the long query completions read. long_query_completions rows in the store for server {ServerId} in the window: {storedLongRows}. "
             + $"Hashes the read returned: [{string.Join(", ", longs.Select(r => r.QueryHash))}].");
         Assert.Equal("ViewerTagBatch", batchLongRow.QueryTag);
-        Assert.Equal([Hog], (await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, untagged, ct)).Select(r => r.QueryHash));
+        Assert.Equal([Hog], (await viewer.GetRecentLongQueryCompletionsAsync(ServerId, start, end, null, untagged, cancellationToken: ct)).Select(r => r.QueryHash));
     });
 }

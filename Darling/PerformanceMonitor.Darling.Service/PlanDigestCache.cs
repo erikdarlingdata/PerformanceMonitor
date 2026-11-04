@@ -111,6 +111,19 @@ internal sealed class PlanDigestCache<TKey>
         }
     }
 
+    /// <summary>The end of a batch: confirms the pending entries when it committed, drops them when it did not.</summary>
+    public void Settle(IEnumerable<TKey> keys, bool committed, DateTime nowUtc)
+    {
+        if (committed)
+        {
+            ConfirmPending(keys, nowUtc);
+        }
+        else
+        {
+            DiscardPending(keys);
+        }
+    }
+
     /// <summary>Forgets every entry, confirmed and pending (#5367 review, A-L1: a cache filled under one filter mode
     /// must not answer a run in another).</summary>
     public void Clear()

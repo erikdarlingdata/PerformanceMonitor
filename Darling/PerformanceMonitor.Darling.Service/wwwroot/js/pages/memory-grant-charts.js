@@ -45,6 +45,11 @@ function mixedNote(data) {
   return el("div", { class: "mp-metric-note", text: width === "Each point is one collection." ? width : width + " Grantees and waiters are averaged over the bucket; timeouts and forced grants are summed." });
 }
 
+/** The two pools the engine always has are named, because a reader should not have to know that 1 is internal and 2 is default (#7416). Any other pool keeps its number. */
+export function poolName(pool) {
+  return pool === 1 ? "Internal pool" : pool === 2 ? "Default pool" : "Pool " + pool;
+}
+
 /**
  * Shape the read's entries ({ collection_time, pool_id, ...metrics }) into one chart's points and series: a line per pool
  * per metric, "Pool N: Metric", each pool x metric on its own colour in the order the desktop assigns them (pool order, then
@@ -59,7 +64,7 @@ export function grantChartSeries(entries, metrics) {
   pools.forEach((pool) => {
     metrics.forEach((m) => {
       const key = "p" + pool + "_" + m.key;
-      series.push({ key, label: "Pool " + pool + ": " + m.label, color: CATEGORICAL_COLORS[series.length % CATEGORICAL_COLORS.length] });
+      series.push({ key, label: poolName(pool) + ": " + m.label, color: CATEGORICAL_COLORS[series.length % CATEGORICAL_COLORS.length] });
       for (const r of rows) {
         if ((Number(r.pool_id) || 0) !== pool || typeof r[m.key] !== "number") continue;
         let point = byTime.get(r.collection_time);

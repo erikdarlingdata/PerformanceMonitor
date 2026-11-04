@@ -7,6 +7,7 @@
  */
 
 using System;
+using PerformanceMonitor.Common;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -999,11 +1000,13 @@ internal static class PgDisplay
             ? "no column statistics - check the monitoring login can SELECT this table"
             : row.LiveTuples < 0
                 ? "never analyzed - no row count to compare against"
-                : suppressed
-                    ? "statistics stale - ANALYZE this table, then re-read"
-                    : row.PgstattupleAvailable
-                        ? "estimate; confirm exactly with pgstattuple"
-                        : "estimate; pgstattuple is not installed here";
+                : row.LastAnalyzed is null
+                    ? "no record of the last ANALYZE - ANALYZE this table, then re-read"
+                    : suppressed
+                        ? "statistics stale - ANALYZE this table, then re-read"
+                        : row.PgstattupleAvailable
+                            ? "estimate; confirm exactly with pgstattuple"
+                            : "estimate; pgstattuple is not installed here";
 
         return new TableBloatRow
         {
@@ -1859,8 +1862,9 @@ internal static class PgDisplay
         ChangedAt = SnapshotTime(row.ChangedAtUtc),
         ChangedAtUtc = row.ChangedAtUtc,
         Name = row.Name,
-        OldValue = row.OldValue,
-        NewValue = row.NewValue,
+        /* #7416 item 3: a pair that differs only in whitespace (log_line_prefix) shows it. */
+        OldValue = ConfigValueText.Shown(row.OldValue, row.NewValue),
+        NewValue = ConfigValueText.Shown(row.NewValue, row.OldValue),
         Unit = row.Unit,
         Scope = ConfigChangeScope(row),
         Kind = row.ChangeKind,
@@ -1931,7 +1935,8 @@ internal static class PgDisplay
     internal static BufferUsageRow BufferUsage(DarlingPgBufferUsageReader.PgBufferUsageRow row) => new()
     {
         DatabaseName = row.DatabaseName,
-        RelationName = row.RelationName,
+        /* #7455: a word for the rows that have no name (another database, the shared catalogs), never a blank. */
+        RelationName = row.RelationName ?? row.NameLabel,
         Buffers = row.Buffers,
         PctOfPool = Math.Round(row.PctOfPool, 1),
         DirtyBuffers = row.DirtyBuffers,

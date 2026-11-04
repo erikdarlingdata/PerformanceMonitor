@@ -513,6 +513,16 @@ public sealed class CollectorContext
     public bool DeferPlanXmlFetch { get; init; }
 
     /// <summary>
+    /// #7419: when true, <c>query_stats</c> returns NULL for <c>query_text</c> in its main query, and the host reads the text of
+    /// the kept rows it holds no digest for in a second target query, <c>QueryStatsCollector.BuildTextFetchQuery</c>. The
+    /// main query still applies <c>sys.dm_exec_sql_text</c>, because the collector's own-statement filter and the host object
+    /// name read it, so what the host saves is the <c>SUBSTRING</c> and the transfer of text for rows the store already knows.
+    /// A host that sets it must set <c>Row.QueryText</c> or <c>Row.KnownTextDigest</c> on every row it wants stored with a text.
+    /// Default false, so Lite, which stores the text on every row, keeps its read and its SQL byte for byte.
+    /// </summary>
+    public bool DeferTextFetch { get; init; }
+
+    /// <summary>
     /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
     /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
     /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the

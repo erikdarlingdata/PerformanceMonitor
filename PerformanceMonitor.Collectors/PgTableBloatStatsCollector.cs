@@ -376,8 +376,9 @@ ORDER BY (CASE WHEN s.heap_pages > s.estimated_heap_pages
            width statistics can only go stale THROUGH modifications, and this counts them. Read as a ratio
            against live_tuples, not as an absolute. */
         new CollectorColumn("mods_since_analyze", CollectorColumnType.BigInt),
-        /* NULL means never analyzed by either route, which is a stronger statement than a stale timestamp
-           and must not be rendered as "unknown". */
+        /* NULL means no analyze is RECORDED by either route (#7456). The reader tells "never analyzed" apart
+           by estimate_unavailable / live_tuples < 0: NULL with statistics present means PostgreSQL lost the
+           record (crash recovery, immediate shutdown, pg_stat_reset), so freshness cannot be judged. */
         new CollectorColumn("last_analyzed", CollectorColumnType.Timestamp),
 
         /* The estimator's own inputs, stored rather than discarded, so the number can be argued with

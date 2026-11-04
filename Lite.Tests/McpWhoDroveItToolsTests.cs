@@ -76,6 +76,8 @@ public sealed class McpWhoDroveItToolsTests : IClassFixture<SharedDuckDbFixture>
         using var doc = JsonDocument.Parse(await McpWhoDroveItTools.GetCpuByDatabase(_data, _serverManager, "TestServer"));
         var root = doc.RootElement;
         Assert.Equal(600.0, root.GetProperty("server_cpu_ms").GetDouble());
+        /* #7419: a run stores only its heaviest statements, so the total says it covers the stored rows. */
+        Assert.Equal(PerformanceMonitor.Common.QueryStatsCoverage.StoredRowsNote, root.GetProperty("coverage_note").GetString());
         var dbs = root.GetProperty("databases").EnumerateArray().ToList();
         Assert.Equal(new[] { "DbA", "DbB" }, dbs.Select(d => d.GetProperty("database_name").GetString()).ToArray());
 

@@ -158,7 +158,7 @@ public sealed partial class ViewerDataService
         lastGood.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         var last = await lastGood.ExecuteScalarAsync(cancellationToken);
         DateTime? lastGoodTime = last is DateTime t ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null;
-        return new RunningJobsRead(items, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff));
+        return new RunningJobsRead(items, PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentSince(lastGoodTime, cutoff), lastGoodTime is not null);
     }
 
     private async Task<List<RunningJobRow>> ReadRunningJobRowsAsync(int serverId, DateTime cutoff, CancellationToken cancellationToken)
@@ -349,4 +349,4 @@ public class RunningJobRow
 
 /// <summary>The running jobs, and the time of the collector's last good collection when no job is listed because that is older
 /// than the freshness bound (null otherwise). See <see cref="ViewerDataService.ReadRunningJobsAsync"/>.</summary>
-public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection);
+public sealed record RunningJobsRead(List<RunningJobRow> Jobs, DateTime? LastGoodCollection, bool CollectorRan = true);

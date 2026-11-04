@@ -156,38 +156,33 @@ public sealed class AnalysisCoverageLivePostgresTests
             }
 
             /* compare_analysis: the baseline window (28h back) was never observed, the comparison
-               window partly — both caveats, and the gap fact reported through the coverage blocks
-               rather than as a compared key. */
+               window partly. #7458: nothing is compared. The baseline caveat leads, says the window was
+               not collected at all and names it, the partly collected comparison still earns its own
+               sentence, and the gap fact is reported through the coverage blocks rather than as a key. */
             var compared = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 4, 28);
             using (var doc = JsonDocument.Parse(compared))
             {
                 var root = doc.RootElement;
                 var caveat = root.GetProperty("caveat").GetString()!;
-                Assert.Contains("The BASELINE window produced no facts at all", caveat, StringComparison.Ordinal);
+                Assert.StartsWith("The BASELINE window (", caveat, StringComparison.Ordinal);
+                Assert.Contains("was not collected at all", caveat, StringComparison.Ordinal);
+                Assert.DoesNotContain("The BASELINE window was only partly collected", caveat, StringComparison.Ordinal);
+                Assert.DoesNotContain("counts as a new issue", caveat, StringComparison.Ordinal);
                 Assert.Contains("The COMPARISON window was only partly collected", caveat, StringComparison.Ordinal);
                 Assert.True(root.GetProperty("baseline").GetProperty("coverage").GetProperty("unobserved").GetBoolean());
                 Assert.True(root.GetProperty("comparison").GetProperty("coverage").GetProperty("partial").GetBoolean());
                 Assert.DoesNotContain(root.GetProperty("facts").EnumerateArray(),
                     f => f.GetProperty("key").GetString() == WindowCoverage.FactKey);
 
-                /* #3538 A3 composes with the caveat: every verdict row and family carries coverage_caveat,
-                   the storm is a comparison-only row banded by presence (worse: 0.25 saturates CXPACKET's
-                   ladder), the rules are stated, and the summary counts families beside rows. */
-                Assert.True(root.GetProperty("summary").GetProperty("coverage_caveat").GetBoolean());
+                AssertNothingCompared(root);
                 Assert.All(root.GetProperty("facts").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
-                Assert.All(root.GetProperty("families").EnumerateArray(), f => Assert.True(f.GetProperty("coverage_caveat").GetBoolean()));
                 var cxRow = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
                 Assert.Equal("comparison_only", cxRow.GetProperty("presence").GetString());
-                Assert.Equal("presence", cxRow.GetProperty("band_source").GetString());
-                Assert.Equal("worse", cxRow.GetProperty("status").GetString());
+                Assert.Equal("not_compared", cxRow.GetProperty("status").GetString());
+                /* The tool's window ends at "now", a minute past windowEnd, so the value is a hair over 0.25
+                   (0.2549 measured); a precision-1 compare rounds it to 0.3 against 0.2. */
+                Assert.InRange(cxRow.GetProperty("comparison_value").GetDouble(), 0.24, 0.27);
                 Assert.Equal("parallelism", cxRow.GetProperty("family").GetString());
-                /* BLOCKING_EVENTS at 10/hr (base 0.5) is the other comparison-only key that registers; the
-                   two are two families (parallelism, lock_contention), so families_worse counts causes. */
-                var blockingRow = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "BLOCKING_EVENTS");
-                Assert.Equal("worse", blockingRow.GetProperty("status").GetString());
-                Assert.Equal("lock_contention", blockingRow.GetProperty("family").GetString());
-                Assert.True(root.GetProperty("summary").GetProperty("new_issues").GetInt32() >= 2);
-                Assert.True(root.GetProperty("summary").GetProperty("families_worse").GetInt32() >= 2);
                 Assert.Contains("N=1 vs N=1", root.GetProperty("reading").GetString()!, StringComparison.Ordinal);
                 Assert.Contains("robust-sigma", root.GetProperty("band_rules").GetProperty("baseline").GetString()!, StringComparison.Ordinal);
             }
@@ -398,6 +393,118 @@ public sealed class AnalysisCoverageLivePostgresTests
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #7458 on the real read: a baseline fully collected and a comparison window collected for one hour of four.
+    /// A partly collected side still compares (the storm is worse, the reply is comparable). Move the baseline
+    /// back to a stretch nobody collected and nothing compares. Move the comparison to one and the baseline's
+    /// facts do not become resolved issues.
+    /// </summary>
+    [Fact]
+    public async Task CompareAnalysis_APartlyCollectedSideStillCompares_AndAnUnobservedSideDoesNot()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live compare test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            await PlantWaitAsync(connection, windowEnd.AddHours(-60), "OLD_WAIT", 1_000L, ct);
+
+            /* Baseline [end-28h, end-24h]: fully collected, 900,000 ms of CXPACKET over 4 observed hours. */
+            var baselineStart = windowEnd.AddHours(-28);
+            await PlantWaitAsync(connection, baselineStart, "CXPACKET", 0L, ct);
+            for (var i = 1; i <= 16; i++)
+                await PlantWaitAsync(connection, baselineStart.AddMinutes(15 * i), "CXPACKET", 56_250L, ct);
+
+            /* Comparison [end-4h, end]: one hour collected, the same 900,000 ms in it. */
+            var comparisonStart = windowEnd.AddHours(-4);
+            await PlantWaitAsync(connection, comparisonStart, "CXPACKET", 0L, ct);
+            for (var i = 1; i <= 4; i++)
+                await PlantWaitAsync(connection, comparisonStart.AddMinutes(15 * i), "CXPACKET", 225_000L, ct);
+
+            var service = new DarlingAnalysisService(postgres);
+            var asOf = DateTime.SpecifyKind(windowEnd, DateTimeKind.Utc).ToString("o");
+
+            /* A partly collected comparison against a full baseline: still compared. */
+            var partial = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 4, 28, asOf, ct);
+            using (var doc = JsonDocument.Parse(partial))
+            {
+                var root = doc.RootElement;
+                Assert.True(root.GetProperty("comparable").GetBoolean());
+                Assert.True(root.GetProperty("comparison").GetProperty("coverage").GetProperty("partial").GetBoolean());
+                Assert.Contains("The COMPARISON window was only partly collected", root.GetProperty("caveat").GetString()!, StringComparison.Ordinal);
+                Assert.Equal(0, root.GetProperty("summary").GetProperty("not_compared").GetInt32());
+                var cx = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
+                Assert.Equal("both", cx.GetProperty("presence").GetString());
+                Assert.Equal("worse", cx.GetProperty("status").GetString());
+            }
+
+            /* A baseline stretch nobody collected (52h back): nothing compares. */
+            var noBaseline = await DarlingMcpTools.CompareAnalysis(service, postgres, ServerName, 4, 56, asOf, ct);
+            using (var doc = JsonDocument.Parse(noBaseline))
+            {
+                var root = doc.RootElement;
+                Assert.False(root.GetProperty("comparable").GetBoolean());
+                Assert.True(root.GetProperty("baseline").GetProperty("coverage").GetProperty("unobserved").GetBoolean());
+                var caveat = root.GetProperty("caveat").GetString()!;
+                Assert.StartsWith("The BASELINE window (", caveat, StringComparison.Ordinal);
+                Assert.Contains("was not collected at all", caveat, StringComparison.Ordinal);
+                Assert.DoesNotContain("The BASELINE window was only partly collected", caveat, StringComparison.Ordinal);
+                AssertNothingCompared(root);
+            }
+
+            /* A comparison stretch nobody collected (end-18h, baseline end-28h..end-24h): the baseline's CXPACKET
+               is not a resolved issue. */
+            var noComparison = await DarlingMcpTools.CompareAnalysis(
+                service, postgres, ServerName, 4, 10,
+                DateTime.SpecifyKind(windowEnd.AddHours(-18), DateTimeKind.Utc).ToString("o"), ct);
+            using (var doc = JsonDocument.Parse(noComparison))
+            {
+                var root = doc.RootElement;
+                Assert.False(root.GetProperty("comparable").GetBoolean());
+                Assert.True(root.GetProperty("comparison").GetProperty("coverage").GetProperty("unobserved").GetBoolean());
+                var caveat = root.GetProperty("caveat").GetString()!;
+                Assert.StartsWith("The COMPARISON window (", caveat, StringComparison.Ordinal);
+                Assert.Contains("was not collected at all", caveat, StringComparison.Ordinal);
+                AssertNothingCompared(root);
+                var cx = Assert.Single(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("key").GetString() == "CXPACKET");
+                Assert.Equal("baseline_only", cx.GetProperty("presence").GetString());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static void AssertNothingCompared(JsonElement root)
+    {
+        var summary = root.GetProperty("summary");
+        Assert.Equal(0, summary.GetProperty("worse").GetInt32());
+        Assert.Equal(0, summary.GetProperty("better").GetInt32());
+        Assert.Equal(0, summary.GetProperty("new_issues").GetInt32());
+        Assert.Equal(0, summary.GetProperty("resolved_issues").GetInt32());
+        Assert.Equal(0, summary.GetProperty("families_worse").GetInt32());
+        Assert.Equal(0, summary.GetProperty("families_better").GetInt32());
+        Assert.True(summary.GetProperty("not_compared").GetInt32() > 0);
+        Assert.All(root.GetProperty("facts").EnumerateArray(), f => Assert.Equal("not_compared", f.GetProperty("status").GetString()));
+        Assert.All(root.GetProperty("families").EnumerateArray(), f => Assert.Equal("not_compared", f.GetProperty("status").GetString()));
     }
 
     private static DateTime TruncateToMinutes(DateTime value) =>

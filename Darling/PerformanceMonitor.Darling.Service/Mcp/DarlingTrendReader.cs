@@ -118,7 +118,8 @@ internal static class DarlingTrendReader
     /// instead of returning a short array under the requested window's label.</para>
     /// </summary>
     public sealed record QueryHistoryResult(
-        List<QueryHistoryPoint> Points, string Source, DateTime EffectiveStartUtc, bool Truncated);
+        List<QueryHistoryPoint> Points, string Source, DateTime EffectiveStartUtc, bool Truncated,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null);
 
     /// <summary>
     /// The aggregate twin of <see cref="QueryHistorySql"/>, reading the hourly continuous aggregate (#2353).
@@ -1012,7 +1013,8 @@ internal static class DarlingTrendReader
     /// name, the key says which of the two facts spelled <c>truncated</c> this one is).
     /// </summary>
     public sealed record DurationTrendResult(
-        List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated);
+        List<QueryDurationTrendPoint> Points, DurationTrendRoute Route, DateTime EffectiveStartUtc, bool Truncated,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null);
 
     /// <summary>
     /// Resolves the route for the query-stats duration trend: raw <c>query_stats</c> or
@@ -1374,8 +1376,13 @@ internal static class DarlingTrendReader
 
         /* effective_start is the first COLLECTION the store held (#2353), not the first bucket's start (#3897):
            a bucket is stamped at its boundary, which can sit before the window's first collection. */
-        var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].FirstCollectionTime : null, startUtc);
-        return new DurationTrendResult(points, route, effectiveStart, truncated);
+        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. */
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            points.Count > 0 ? points[0].FirstCollectionTime : null, startUtc,
+            DurationTrendRouting.TierFloorUtc(route.Tier, route.RawRetentionApplies, route.ResolvedAtUtc));
+        return new DurationTrendResult(
+            points, route, effectiveStart, truncated, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies));
     }
 
     /// <summary>
@@ -1613,13 +1620,18 @@ internal static class DarlingTrendReader
             ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken)
             : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, cancellationToken);
 
-        var (effectiveStart, truncated) = DescribeCoverage(items.Count > 0 ? items[0].CollectionTime : null, startUtc);
+        /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. */
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            items.Count > 0 ? items[0].CollectionTime : null, startUtc,
+            DurationTrendRouting.TierFloorUtc(tier, hourlyAvailable, nowUtc ?? DateTime.UtcNow));
 
         return new QueryHistoryResult(
             items,
             DurationTrendRouting.SourceWord(tier),
             effectiveStart,
-            truncated);
+            truncated,
+            startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, hourlyAvailable));
     }
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(

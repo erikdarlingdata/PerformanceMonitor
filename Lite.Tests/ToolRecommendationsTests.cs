@@ -105,4 +105,66 @@ public sealed class ToolRecommendationsTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
         Assert.True(toolsSeen.Count >= 25, $"only {toolsSeen.Count} distinct tools are recommended; the table has emptied");
     }
+
+    /// <summary>
+    /// #7449: every fact key FactAdvice writes a card for, other than the ones the table already carried. Each arrived
+    /// on the reply with <c>"next_tools":[]</c>, the memory-pressure card among them. The prefix-routed anomaly keys
+    /// are here too, so a routing change that drops one fails.
+    /// </summary>
+    public static TheoryData<string> AdviceKeysThatWereMissingNextTools => new()
+    {
+        "ANOMALY_BLOCKING_SPIKE", "ANOMALY_CPU_SPIKE", "ANOMALY_DEADLOCK_SPIKE", "ANOMALY_OBJECT_CONTENTION", "ANOMALY_OBJECT_GROWTH",
+        "ANOMALY_READ_LATENCY", "ANOMALY_WAIT_PROFILE", "ANOMALY_WRITE_LATENCY", "BLOCKING_CHAIN", "CONFIG_CTFP",
+        "CONFIG_IFI_DISABLED", "CONFIG_LIGHTWEIGHT_POOLING", "CONFIG_LPIM_DISABLED", "CONFIG_MAXDOP", "CONFIG_MAX_MEMORY_MB",
+        "CONFIG_MIN_MAX_MEMORY_NARROW", "CONFIG_PRIORITY_BOOST", "LCK_M_RIn_NL", "LCK_M_RIn_S", "LCK_M_RIn_U", "LCK_M_RIn_X",
+        "LCK_M_RS_S", "LCK_M_RS_U", "LCK_M_RX_S", "LCK_M_RX_U", "LCK_M_RX_X", "MEMORY_CLERKS", "MEMORY_PRESSURE_EVENTS",
+        "MISSING_INDEX", "PAGELATCH_EX", "PAGELATCH_UP", "PLAN_CACHE_BLOAT", "PLAN_WARNING", "RESOURCE_SEMAPHORE_QUERY_COMPILE",
+        "RUNNABLE_TASKS", "SERVER_MEMORY_DUMPS", "THREADPOOL_BLOCKING", "THREADPOOL_MIXED", "THREADPOOL_PARALLEL",
+    };
+
+    [Theory]
+    [MemberData(nameof(AdviceKeysThatWereMissingNextTools))]
+    public void EveryKeyTheAdviceCovers_ReachesAtLeastOneNextTool(string factKey)
+    {
+        Assert.NotEmpty(RecommendationsFor(factKey));
+    }
+
+    [Fact]
+    public void MemoryPressureEvents_SendsTheReaderToItsOwnRead_ThenMemoryStatsAndClerks()
+    {
+        var tools = RecommendationsFor("MEMORY_PRESSURE_EVENTS").Select(r => r.GetProperty("tool").GetString()).ToArray();
+
+        Assert.Equal(["get_memory_pressure_events", "get_memory_stats", "get_memory_clerks"], tools);
+    }
+
+    [Fact]
+    public void MemoryPressureAdvice_StatesTheCountAndBothPeaks_FromTheFactsMetadata()
+    {
+        var fact = new Fact
+        {
+            Source = "memory",
+            Key = "MEMORY_PRESSURE_EVENTS",
+            Value = 3,
+            Metadata = new() { ["event_count"] = 12, ["max_process_indicator"] = 3, ["max_system_indicator"] = 1 }
+        };
+
+        var advice = FactAdvice.Compose("MEMORY_PRESSURE_EVENTS", new Dictionary<string, Fact> { [fact.Key] = fact });
+
+        Assert.NotNull(advice);
+        Assert.Contains("12 pressure notifications", advice!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("process indicator peaked at 3 and the system indicator at 1", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("get_memory_pressure_events", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MemoryPressureAdvice_WithoutMetadata_PointsAtTheReadInsteadOfPromisingFiguresTheReplyLacks()
+    {
+        var fact = new Fact { Source = "memory", Key = "MEMORY_PRESSURE_EVENTS", Value = 3 };
+
+        var advice = FactAdvice.Compose("MEMORY_PRESSURE_EVENTS", new Dictionary<string, Fact> { [fact.Key] = fact });
+
+        Assert.NotNull(advice);
+        Assert.Contains("get_memory_pressure_events", advice!.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("The finding carries", advice.Investigation, StringComparison.Ordinal);
+    }
 }

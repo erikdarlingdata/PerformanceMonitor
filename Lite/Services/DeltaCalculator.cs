@@ -53,7 +53,7 @@ public class DeltaCalculator : CollectorDeltaCalculator
          time, and the window's rows are the whole working set (one sort over fifteen minutes of one
          family). A key seeded from an older row inside the window carries that row's timestamp, so
          its first delta spans a longer interval than the in-memory cache would have measured; the
-         value is exact (the counter was idle in between, which is why no newer row exists) and the
+         value is exact (the counter was idle in between, or since #7419 the row ranked below the per-run cap and was not stored, so the delta is the work since the stored row) and the
          gap policy still bounds the span.
 
        query_stats joined the per-key shape with Lite v61 / Darling V128 (#3540). Its delta key is
