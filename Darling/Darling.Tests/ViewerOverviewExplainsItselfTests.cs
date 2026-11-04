@@ -194,7 +194,7 @@ public sealed class ViewerOverviewExplainsItselfTests
         var card = Busy();
 
         Assert.Equal(4, card.MeasuredMetricCount);
-        Assert.StartsWith("Critical — CPU 96%, Blocking 6 · 4 of 6 measured", card.StatusTooltip, StringComparison.Ordinal);
+        Assert.StartsWith("Critical — CPU 96%, Blocking 6 (longest block 1.2 min) · 4 of 6 measured", card.StatusTooltip, StringComparison.Ordinal);
         Assert.Contains(FleetRollup.BuildReason(card), card.StatusTooltip, StringComparison.Ordinal);
     }
 
