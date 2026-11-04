@@ -368,4 +368,30 @@ public sealed class WebChartLegendIsolateBehaviourTests
         }
         Assert.Equal(2, lines.Count(l => !l.EndsWith('|')));
     }
+
+    /* A swatch shows a dash only when the plot draws one: stacked bands and bars have no stroke, and a lone dot cannot be dashed. */
+    [Theory]
+    [InlineData("sameStackedBar")]
+    [InlineData("sameStacked")]
+    [InlineData("sameLoneDot")]
+    public void ASeriesSharingAColor_IsSolidInTheLegend_WhenThePlotDrawsItSolid(string scenario)
+    {
+        var look = S(Run(), scenario);
+        var legend = look.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal(2, legend.Length);
+        Assert.All(legend, l => Assert.DoesNotContain("repeating-linear-gradient", l, StringComparison.Ordinal));
+        Assert.All(look.GetProperty("lines").EnumerateArray(), l => Assert.Equal("", l.GetString()));
+        Assert.True(look.GetProperty("marks").GetInt32() > 0);
+    }
+
+    [Fact]
+    public void TwoLinesSharingAColor_StillDashTheSecond_InTheLegendAndOnTheLine()
+    {
+        var look = S(Run(), "sameLines");
+        var legend = look.GetProperty("legend").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var lines = look.GetProperty("lines").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.DoesNotContain("repeating-linear-gradient", legend[0], StringComparison.Ordinal);
+        Assert.Contains("repeating-linear-gradient", legend[1], StringComparison.Ordinal);
+        Assert.Equal(new[] { "", "6 3" }, lines);
+    }
 }

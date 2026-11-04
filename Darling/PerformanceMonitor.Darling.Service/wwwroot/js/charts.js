@@ -253,11 +253,16 @@ export function renderLineChart(spec) {
   const anyVisible = visibleSeries.length > 0 || series2 !== null;
   const series = anyVisible ? visibleSeries : allSeries;
   const legendHidden = anyVisible ? hiddenSet : new Set();
-  const dashes = seriesDashes(allSeries); /* #7401: a repeated color is drawn dashed, in the lines, tooltip and legend alike */
   const stacked = mode === "stacked";
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
   const usesStack = stacked || stackedBar;
+  /* #7401: a repeated color is drawn dashed on a line. The stacked bands and bars have no stroke to dash, so they take none. */
+  const dashes = usesStack ? new Map() : seriesDashes(allSeries);
+  /* The keys whose dashed polyline the plot actually drew: a series that is only dots (one bucket, or runs of one) draws no dash,
+     so its legend and tooltip swatches show none either. A hidden series draws nothing, so its entry keeps its assigned look. */
+  const dashDrawn = new Set();
+  const swatchDash = (key) => (dashDrawn.has(key) || hiddenSet.has(key) ? dashes.get(key) : undefined);
   const filled = mode === "area" || stacked;
 
   /* Parse + sort the x axis (naive UTC -> real Date via parseUtc). */
@@ -570,6 +575,7 @@ export function renderLineChart(spec) {
               })
             );
           }
+          if (dashes.has(s.key)) dashDrawn.add(s.key);
           root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color), ...(dashes.has(s.key) ? { "stroke-dasharray": dashes.get(s.key).svg } : {}) }));
         }
       }
@@ -748,7 +754,7 @@ export function renderLineChart(spec) {
         const v = r[s.key];
         tooltip.appendChild(
           el("div", { class: "t-row" }, [
-            el("span", { class: "swatch", style: swatchStyle(s.color, dashes.get(s.key)) }),
+            el("span", { class: "swatch", style: swatchStyle(s.color, swatchDash(s.key)) }),
             el("span", { text: s.label }),
             el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
           ])
@@ -786,7 +792,7 @@ export function renderLineChart(spec) {
   const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
   const chart = el("div", { class: "chart" }, [plotHost]);
   chart.appendChild(tooltip);
-  chart.appendChild(buildLegend((series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries).map((s) => (dashes.has(s.key) ? { ...s, dash: dashes.get(s.key) } : s)), onSelect, legendHidden, onLegend));
+  chart.appendChild(buildLegend((series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries).map((s) => (swatchDash(s.key) ? { ...s, dash: swatchDash(s.key) } : s)), onSelect, legendHidden, onLegend));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
   watchPlotWidth(plotHost, (width) => {
     tooltip.style.display = "none";
@@ -1278,7 +1284,7 @@ const NEUTRAL_SLICE = "#5b626e";
 
 /**
  * The event-annotation marker palette (#1563 D5) — deliberately DISJOINT from both CATEGORICAL_COLORS (the cool
- * blues/purples/grays the data series use) and the ok/warn/err severity colors, so an annotation marker never
+ * blues/purples/grays and the one magenta the data series use) and the ok/warn/err severity colors, so an annotation marker never
  * reads as a data series OR as a health state. Warm/distinct hues (pink, orange, brown, indigo), one per source,
  * cycled at the D5 cap of four. All #rrggbb literals (air-gap safe); pass through normalizeColor like every color.
  */
