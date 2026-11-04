@@ -603,7 +603,7 @@ public static class FactAdvice
             var schedulerNote = schedulers == 0
                 ? ""
                 : schedulers > 64
-                    ? $" (up to 64 of this server's {schedulers})"
+                    ? $" (up to 64 of this {(basis.FromVcores ? "database" : "server")}'s {schedulers})"
                     : $" ({schedulers} on this {(basis.FromVcores ? "database" : "server")})";
             headline = $"MAXDOP is 0 — a single query can fan out across every scheduler{schedulerNote}";
             remediation =
