@@ -106,12 +106,23 @@ export function truncate(s, max = 120) {
  * A native <details> disclosure: a one-line truncated `summaryText` that expands to reveal `detail`. Built on
  * the platform <details>/<summary> so it is keyboard-accessible with no JS handlers; every piece of text goes
  * through el()/textContent (R4 — never innerHTML). `detail` may be a node, an array of nodes, or a string.
+ * `opts.cell` marks the disclosure as a grid cell's detail (#6154, #7482).
  */
 export function disclosure(summaryText, detail, opts = {}) {
   const summary = el("summary", { class: "disc-summary", title: opts.title || null }, [
     truncate(summaryText, opts.max || 120),
   ]);
-  return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
+  const body = el("div", { class: "disc-body" }, detail);
+  const box = el("details", { class: opts.cell ? "disclosure cell-detail" : "disclosure" }, [summary, body]);
+  /* #7482: a grid cell's detail opens in place. In a right-hand column of a grid that scrolls sideways the opened text
+     started at the cell and ran past the grid's edge, so it sat out of sight until the reader scrolled. Opening it
+     scrolls the grid just far enough to show the text, and does nothing when it is already in view. */
+  if (opts.cell && typeof box.addEventListener === "function") {
+    box.addEventListener("toggle", () => {
+      if (box.open && typeof body.scrollIntoView === "function") body.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+  return box;
 }
 
 /* Text longer than this many characters (or holding a line break) gets the expand toggle; shorter text fits a cell as is. */

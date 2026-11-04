@@ -835,6 +835,9 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
   overflow-y: auto;
 }
 .panel .disclosure { max-width: none; margin-top: 0.6rem; }
+/* #7482: a disclosure inside a grid cell has no top margin. The rule above is for one placed under a panel; it also matched a cell's
+   disclosure and put its text about 4 px below the plain cells beside it (the cell centres its content). */
+table.data td .disclosure { margin-top: 0; }
 
 /* ─────────────────────────── custom view chrome (#1563 view-level scope) ─────────────────────────── */
 
@@ -1124,7 +1127,8 @@ td.cell-picked { outline: 1px solid var(--accent); outline-offset: -1px; }
    under it at a readable width. */
 .disclosure.cell-detail > .disc-summary { color: inherit; }
 .disclosure.cell-detail > .disc-summary:hover { color: var(--fg); text-decoration: underline; }
-.cell-detail .disc-body { white-space: normal; min-width: 16rem; max-width: 34rem; font-weight: normal; text-align: left; }
+/* #7482: the opened text follows the window: 34rem on a wide one, never wider than the window less a margin on a narrow one. */
+.cell-detail .disc-body { white-space: normal; min-width: min(16rem, calc(100vw - 4rem)); max-width: min(34rem, calc(100vw - 4rem)); font-weight: normal; text-align: left; }
 .cell-detail-text { margin: 0; color: var(--dim); }
 /* #6156: an info mark after a banner; the longer background is its tooltip. */
 .info-tip { cursor: help; color: var(--muted); }

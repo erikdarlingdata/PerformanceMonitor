@@ -295,9 +295,7 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
       if (row.remedy) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Remedy. "]), row.remedy]));
       if (row.cost_note) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Cost. "]), row.cost_note]));
       if (!parts.length) return document.createTextNode("—");
-      const box = disclosure(firstSentence(row.remedy || row.cost_note, 70), parts, { max: 70 });
-      box.classList.add("cell-detail");
-      return box;
+      return disclosure(firstSentence(row.remedy || row.cost_note, 70), parts, { max: 70, cell: true });
     },
   },
   /* #7410: not drawn, still in Copy and the CSV: the fields the Value cell and the remedy cell fold in. */
