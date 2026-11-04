@@ -838,7 +838,9 @@ export function metricBands(c, store) {
       ? "SQL " + fmtPct(c.cpu_percent) + (c.other_process_cpu_percent != null ? " · other " + fmtPct(c.other_process_cpu_percent) : "")
       : null;
 
-  const memValue = c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "OK";
+  /* #7560: PostgreSQL has no memory-grant reading, so its Memory chip says "n/a" as CPU and Threads do when they have none. The reply
+     sends has_memory_pressure null there, and the false it used to send printed "OK" beside a gray Unknown band. */
+  const memValue = c.has_memory_pressure == null ? "n/a" : c.has_memory_pressure ? fmtInt(c.memory_waiter_count) + " waiters" : "OK";
   const memDetail =
     c.memory_mb != null
       ? fmtMb(c.memory_mb) + (c.buffer_pool_mb != null ? " · BP " + fmtMb(c.buffer_pool_mb) : "")
@@ -908,7 +910,9 @@ export function metricBands(c, store) {
     chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, c.cpu_severity, cpuDetail),
     chip("Threads", threadsValue, c.threads_severity, threadsDetail),
     chip("Memory", memValue, c.memory_severity, memDetail),
-    chip("Blocking", fmtInt(c.blocking_count), c.blocking_severity, blockingDetail),
+    /* #7560: blocking_count is a structural 0 on PostgreSQL (nothing in the fleet read counts its blocking), and blocking_severity reads Unknown
+       there, so the chip says "n/a" instead of a 0 that looks measured. get_pg_blocking has the PostgreSQL blocking captures. */
+    chip("Blocking", c.is_postgres === true ? "n/a" : fmtInt(c.blocking_count), c.blocking_severity, c.is_postgres === true ? null : blockingDetail),
     chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
