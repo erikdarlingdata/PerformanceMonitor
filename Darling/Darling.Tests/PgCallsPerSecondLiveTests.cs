@@ -1,0 +1,169 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Globalization;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #7566, against a live store: a PostgreSQL statement's calls per second divides by the seconds the collector's
+/// runs covered in the bucket, not by the seconds of only the runs where the statement had a row. The collector
+/// skips idle rows at the write, so a statement that runs a batch every 5 minutes has a row in one run of five.
+/// The old read gave that statement 29 / 60 per second in the run it moved and a pair of buckets at 58 / 120; the
+/// rate over the time is 58 / 600 per 10-minute bucket.
+///
+/// <para>The same read feeds the web chart, <c>get_pg_query_duration_trend</c> and the Viewer, so each fact reads it
+/// through the reader and through the tool's parsed JSON.</para>
+/// </summary>
+[Collection("live-postgres")]
+public sealed class PgCallsPerSecondLiveTests
+{
+    private const string ServerName = "pg-calls-per-second-e2e";
+    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+    private const long QueryId = 7566;
+    private static readonly DateTime T0 = new(2026, 3, 6, 10, 0, 0);
+    private const string AsOfText = "2026-03-06T12:00:00Z";
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /// <summary>
+    /// Runs every minute from 09:50 to 10:29, then none until 11:35 (an outage past the collector's gap policy),
+    /// then every minute from 11:35 to 11:44. The statement has 29 calls in the runs at :00 and :05 of 10:00 to
+    /// 10:25 and nothing else. Expected, per 10-minute bucket:
+    /// 09:50 runs but no calls (zero, 9 rated runs: the window's first run has no previous one), 10:00 / 10:10 /
+    /// 10:20 two batches over 600 s, 10:30 to 11:20 no run so no bucket, 11:30 and 11:40 runs but no calls (zero).
+    /// </summary>
+    [Fact]
+    public async Task CallsPerSecond_DividesByTheTimeTheRunsCovered_ReadsZeroWhenItDidNotRun_AndLeavesAGapAbsent()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            for (var t = T0.AddMinutes(-10); t < T0.AddMinutes(30); t = t.AddMinutes(1))
+            {
+                await SeedRunAsync(connection, ct, t);
+            }
+
+            for (var t = T0.AddMinutes(95); t < T0.AddMinutes(105); t = t.AddMinutes(1))
+            {
+                await SeedRunAsync(connection, ct, t);
+            }
+
+            for (var t = T0; t < T0.AddMinutes(30); t = t.AddMinutes(5))
+            {
+                await SeedStatementAsync(connection, ct, t, deltaCalls: 29, deltaMs: 290.0);
+            }
+
+            var start = new DateTime(2026, 3, 6, 9, 0, 0);
+            var end = new DateTime(2026, 3, 6, 12, 0, 0);
+
+            var points = await DarlingPgTrendReader.GetQueryDurationBucketsAsync(postgres, ServerId, QueryId, start, end, 10, ct);
+            var root = JsonDocument.Parse(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(
+                postgres, ServerName, QueryId.ToString(CultureInfo.InvariantCulture), 3, AsOfText, 10, TrendBudget.Chart, cancellationToken: ct)).RootElement;
+            var tool = root.GetProperty("points").EnumerateArray().ToArray();
+
+            var expected = new (string Start, long Calls, double Rate)[]
+            {
+                ("09:50", 0, 0.0),
+                ("10:00", 58, 58.0 / 600.0),
+                ("10:10", 58, 58.0 / 600.0),
+                ("10:20", 58, 58.0 / 600.0),
+                ("11:30", 0, 0.0),
+                ("11:40", 0, 0.0),
+            };
+
+            Assert.Equal(expected.Length, points.Count);
+            Assert.Equal(expected.Length, tool.Length);
+            for (var i = 0; i < expected.Length; i++)
+            {
+                Assert.Equal(expected[i].Start, points[i].CollectionTimeUtc.ToString("HH:mm", CultureInfo.InvariantCulture));
+                Assert.Equal(expected[i].Calls, points[i].Calls);
+                Assert.Equal(expected[i].Rate, points[i].CallsPerSecond, 9);
+
+                Assert.Equal(expected[i].Start, DateTime.Parse(tool[i].GetProperty("collection_time").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal).ToString("HH:mm", CultureInfo.InvariantCulture));
+                Assert.Equal(expected[i].Calls, tool[i].GetProperty("calls").GetInt64());
+                Assert.Equal(Math.Round(expected[i].Rate, 4), tool[i].GetProperty("calls_per_second").GetDouble(), 9);
+            }
+
+            /* A bucket where the statement did not run has no mean: absent, not 0 ms. */
+            Assert.Equal(JsonValueKind.Null, tool[0].GetProperty("mean_exec_ms").ValueKind);
+            Assert.Equal(10.0, tool[1].GetProperty("mean_exec_ms").GetDouble(), 6);
+        });
+    }
+
+    /// <summary>A statement that never ran in the window is an empty answer, not a row of zeros over every run.</summary>
+    [Fact]
+    public async Task AStatementWithNoSnapshotInTheWindow_ReadsNothing()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            for (var t = T0; t < T0.AddMinutes(20); t = t.AddMinutes(1))
+            {
+                await SeedRunAsync(connection, ct, t);
+            }
+
+            var points = await DarlingPgTrendReader.GetQueryDurationBucketsAsync(
+                postgres, ServerId, QueryId, new DateTime(2026, 3, 6, 9, 0, 0), new DateTime(2026, 3, 6, 12, 0, 0), 10, ct);
+            Assert.Empty(points);
+        });
+    }
+
+    private static async Task SeedRunAsync(NpgsqlConnection connection, CancellationToken ct, DateTime start) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected) VALUES ($1, $2, $3, 'pg_statement_stats', $4, 1500, 'SUCCESS', 0)",
+            CollectionIdGenerator.Next(), ServerId, ServerName, start.AddSeconds(2));
+
+    private static async Task SeedStatementAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime t, long deltaCalls, double deltaMs) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_statement_stats (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls, total_exec_time_ms, min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, temp_blks_read, temp_blks_written, blk_read_time_ms, blk_write_time_ms, wal_records, wal_fpi, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, 1, 1, TRUE, 10, 100.0, 1.0, 20.0, 10.0, 100, 100, 10, 0, 0, 0, 0, 1.0, 0.0, 0, 0, 0, $6, $7, 50, 60)",
+            CollectionIdGenerator.Next(), t, ServerId, ServerName, QueryId, deltaCalls, deltaMs);
+
+    private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live PostgreSQL calls-per-second tests.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await body(connection, postgres, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
+        }
+    }
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        foreach (var table in new[] { "collect.collection_log", "pg_statement_stats", "servers" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", ServerId);
+        }
+    }
+}
