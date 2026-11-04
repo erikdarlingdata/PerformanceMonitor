@@ -111,7 +111,9 @@ public sealed class QueryTagUsageWindow : Window
             }
 
             var filter = QueryTagUsageView.FilterFor(data.Tags, _tag.SelectedItem as string);
-            Render(QueryTagUsageView.Build(data, scope, allServers, filter, notCollected: notCollected));
+            /* #7376: Query Store alone reads not_collected for a readable secondary Darling does not collect it from, with get_query_store_top's reason. */
+            var queryStoreNotCollected = await _data.GetQueryStoreNotCollectedAsync(data, servers, notCollected);
+            Render(QueryTagUsageView.Build(data, scope, allServers, filter, notCollected: notCollected, queryStoreNotCollected: queryStoreNotCollected));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
