@@ -108,7 +108,17 @@ public sealed class WaitingTasksBarsBehaviourTests
         var waiting = Run("close").GetProperty("waiting");
 
         Assert.Equal(3, waiting.GetProperty("barColumns").GetInt32());
-        Assert.All(Ints(waiting, "widths"), w => Assert.InRange(w, 8, 64));
+        // The tightest gap (one minute in 24 hours) is well under a pixel; the floor keeps each bar at 8 px.
+        Assert.All(Ints(waiting, "widths"), w => Assert.True(w >= 8, "a bar one minute from its neighbour was " + w + " px wide, under the 8 px floor"));
+    }
+
+    [Fact]
+    public void ALoneCollectionInADayWindow_IsOneBarNoWiderThan64Px_NotASlabAcrossThePlot()
+    {
+        var waiting = Run("lone").GetProperty("waiting");
+
+        Assert.Equal(1, waiting.GetProperty("barColumns").GetInt32());
+        Assert.All(Ints(waiting, "widths"), w => Assert.True(w <= 64, "a lone bar was " + w + " px wide, over the 64 px cap"));
     }
 
     [Fact]
