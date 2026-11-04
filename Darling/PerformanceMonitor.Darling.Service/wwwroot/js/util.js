@@ -705,6 +705,39 @@ export function windowFromHours(hours) {
   return { windowStart: windowEnd - h * 3600000, windowEnd };
 }
 
+/* #7386: the shortest axis a data start may produce (two points of the slowest, 15 minute, collector cadence), and the run-in
+   left before the first collection (one fiftieth of the span) so the first marker is not cut by the plot edge. The same two
+   numbers as PerformanceMonitor.Ui.ChartAxisStart, which the desktop charts use. */
+const MIN_AXIS_SPAN_MS = 30 * 60000;
+const AXIS_RUN_IN_DIVISOR = 50;
+
+/**
+ * #7386: where the X axis of a time chart starts, in UTC-epoch ms: the LATER of the picked start and the server's data start,
+ * the first time the server was collected at all. The JS twin of ChartAxisStart.XStart. Returns the picked start when the data
+ * start is missing (no claim), at or before the picked start, at or after the picked end (a window the server was not collected
+ * in stays as picked), or when the axis it would give is shorter than 30 minutes. Otherwise the data start less its run-in,
+ * never earlier than the picked start. The picked start is the floor, so a data start never widens a window.
+ */
+export function xStartMs(pickedStart, pickedEnd, dataStart) {
+  if (typeof dataStart !== "number" || !isFinite(dataStart) || dataStart <= pickedStart || dataStart >= pickedEnd) return pickedStart;
+  const start = Math.max(pickedStart, dataStart - Math.floor((pickedEnd - dataStart) / AXIS_RUN_IN_DIVISOR));
+  return pickedEnd - start < MIN_AXIS_SPAN_MS ? pickedStart : start;
+}
+
+/* The server's data start for the server page on screen (UTC-epoch ms), or null. Set by the server page when its read answers
+   and dropped when the page is left, so a chart on any other page, and a chart on a server whose read failed, keeps the picked range. */
+let chartDataStartMs = null;
+
+/** #7386: tell every line chart where the server on screen was first collected (ms), or null for no claim. */
+export function setChartDataStart(ms) {
+  chartDataStartMs = typeof ms === "number" && isFinite(ms) ? ms : null;
+}
+
+/** #7386: the data start the charts use, or null. */
+export function chartDataStart() {
+  return chartDataStartMs;
+}
+
 /**
  * #6359: the window a panel draws when it reads the WHOLE hours the grid ranked over (a row's History; see readTool's
  * `wholeWindow`): [end - hours, end], where end is the custom range's end (or now), not the exact pair the reader picked.

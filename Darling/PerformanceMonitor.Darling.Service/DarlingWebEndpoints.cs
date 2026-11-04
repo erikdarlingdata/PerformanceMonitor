@@ -801,5 +801,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            serves is already reachable through /api/read/*. */
         AlertNotebookEndpoint.Map(app, postgres, analysis, logger, readAdmission, readLatencyRecorder);
         DarlingServerDatabasesEndpoint.Map(app, postgres, logger, readAdmission, readLatencyRecorder); // #5245: the database picker's list
+        DarlingServerDataStartEndpoint.Map(app, postgres, logger, readAdmission, readLatencyRecorder); // #7386: when the server was first collected, for the charts' time axis
     }
 }

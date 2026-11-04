@@ -10,22 +10,19 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
 public sealed partial class ViewerDataService
 {
-    /// <summary>
-    /// When the server was first collected (#7386): the oldest <c>wait_stats</c> row for a SQL Server target, the oldest
-    /// <c>pg_database_stats</c> row for a PostgreSQL one. The two tables <c>analyze_server</c> measures its history depth on, so the
-    /// charts and that gate agree on what "the server has this much history" means. Read as the oldest row in time order, not as a
-    /// <c>MIN</c>, so the ordered read can stop in the oldest chunk. One row, one read per server; the tab caches it.
-    /// $1 server_id.
-    /// </summary>
-    public const string SqlServerDataStartSql = "SELECT collection_time FROM wait_stats WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1";
+    /// <summary>The SQL Server target's data start (#7386): the oldest <c>wait_stats</c> row. The one copy is
+    /// <see cref="ServerDataStart.SqlServerSql"/>, which the web viewer's route runs too. One row, one read per server; the tab
+    /// caches it. $1 server_id.</summary>
+    public const string SqlServerDataStartSql = ServerDataStart.SqlServerSql;
 
-    /// <summary>The PostgreSQL-target twin of <see cref="SqlServerDataStartSql"/>.</summary>
-    public const string PgDataStartSql = "SELECT collection_time FROM pg_database_stats WHERE server_id = $1 ORDER BY collection_time ASC LIMIT 1";
+    /// <summary>The PostgreSQL-target twin of <see cref="SqlServerDataStartSql"/>: the oldest <c>pg_database_stats</c> row.</summary>
+    public const string PgDataStartSql = ServerDataStart.PostgresSql;
 
     /// <summary>The first time the server was collected, as naive UTC, or null when it has no row yet. A read that fails throws; the
     /// caller keeps what it had.</summary>

@@ -48,6 +48,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
         ["DarlingServerDatabasesEndpoint.cs"] = 1, // the database picker (round 1, M3)
+        ["DarlingServerDataStartEndpoint.cs"] = 1, // the charts' data start (#7386)
         ["McpToolLatencyFilter.cs"] = 1, // every MCP tool call but run_custom_view_panel
     };
 
@@ -164,6 +165,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         Assert.Equal("get_sweep_reports", DarlingFleetSweepEndpoints.SweepReportsRoute);
         Assert.Equal("alert_notebook", AlertNotebookEndpoint.NotebookRoute);
         Assert.Equal("server_databases", DarlingServerDatabasesEndpoint.AdmissionRoute);
+        Assert.Equal("server_data_start", DarlingServerDataStartEndpoint.AdmissionRoute);
     }
 
     /// <summary>
@@ -192,6 +194,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [SweepsFile + "GET \"/api/sweeps/{id:long}\""] = null,
         [SweepsFile + "GET \"/api/sweeps/watch-items\""] = null,
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
+        ["DarlingServerDataStartEndpoint.cs: GET Route"] = null, // the charts' data start, /api/server-data-start (#7386)
         ["DarlingKnownPatternRoutes.cs: POST \"/api/known-patterns\""] = "write (#6334)",
         ["DarlingKnownPatternRoutes.cs: PUT \"/api/known-patterns/{id:long}\""] = "write (#6334)",
         ["DarlingKnownPatternRoutes.cs: DELETE \"/api/known-patterns/{id:long}\""] = "write (#6334)",

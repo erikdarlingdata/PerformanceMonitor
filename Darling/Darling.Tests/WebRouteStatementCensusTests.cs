@@ -42,6 +42,7 @@ public sealed class WebRouteStatementCensusTests
         "AlertNotebookEndpoint.cs",
         "DarlingFleetSweepEndpoints.cs",
         "DarlingKnownPatternRoutes.cs",
+        "DarlingServerDataStartEndpoint.cs",
         "DarlingServerDatabasesEndpoint.cs",
         "DarlingTriageEndpoint.cs",
         "DarlingWebEndpoints.cs",
@@ -128,6 +129,8 @@ public sealed class WebRouteStatementCensusTests
     {
         ["DarlingServerDatabasesEndpoint.cs|Results.Text(Render(resolved.ServerName, names, truncated), \"application/json\")"] =
             "the database picker's list: database names and a truncation flag, no statement text",
+        ["DarlingServerDataStartEndpoint.cs|Results.Text(Render(resolved.ServerName, start), \"application/json\")"] =
+            "when the server was first collected: a server name and one time, no statement text (#7386)",
     };
 
     /// <summary>Writers that sweep, by the one file that defines and uses them (a same-named helper elsewhere does

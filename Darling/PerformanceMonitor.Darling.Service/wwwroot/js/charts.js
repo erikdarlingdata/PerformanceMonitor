@@ -16,7 +16,7 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart } from "./util.js";
 import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
@@ -238,6 +238,9 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *                the caller's query-time "now", NEVER the last data point — anchoring to the last point would slide
  *                an old burst to the right edge and read as current. Absent/degenerate ⇒ the original data-extent
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
+ *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
+ *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
+ *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
   const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
@@ -285,7 +288,16 @@ export function renderLineChart(spec) {
   const hasWindow =
     typeof windowStart === "number" && typeof windowEnd === "number" &&
     isFinite(windowStart) && isFinite(windowEnd) && windowEnd > windowStart;
-  const tMin = hasWindow ? windowStart : dataTMin;
+  /* #7386: a window longer than the server's history starts at the server's data start, so a server with three hours under "Past
+     day" does not spend seven eighths of the plot on empty time. The picked start stays the floor, and the data start moves back
+     to the earliest row this chart plotted when that is older (another relation, its own retention), so a chart never hides a
+     point it drew. A zoomed window (windowExact) is the exact span the reader asked for and is never trimmed. With no server
+     claim the axis is the picked window, as before. */
+  const tMin = hasWindow
+    ? (spec.windowExact === true || chartDataStart() === null
+      ? windowStart
+      : xStartMs(windowStart, windowEnd, Math.min(chartDataStart(), dataTMin)))
+    : dataTMin;
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
   const rowTimes = rows.map((p) => p.t.getTime());
@@ -1768,7 +1780,7 @@ export function applyChartZoom(spec, zoom) {
   const lo = first > 0 ? first - 1 : first;
   const hi = last + 1 < timed.length ? last + 1 : last;
   const inside = timed.slice(lo, hi + 1).map((p) => p.r);
-  return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to }, zoomed: true };
+  return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to, windowExact: true }, zoomed: true };
 }
 
 /**
