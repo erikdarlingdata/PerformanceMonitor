@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <!-- xUnit1051: per-call-site CancellationToken style nag, suppressed as in the PerformanceMonitor test projects. -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+    <RootNamespace>PerformanceMonitor.Exporter.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <!-- xunit.v3.mtp-off is xunit.v3 with Microsoft.Testing.Platform support switched off. The .NET 10 SDK refuses a VSTest-style `dotnet test` (the filter-switch commands CI and the verify script use) on an MTP test project; this keeps them working. -->
+    <PackageReference Include="xunit.v3.mtp-off" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PerformanceMonitor.Exporter\PerformanceMonitor.Exporter.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The tiny child process the `run` tests start (Exporter/PerformanceMonitor.Exporter.TestChild). Built first, copied to testchild/ next to the tests. -->
+    <ProjectReference Include="..\PerformanceMonitor.Exporter.TestChild\PerformanceMonitor.Exporter.TestChild.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Target Name="CopyTestChild" AfterTargets="Build">
+    <ItemGroup>
+      <TestChildFile Include="..\PerformanceMonitor.Exporter.TestChild\bin\$(Configuration)\net10.0\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(TestChildFile)" DestinationFolder="$(OutDir)testchild\%(RecursiveDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <None Include="Fixtures\**\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*.sqlplan" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*.key.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
