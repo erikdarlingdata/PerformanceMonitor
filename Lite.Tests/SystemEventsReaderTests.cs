@@ -147,7 +147,8 @@ public sealed class SystemEventsReaderTests : IClassFixture<SharedDuckDbFixture>
                 xml.Replace(">STABLE<", ">" + notification + "<", StringComparison.Ordinal), Truncate(DateTime.UtcNow.AddMinutes(-minutesAgo)));
         }
 
-        var (rows, counts) = await service.GetMemoryBrokerWithCountsAsync(ServerId);
+        var (rows, counts, raw) = await service.GetMemoryBrokerWithCountsAsync(ServerId);
+        Assert.Equal(4, raw);
 
         var row = Assert.Single(rows);
         Assert.Equal("SHRINK", row.Notification);

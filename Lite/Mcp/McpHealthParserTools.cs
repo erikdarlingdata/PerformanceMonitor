@@ -432,7 +432,7 @@ public sealed class McpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: SHRINK notifications only (the broker carries STABLE, GROW or SHRINK; a shrink is not always an incident, since a broker lowers its target under ordinary workload shifts too). An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out, with notification_counts splitting that count by notification value (for example GROW 12, SHRINK 0, STABLE 40). status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (SHRINK; the gate returns no other, and notification_counts shows how many STABLE, GROW and SHRINK events the window held). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: SHRINK notifications only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets memory broker events from system_health: broker ratio changes and target adjustments (currently predicated / allocated / previously allocated), the broker name, and the notification (SHRINK; the gate returns no other). The broker carries STABLE, GROW or SHRINK, and a shrink is not always an incident, since a broker lowers its target under ordinary workload shifts too. notification_counts splits events_in_window by notification value (for example GROW 12, SHRINK 0, STABLE 40), so a window with no SHRINK still shows what the broker did. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryBroker(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -449,7 +449,7 @@ public sealed class McpHealthParserTools
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
 
-            var (rows, notificationCounts) = await dataService.GetMemoryBrokerWithCountsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var (rows, notificationCounts, rawEventCount) = await dataService.GetMemoryBrokerWithCountsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
             if (rows.Count == 0)
                 return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.MemoryBrokerEvent,
@@ -469,8 +469,8 @@ public sealed class McpHealthParserTools
                 source_observed = true,
                 last_captured_at = Stamp(lastCapturedAt),
                 event_count = rows.Count,
-                /* #7466: what the window held by notification value, so a reader sees what the SHRINK gate filtered out. */
-                events_in_window = notificationCounts.Values.Sum(),
+                /* #7466: every broker event the window held (the same raw count the empty reply gives) and its split by notification value, so a reader sees what the SHRINK gate filtered out. */
+                events_in_window = rawEventCount,
                 notification_counts = notificationCounts,
                 shown = Math.Min(rows.Count, limit),
                 events = rows.Take(limit).Select(r => new

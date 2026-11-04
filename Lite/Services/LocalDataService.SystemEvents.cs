@@ -432,8 +432,10 @@ ORDER BY event_time DESC";
     /// <summary>
     /// The significant memory-broker rows plus how many broker events of each notification value (STABLE, GROW, SHRINK) the
     /// window held before the gate (#7466), so the MCP read can show what the gate filtered out. One read of the window.
+    /// <c>RawEventCount</c> is the number of stored broker events read, parsed or not, which is what the empty reply's
+    /// <c>events_in_window</c> counts and what Darling reports, so a broker XML that fails to shred cannot make the two paths differ.
     /// </summary>
-    public async Task<(List<MemoryBrokerRow> Rows, SortedDictionary<string, int> NotificationCounts)> GetMemoryBrokerWithCountsAsync(
+    public async Task<(List<MemoryBrokerRow> Rows, SortedDictionary<string, int> NotificationCounts, int RawEventCount)> GetMemoryBrokerWithCountsAsync(
         int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
@@ -449,7 +451,7 @@ ORDER BY event_time DESC";
         }
 
         var rows = records.Where(SystemHealthSignificance.IsSignificant).Select(r => new MemoryBrokerRow(r)).ToList();
-        return (rows, SystemHealthSignificance.CountBrokerNotifications(records));
+        return (rows, SystemHealthSignificance.CountBrokerNotifications(records), xmls.Count);
     }
 
     // ── Memory Node OOM ──

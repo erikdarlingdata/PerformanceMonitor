@@ -449,7 +449,7 @@ public sealed partial class ViewerDataService
 
     // ── Memory Broker ──
 
-    /// <summary>Significant memory-broker ratio changes (RESOURCE_MEMPHYSICAL_LOW) for the window, newest first.</summary>
+    /// <summary>Significant memory-broker ratio changes (SHRINK, #7466) for the window, newest first.</summary>
     public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
