@@ -19,6 +19,7 @@ class FakeNode {
   removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; }
   get firstChild() { return this.children[0] || null; }
   addEventListener(t, fn) { (this.listeners[t] ||= []).push(fn); }
+  removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn); }
   every(pred, acc = []) { for (const c of this.children) { if (pred(c)) acc.push(c); c.every(pred, acc); } return acc; }
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
