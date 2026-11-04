@@ -530,7 +530,14 @@ a:hover { text-decoration: underline; }
 
 /* ─────────────────────────── tables ─────────────────────────── */
 
-.table-wrap { overflow-x: auto; }
+/* #7393: a long grid scrolls inside its own box instead of making the page tens of thousands of pixels tall. The box is sized
+   from the window (70vh, never under 18rem), so a tall window shows more rows and a short one still shows some. A short grid
+   is only as tall as its rows. The header row sticks to the top of the box while the rows scroll under it. A scroll that
+   reaches either end of the box carries on to the page (overscroll-behavior is left at auto). */
+.table-wrap { overflow: auto; max-height: max(18rem, 70vh); }
+/* The grid's filter bar is above the table inside the box and scrolls away with the rows, so the header's own sticky top
+   is the box's top edge. The inset shadow stands in for the bottom border, which does not travel with a sticky cell in a collapsed table. */
+.table-wrap table.data thead th { position: sticky; top: 0; z-index: 2; box-shadow: inset 0 -1px 0 var(--border); }
 table.data {
   width: 100%;
   border-collapse: collapse;

@@ -63,15 +63,45 @@ export function replaceNodes(container, old, fresh) {
   });
 }
 
-/** Run `fn`, then put the page back where the reader had scrolled it if the swap moved it. */
+/* #7393: a long grid scrolls inside its own `.table-wrap`. A poll swaps in a new wrap, which starts at the top, so the grid's own
+   scroll position is kept the way the page's is. A grid is told apart by its `data-grid` name (on the wrap, or on the box around
+   it), and by its place among the grids of that name when a page draws two with one name. */
+function gridWraps() {
+  const wraps = new Map();
+  const seen = new Map();
+  Array.from(document.querySelectorAll(".table-wrap")).forEach((w) => {
+    const box = typeof w.closest === "function" ? w.closest("[data-grid]") : null;
+    const name = box ? box.getAttribute("data-grid") : "";
+    const n = seen.get(name) || 0;
+    seen.set(name, n + 1);
+    wraps.set(name + "\u0001" + n, w);
+  });
+  return wraps;
+}
+
+/** Run `fn`, then put the page, and every grid that was scrolled inside its own box, back where the reader had scrolled it if the swap moved it. */
 export function keepScroll(fn) {
   const y = globalThis.scrollY;
+  const grids = [];
+  gridWraps().forEach((w, id) => {
+    if (w.scrollTop > 0 || w.scrollLeft > 0) grids.push({ id, was: w, top: w.scrollTop, left: w.scrollLeft });
+  });
   fn();
-  if (y > 0) {
+  if (y > 0 || grids.length) {
     /* The browser's scroll anchoring moves the page when it next lays out, after the nodes above the reader changed, so lay out
        now and then put the page back. Reading scrollY alone does not lay out. */
     void document.documentElement.offsetHeight;
-    if (globalThis.scrollY !== y) globalThis.scrollTo(0, y);
+    if (y > 0 && globalThis.scrollY !== y) globalThis.scrollTo(0, y);
+    if (grids.length) {
+      const now = gridWraps();
+      grids.forEach((g) => {
+        const w = now.get(g.id);
+        /* A wrap the swap left in place keeps its own position. A fresh one is set after layout, and clamps to its new height. */
+        if (!w || w === g.was) return;
+        w.scrollTop = g.top;
+        w.scrollLeft = g.left;
+      });
+    }
   }
 }
 
