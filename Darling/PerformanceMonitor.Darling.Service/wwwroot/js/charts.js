@@ -16,7 +16,7 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart } from "./util.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
 import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
@@ -243,7 +243,7 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -352,7 +352,9 @@ export function renderLineChart(spec) {
 
   /* Nice-rounded domain so gridline labels land on round values; percentage charts (clampMax=100) cap the top
      at 100 and never exceed it, so a 96% reading no longer rounds the axis up to a "120%" tick. */
-  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks);
+  /* #7488: a size axis whose labels step up to the next unit (60,000 MB reads "GB") picks its ticks in that unit, so it reads 20, 40, 60 GB
+     and not 19.5, 39.1, 58.6. Under 1,024 of its own unit (or with no sizeUnit) the ticks are exactly what they were. */
+  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeAxisPer(sizeUnit, dataMax));
   const yMin = scale.min;
   const yMax = scale.max;
 
@@ -377,7 +379,7 @@ export function renderLineChart(spec) {
     if (m2 === -Infinity) { m2 = 1; n2 = 0; }
     n2 = Math.min(0, n2);
     if (m2 === n2) m2 = n2 + 1;
-    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
+    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, sizeAxisPer(series2.sizeUnit, m2));
     yLabels2 = axisTickLabels(scale2.ticks, scale2.step, series2.formatValue || ((v) => String(v)));
     rightGutter = axisGutterPx(yLabels2, 56);
   }
@@ -1354,8 +1356,14 @@ export function axisGutterPx(labels, minPx) {
  * 0.2 or 0.5, and a chart of COUNTS (events, sessions) labels those ticks through a whole-number formatter, so a
  * 0-1 axis read "1 1 1 0 0 0". With the step held at 1 or more the ticks are distinct whole numbers, and a
  * small-count chart shows a few honest gridlines (0, 1, 2) instead of a column of repeated labels.
+ * `per` (> 1) is for a size axis whose labels print in a unit `per` times larger than the data's (#7488): the ticks are chosen in
+ * that larger unit and handed back in the data's, so a 0-60,000 MB axis steps by 20,480 MB and its labels read 20, 40, 60 GB.
  */
-export function niceScale(min, max, maxTicks, clampMax, integer = false) {
+export function niceScale(min, max, maxTicks, clampMax, integer = false, per = 1) {
+  if (per > 1) {
+    const s = niceScale(min / per, max / per, maxTicks, clampMax == null ? null : clampMax / per, integer);
+    return { min: s.min * per, max: s.max * per, step: s.step * per, ticks: s.ticks.map((t) => Number((t * per).toPrecision(12))) };
+  }
   const range = niceNum(max - min || 1, false);
   const niceStep = niceNum(range / Math.max(1, maxTicks), true) || 1;
   const step = integer ? Math.max(1, Math.ceil(niceStep)) : niceStep;
