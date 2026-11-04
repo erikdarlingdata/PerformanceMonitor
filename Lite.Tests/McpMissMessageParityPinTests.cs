@@ -55,7 +55,7 @@ public sealed class McpMissMessageParityPinTests
 
         var recorded = source.IndexOf($"{helper}.StatusAsync", StringComparison.Ordinal);
         var gate = source.IndexOf($"{helper}.GatedOffStatusAsync", StringComparison.Ordinal);
-        var empty = source.IndexOf("McpHelpers.Status(\"empty\"", StringComparison.Ordinal);
+        var empty = source.LastIndexOf("EmptyRunningJobsStatus(", StringComparison.Ordinal); // #7459: the last resort is the run-facts answer (empty after a good run, else unavailable)
 
         Assert.True(gate > 0, $"{relativePath} never asks whether the collector is gated off (#2559)");
         Assert.True(recorded > 0 && empty > 0, $"{relativePath} no longer has the arms this pin describes");

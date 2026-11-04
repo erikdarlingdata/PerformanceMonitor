@@ -129,4 +129,46 @@ public sealed record CollectorRunFacts(
 
         return string.Create(CultureInfo.InvariantCulture, $"No trace flags are enabled as of the trace_flags collector's latest successful run ({LastSuccessUtc:yyyy-MM-dd HH:mm:ss} UTC).");
     }
+
+    /// <summary>
+    /// #7459: the answer for a trace-flag read that came back with no flags. <c>empty</c> only when the trace_flags collector's
+    /// newest successful run stored nothing, which is the collector saying no flag is on (<see cref="NoTraceFlagsEnabled"/>).
+    /// With no successful run, or a newest run that did not record finding none, the store cannot say no flag is enabled, so
+    /// the status is <c>unavailable</c>: <c>empty</c> always means somebody looked.
+    /// </summary>
+    public (string Status, string Message) TraceFlagsEmpty()
+    {
+        if (NoTraceFlagsEnabled() is { } none)
+        {
+            return ("empty", none);
+        }
+
+        return NoFindingOnRecord("trace_flags", "trace flags");
+    }
+
+    /// <summary>
+    /// #7459: the answer for a running-jobs read that came back with no jobs and no fresher explanation. A successful
+    /// running_jobs run says no SQL Agent job was running as of that run, so <c>empty</c>, stating the run's time. With no
+    /// successful run the tool never looked, so <c>unavailable</c>.
+    /// </summary>
+    public (string Status, string Message) RunningJobsEmpty()
+    {
+        if (LastSuccessUtc is { } at)
+        {
+            return ("empty", string.Create(CultureInfo.InvariantCulture, $"No running SQL Agent jobs found as of the running_jobs collector's latest successful run ({at:yyyy-MM-dd HH:mm:ss} UTC)."));
+        }
+
+        return NoFindingOnRecord("running_jobs", "running SQL Agent jobs");
+    }
+
+    private (string Status, string Message) NoFindingOnRecord(string collectorName, string what)
+    {
+        if (LastSuccessUtc is { } at)
+        {
+            return ("unavailable", string.Create(CultureInfo.InvariantCulture,
+                $"No {what} are stored, and the {collectorName} collector's latest successful run ({at:yyyy-MM-dd HH:mm:ss} UTC) did not record finding none, so this is not a report that there are none. Check collection health."));
+        }
+
+        return ("unavailable", $"The {collectorName} collector has not completed a run yet, so there is nothing to report on {what}. This is not a report that there are none. Check collection health.");
+    }
 }

@@ -448,16 +448,17 @@ public sealed class FinOpsOptimizationViewLiveTests
     }
 
     [Fact]
-    public async Task ServerWithNoRows_IsExactlyEmpty()
+    public async Task ServerWithNoRows_IsUnavailable_BecauseNothingCoveredTheSpan()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        /* #7010: the empty answer carries the window notice under hints (a server the store holds no collection for is not a true negative). */
+        /* #7010: the answer carries the window notice under hints. #7459: a server the store holds no collection for is not a true negative,
+           so it says unavailable, the word its idle_databases section would give. */
         var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", EmptyServerName, 24, 10, cancellationToken: ct);
         using var doc = JsonDocument.Parse(body);
-        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
         Assert.Equal("No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.",
             doc.RootElement.GetProperty("message").GetString());
         Assert.True(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
@@ -518,7 +519,10 @@ public sealed class FinOpsOptimizationViewLiveTests
         using var tool = await ToolAsync(ds, TempdbOnlyServerName, 24, 10, ct);
         Assert.Equal("ok", Section(tool, "tempdb_pressure").GetProperty("status").GetString());
         Assert.Equal(4, Section(tool, "tempdb_pressure").GetProperty("rows").GetArrayLength());
-        foreach (var name in new[] { "idle_databases", "wait_categories", "expensive_queries", "memory_grant_efficiency" })
+        /* #7459: this server has no query-stats coverage, so idle_databases cannot say which databases are idle. */
+        Assert.Equal("unavailable", Section(tool, "idle_databases").GetProperty("status").GetString());
+        Assert.Equal(0, Section(tool, "idle_databases").GetProperty("rows").GetArrayLength());
+        foreach (var name in new[] { "wait_categories", "expensive_queries", "memory_grant_efficiency" })
         {
             Assert.Equal("empty", Section(tool, name).GetProperty("status").GetString());
             Assert.Equal(0, Section(tool, name).GetProperty("rows").GetArrayLength());

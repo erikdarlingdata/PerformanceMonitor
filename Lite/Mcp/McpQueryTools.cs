@@ -1139,8 +1139,15 @@ public sealed class McpQueryTools
 
         if (!hasInWindow)
         {
+            /* #7459: this answer says unavailable now, which the caller's OfflineInsteadOfEmptyAsync leaves as it is, so the offline check is asked here. */
+            var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd);
+            if (offline != null)
+            {
+                return offline;
+            }
+
             return McpHelpers.Status(
-                "empty",
+                "unavailable",
                 $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
                 notice.AsHints());
         }
