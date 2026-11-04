@@ -16,6 +16,7 @@ using System.Text.Json;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 using static Darling.Tests.RepoFile;
@@ -141,6 +142,64 @@ public sealed class IdentityCapacityCritBandsTheServerTests
         Assert.DoesNotContain(rollup.WorstServers, w => w.DisplayName == "plain");
         Assert.Contains("Agent alerts 1 gap", rollup.WorstServers.Single(w => w.DisplayName == "agent").Reason, StringComparison.Ordinal);
         Assert.Contains("Protection 1 overdue item", rollup.WorstServers.Single(w => w.DisplayName == "protection").Reason, StringComparison.Ordinal);
+
+        /* The reply says WHY a Healthy server is listed: the tile names ride on the row, and on the card the web page reads. */
+        Assert.Equal(new[] { "Identity capacity" }, rollup.WorstServers.Single(w => w.DisplayName == "warn-identity").AdvisoryTiles);
+        Assert.Equal(new[] { "Agent alerts" }, rollup.WorstServers.Single(w => w.DisplayName == "agent").AdvisoryTiles);
+        Assert.Equal(new[] { "Protection" }, rollup.WorstServers.Single(w => w.DisplayName == "protection").AdvisoryTiles);
+        Assert.Empty(plain.AdvisoryTiles);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(rollup, DarlingFleetReader.JsonOptions));
+        var agentRow = doc.RootElement.GetProperty("worst_servers").EnumerateArray().Single(r => r.GetProperty("display_name").GetString() == "agent");
+        Assert.Equal("Healthy", agentRow.GetProperty("band_label").GetString());
+        Assert.Equal("Agent alerts", agentRow.GetProperty("advisory_tiles")[0].GetString());
+    }
+
+    [Fact]
+    public void TheViewersNeedsAttention_ListsAndRanksAWarnTileServerAboveAHealthyOne_WithoutChangingItsBand()
+    {
+        ServerSummaryItem Item(int id, string name, IReadOnlyList<AgentAlertGap>? gaps = null, IdentityCapacityCard? identity = null)
+        {
+            var item = new ServerSummaryItem
+            {
+                ServerName = name,
+                DisplayName = name,
+                ServerId = id,
+                HealthyCollectorCount = 40,
+                CollectorCount = 40,
+                DeadlockWindow = TimeSpan.FromHours(1),
+                BlockingWindow = TimeSpan.FromHours(1),
+                LastCollectionTime = Now.AddSeconds(-30),
+                IdentityCapacity = identity,
+                AgentAlertGaps = gaps ?? Array.Empty<AgentAlertGap>(),
+            };
+            item.ApplyFreshness(Now);
+            return item;
+        }
+
+        var plain = Item(1, "a-plain");
+        var agent = Item(2, "b-agent", gaps: new[] { new AgentAlertGap("x", "Agent alert 823 is missing.", Array.Empty<string>(), Array.Empty<int>()) });
+        var warnIdentity = Item(3, "c-warn-identity", identity: new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 2));
+        var all = new[] { plain, agent, warnIdentity };
+
+        /* The band and the dot stay Healthy: nothing here re-bands the server. */
+        foreach (var s in all)
+        {
+            Assert.Equal(FleetHealthBand.Healthy, FleetRollup.ClassifyBand(s));
+        }
+
+        Assert.False(plain.HasAdvisoryTile);
+        Assert.Equal(new[] { "Agent alerts" }, agent.AdvisoryTiles);
+        Assert.Equal(new[] { "Identity capacity" }, warnIdentity.AdvisoryTiles);
+
+        /* The Needs attention list and the worst-first ranking keep them and leave the plain one out. */
+        Assert.Equal(new[] { "b-agent", "c-warn-identity" }, FleetRollup.NeedsAttention(all).Select(s => s.DisplayName).ToArray());
+        var rollup = FleetRollup.Build(all, new FleetTotals(), totalServerCount: 3);
+        Assert.Equal(3, rollup.HealthyCount);
+        Assert.Equal(0, rollup.WarningCount + rollup.CriticalCount + rollup.OfflineCount);
+        Assert.Equal(new[] { "b-agent", "c-warn-identity" }, rollup.WorstServers.Select(w => w.DisplayName).ToArray());
+        Assert.All(rollup.WorstServers, w => Assert.Equal(FleetHealthBand.Healthy, w.Band));
+        Assert.Contains("Agent alerts 1 gap", rollup.WorstServers[0].Reason, StringComparison.Ordinal);
+        Assert.Contains("Identity capacity 2 columns at the warning bar", rollup.WorstServers[1].Reason, StringComparison.Ordinal);
     }
 
     private const string FleetJsPath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/fleet.js";

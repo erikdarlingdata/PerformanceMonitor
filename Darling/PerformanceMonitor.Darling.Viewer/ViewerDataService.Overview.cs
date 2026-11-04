@@ -999,6 +999,17 @@ public sealed class ServerSummaryItem
     /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
     public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
 
+    /// <summary>#7561: the tiles no band reads and that still want a person (a warning Identity capacity column, an Agent alerts gap, an overdue backup or CHECKDB), by name,
+    /// from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one rule the web fleet card and <c>get_fleet_overview</c> read too. Empty when there are none.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AdvisoryTiles => ServerHealthClassifier.AdvisoryTiles(
+        AgentAlertGaps.Count,
+        HasDatabaseProtectionOverdue ? 1 : 0,
+        IdentityCapacity?.ColumnsAtBar ?? 0,
+        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical);
+
+    /// <summary>#7561: true when <see cref="AdvisoryTiles"/> names any. The band stays what the metrics say; the fleet's Needs attention list and ranking count the server.</summary>
+    public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
+
     /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
     public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
 

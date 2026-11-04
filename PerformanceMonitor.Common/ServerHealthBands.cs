@@ -1406,6 +1406,31 @@ namespace PerformanceMonitor.Common
             return worst;
         }
 
+        /// <summary>#7561: the tiles no band reads and that still want a person, by name: an identity capacity column at the warning bar (a column at the
+        /// critical bar bands the server instead, see <see cref="ServerHealthMetrics.IdentityCapacityCritical"/>), an Agent alerts setup gap, and an overdue
+        /// backup or CHECKDB (Protection). The ONE rule for the web fleet card, <c>get_fleet_overview</c> and the Viewer's Needs attention list, so none keeps its
+        /// own copy. Empty when the server has none.</summary>
+        public static IReadOnlyList<string> AdvisoryTiles(int agentAlertGapCount, int databaseProtectionOverdueCount, int identityColumnsAtBar, bool identityCritical)
+        {
+            var tiles = new List<string>(3);
+            if (identityColumnsAtBar > 0 && !identityCritical)
+            {
+                tiles.Add("Identity capacity");
+            }
+
+            if (agentAlertGapCount > 0)
+            {
+                tiles.Add("Agent alerts");
+            }
+
+            if (databaseProtectionOverdueCount > 0)
+            {
+                tiles.Add("Protection");
+            }
+
+            return tiles;
+        }
+
         /// <summary>
         /// How many of the six card metrics carry a real reading (#3528): measured = severities that are
         /// not <see cref="HealthSeverity.Unknown"/>, out of the per-metric total. The worst-of fold above

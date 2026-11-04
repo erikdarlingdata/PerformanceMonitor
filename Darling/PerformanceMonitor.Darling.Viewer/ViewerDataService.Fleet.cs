@@ -660,7 +660,7 @@ public sealed class FleetRollup
            name as the stable tiebreak. The composite score keeps offline > critical > warning and, within
            a band, ranks by how many metrics are bad — see FleetHealthScore. */
         var problems = summaries
-            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy)
+            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile)
             .OrderByDescending(FleetHealthScore)
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -853,6 +853,21 @@ public sealed class FleetRollup
             /* #7561: the critical identity tile bands the card, so the reason names it, in the service's words. */
             parts.Add($"Identity capacity critical ({identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the bar)");
         }
+        else if (s.IdentityCapacity is { ColumnsAtBar: > 0 } warnIdentity)
+        {
+            /* #7561: the tiles no band reads are named too, in the service's words, so a Healthy server in Needs attention says why. */
+            parts.Add($"Identity capacity {warnIdentity.ColumnsAtBar} column{(warnIdentity.ColumnsAtBar == 1 ? "" : "s")} at the warning bar");
+        }
+
+        if (s.AgentAlertGaps.Count > 0)
+        {
+            parts.Add($"Agent alerts {s.AgentAlertGaps.Count} gap{(s.AgentAlertGaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (s.HasDatabaseProtectionOverdue)
+        {
+            parts.Add($"Protection {s.DatabaseProtectionChipValue}");
+        }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
         {
@@ -1010,7 +1025,8 @@ public sealed class FleetRollup
     {
         ArgumentNullException.ThrowIfNull(summaries);
 
-        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+        /* #7561: the same predicate as the web page's Needs attention filter: a band away from Healthy, or a Healthy server with a tile no band reads. */
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile).ToList();
     }
 
     /// <summary>

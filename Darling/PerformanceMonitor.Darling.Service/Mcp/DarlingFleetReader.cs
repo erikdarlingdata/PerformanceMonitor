@@ -1350,8 +1350,9 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             /* #6875: set only when a column is at the warning bar or past it. #7561: a CRITICAL column raises the Band (OverallMetricSeverity reads it
                through the metrics above); a WARN one stays a tile and is listed in Needs attention through HasAdvisoryTile. */
             IdentityCapacity = identityCapacity,
-            HasAdvisoryTile = (agentAlertGaps?.Count ?? 0) > 0 || (databaseProtectionOverdue?.Count ?? 0) > 0
-                || (identityCapacity is { ColumnsAtBar: > 0 } && !FleetServerCard.IsIdentityCritical(identityCapacity)),
+            AdvisoryTiles = ServerHealthClassifier.AdvisoryTiles(
+                agentAlertGaps?.Count ?? 0, databaseProtectionOverdue?.Count ?? 0,
+                identityCapacity?.ColumnsAtBar ?? 0, FleetServerCard.IsIdentityCritical(identityCapacity)),
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -1472,6 +1473,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 Band = c.Band,
                 Score = ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()),
                 Reason = BuildReason(c),
+                AdvisoryTiles = c.AdvisoryTiles,
             })
             .ToList();
 
@@ -3209,7 +3211,10 @@ public sealed class FleetServerCard
     /// <summary>#7561: true when the card carries a tile that no band reads and that still wants a person: a Warning identity capacity tile, an Agent alert
     /// setup gap or an overdue backup or CHECKDB. The band, the dot and the strip counts ignore it. <c>worst_servers</c> and <c>additional_problem_count</c> count
     /// such a server (its <c>band</c> stays Healthy) and the web page sorts it above a server without one. A CRITICAL identity tile is not here: it bands the server Critical.</summary>
-    [JsonPropertyName("has_advisory_tile")] public bool HasAdvisoryTile { get; init; }
+    [JsonPropertyName("has_advisory_tile")] public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
+    /// <summary>#7561: the names of those tiles ("Identity capacity", "Agent alerts", "Protection"), from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one
+    /// rule the Viewer's Needs attention list reads too. Empty when the server has none.</summary>
+    [JsonPropertyName("advisory_tiles")] public IReadOnlyList<string> AdvisoryTiles { get; init; } = Array.Empty<string>();
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539
@@ -3332,6 +3337,9 @@ public sealed class FleetRankedServer
     [JsonPropertyName("band_label")] public string BandLabel => ServerHealthClassifier.BandLabel(Band);
     [JsonPropertyName("score")] public long Score { get; init; }
     [JsonPropertyName("reason")] public string Reason { get; init; } = "";
+    /// <summary>#7561: the tiles that put this server in the list when its band alone would not. A <c>band</c> of Healthy with names here is a server listed for
+    /// an Identity capacity warning, an Agent alerts gap or an overdue backup or CHECKDB. Empty when the server has none, whatever its band.</summary>
+    [JsonPropertyName("advisory_tiles")] public IReadOnlyList<string> AdvisoryTiles { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>The full fleet roll-up payload — the pre-banded per-server cards, the band counts, the cross-server
