@@ -300,12 +300,67 @@ public sealed class AlertDetailWindowTests
                 {
                     Assert.Equal("Open the Activity tab at this time", window.FullChainLinkRun.Text);
                     window.FullChainLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+                    /* #7554: the click closes the window and hands the action to the caller; it does not run it inside the click. */
+                    Assert.Equal(0, opened);
+                    Assert.NotNull(window.DeferredOpen);
+                    window.DeferredOpen!();
                     Assert.Equal(1, opened);
                 }
             }
             finally
             {
                 window.Close();
+            }
+        });
+    }
+
+    /// <summary>
+    /// #7554: the link used to select the server tab inside the dialog's own click handler, and the Alert History grid getting its
+    /// keyboard focus back when the dialog closed selected Alert History again. The action must run only after ShowDialog has
+    /// returned, and the server tab must still be the selected one once the dispatcher has settled.
+    /// </summary>
+    [Fact]
+    public void FullChainLink_RunsTheOpenerAfterTheDialogHasClosed_AndTheServerTabStaysSelected()
+    {
+        StaTestThread.Run(() =>
+        {
+            var historyBox = new TextBox();
+            var historyTab = new TabItem { Header = "Alert History", Content = historyBox };
+            var serverTab = new TabItem { Header = "Server", Content = new TextBox() };
+            var tabs = new TabControl();
+            tabs.Items.Add(historyTab);
+            tabs.Items.Add(serverTab);
+            var owner = new Window { Content = tabs, Width = 300, Height = 200, ShowInTaskbar = false };
+            AlertDetailWindow? dialog = null;
+            try
+            {
+                owner.Show();
+                tabs.SelectedItem = historyTab;
+                historyBox.Focus();
+
+                var dialogReturned = false;
+                var openedAfterReturn = false;
+                dialog = new AlertDetailWindow(Row("Blocking Detected"), new AlertChainOpener("Open the Blocking view at this time", () =>
+                {
+                    openedAfterReturn = dialogReturned;
+                    tabs.SelectedItem = serverTab;
+                }));
+                dialog.Owner = owner;
+                var link = dialog.FullChainLink;
+                dialog.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+                    link.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent)));
+
+                AlertsHistoryTab.ShowDetailDialog(dialog, owner.Dispatcher);
+                dialogReturned = true;
+                owner.Dispatcher.Invoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () => { });
+
+                Assert.True(openedAfterReturn, "the opener ran before the dialog had closed");
+                Assert.Same(serverTab, tabs.SelectedItem);
+            }
+            finally
+            {
+                dialog?.Close();
+                owner.Close();
             }
         });
     }
