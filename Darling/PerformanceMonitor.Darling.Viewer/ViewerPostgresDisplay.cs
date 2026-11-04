@@ -2011,7 +2011,10 @@ internal static class PgDisplay
     /// <summary>One facet of the Plan-capture readiness grid: the check's answer as words, with the time it was last observed.</summary>
     internal sealed class PlanCaptureRow
     {
+        /// <summary>#7410: the plain label for the step ("Auto_explain loaded at server start"), not the raw facet name.</summary>
         public string Facet { get; init; } = "";
+        /// <summary>The facet's raw name (<c>library_loaded</c>), shown as the Facet cell's tooltip.</summary>
+        public string FacetName { get; init; } = "";
         /* Words, not a checkbox or a bare bool: "False" beside a remedy sentence reads as a failure rather than as a
            step not yet taken. */
         public string Satisfied { get; init; } = "";
@@ -2024,7 +2027,8 @@ internal static class PgDisplay
 
     internal static PlanCaptureRow PlanCapture(DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow row) => new()
     {
-        Facet = row.Facet,
+        Facet = ViewerServerTab.PlanCaptureFacetLabel(row.Facet, capitalize: true),
+        FacetName = row.Facet,
         Satisfied = row.IsSatisfied ? "yes" : "no",
         Observed = row.Observed ?? "(not reported)",
         Detail = row.Detail ?? string.Empty,

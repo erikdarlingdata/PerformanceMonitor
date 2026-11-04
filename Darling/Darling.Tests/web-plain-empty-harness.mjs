@@ -29,7 +29,7 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { createElement: (t) => new FakeNode(t), createElementNS: (_ns, t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/server/a/vacuum" };
 
 const root = process.argv[2];
@@ -150,4 +150,54 @@ out.waitTrendEmpty = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { s
 out.waitTrendUnavailable = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
 out.durationTrendEmpty = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "empty", message: trendMessage, hints: null });
 out.durationTrendUnavailable = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
+/* #7410 pass 4: the real Queries tab on a SQL Server. One fetch answers every panel; the Query Store clutter read gets a payload whose memory clerk
+   never appeared, the heatmap read gets a true negative. Only fetch is a stand-in. */
+{
+  const { SERVER_TABS } = await import(pathToFileURL(root + "/pages/server-tabs.js").href);
+  const clerkNote = "The clerk never appeared in the window. memory_clerks stores the top 25 clerks over 1 MB per capture, so this is a RANK, not a zero.";
+  const overviewNote = "The excluded types are sleep waits - Query Store's background tasks idling - dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one. The proxy is a proxy.";
+  const heatmapMessage = "Query stats WERE collected for example-sql-01 in the last 6 hour(s), but no capture recorded an execution. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.";
+  const clutter = { databases: [{ database_name: "d", verdict: "Healthy" }], server_note: null, qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X", total_wait_ms: 5 }], excluded_note: overviewNote }, memory_clerk: { latest_memory_mb: null, max_memory_mb_in_window: null, latest_clerk_captured_at: null, note: clerkNote } } };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const body = u.includes("get_query_store_clutter") ? clutter : u.includes("get_query_heatmap") ? { status: "empty", message: heatmapMessage, hints: null } : { status: "unavailable", message: "n/a" };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+  };
+  const tab = SERVER_TABS.find((t) => t.id === "queries");
+  const panels = tab.build("example-sql-01", { hours: 6, label: "last 6 hours", server: "example-sql-01" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const flat = [];
+  const walk = (n) => { if (!n) return; if (Array.isArray(n)) return n.forEach(walk); flat.push(n); };
+  walk(panels);
+  const bodyOf = (title) => {
+    const p = flat.flatMap((n) => n.findAll((x) => x.attrs && x.attrs["data-title"] === title))[0];
+    if (!p) return null;
+    const b = p.findAll((x) => String(x.className).includes("panel-body"))[0];
+    return { text: b.textContent, details: b.findAll((x) => x.tag === "details").length, empties: b.findAll((x) => String(x.className).includes("strip empty")).length };
+  };
+  out.qsClerk = bodyOf("Query Store Memory Clerk");
+  out.qsOverview = bodyOf("Query Store Overhead (per server)");
+  out.heatmapEmpty = bodyOf("Query Heatmap");
+  out.heatmapEmptyMessage = heatmapMessage;
+}
+
+/* #7410 pass 4: an empty alert list that hid dismissed alerts says so in words; any other empty reply keeps its text. */
+{
+  const { emptyAlertsStrip } = await import(pathToFileURL(root + "/pages/alerts.js").href);
+  const toolSaid = "No undismissed alerts found in the specified time range, but 3 dismissed alerts were excluded by the default filter. Re-run with include_dismissed = true to see them.";
+  out.alertsDismissed = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: toolSaid, hints: { dismissed_excluded_count: 3 } }));
+  out.alertsDismissedOne = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: toolSaid, hints: { dismissed_excluded_count: 1 } }));
+  out.alertsQuiet = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: "No alerts found in the specified time range.", hints: null }));
+  out.alertsToolSaid = toolSaid;
+}
+
+/* #7410 pass 4b: the Admin Settings tab, when the store holds no alert settings yet. */
+{
+  const { settingsUnavailableStrip } = await import(pathToFileURL(root + "/pages/admin.js").href);
+  const toolSaid = "No alert-settings row is present in the store yet. The service seeds it on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.";
+  out.settingsUnavailable = describe(settingsUnavailableStrip({ kind: "empty", status: "unavailable", message: toolSaid, hints: null }));
+  out.settingsToolSaid = toolSaid;
+  out.settingsOtherReply = settingsUnavailableStrip({ kind: "empty", status: "empty", message: "x", hints: null }) === null;
+}
+
 console.log(JSON.stringify(out));
