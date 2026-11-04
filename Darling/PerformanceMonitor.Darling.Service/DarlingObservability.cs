@@ -76,34 +76,44 @@ ON CONFLICT (server_id) DO UPDATE SET
     next_connect_attempt = NULL;";
 
     /* The failed-connect half of the registry (V242, #7590). connect_down_since keeps the FIRST failure of an outage (COALESCE), so it also
-       survives a service restart while the server stays down; the error is the latest, and next_connect_attempt is when the backoff will try again. A server that has never connected has no row yet and
-       matches nothing here: it has no collection to be stale, and reads as awaiting its first collection. The good connect clears both in
-       UpsertServerSql above. */
+       survives a service restart while the server stays down; the error is the latest, and next_connect_attempt is when the backoff will try again.
+       A server that has NEVER connected has no row (the good connect's upsert writes it), and the most common first failure is exactly that: a wrong
+       host name or a bad password on the day it is added. The insert arm gives it one from the configuration (id, storage name, display name, enabled,
+       the engine the config names, the cost) with the three connect columns, and leaves every fact only a connect learns (version, edition, machine
+       identity, the RDS probes) NULL, which every reader already treats as "no claim". The good connect's upsert then fills those and clears the
+       connect columns. is_enabled is TRUE for the same reason as in UpsertServerSql: only enabled servers are in the connect loop. */
     internal const string MarkConnectFailedSql = @"
-UPDATE servers
-SET connect_down_since = COALESCE(connect_down_since, $2),
-    last_connect_error = $3,
-    next_connect_attempt = $4
-WHERE server_id = $1;";
+INSERT INTO servers (server_id, server_name, display_name, is_enabled, engine_kind, created_date, modified_date, monthly_cost_usd, connect_down_since, last_connect_error, next_connect_attempt)
+VALUES ($1, $5, $6, TRUE, $7, $2, $2, $8, $2, $3, $4)
+ON CONFLICT (server_id) DO UPDATE SET
+    connect_down_since = COALESCE(servers.connect_down_since, EXCLUDED.connect_down_since),
+    last_connect_error = EXCLUDED.last_connect_error,
+    next_connect_attempt = EXCLUDED.next_connect_attempt;";
 
     /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints and the time the backoff will try again (V242, #7590).
+    /// A server that has never connected gets its registry row from <paramref name="config"/> here (see <see cref="MarkConnectFailedSql"/>).
     /// Failure-isolated like the other observability writes: it logs at Debug and never throws.</summary>
-    public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, int serverId, string? error, ILogger? logger, CancellationToken cancellationToken, DateTime? nextAttemptUtc = null)
+    public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, MonitoredServer config, string? error, ILogger? logger, CancellationToken cancellationToken, DateTime? nextAttemptUtc = null)
     {
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(MarkConnectFailedSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(config.ServerId);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
             command.Parameters.AddWithValue((object?)error ?? DBNull.Value);
             command.Parameters.Add(new NpgsqlParameter { Value = nextAttemptUtc.HasValue ? DateTime.SpecifyKind(nextAttemptUtc.Value, DateTimeKind.Unspecified) : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+            command.Parameters.AddWithValue(config.StorageName);
+            command.Parameters.AddWithValue(config.DisplayName);
+            /* The engine the config names, as the registry token. Aurora-ness is probed at connect, so a configured PostgreSQL target reads as stock PostgreSQL until then. */
+            command.Parameters.AddWithValue(MonitoredEngineKind.For(config.TargetEngine, false));
+            command.Parameters.AddWithValue(config.MonthlyCostUsd);
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug(ex, "Connect-failure state write failed for server {ServerId}", serverId);
+            logger?.LogDebug(ex, "Connect-failure state write failed for server {ServerId}", config.ServerId);
         }
     }
 

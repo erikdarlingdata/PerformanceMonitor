@@ -139,8 +139,8 @@ VALUES (101, 'ui-sql', '127.0.0.1,1', 'integrated', TRUE, now() AT TIME ZONE 'UT
 
         /* #7590: the service writes every failed connect onto the registry row. The seed's trigger keeps the three columns as seeded, so the
            three servers it seeded as reachable stay not-down and ui-down-sql keeps the error and the retry time pages.json is written against. */
-        await DarlingObservability.MarkConnectFailedAsync(source, 101, "service wrote this", null, ct, DateTime.UtcNow.AddMinutes(1));
-        await DarlingObservability.MarkConnectFailedAsync(source, 104, "service wrote this too", null, ct, DateTime.UtcNow.AddMinutes(1));
+        await DarlingObservability.MarkConnectFailedAsync(source, new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "ui-sql", Host = "127.0.0.1,1", StoredServerId = 101 }, "service wrote this", null, ct, DateTime.UtcNow.AddMinutes(1));
+        await DarlingObservability.MarkConnectFailedAsync(source, new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "ui-down-sql", Host = "127.0.0.3,1", StoredServerId = 104 }, "service wrote this too", null, ct, DateTime.UtcNow.AddMinutes(1));
         Assert.Equal(0, await CountAsync("collect.servers", "server_id = 101 AND (connect_down_since IS NOT NULL OR last_connect_error IS NOT NULL OR next_connect_attempt IS NOT NULL)"));
         Assert.Equal(1, await CountAsync("collect.servers", "server_id = 104 AND last_connect_error LIKE 'Login failed%' AND connect_down_since IS NOT NULL AND next_connect_attempt IS NOT NULL"));
     }

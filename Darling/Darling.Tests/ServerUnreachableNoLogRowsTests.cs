@@ -82,7 +82,7 @@ public class ServerUnreachableNoLogRowsTests
             Assert.False(up.RootElement.TryGetProperty("server_connection", out _));
         }
 
-        await DarlingObservability.MarkConnectFailedAsync(postgres, 78, ConnectError, null, ct, DateTime.UtcNow.AddMinutes(2));
+        await DarlingObservability.MarkConnectFailedAsync(postgres, new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "sql-quiet", Host = "sql-quiet", StoredServerId = 78 }, ConnectError, null, ct, DateTime.UtcNow.AddMinutes(2));
 
         using var down = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealthUncut(postgres, "sql-quiet", ct));
         var root = down.RootElement;

@@ -161,23 +161,25 @@ public class ServerUnreachableReadsOfflineTests
             await config.ExecuteNonQueryAsync(ct);
         }
 
-        /* A server that has never connected has no registry row: the failed-connect write matches nothing and does not invent one. */
-        await DarlingObservability.MarkConnectFailedAsync(postgres, 77, "no route", null, ct);
-        await using (var count = postgres.CreateCommand("SELECT count(*) FROM servers WHERE server_id = 77"))
+        /* A server that has never connected has no registry row: the first failed connect writes one from the configuration (#7590 part F;
+           the live test of the real connect path is ServerNeverConnectedTests). Facts only a connect learns stay NULL. */
+        var configured = new PerformanceMonitor.Darling.Service.MonitoredServer { Name = "sql-live", Host = "sql-live", StoredServerId = 77 };
+        await DarlingObservability.MarkConnectFailedAsync(postgres, configured, "no route", null, ct);
+        await using (var row = postgres.CreateCommand("SELECT count(*) FILTER (WHERE sql_major_version IS NULL AND sql_engine_edition IS NULL AND connect_down_since IS NOT NULL AND last_connect_error = 'no route') FROM servers WHERE server_id = 77"))
         {
-            Assert.Equal(0L, await count.ExecuteScalarAsync(ct));
+            Assert.Equal(1L, await row.ExecuteScalarAsync(ct));
         }
 
         await UpsertAsync(postgres, ct);
         Assert.Equal((null, null), await FleetReadAsync(postgres, ct));
 
-        await DarlingObservability.MarkConnectFailedAsync(postgres, 77, "first error", null, ct);
+        await DarlingObservability.MarkConnectFailedAsync(postgres, configured, "first error", null, ct);
         var (firstSince, firstError) = await FleetReadAsync(postgres, ct);
         Assert.NotNull(firstSince);
         Assert.Equal("first error", firstError);
 
         /* The second failure keeps the outage's first time and takes the newest error. */
-        await DarlingObservability.MarkConnectFailedAsync(postgres, 77, "second error", null, ct);
+        await DarlingObservability.MarkConnectFailedAsync(postgres, configured, "second error", null, ct);
         var (secondSince, secondError) = await FleetReadAsync(postgres, ct);
         Assert.Equal(firstSince, secondSince);
         Assert.Equal("second error", secondError);
