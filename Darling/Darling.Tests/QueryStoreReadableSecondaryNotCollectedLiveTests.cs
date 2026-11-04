@@ -89,6 +89,24 @@ public sealed class QueryStoreReadableSecondaryNotCollectedLiveTests
         });
     }
 
+    /// <summary>#7584: the collector skips a readable secondary, so Query Store Health has no rows there; its empty read answers the same
+    /// not_collected text as the other Query Store reads, not the general "predates Query Store" text.</summary>
+    [Fact]
+    public async Task SecondaryRole_QueryStoreHealth_AnswersNotCollected_NamingTheSecondary()
+    {
+        await WithStoreAsync(async (c, postgres, ct) =>
+        {
+            await SeedRoleAsync(c, ct, "Secondary");
+
+            var health = await DarlingMcpConfigHistoryTools.GetQueryStoreHealth(postgres, ServerName, DatabaseFilter.All, ct);
+            Assert.Equal("not_collected", DarlingMcpTestData.StatusOf(health));
+            Assert.Contains("readable secondary", Message(health));
+            Assert.Contains("query_store_replica", Message(health));
+            Assert.DoesNotContain("predates Query Store", Message(health));
+            return 0;
+        });
+    }
+
     [Fact]
     public async Task EveryDatabaseCarriesTheSecondaryBit_QueryStoreTopAnswersNotCollected_NotReadOnly()
     {
