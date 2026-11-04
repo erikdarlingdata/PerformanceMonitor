@@ -119,7 +119,7 @@ public class SlackDetailsSizeTests
                 Key = "PLAN_REGRESSION", Value = 14.2, Severity = 0.9,
                 Metadata = new()
                 {
-                    ["worst_regression_factor"] = 14.2, ["offender_count"] = 3,
+                    ["lead_regression_factor"] = 14.2, ["offender_count"] = 3,
                     ["latest_cpu_per_exec_us"] = 2_480_000, ["best_cpu_per_exec_us"] = 174_600,
                     ["latest_is_forced"] = 0, ["force_failure_count"] = 0
                 }
