@@ -171,6 +171,42 @@ out.eventsThreshold = String(charts.gapThresholdMs(events.map((m) => m * MIN)));
 /* a 1 minute series that is missing a quarter of its samples at random is still sampled: it breaks at the 7 hour silence */
 out.jitterGap = marks(draw(withGap.filter((m, i) => i % 5 !== 3), { series: [{ key: "a", label: "A", color: "#f00" }] }));
 
+/* #7508: a series that joins two grains. The Query Store Duration Trend is one point per hour, then one point per interval from the
+   seam (routing.raw_from): 22 hourly points, then 90 one-minute points. One threshold for the whole series reads every hourly step as a
+   gap once the minute points outnumber them; with the seam each side is judged against its own spacing. */
+const seamAt = 22 * 60;
+const oneSeries = [{ key: "a", label: "A", color: "#f00" }];
+const hourly = seq(0, 21 * 60, 60);
+const raw = seq(seamAt, seamAt + 89);
+const seamExtra = { series: oneSeries, gapSeamMs: T0 + seamAt * MIN };
+out.seamJoined = marks(draw(hourly.concat(raw), seamExtra));
+out.seamAbsent = marks(draw(hourly.concat(raw), { series: oneSeries }));
+out.seamArea = marks(draw(hourly.concat(raw), { ...seamExtra, mode: "area" }));
+/* a 6 hour outage inside the hourly side, and a 20 minute one inside the raw side, each still break the line */
+out.seamHourlyOutage = marks(draw(seq(0, 10 * 60, 60).concat(seq(16 * 60, 21 * 60, 60), raw), seamExtra));
+out.seamRawOutage = marks(draw(hourly.concat(seq(seamAt, seamAt + 29), seq(seamAt + 50, seamAt + 89)), seamExtra));
+/* a seam with every point on one side of it, or a bad one, leaves the plain rule */
+out.seamAllRaw = marks(draw(seq(0, 119), { series: oneSeries, gapSeamMs: T0 + 500 * MIN }));
+out.seamAllRawOutage = marks(draw(withGap, { series: oneSeries, gapSeamMs: T0 }));
+out.seamBad = marks(draw(withGap, { series: oneSeries, gapSeamMs: NaN }));
+/* a side too short for a spacing of its own borrows the other side's, so an outage next to it still breaks. Two hourly points, a
+   19 hour silence, then one-minute points. And 22 hourly points, then 2 raw points 19 hours apart. */
+const silenceEnd = 20 * 60;
+out.seamShortHourlyOutage = marks(draw([0, 60].concat(seq(silenceEnd, silenceEnd + 59)), { series: oneSeries, gapSeamMs: T0 + silenceEnd * MIN }));
+out.seamShortRawOutage = marks(draw(hourly.concat([seamAt, seamAt + 19 * 60]), seamExtra));
+/* neither side can judge: the seam adds nothing */
+const bothShort = [0, 60, silenceEnd, silenceEnd + 1].map((m) => m * MIN);
+out.seamBothShortIsPlain = charts.gapThresholdMs(bothShort, silenceEnd * MIN) === charts.gapThresholdMs(bothShort);
+/* a seamed threshold is a function of a pair's two times; a plain one is a number */
+const at = (t, x, y) => (typeof t === "function" ? t(x, y) : t);
+out.seamThreshold = {
+  plain: charts.gapThresholdMs(noGap.map((m) => m * MIN), null),
+  oneSide: charts.gapThresholdMs(noGap.map((m) => m * MIN), 500 * MIN),
+  hourlySide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), 0, 60 * MIN),
+  rawSide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt + 5) * MIN, (seamAt + 6) * MIN),
+  crossing: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt - 60) * MIN, seamAt * MIN),
+};
+
 out.threshold = {
   empty: String(charts.gapThresholdMs([])),
   one: String(charts.gapThresholdMs([0])),

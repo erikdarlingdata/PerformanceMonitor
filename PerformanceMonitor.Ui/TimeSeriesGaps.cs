@@ -43,6 +43,21 @@ public static class TimeSeriesGaps
     /// Returns the original arrays when no break is needed, so the common no-gap case allocates nothing.
     /// </summary>
     public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys)
+        => BreakAtGaps(xs, ys, null);
+
+    /// <summary>
+    /// <see cref="BreakAtGaps(double[], double[])"/> for a series that joins two grains (#7508): the Query Store
+    /// Duration Trend is one point per hour before the instant the raw intervals start (<c>routing.raw_from</c>,
+    /// <c>QueryStoreTrendRoute.RawStartUtc</c>) and one point per Query Store interval from it. One threshold for
+    /// the whole series cannot judge both: once the interval points outnumber the hourly ones the median falls to
+    /// minutes and every hourly step reads as a gap, so the older part drew as lone dots. With
+    /// <paramref name="seamX"/> (an OADate) that has points on both sides, each side gets its own threshold, so
+    /// the hourly side is judged against an hour and the raw side against its interval, and a real outage on either
+    /// side still breaks. A pair that crosses the seam is judged by the larger threshold. A side too short for a
+    /// spacing of its own borrows the other side's, so an outage next to it still breaks. With neither side able to
+    /// judge, no seam, or every point on one side of it, this is the plain rule.
+    /// </summary>
+    public static (double[] Xs, double[] Ys) BreakAtGaps(double[] xs, double[] ys, double? seamX)
     {
         if (xs is null || ys is null || xs.Length != ys.Length || xs.Length < 3)
         {
@@ -50,7 +65,28 @@ public static class TimeSeriesGaps
         }
 
         var threshold = GapThreshold(xs);
-        if (threshold is null)
+        var beforeSeam = 0.0;
+        var afterSeam = 0.0;
+        var seamAt = 0.0;
+        var seamed = false;
+        if (seamX is double seam && double.IsFinite(seam))
+        {
+            var first = Array.FindIndex(xs, x => x >= seam);
+            if (first > 0)
+            {
+                var before = GapThreshold(xs[..first]);
+                var after = GapThreshold(xs[first..]);
+                if (before is not null || after is not null)
+                {
+                    seamed = true;
+                    seamAt = seam;
+                    beforeSeam = before ?? after!.Value;
+                    afterSeam = after ?? before!.Value;
+                }
+            }
+        }
+
+        if (!seamed && threshold is null)
         {
             return (xs, ys);
         }
@@ -58,7 +94,10 @@ public static class TimeSeriesGaps
         List<int>? breakAfter = null;
         for (var i = 0; i < xs.Length - 1; i++)
         {
-            if (xs[i + 1] - xs[i] > threshold.Value)
+            var limit = !seamed
+                ? threshold!.Value
+                : xs[i] >= seamAt ? afterSeam : xs[i + 1] < seamAt ? beforeSeam : Math.Max(beforeSeam, afterSeam);
+            if (xs[i + 1] - xs[i] > limit)
             {
                 (breakAfter ??= new List<int>()).Add(i);
             }

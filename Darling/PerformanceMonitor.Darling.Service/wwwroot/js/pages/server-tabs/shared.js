@@ -810,6 +810,8 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
+    seamKey: opts.seamKey,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
     bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */
