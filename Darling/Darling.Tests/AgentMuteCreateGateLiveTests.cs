@@ -108,8 +108,8 @@ public sealed class AgentMuteCreateGateLiveTests
             var agentCreate = DarlingMcpAlertTools.CreateMuteRule(source, metric_name: "Agent Metric", reason: "alert storm after the collector change",
                 expires_at: Iso(DateTime.UtcNow.AddDays(1)), action: "digest", agentSeat: Agent);
 
-            /* The old order locked the row within milliseconds and then waited on the gate. The new order never locks it, so this loop only
-               ever fails on the old code: it cannot fail on a slow machine. */
+            /* The new order never locks the row while it waits on the gate, so this loop cannot fail on a slow machine. It does not prove the
+               old stall: on the old order this test still passed, because the probe did not catch the held row inside its window. */
             for (var i = 0; i < 75; i++)
             {
                 Assert.True(await SwitchRowIsFreeAsync(source, ct), "At " + i + ": The agent's create holds the agent switch row while it waits on the create gate.");
