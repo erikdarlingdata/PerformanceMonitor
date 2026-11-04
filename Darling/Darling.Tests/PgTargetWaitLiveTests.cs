@@ -170,7 +170,9 @@ public sealed class PgTargetWaitLiveTests
             Assert.Equal(3_022_000, estimated.Metadata[PgTargetScorer.WaitMsKey], precision: 3);
             Assert.Equal(3_022_000 / 14_400_000.0, estimated.Value, precision: 9);
             Assert.Equal(1, estimated.Metadata[PgTargetScorer.WaitCounterResetsKey]);
-            Assert.Equal(3, estimated.Metadata[PgTargetScorer.WaitPeakBackendsKey]);
+            /* #7428: these rows carry no sampled_ms, which is the extension arm. Its backend_count is the distinct pids in the
+               module's cumulative profile, not one collection's backends, so no peak is claimed (0 drops the advice sentence). */
+            Assert.Equal(0, estimated.Metadata[PgTargetScorer.WaitPeakBackendsKey]);
             Assert.False(estimated.Metadata.ContainsKey(PgTargetScorer.WaitRestartCollectionsKey));
             /* CPU/Running is not waiting: share = 3,022 / (3,022 + 7,200). */
             Assert.Equal(3_022_000 / (3_022_000 + 7_200_000.0), estimated.Metadata[PgTargetScorer.WaitShareOfWaitTimeKey], precision: 9);

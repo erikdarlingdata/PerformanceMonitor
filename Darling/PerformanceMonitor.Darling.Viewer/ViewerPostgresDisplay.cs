@@ -1624,8 +1624,10 @@ internal static class PgDisplay
             + (serviceTier
                 ? $"Instrument: SERVICE SAMPLER, the service polling pg_stat_activity {cadence}. "
                   + PgWaitInstrument.ServiceSampledCaveat + " "
+                  + PgWaitInstrument.ServiceBackendsMeaning + " "
                 : instrumentKnown
                     ? "Instrument: pg_wait_sampling extension (10 ms in-engine profiler). "
+                      + PgWaitInstrument.ExtensionBackendsMeaning + " "
                     : string.Empty)
             + "Est. Wait is samples multiplied by the profile period, an estimate from a sampling "
             + "profiler and not a measured duration, so treat it as a ranking rather than a stopwatch. "

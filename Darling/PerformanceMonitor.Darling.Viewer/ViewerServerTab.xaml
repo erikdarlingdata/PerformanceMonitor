@@ -5202,7 +5202,7 @@
                              sampling profiler, not a measured duration. -->
                         <DataGridTextColumn Header="Est. Wait (ms)" Binding="{Binding EstimatedWaitMs}" ElementStyle="{StaticResource NumericCell}" Width="130"/>
                         <DataGridTextColumn Header="Samples" Binding="{Binding SampleCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
-                        <DataGridTextColumn Header="Backends" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
+                        <DataGridTextColumn Header="Backends Seen" Binding="{Binding BackendCount}" ElementStyle="{StaticResource NumericCell}" Width="100"/>
                         <!-- Zero means the wait belonged to no statement - a background process -
                              rather than an unknown query. Joins pg_statement_stats.queryid. A dash is a target that
                              does not report a query id (PostgreSQL 10 to 13, #6836). -->

@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -145,6 +145,7 @@ export function fanout(read, params, specs, intro = null) {
            opts.atTimeItem; Active Queries when it names none. */
         const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
+        applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
         mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noticeStrip(note) : null, rendered]);
       } catch (e) {
@@ -683,12 +684,14 @@ export function renderInto(body, render) {
  * and its process rows follow the database filter.
  * `control` (#5226) is a node drawn under the title, before the rows: the ranking selector on the Top Queries and Top Procedures cards.
  */
-export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null) {
+export function tablePanel(title, read, params, rowsKey, columns, subtitle, emptyText, span = 2, noteKey = null, moreNoteKeys = null, columnGroups = null, control = null, dbScope = null, extensionMissingLine = null, emptyWins = false, onRow = null, extra = null) {
   if (!emptyText) throw new Error("tablePanel(" + title + "): a table panel must explain its own empty state.");
   const desc = { title, subtitle, read, params, viz: "table", rowsKey, columns, emptyText, moreNoteKeys, span, noteKey, dbScope, extensionMissingLine, emptyWins };
   if (columnGroups) Object.assign(desc, { groups: columnGroups.groups, defaultGroups: columnGroups.defaultGroups });
   if (control) desc.control = control;
   if (onRow) desc.onRow = onRow;
+  /* #7428: further descriptor fields the positional list has no slot for, such as `noteFrom`. */
+  if (extra) Object.assign(desc, extra);
   return renderPanel(desc);
 }
 
@@ -702,8 +705,8 @@ export function tablePanel(title, read, params, rowsKey, columns, subtitle, empt
  * finding} is the type — which is data, not the {status,message} envelope, so it reaches vizStat and renders
  * as a row of em-dashes. vizStat spends this at exactly the all-null case; see the guard there.
  */
-export function stat(title, read, params, stats, subtitle, span = 1, emptyText) {
-  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText });
+export function stat(title, read, params, stats, subtitle, span = 1, emptyText, extra = null) {
+  return renderPanel({ title, subtitle, read, params, viz: "stat", stats, span, emptyText, ...(extra || {}) });
 }
 
 /**
