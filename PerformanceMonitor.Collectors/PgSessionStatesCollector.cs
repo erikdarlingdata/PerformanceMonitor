@@ -287,6 +287,11 @@ WITH activity AS
        zero-rows-when-healthy state becomes unreachable and every denominator is padded by one. Same
        exclusion, same reason, as pg_blocking and pg_xmin_horizon. */
     AND   a.pid <> pg_backend_pid()
+    /* Nor any other connection this service holds open (#7381). The wait sampler runs its 30 second batch
+       on a second connection, inside a transaction with a snapshot, so pg_sleep sat here as a Critical
+       'horizon holder'. Excluded by application_name, the same two names the sampler uses for the same
+       reason (PgWaitSamplingCollector.SamplerSnapshotSql). */
+    AND   coalesce(a.application_name, '') NOT IN ('{PgWaitSamplingCollector.ServiceApplicationName}', '{PgWaitSamplingCollector.ServiceRemediationApplicationName}')
     /* Parallel workers are not independent sessions. They share the leader's transaction, so including them
        would report one long transaction as N rows with identical durations and inflate every count here by
        the instance's parallelism. The leader represents them. The '<> pid' guard rather than a bare NULL

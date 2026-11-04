@@ -42,6 +42,27 @@ public sealed class DarlingMcpPgSessionStatesTools
     internal const double SustainedHolderSampleShare = 0.5;
 
     /// <summary>
+    /// The fewest holder samples a session needs before it can be called a sustained holder (#7381). The
+    /// share rule alone is met by 1 of 1, and one sighting is a passing statement on a quiet instance, not a
+    /// hold. Copied into <c>PgDisplay</c>, which cannot call this class; a behavior test keeps the two equal.
+    /// </summary>
+    internal const int MinSustainedHolderSamples = 2;
+
+    /// <summary>
+    /// The one rule behind the Critical band and the "PINS THE XMIN HORIZON" text (#7381): at least
+    /// <see cref="MinSustainedHolderSamples"/> holder samples, at least <see cref="SustainedHolderSampleShare"/>
+    /// of the samples that saw the session, and a peak horizon age above 0. Age 0 means the session held the
+    /// newest xid or snapshot, so nothing waited behind it: being the oldest on a quiet instance is not the
+    /// same as holding anything. This also covers rows stored before the collector stopped reporting the
+    /// service's own connections.
+    /// </summary>
+    internal static bool IsSustainedHolder(DarlingPgSessionStatesReader.PgSessionStateRow r) =>
+        r.SampleCount > 0
+        && r.PeakHorizonAge > 0
+        && r.HorizonHolderSamples >= Math.Max(
+            MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+
+    /// <summary>
     /// The duration past which an idle-in-transaction session is worth a human's attention even when it
     /// pins nothing.
     /// <para>Five minutes. It holds no snapshot and no transaction id, so it is costing vacuum nothing — but
@@ -79,8 +100,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "Grant pg_monitor to the monitoring role and this becomes answerable.";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
@@ -93,6 +113,17 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "transaction end, which is an application change, not a database one - terminating the "
                  + "backend releases the horizon immediately but the code path that opened it will do it "
                  + "again.";
+        }
+
+        if (r.HorizonHolderSamples > 0 && r.PeakHorizonAge == 0)
+        {
+            /* #7381: the oldest open transaction on the instance, but at age 0 it held the newest xid or
+               snapshot, so no row version waited behind it. On a quiet instance the oldest is simply
+               whatever ran. Said plainly so a count like 5 of 5 does not read as a hold. */
+            return "Was the oldest open transaction on the instance in "
+                 + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s), but its horizon age never rose "
+                 + "above 0: it held the newest xid or snapshot, so no row version waited behind it and "
+                 + "VACUUM lost nothing. On a quiet instance the oldest transaction is just whatever ran.";
         }
 
         if (r.HorizonHolderSamples > 0)
@@ -168,8 +199,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             return "Unknown";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {

@@ -1154,6 +1154,13 @@ internal static class PgDisplay
     internal const double SustainedHolderSampleShare = 0.5;
 
     /// <summary>
+    /// The fewest holder samples a session needs before the grid paints it red (#7381). A copy of
+    /// <c>DarlingMcpPgSessionStatesTools.MinSustainedHolderSamples</c>, kept equal by test. The grid also
+    /// needs a peak horizon age above 0, as the MCP band does.
+    /// </summary>
+    internal const int MinSustainedHolderSamples = 2;
+
+    /// <summary>
     /// How long a session must have sat idle in transaction, while pinning NOTHING, before the grid says
     /// anything about it. Five minutes, the copy of
     /// <c>DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs</c> — see above for why it is a copy.
@@ -1297,7 +1304,9 @@ internal static class PgDisplay
 
         var sustained = !unknown
             && r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+            && r.PeakHorizonAge > 0
+            && r.HorizonHolderSamples >= Math.Max(
+                MinSustainedHolderSamples, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
 
         /* Deliberately NOT gated on PeakHorizonAge < 0, and the gate that used to be here was a real
            cross-surface bug. is_horizon_holder means "the OLDEST holder on the instance", not "holds

@@ -615,6 +615,13 @@ public sealed class ViewerPostgresTabsTests
     [Theory]
     /* A sustained holder: the critical band, and the only one that gets the red. */
     [InlineData(10, 9, 10, 0L, 5_000_000L, false, "Critical")]
+    /* #7381: the floor is 2 holder samples, so 2 of 2 is still red. */
+    [InlineData(2, 2, 0, 1_000L, 5_000_000L, false, "Critical")]
+    /* #7381: 1 of 1 is a sighting, not a hold, and so is the monitor's own sampler (1 of 1, age 0). */
+    [InlineData(1, 1, 0, 1_000L, 5_000_000L, false, "Healthy")]
+    [InlineData(1, 1, 0, 1_000L, 0L, false, "Healthy")]
+    /* #7381: always the oldest, but at age 0 nothing waited behind it. */
+    [InlineData(5, 5, 0, 1_000L, 0L, false, "Healthy")]
     /* Idle in transaction, long, pinning NOTHING: the warning band and the amber. The correction this
        whole feature exists to make. */
     [InlineData(10, 0, 10, 600_000L, -1L, false, "Warning")]
@@ -675,6 +682,9 @@ public sealed class ViewerPostgresTabsTests
             DarlingMcpPgSessionStatesTools.SustainedHolderSampleShare,
             PgDisplay.SustainedHolderSampleShare,
             precision: 10);
+        Assert.Equal(
+            DarlingMcpPgSessionStatesTools.MinSustainedHolderSamples,
+            PgDisplay.MinSustainedHolderSamples);
         Assert.Equal(
             DarlingMcpPgSessionStatesTools.IdleWithoutHorizonAttentionMs,
             PgDisplay.IdleWithoutHorizonAttentionMs);

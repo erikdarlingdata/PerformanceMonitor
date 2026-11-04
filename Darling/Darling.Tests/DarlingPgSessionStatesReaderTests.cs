@@ -468,6 +468,45 @@ public class DarlingPgSessionStatesReaderTests
     }
 
     /// <summary>
+    /// #7381: a session seen once is not a sustained holder, and a session whose horizon age never rose above
+    /// 0 held nothing back however often it was the oldest. The monitor's own wait sampler stored as exactly
+    /// this shape (1 of 1, age 0), and rows like it are still in stores until retention removes them.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1, 0L)]
+    [InlineData(5, 5, 0L)]
+    [InlineData(1, 1, 5_000_000L)]
+    public void ASingleSightingOrAnAgeOfZeroIsNeverCritical(int sampleCount, int holderSamples, long peakHorizonAge)
+    {
+        var row = Row(sampleCount: sampleCount, horizonHolderSamples: holderSamples, peakHorizonAge: peakHorizonAge);
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(row);
+
+        Assert.Equal("Healthy", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.DoesNotContain("PINS THE XMIN HORIZON", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("terminating the backend", finding, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnAgeOfZeroIsToldNothingWaitedBehindIt()
+    {
+        var finding = DarlingMcpPgSessionStatesTools.HorizonFinding(
+            Row(sampleCount: 5, horizonHolderSamples: 5, peakHorizonAge: 0));
+
+        Assert.Contains("never rose above 0", finding, StringComparison.Ordinal);
+        Assert.DoesNotContain("passing sighting", finding, StringComparison.Ordinal);
+    }
+
+    /// <summary>The floor is 2 holder samples, so 2 of 2 with a real age is still Critical.</summary>
+    [Fact]
+    public void TwoHolderSamplesWithARealAgeAreStillCritical()
+    {
+        var row = Row(sampleCount: 2, horizonHolderSamples: 2, peakHorizonAge: 40_000);
+
+        Assert.Equal("Critical", DarlingMcpPgSessionStatesTools.SessionSeverity(row));
+        Assert.Contains("PINS THE XMIN HORIZON", DarlingMcpPgSessionStatesTools.HorizonFinding(row), StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// <b>The assertion the whole feature turns on.</b> An idle-in-transaction session that pinned nothing
     /// must be told so explicitly, and must NOT be given the vacuum argument.
     /// <para>Measured on live PostgreSQL 16.15: a READ COMMITTED transaction that only read, and one whose
