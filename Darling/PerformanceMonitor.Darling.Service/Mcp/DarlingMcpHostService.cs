@@ -934,7 +934,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                    of TriageBaseUrl, not a copy of it. */
                 DarlingAlertSettings.TriageBaseUrlOf(config),
                 tokenSet,
-                frontDoor);
+                frontDoor,
+                config.Mcp.AllowAgentMuteRules);
 
             _app = builder.Build();
 
@@ -1301,7 +1302,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true)
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
@@ -1419,7 +1420,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             options.ServerInstructions = DarlingMcpInstructions.Build(
-                declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection));
+                declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection), agentMuteRules);
 
             if (tokens is { HasNamed: true })
             {
@@ -1428,7 +1429,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 {
                     roleInstructions[LegacyRoleKey] = DarlingMcpInstructions.Build(
                         declaredPeers, catalog,
-                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, tokens.LegacyPolicy)));
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, tokens.LegacyPolicy)), agentMuteRules);
                 }
 
                 foreach (var entry in tokens.Named)
@@ -1436,7 +1437,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     var policy = tokens.PolicyFor(entry);
                     roleInstructions[entry.Role] = DarlingMcpInstructions.BuildForNamedToken(
                         declaredPeers, catalog,
-                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy);
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
                 }
             }
         });

@@ -104,6 +104,21 @@ public sealed class AgentLevel2ToolPolicyTests
         Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)", text, StringComparison.Ordinal);
     }
 
+    /// <summary>#7414: with mcp.allowAgentMuteRules off every direct mute call is refused, so neither census offers one.</summary>
+    [Fact]
+    public void TheInstructionsCensus_WithAgentMuteRulesOff_DoesNotOfferTheFourMuteTools()
+    {
+        var catalog = DarlingMcpWritePolicy.ToolNames(McpToolsListBudgetTests.BuildServedTools().Tools);
+        var served = AgentServed().Select(t => t.ProtocolTool.Name).ToList();
+        var agentRole = new DarlingMcpWritePolicy.Effective(false, false, true);
+        var peers = DarlingPeerDirectory.Snapshot.Empty;
+
+        Assert.Contains("the four mute rule tools", DarlingMcpInstructions.Build(peers, catalog, served), StringComparison.Ordinal);
+        Assert.DoesNotContain("the four mute rule tools", DarlingMcpInstructions.Build(peers, catalog, served, agentMuteRules: false), StringComparison.Ordinal);
+        Assert.Contains("the four mute rule tools", DarlingMcpInstructions.BuildForNamedToken(peers, catalog, served, agentRole), StringComparison.Ordinal);
+        Assert.DoesNotContain("the four mute rule tools", DarlingMcpInstructions.BuildForNamedToken(peers, catalog, served, agentRole, agentMuteRules: false), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheWritesArm_StillServesEveryWriteTool_AndTheActionToolsAreNotAgentOnly()
     {

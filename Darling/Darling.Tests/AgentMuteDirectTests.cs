@@ -509,11 +509,12 @@ CREATE TRIGGER fail_journal BEFORE INSERT ON config.investigation_journal FOR EA
         await RunAsync(async c =>
         {
             /* Made 5 days ago, expiring tomorrow: it may live until created + 7 days, which is 2 days from now. */
-            var aging = await SeedAsync(c, enabled: true, expiresUtc: DateTime.UtcNow.AddDays(1), createdUtc: DateTime.UtcNow.AddDays(-5));
+            var createdUtc = DateTime.UtcNow.AddDays(-5);
+            var aging = await SeedAsync(c, enabled: true, expiresUtc: createdUtc.AddDays(6), createdUtc: createdUtc);
             var refused = Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging, Changes(Iso(DateTime.UtcNow.AddDays(4))), agentSeat: Named));
             Assert.Equal(DarlingMcpAgentMuteDirect.LifetimeCode, (string?)refused["reason"]);
             Assert.Contains("An operator can extend it", (string?)refused["message"], StringComparison.Ordinal);
-            Assert.Contains(DateTime.UtcNow.AddDays(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), (string?)refused["message"], StringComparison.Ordinal);
+            Assert.Contains(createdUtc.AddDays(DarlingMcpAgentMuteDirect.MaxExpiryDays).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), (string?)refused["message"], StringComparison.Ordinal);
             Assert.Equal("0", await JournalCountAsync(c));
 
             Assert.Equal("updated", (string?)Parse(await DarlingMcpAlertTools.UpdateMuteRule(c.Source, aging, Changes(Iso(DateTime.UtcNow.AddDays(1.5))), agentSeat: Named))["status"]);

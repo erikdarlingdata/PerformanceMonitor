@@ -51,8 +51,8 @@ internal static class DarlingMcpInstructions
     /// right after <see cref="DarlingMcpWritePolicy.Apply"/> narrows the collection, so the two cannot disagree.
     /// </summary>
     internal static string Build(
-        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
-        => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
+        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool));
 
     /// <summary>
     /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
@@ -62,8 +62,8 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static string BuildForNamedToken(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
-        DarlingMcpWritePolicy.Effective policy)
-        => Compose(peers, ToolCensus(catalog, served, policy), served.Contains(MuteTool), policy);
+        DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
 
     private static string Compose(
         DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
@@ -111,9 +111,10 @@ internal static class DarlingMcpInstructions
 
     /// <summary><see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> for a named token's role (#6542) when
     /// <paramref name="named"/> is set: the sentence that says what is not served names the role, not the settings that govern
-    /// the legacy token. Null leaves the legacy census byte-identical.</summary>
+    /// the legacy token. Null leaves the legacy census byte-identical. <paramref name="agentMuteRules"/> is <c>mcp.allowAgentMuteRules</c> (#7414): when it is
+    /// off, the census does not say an agent may call the four mute rule tools without an <c>agent_action</c>, since every such call is refused.</summary>
     internal static string ToolCensus(
-        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named)
+        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named, bool agentMuteRules = true)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -136,8 +137,10 @@ internal static class DarlingMcpInstructions
         if (named is { } role)
         {
             if (role.Investigations)
-                off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action`, and beyond " +
-                    "the four mute rule tools it may call without one for a rule that expires within 7 days, are served only to an operator token");
+                off.Add(agentMuteRules
+                    ? "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action`, and beyond " +
+                      "the four mute rule tools it may call without one for a rule that expires within 7 days, are served only to an operator token"
+                    : "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are served only to an operator token");
             else if (!role.Writes)
                 off.Add("this token has the reader role: the write tools, the server registry tools and the investigation tools are never " +
                     "served to it, whatever the settings say");
@@ -153,7 +156,7 @@ internal static class DarlingMcpInstructions
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)"
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? ", except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +

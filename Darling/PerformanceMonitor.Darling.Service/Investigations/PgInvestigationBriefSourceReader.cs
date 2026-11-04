@@ -216,8 +216,12 @@ ORDER BY CASE WHEN p.scope_server_id IS NOT NULL THEN 0 WHEN p.scope_tag_id IS N
     /// with one space before the reason is cut, so the brief shows the reason as one line, as the digest hold line does (<c>MuteRule.OneLine</c>).</summary>
     internal const string AgentReasonControlPattern = @"[\x01-\x1f\x7f-\x9f\u2028\u2029]+";
 
-    /// <summary>The agent-written reason with its attribution suffix cut, its control characters turned into spaces and its ends trimmed, before it is cut to length.</summary>
-    private const string AgentReasonOneLineSql = @"btrim(regexp_replace(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''), '" + AgentReasonControlPattern + @"', ' ', 'g'))";
+    /// <summary>#7414: the invisible Format code points an agent-written reason may carry (zero-width characters, bidi controls, tag characters). Each is deleted,
+    /// as <c>MuteRule.OneLine</c> deletes them, so a reason cannot hide text or reverse the order the brief displays in.</summary>
+    internal const string AgentReasonFormatPattern = @"[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000e0001\U000e0020-\U000e007f]+";
+
+    /// <summary>The agent-written reason with its attribution suffix cut, its Format code points deleted, its control characters turned into spaces and its ends trimmed, before it is cut to length.</summary>
+    private const string AgentReasonOneLineSql = @"btrim(regexp_replace(regexp_replace(regexp_replace(m.reason, '" + AgentReasonSuffixPattern + @"', ''), '" + AgentReasonFormatPattern + @"', '', 'g'), '" + AgentReasonControlPattern + @"', ' ', 'g'))";
 
     internal static readonly string ChangesSql = @"
 SELECT at, kind, text, pattern
