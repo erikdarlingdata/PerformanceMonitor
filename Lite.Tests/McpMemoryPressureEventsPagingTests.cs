@@ -141,6 +141,18 @@ FROM generate_series(1, " + Samples + ") AS s(g)",
     }
 
     [Fact]
+    public async Task AWindowExactlyAtTheLimit_IsNotTruncated()
+    {
+        await SeedAsync();
+
+        var root = JsonDocument.Parse(await CallAsync(Samples)).RootElement;
+
+        Assert.Equal(Samples, root.GetProperty("events").GetArrayLength());
+        Assert.False(root.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("limit_note").ValueKind);
+    }
+
+    [Fact]
     public async Task TheChartRead_StillReturnsEveryRow()
     {
         await SeedAsync();
