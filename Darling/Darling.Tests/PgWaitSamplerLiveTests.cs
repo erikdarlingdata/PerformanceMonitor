@@ -305,14 +305,12 @@ public sealed class PgWaitSamplerLiveTests
 
             var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(
                 postgres, pre14ServerId, DateTime.UtcNow.AddHours(-1), DateTime.UtcNow.AddMinutes(1), 21, ct);
-            Assert.NotEmpty(page.Rows);
-            Assert.All(page.Rows, r => Assert.Null(r.QueryId));
-            /* One cycle stores one row per series, so the window's difference is 0 for every series. A join that
-               cannot match a NULL query_id to itself finds no oldest row and reports the whole cumulative count. */
-            Assert.All(page.Rows, r => Assert.Equal(0L, r.SampleCount));
+            /* One cycle stores one row per series, so the window's difference is 0 for every series, and (#7409) a
+               series that did not move is not listed. A join that cannot match a NULL query_id to itself finds no
+               oldest row and reports the whole cumulative count, which would list the series with samples. The null
+               query_id itself is asserted on the stored rows above. */
+            Assert.Empty(page.Rows);
             Assert.Equal(0L, page.WindowTotalSamples);
-            var json = JsonDocument.Parse(DarlingMcpPgWaitSamplingTools.BuildWaitSamplingJson("pm6836-pre14", 1, page, 20, null)).RootElement;
-            Assert.All(json.GetProperty("waits").EnumerateArray(), w => Assert.Equal(JsonValueKind.Null, w.GetProperty("queryid").ValueKind));
 
             bodySucceeded = true;
         }
