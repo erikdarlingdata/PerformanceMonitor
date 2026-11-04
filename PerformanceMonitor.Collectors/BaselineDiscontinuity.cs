@@ -183,18 +183,32 @@ public static class BaselineDiscontinuities
     public readonly record struct StateRow(string CollectorName, string StateKey, string StateValue, DateTime UpdatedAt);
 
     /// <summary>
-    /// The rendered sentence, one spelling for the two desktop viewers and the web page:
-    /// <c>baseline discontinuity at 2026-09-20 03:12 (restart)</c>. <paramref name="displayAt"/> is the instant
+    /// The rendered sentence, one spelling for the two desktop viewers and the web page, in words for a person (#7416):
+    /// <c>SQL Server restarted at 2026-09-20 03:12. Rates start over there.</c> The reason word picks what happened
+    /// (<c>restart</c>, <c>failover</c>, <c>rename</c>, <c>identity</c>, <c>stats_reset</c>, <c>postmaster_restart</c>), and a word
+    /// outside the closed vocabulary reads "Collection started again". The tool's own wording, with the reason word and the
+    /// payload's detail, stays in the MCP payload and behind the web page's "Full text" disclosure. <paramref name="displayAt"/> is the instant
     /// ALREADY converted to the surface's display clock — this method does not know which clock a surface shows
     /// and must not guess. <paramref name="offsetSuffix"/> is the caller's UTC offset for that instant when its
     /// wall time happens twice in the display zone (the repeated autumn hour; <c>DisplayZone.AmbiguousOffsetSuffix</c>
-    /// answers it, #4766): it follows the time after one space, <c>baseline discontinuity at 2026-11-01 01:30 -04:00
-    /// (restart)</c>, so the two markers a repeated hour holds read differently. <c>null</c> (the default) leaves
-    /// the sentence exactly as it was; this method takes the text and does not decide when to add it.
+    /// answers it, #4766): it follows the time after one space, <c>SQL Server restarted at 2026-11-01 01:30 -04:00.</c>,
+    /// so the two markers a repeated hour holds read differently. <c>null</c> (the default) adds nothing; this method
+    /// takes the text and does not decide when to add it.
     /// </summary>
     public static string Sentence(DateTime displayAt, string reason, string? offsetSuffix = null)
-        => "baseline discontinuity at " + displayAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
-            + (offsetSuffix is null ? "" : " " + offsetSuffix) + " (" + reason + ")";
+        => WhatHappened(reason) + " at " + displayAt.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+            + (offsetSuffix is null ? "" : " " + offsetSuffix) + ". Rates start over there.";
+
+    private static string WhatHappened(string reason) => reason switch
+    {
+        RestartReason => "SQL Server restarted",
+        PostmasterRestartReason => "PostgreSQL restarted",
+        FailoverReason => "The connection reached a different server",
+        RenameReason => "SQL Server was renamed",
+        IdentityReason => "The server's identity changed",
+        StatsResetReason => "Statistics were reset",
+        _ => "Collection started again",
+    };
 
     /// <summary>The payload projection — <see cref="BaselineDiscontinuityPayload"/> per item, oldest first, the store's frame with no zone suffix.</summary>
     public static IReadOnlyList<BaselineDiscontinuityPayload> ToPayload(IReadOnlyList<BaselineDiscontinuity> items)

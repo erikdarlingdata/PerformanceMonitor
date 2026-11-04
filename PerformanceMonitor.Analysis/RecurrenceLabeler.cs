@@ -275,10 +275,11 @@ public static class RecurrenceLabeler
                 lastWeekSlotsForJob = null;
         }
 
-        // Fact key -> whether its collector source is a setting, read once per pass. A story whose every fact is a
-        // setting (#6132) is the same story at every hour, so "recurring at this hour" says nothing true about it:
-        // the hour the pass happens to run in is not part of what it found.
-        var settingsByKey = BuildSettingsByKey(facts);
+        // Fact key -> whether its collector source reads a standing state, read once per pass. A story ROOTED in a
+        // standing state (#6132 settings, #7416 free space) is the same story at every hour, so "recurring at this
+        // hour" says nothing true about it: the hour the pass happens to run in is not part of what it found. The
+        // root decides, not the whole chain: DB_CONFIG -> LCK_M_S is the setting's story with a wait at the end.
+        var standingByKey = BuildStandingByKey(facts);
 
         foreach (var story in stories)
         {
@@ -286,7 +287,7 @@ public static class RecurrenceLabeler
                 continue;
 
             if (!string.IsNullOrEmpty(story.StoryPathHash)
-                && !IsStaticSettingsStory(story, settingsByKey)
+                && !IsRootedInStandingState(story, standingByKey)
                 && sameSlotWeeksByChain.TryGetValue(story.StoryPathHash, out var weeks))
             {
                 // Consecutive from this week backwards: this pass is week 0 and counts; each prior week counts
@@ -305,10 +306,10 @@ public static class RecurrenceLabeler
     }
 
     /// <summary>
-    /// Key -> "this fact is a setting" for every fact of the pass (#6132). A key whose facts disagree counts as a
-    /// setting only when every one of them is.
+    /// Key -> "this fact reads a standing state" for every fact of the pass (#6132, #7416). A key whose facts
+    /// disagree counts as standing only when every one of them is.
     /// </summary>
-    private static Dictionary<string, bool> BuildSettingsByKey(IReadOnlyList<Fact>? facts)
+    private static Dictionary<string, bool> BuildStandingByKey(IReadOnlyList<Fact>? facts)
     {
         var map = new Dictionary<string, bool>(StringComparer.Ordinal);
         if (facts is null)
@@ -319,29 +320,29 @@ public static class RecurrenceLabeler
             if (fact is null || string.IsNullOrEmpty(fact.Key))
                 continue;
 
-            var isSetting = FactKinds.IsSettingsSource(fact.Source);
-            map[fact.Key] = map.TryGetValue(fact.Key, out var seen) ? seen && isSetting : isSetting;
+            var isStanding = FactKinds.IsStandingStateSource(fact.Source);
+            map[fact.Key] = map.TryGetValue(fact.Key, out var seen) ? seen && isStanding : isStanding;
         }
 
         return map;
     }
 
     /// <summary>
-    /// True when every fact on the story's path is a setting — a configuration or point-in-time fact read from the
-    /// latest row whatever the hour (<see cref="FactKinds.IsSettingsSource"/>). Such a story has no time series
-    /// behind it to recur. A path key with no fact in the pass cannot be classified, so the story stays eligible,
+    /// True when the story's ROOT fact is a standing state: a setting or a free-space level
+    /// (<see cref="FactKinds.IsStandingStateSource"/>), or a key the engine roots as a standing advisory at any
+    /// severity (<see cref="InferenceEngine.IsConfigAdvisoryRoot"/>: a missing index, a plan warning, plan-cache
+    /// bloat). Such a story has no time series behind its root to recur, whatever symptom the chain ends in.
+    /// A root with no fact in the pass and no advisory key cannot be classified, so the story stays eligible,
     /// which is what the labeler did before.
     /// </summary>
-    private static bool IsStaticSettingsStory(AnalysisStory story, Dictionary<string, bool> settingsByKey)
+    private static bool IsRootedInStandingState(AnalysisStory story, Dictionary<string, bool> standingByKey)
     {
-        IReadOnlyList<string> keys = story.Path is { Count: > 0 } ? story.Path : new[] { story.RootFactKey };
-        foreach (var key in keys)
-        {
-            if (string.IsNullOrEmpty(key) || !settingsByKey.TryGetValue(key, out var isSetting) || !isSetting)
-                return false;
-        }
+        var root = story.Path is { Count: > 0 } ? story.Path[0] : story.RootFactKey;
+        if (string.IsNullOrEmpty(root))
+            return false;
 
-        return true;
+        return (standingByKey.TryGetValue(root, out var isStanding) && isStanding)
+            || FactKinds.IsStandingStateKey(root);
     }
 
     /// <summary>

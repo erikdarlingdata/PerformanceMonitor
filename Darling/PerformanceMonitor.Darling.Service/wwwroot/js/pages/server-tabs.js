@@ -39,7 +39,7 @@
  * touches innerHTML.
  */
 
-import { el, makeActivatable, noticeStrip, daysText } from "../util.js";
+import { el, makeActivatable, usageNoteStrip, daysText } from "../util.js";
 import { worstFirst } from "../panels.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { statsHistoryColumn } from "./stats-history.js";
@@ -1992,7 +1992,8 @@ export function runningJobsEmptyText(ctx) {
 export function tabNote(tab, widestHours) {
   const note = typeof tab.note === "function" ? tab.note(widestHours) : tab.note;
   if (!note) return null;
-  const strip = noticeStrip(note);
+  /* #7416: every tab note describes the page (what it reads, what it leaves to the desktop viewer), and warns about nothing. */
+  const strip = usageNoteStrip(note);
   /* A longer background behind an info mark, not in the banner itself. */
   if (tab.noteInfo) strip.appendChild(el("span", { class: "info-tip", tabindex: "0", role: "img", title: tab.noteInfo, "aria-label": tab.noteInfo, text: " \u24d8" }));
   return strip;
