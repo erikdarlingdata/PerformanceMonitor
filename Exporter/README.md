@@ -137,3 +137,5 @@ dotnet test Exporter/PerformanceMonitor.Exporter.Tests -c Release
 Some tests start PostgreSQL in Docker. They skip themselves when Docker is not there.
 The tests with the `Slow` trait take longer.
 The release build is `dotnet publish Exporter/PerformanceMonitor.Exporter -c Release -r win-x64 --self-contained`.
+Each release ships two zips: `PerformanceMonitorDarlingExport-<version>-win-x64.zip`, which is signed, and
+`PerformanceMonitorDarlingExport-<version>-linux-x64.zip`, which is not. `SHA256SUMS.txt` and `SHA256SUMS-linux.txt` hold their checksums.

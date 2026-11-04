@@ -571,8 +571,9 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack
 
-      # The Darling export tool (Exporter/): one self-contained win-x64 folder, zipped as PerformanceMonitorDarlingExport-<version>.zip.
-      # It is its own artifact and its own SignPath configuration, and it is not part of the Darling zip.
+      # The Darling export tool (Exporter/): one self-contained win-x64 folder, zipped as PerformanceMonitorDarlingExport-<version>-win-x64.zip.
+      # It is its own artifact and its own SignPath configuration, and it is not part of the Darling zip. The linux-x64 zip is
+      # built in the darling-linux job, unsigned, like the other Linux assets.
       - name: Publish Darling Export
         if: github.event_name == 'release'
         run: dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r win-x64 --self-contained -o publish/DarlingExport
@@ -730,8 +731,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          Remove-Item "releases/PerformanceMonitorDarlingExport-$version.zip" -ErrorAction SilentlyContinue
-          Compress-Archive -Path 'signed/DarlingExport/*' -DestinationPath "releases/PerformanceMonitorDarlingExport-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/DarlingExport/*' -DestinationPath "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -Force
 
       # #6480: the Darling MSI, built from the same signed tree the zip above holds (signed/Darling: the service at the
       # root, viewer\, the three signed scripts, pg-runtime.zip), the way darling-msi.yml builds it. It goes to
@@ -1208,6 +1209,19 @@ jobs:
         if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
 
+      # The Darling export tool for Linux: self-contained linux-x64, zipped in the package step below. It is not signed
+      # (SignPath signs Windows PE files), so it stays out of the Windows job and its signature guard, like the tarball.
+      - name: Publish Darling Export (linux-x64)
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r linux-x64 --self-contained -o publish/DarlingExport-linux
+          cp Exporter/README.md Exporter/file-contract.md Exporter/darling-export.sample.json publish/DarlingExport-linux/
+          chmod 755 publish/DarlingExport-linux/darling-export
+
       - name: Build container image
         if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
@@ -1282,7 +1296,14 @@ jobs:
             echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
+          export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
+          (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+            echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
+            exit 1
+          fi
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" "${export_zip}" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
       # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
@@ -1350,13 +1371,14 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           test -f "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz"
           test -f "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
+          test -f "releases/PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd releases && sha256sum -c SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz releases/PerformanceMonitorDarlingExport-*-linux-x64.zip --clobber
 
       - name: Build and push container image (ghcr, versioned + latest)
         if: github.event_name == 'release'

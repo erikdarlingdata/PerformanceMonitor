@@ -123,13 +123,14 @@ jobs:
           sys.modules["ci_select"] = mod
           spec.loader.exec_module(mod)
           files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
-          rules = mod.Rules()
-          root_and_exporter = rules.build["exporter"] + rules.build["root"] + ["Directory.Packages.props"]
+          areas = mod.Rules().areas(files)
           run = (
               os.environ["EVENT_NAME"] != "pull_request"
               or os.environ["BASE_REF"] != "dev"
               or any(f.startswith("unknown/") for f in files)
-              or bool(rules._hits(root_and_exporter, files))
+              or areas["exporter"]
+              or areas["root"]
+              or "Directory.Packages.props" in files
           )
           print("exporter=" + ("true" if run else "false"))
           PY

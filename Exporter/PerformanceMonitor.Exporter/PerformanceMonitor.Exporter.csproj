@@ -8,10 +8,10 @@
     <RootNamespace>PerformanceMonitor.Exporter</RootNamespace>
     <AssemblyName>darling-export</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- The release zip is published for win-x64 self-contained, so the win-x64 restore graph is part of the committed lock file.
+    <!-- The release zips are published for win-x64 and linux-x64 self-contained, so both restore graphs are part of the committed lock file.
          That keeps the RID-less locked-mode restore and the RID publish on one lock file (as in Lite). RuntimeIdentifiers (plural)
          only widens what restore resolves and sets no RID on a plain build. -->
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
