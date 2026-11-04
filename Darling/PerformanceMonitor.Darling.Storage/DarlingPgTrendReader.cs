@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -195,42 +196,132 @@ public static class DarlingPgTrendReader
         """;
 
     /// <summary>
-    /// One statement over time, BUCKETED (#3960): <see cref="QueryDurationTrendSql"/>'s rated snapshots — the ones
-    /// its reader kept — gathered into buckets of <c>$5</c> minutes. Calls and execution time are summed; the mean is
-    /// the bucket's summed time over its summed calls (NULL where nothing ran: a mean over no executions is absent,
-    /// not fast); the call rate is the summed calls over the seconds the snapshots covered; and the peak is the
-    /// costliest single interval's mean, so the step a regression makes is not averaged into the calls around it.
-    /// The first and last intervals that ran keep their own means, which the tool's window ends are read from.
-    /// Each point is stamped at its bucket's start, the first at the window's start. $1 server_id, $2 queryid,
-    /// $3/$4 window (naive UTC), $5 the bucket width in minutes.
+    /// One statement over time, BUCKETED (#3960, #7566). A bucket's call rate is the statement's summed calls over the
+    /// seconds the collector's RUNS covered in that bucket, so a run in which the statement had no row counts as zero
+    /// calls over its real seconds. The old read divided by the seconds of only the runs where the statement had a row
+    /// (this collector skips idle rows at the write), which read a bursty statement at its rate while it ran: 29 calls
+    /// every 5 minutes charted near 0.48 per second instead of 0.097.
+    ///
+    /// <para><b>The axis is the collector's SUCCESS runs</b> in <c>collect.collection_log</c> (the shape
+    /// <c>DurationTrendRouting.ProcedureCollectionsCte</c> settled on, #5449). A run is logged after it finishes and its
+    /// rows are stamped at its start, so a statement snapshot belongs to the nearest run logged at or after it (within ten
+    /// minutes). A run that owns a snapshot is a point at the snapshot's stamp; a run that owns none is an idle point
+    /// carrying zero calls at the log time less its <c>duration_ms</c>. A point's seconds are the gap to the previous run
+    /// point, or unrated when the gap passes <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (an outage is a
+    /// gap, never zero calls) or when every row the snapshot stored carries interval 0 (a restart). A snapshot no run
+    /// claims (a store without the log) is its own point on the old rule: its stored interval, else the gap to the
+    /// previous such snapshot. A window in which the statement has no snapshot at all returns nothing.</para>
+    ///
+    /// <para>Calls and execution time are summed; the mean is the bucket's summed time over its summed calls (NULL where
+    /// nothing ran); the peak is the costliest single run's mean. The first and last runs that ran the statement keep
+    /// their own means, which the tool's window ends are read from. Each point is stamped at its bucket's start, the
+    /// first at the window's start. $1 server_id, $2 queryid, $3/$4 window (naive UTC), $5 the bucket width in minutes.</para>
     /// </summary>
     public static readonly string QueryDurationTrendBucketedSql = $"""
-        WITH {QueryDurationSnapshotsCte()},
-        rated AS (
+        WITH statement_snapshots AS (
             SELECT
                 collection_time,
-                coalesce(calls, 0)                            AS calls,
-                coalesce(total_exec_ms, 0)::double precision  AS total_exec_ms,
-                interval_seconds
-            FROM per_snapshot
-            WHERE interval_seconds > 0
+                SUM(delta_calls)                AS calls,
+                SUM(delta_total_exec_time_ms)   AS total_exec_ms,
+                MAX(sample_interval_seconds)    AS stored_interval
+            FROM pg_statement_stats
+            WHERE server_id = $1
+            AND   queryid = $2
+            AND   collection_time >= $3
+            AND   collection_time <= $4
+            GROUP BY collection_time
+        ),
+        runs AS (
+            SELECT collection_time AS logged_at, COALESCE(duration_ms, 0)::bigint AS duration_ms
+            FROM {PgSchemaGenerator.CollectSchema}.collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'pg_statement_stats'
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $3 - INTERVAL '{CollectorDeltaCalculator.DefaultMaxGapSeconds} seconds'
+            AND   collection_time <= $4 + INTERVAL '{CollectorDeltaCalculator.DefaultMaxGapSeconds} seconds'
+        ),
+        events AS (
+            SELECT collection_time AS event_time, 0 AS is_run, calls, total_exec_ms, stored_interval,
+                   CAST(NULL AS timestamp) AS logged_at
+            FROM statement_snapshots
+            UNION ALL
+            SELECT logged_at, 1, NULL, NULL, NULL, logged_at
+            FROM runs
+        ),
+        claimed AS (
+            SELECT event_time, is_run, calls, total_exec_ms, stored_interval,
+                   MIN(logged_at) OVER (ORDER BY event_time DESC, is_run DESC) AS next_run
+            FROM events
+        ),
+        owned AS (
+            SELECT next_run AS run_logged_at, MIN(event_time) AS snapshot_time,
+                   SUM(calls) AS calls, SUM(total_exec_ms) AS total_exec_ms, MAX(stored_interval) AS stored_interval
+            FROM claimed
+            WHERE is_run = 0
+            AND   next_run IS NOT NULL
+            AND   next_run - event_time <= INTERVAL '600 seconds'
+            GROUP BY next_run
+        ),
+        run_points AS (
+            SELECT
+                COALESCE(o.snapshot_time, r.logged_at - r.duration_ms * INTERVAL '1 millisecond') AS point_time,
+                COALESCE(o.calls, 0)          AS calls,
+                COALESCE(o.total_exec_ms, 0)  AS total_exec_ms,
+                o.stored_interval             AS stored_interval,
+                o.snapshot_time IS NOT NULL   AS has_rows
+            FROM runs AS r
+            LEFT JOIN owned AS o ON o.run_logged_at = r.logged_at
+        ),
+        run_gaps AS (
+            SELECT point_time, calls, total_exec_ms, stored_interval, has_rows,
+                   extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS gap_seconds
+            FROM run_points
+        ),
+        loose AS (
+            SELECT event_time AS point_time, calls, total_exec_ms, stored_interval,
+                   extract(epoch FROM (event_time - LAG(event_time) OVER (ORDER BY event_time))) AS gap_seconds
+            FROM claimed
+            WHERE is_run = 0
+            AND   (next_run IS NULL OR next_run - event_time > INTERVAL '600 seconds')
+        ),
+        rated AS (
+            SELECT
+                point_time,
+                calls,
+                total_exec_ms,
+                CASE WHEN has_rows AND stored_interval = 0 THEN NULL
+                     WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {CollectorDeltaCalculator.DefaultMaxGapSeconds} THEN gap_seconds END
+                     ELSE NULLIF(stored_interval, 0)
+                END AS interval_seconds
+            FROM run_gaps
+            UNION ALL
+            SELECT
+                point_time,
+                calls,
+                total_exec_ms,
+                CASE WHEN stored_interval IS NULL THEN gap_seconds ELSE NULLIF(stored_interval, 0) END
+            FROM loose
         )
         SELECT
-            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
-            SUM(calls)::bigint                                                   AS calls,
-            SUM(total_exec_ms)                                                   AS total_exec_ms,
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', point_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            SUM(coalesce(calls, 0))::bigint                                      AS calls,
+            SUM(coalesce(total_exec_ms, 0))::double precision                    AS total_exec_ms,
             CASE WHEN SUM(calls) > 0 THEN SUM(total_exec_ms) / SUM(calls) END    AS mean_exec_ms,
             CASE WHEN SUM(interval_seconds) > 0
-                 THEN SUM(calls)::double precision / SUM(interval_seconds)
+                 THEN SUM(coalesce(calls, 0))::double precision / SUM(interval_seconds)
             END                                                                  AS calls_per_second,
             MAX(CASE WHEN calls > 0 THEN total_exec_ms / calls END)              AS peak_mean_exec_ms,
-            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY collection_time)
+            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY point_time)
                 FILTER (WHERE calls > 0))[1]                                     AS first_mean_exec_ms,
-            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY collection_time DESC)
+            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY point_time DESC)
                 FILTER (WHERE calls > 0))[1]                                     AS last_mean_exec_ms,
             COUNT(*) FILTER (WHERE calls > 0)                                    AS intervals_with_calls,
             COUNT(*)                                                             AS intervals
         FROM rated
+        WHERE interval_seconds > 0
+        AND   point_time >= $3
+        AND   point_time <= $4
+        AND   EXISTS (SELECT 1 FROM statement_snapshots)
         GROUP BY 1
         ORDER BY 1
         """;
