@@ -525,7 +525,9 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         await RefreshAsync(connection, successor, D(0), D(1), ct);
 
         /* D1 is the rollup's newest day and is partial: two hashes were rolled up at 01:00, then three more
-           arrived at 10:00 that the rollup has not reached. D2 is past the rollup altogether (raw only). */
+           arrived at 10:00 that the rollup has not reached, with a restart row (interval 0) the rollup will never
+           hold. The partial day's raw half leaves that row out, so D1 reads 5 and not 6. D2 is past the rollup
+           altogether (raw only). */
         await Plant(D(1).AddHours(1), "0xH0");
         await Plant(D(1).AddHours(1), "0xH1");
         await RefreshAsync(connection, successor, D(1), D(2), ct);
@@ -534,6 +536,7 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
             await Plant(D(1).AddHours(10), h);
         }
 
+        await Plant(D(1).AddHours(10), "0xRESTART", interval: 0);
         await Plant(D(2).AddHours(3), "0xH0");
         await Plant(D(2).AddHours(3), "0xH1");
 
@@ -553,10 +556,11 @@ VALUES ($1, $2, $3, $4, 'CalendarDb', $5, $5, 1000, 1000, 10, $6)", connection);
         Assert.Equal(new long?[] { 4L, 5L, 2L }, stitched.Select(r => r.UniqueQueries).ToArray());
 
         /* THE DAILY TIER IS UNCHANGED: its buckets are whole days, so its ceiling day (D0) reads the rollup,
-           including the restart row the legacy admits, and only the days after it read raw. */
+           including the restart row the legacy admits, and only the days after it read raw, unfiltered as they
+           always were, so D1 counts its restart row here. */
         await RefreshAsync(connection, daily, D(0), D(1), ct);
         var dailyTier = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), PartialServerId, D(0), D(3), ct);
-        Assert.Equal(new long?[] { 4L, 5L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new long?[] { 4L, 6L, 2L }, dailyTier.Select(r => r.UniqueQueries).ToArray());
 
         /* RAW HAS LOST THE DAY (retention, or a rollup that stopped refreshing): the rollup's partial count
            stays, never 0 and never fewer than it holds. */
