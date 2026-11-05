@@ -814,6 +814,9 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     format: opts.format,
     unit: opts.unit,
     emptyText: opts.emptyText,
+    /* #7682: a series with no measured value is left out (CPU's Other and Total on a Linux server), and the reply's footNoteKey field says why under the chart. */
+    hideEmptySeries: opts.hideEmptySeries === true,
+    footNoteKey: opts.footNoteKey,
     /* #5644 W16: the page's one sentence replaces the read's own empty message. */
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */

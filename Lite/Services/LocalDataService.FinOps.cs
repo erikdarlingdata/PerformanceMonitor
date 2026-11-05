@@ -73,6 +73,8 @@ public class DatabaseSizeSummaryRow
 
 public class UtilizationEfficiencyRow
 {
+    /// <summary>The server is an Availability Group secondary replica (#7705): its verdict is not judged from its own load, and it gets no CPU or memory right-sizing row.</summary>
+    public bool IsAgSecondary { get; set; }
     public decimal AvgCpuPct { get; set; }
     public int MaxCpuPct { get; set; }
     public decimal P95CpuPct { get; set; }

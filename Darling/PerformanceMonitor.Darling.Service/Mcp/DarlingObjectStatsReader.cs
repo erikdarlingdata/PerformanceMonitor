@@ -537,7 +537,7 @@ internal static class DarlingObjectStatsReader
         WHERE server_id = $1
         AND   collection_time = $2
         AND   ($3::text[] IS NULL OR database_name = ANY($3))
-        ORDER BY database_name, file_type_desc, file_name
+        ORDER BY lower(database_name), database_name, file_type_desc, file_name
         """;
 
     /// <summary>The windowed half of <see cref="GetLatestSnapshotTimeAsync"/>: bounded below so the planner can
