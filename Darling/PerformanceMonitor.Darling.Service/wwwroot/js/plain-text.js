@@ -99,7 +99,10 @@ const PAGE_FOR_TOOLS = [
   ["the Vacuum tab", ["get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"]],
   ["the Waits tab", ["get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_kernel_stats"]],
   ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
-  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats"]],
+  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats",
+    /* #7557: the Configuration Audit's advice points at these reads, and the Activity tab shows each (server-tab-reach.js). */
+    "get_pg_column_stats", "get_pg_predicate_stats", "get_pg_query_duration_trend"]],
+  ["the Overview tab", ["get_pg_cpu_utilization", "get_pg_extensions"]],
   ["the Storage tab", ["get_pg_table_bloat", "get_pg_index_bloat", "get_pg_index_usage"]],
   ["the Configuration tab", ["get_pg_server_config", "get_pg_server_config_changes"]],
 ];
@@ -273,11 +276,16 @@ function withoutToolNames(text) {
   t = t.replace(/(?<![\w.])((?:[Tt]he )?)([a-z][a-z0-9]*(?:_[a-z0-9]+)+) collector(?![\w])/g, (m, the, name) => the + toolWords(name) + " collector");
   t = t.replace(/\bcollector '([a-z][a-z0-9]*(?:_[a-z0-9]+)+)'/g, (m, name) => "collector '" + toolWords(name) + "'");
 
-  /* A read a tab shows. Any other tool name stays here and is dropped below. */
-  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m) => PAGE_FOR_TOOL.get(m) ?? m);
+  /* A read a tab shows. Any other tool name stays here and is dropped below. #7557: a name that opens the text or a sentence ("get_pg_top_queries has the
+     statement's text.") becomes "The Activity tab ...", not "the Activity tab ...". */
+  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m, at, whole) => {
+    const page = PAGE_FOR_TOOL.get(m);
+    if (page === undefined) return m;
+    return /^[a-z]/.test(page) && (at === 0 || /[.!?]\s+$/.test(whole.slice(0, at))) ? page[0].toUpperCase() + page.slice(1) : page;
+  });
 
   /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
-  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )\1/g, "$1");
+  t = t.replace(/\b([Tt]he) ((?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )the \2/g, "$1 $2");
 
   if (firstToolAt(t) < 0) return t;
 
