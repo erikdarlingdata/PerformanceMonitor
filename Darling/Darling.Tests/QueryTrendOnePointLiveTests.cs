@@ -130,20 +130,23 @@ public sealed class QueryTrendOnePointLiveTests
             var first = DateTime.UtcNow.AddHours(-3);
             first = new DateTime(first.Year, first.Month, first.Day, first.Hour, first.Minute, 0, DateTimeKind.Unspecified);
             var second = first.AddMinutes(5);
+            var third = first.AddMinutes(10);
 
             /* First collection: a plan from before a MAXDOP change sits in the cache with max_dop 8 and ran nothing;
-               the plan that ran has max_dop 2. Second collection: nothing ran at all, so both plans still show. */
+               the plan that ran has max_dop 2. Second collection: nothing ran at all, so both plans still show but
+               the DOP pair is null. Third: a single handle that ran nothing, which is null the same way. */
             await InsertAsync(connection, ct, first, "0xH1", 0, 0, 0, 0, 1, 8, "0xSTALE");
             await InsertAsync(connection, ct, first, "0xH2", 6, 600, 900, 60, 1, 2, "0xLIVE");
             await InsertAsync(connection, ct, second, "0xH1", 0, 0, 0, 0, 1, 8, "0xSTALE");
             await InsertAsync(connection, ct, second, "0xH2", 0, 0, 0, 0, 1, 2, "0xLIVE");
+            await InsertAsync(connection, ct, third, "0xH1", 0, 0, 0, 0, 1, 8, "0xSTALE");
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
             var points = doc.RootElement.GetProperty("trend").EnumerateArray().ToArray();
-            Assert.Equal(2, points.Length);
+            Assert.Equal(3, points.Length);
 
             Assert.Equal(6, points[0].GetProperty("execution_count").GetInt64());
             Assert.Equal(2, points[0].GetProperty("max_dop").GetInt32());
@@ -151,11 +154,15 @@ public sealed class QueryTrendOnePointLiveTests
             Assert.Equal("0xLIVE", points[0].GetProperty("query_plan_hash").GetString());
             Assert.Equal(1, points[0].GetProperty("plan_count").GetInt32());
 
-            /* No row ran: every row counts, so the point shows both plans and the highest DOP among them. */
+            /* No row ran: the point still shows both plans, but a DOP describes an execution, so the pair is null. */
             Assert.Equal(0, points[1].GetProperty("execution_count").GetInt64());
-            Assert.Equal(8, points[1].GetProperty("max_dop").GetInt32());
+            Assert.Equal(JsonValueKind.Null, points[1].GetProperty("max_dop").ValueKind);
+            Assert.Equal(JsonValueKind.Null, points[1].GetProperty("min_dop").ValueKind);
             Assert.Equal(JsonValueKind.Null, points[1].GetProperty("query_plan_hash").ValueKind);
             Assert.Equal(2, points[1].GetProperty("plan_count").GetInt32());
+            Assert.Equal(0, points[2].GetProperty("execution_count").GetInt64());
+            Assert.Equal(JsonValueKind.Null, points[2].GetProperty("max_dop").ValueKind);
+            Assert.Equal(JsonValueKind.Null, points[2].GetProperty("min_dop").ValueKind);
             bodySucceeded = true;
         }
         finally

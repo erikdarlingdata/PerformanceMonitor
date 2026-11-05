@@ -1473,7 +1473,7 @@ internal static class ToolRecommendations
         ["PLAN_REGRESSION"] =
         [
             new("analyze_query_store_plan", "Compare the regressed plan against the prior plan to see what the optimizer changed"),
-            new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse"),
+            new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse. Where plan_count is above 1 at a point, query_plan_hash is null there: use get_query_store_top to see the plans apart"),
             new("get_query_store_top", "Pull the full Query Store entry including plan_id and forced-plan history before considering a force")
         ],
         // #4149: LATCH_EX/LATCH_SH are non-buffer latches; the class from get_latch_stats decides the

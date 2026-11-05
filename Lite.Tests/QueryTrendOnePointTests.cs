@@ -88,9 +88,35 @@ public sealed class QueryTrendOnePointTests
         Assert.Equal("0xLIVE", points[0].QueryPlanHash);
         Assert.Equal(1, points[0].PlanCount);
 
-        /* Nothing ran: every row counts, so the point shows both plans. */
-        Assert.Equal(8, points[1].MaxDop);
+        /* Nothing ran: the point still shows both plans, but a DOP describes an execution, so the pair is null. */
+        Assert.Null(points[1].MinDop);
+        Assert.Null(points[1].MaxDop);
         Assert.Equal("", points[1].QueryPlanHash);
         Assert.Equal(2, points[1].PlanCount);
+    }
+
+    [Fact]
+    public void ASingleHandleWithNoExecutions_HasNullDop()
+    {
+        var points = McpQueryTools.OnePointPerCollection(new List<QueryStatsHistoryRow> { Row(T1, 0, 0, 1, 8, "0xSTALE") });
+
+        var point = Assert.Single(points);
+        Assert.Null(point.MinDop);
+        Assert.Null(point.MaxDop);
+        Assert.Equal("0xSTALE", point.QueryPlanHash);
+    }
+
+    [Fact]
+    public void ThePlanRegressionRecommendation_PointsAtQueryStoreTop_ForPointsWhereTheHashIsNull()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(PerformanceMonitor.Analysis.StoryKeys.OfPath("PLAN_REGRESSION")));
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        string? reason = null;
+        foreach (var e in doc.RootElement.EnumerateArray())
+            if (e.GetProperty("tool").GetString() == "get_query_trend") reason = e.GetProperty("reason").GetString();
+
+        Assert.NotNull(reason);
+        Assert.Contains("plan_count is above 1", reason, StringComparison.Ordinal);
+        Assert.Contains("get_query_store_top", reason, StringComparison.Ordinal);
     }
 }

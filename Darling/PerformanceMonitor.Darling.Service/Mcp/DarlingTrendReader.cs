@@ -103,7 +103,7 @@ internal static class DarlingTrendReader
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int MinDop, int MaxDop, string? QueryPlanHash, int? PlanCount = null);
+        long DeltaSpills, int? MinDop, int? MaxDop, string? QueryPlanHash, int? PlanCount = null);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -1491,8 +1491,9 @@ internal static class DarlingTrendReader
     /// grouped by <c>collection_time</c>: the deltas are summed. The DOP pair (<c>MIN</c> of the minimums,
     /// <c>MAX</c> of the maximums), <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from
     /// the rows that ran in the interval (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP
-    /// does not ride along; when no row at that time ran, all its rows count and the point still shows its plan.
-    /// The hash is the one every such row carries, and NULL when they differ or one has none.</para>
+    /// does not ride along. When no row at that time ran, the point still shows its plan from all its rows, but
+    /// the DOP pair is NULL: the DOP describes an execution and there was none. The hash is the one every such
+    /// row carries, and NULL when they differ or one has none.</para>
     /// </summary>
     public const string QueryHistorySql = """
         SELECT
@@ -1505,8 +1506,8 @@ internal static class DarlingTrendReader
             CAST(SUM(delta_physical_reads) AS bigint) AS delta_physical_reads,
             CAST(SUM(delta_rows) AS bigint) AS delta_rows,
             CAST(SUM(delta_spills) AS bigint) AS delta_spills,
-            MIN(min_dop) FILTER (WHERE ran) AS min_dop,
-            MAX(max_dop) FILTER (WHERE ran) AS max_dop,
+            MIN(min_dop) FILTER (WHERE delta_execution_count > 0) AS min_dop,
+            MAX(max_dop) FILTER (WHERE delta_execution_count > 0) AS max_dop,
             CASE WHEN MIN(query_plan_hash) FILTER (WHERE ran) = MAX(query_plan_hash) FILTER (WHERE ran)
                   AND COUNT(query_plan_hash) FILTER (WHERE ran) = COUNT(*) FILTER (WHERE ran)
                  THEN MIN(query_plan_hash) FILTER (WHERE ran) END AS query_plan_hash,
@@ -1660,8 +1661,8 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
+                reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
                 reader.IsDBNull(11) ? null : reader.GetString(11),
                 reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))));
         }
