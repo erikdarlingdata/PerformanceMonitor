@@ -20,6 +20,7 @@
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
 import { plainText, shortEmptyLine } from "./plain-text.js";
+import { plotWidthFor, withPlotPoints } from "./trend-points.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -569,8 +570,8 @@ export async function readWithinKeptHistory(fetchWith, params) {
 }
 
 /** readWithinKeptHistory over a read-only tool by its MCP name. `signal`: see apiGet (#4191). */
-export function readToolWithinKeptHistory(tool, params, signal) {
-  return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
+export function readToolWithinKeptHistory(tool, params, signal, options) {
+  return readWithinKeptHistory((p) => readTool(tool, p, signal, options), params);
 }
 
 /** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
@@ -1840,7 +1841,11 @@ export function alertDeliveryState(a) {
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   const selection = params ? params[TRIM_TO] : undefined;
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
+  /* #7661: a trend chart asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute buckets the plot
+     cannot show. `options.plotPx` is the measured plot of the panel asking; without it the width is estimated from the window (a full-width panel's). */
+  const plotPx = options && options.plotPx > 0 ? options.plotPx : plotWidthFor(0, typeof window !== "undefined" ? window.innerWidth : 0, 2);
+  const sized = withPlotPoints(tool, plan.params, plotPx);
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));

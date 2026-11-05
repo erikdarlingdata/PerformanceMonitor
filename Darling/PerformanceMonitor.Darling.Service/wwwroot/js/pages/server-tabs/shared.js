@@ -8,7 +8,8 @@
 
 import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
-import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
+import { plotWidthFor } from "../../trend-points.js";
+import { SNAPSHOT_LIST_CAP,snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
@@ -133,7 +134,9 @@ export function fanout(read, params, specs, intro = null) {
   /* #6793: the batch's signal, captured while the tab is built (setPanelSignal holds it then), so leaving the page or a redraw cancels this read. */
   const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory(read, params, signal);
+    /* #7661: the plot of the widest panel over this read sets how many points it asks for (readTool, trend-points.js). */
+    const plotPx = plotWidthFor(0, typeof window !== "undefined" ? window.innerWidth : 0, specs.some((s) => (s.span ?? 2) === 2) ? 2 : 1);
+    const res = await readToolWithinKeptHistory(read, params, signal, { plotPx });
     if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [noticeStrip(intro.text)]);
