@@ -445,7 +445,7 @@ public sealed class ExportRunner
         var result = waitAsync is null
             ? await StragglerGuard.CheckAsync(connectionStringBuilder, collectionTo, ct).ConfigureAwait(false)
             : await StragglerGuard.CheckAsync(
-                innerCt => StragglerGuardCountAsync(connectionStringBuilder, collectionTo, innerCt),
+                innerCt => StragglerGuard.CountStragglersAsync(connectionStringBuilder, collectionTo, innerCt),
                 ct,
                 waitAsync).ConfigureAwait(false);
 
@@ -455,23 +455,6 @@ public sealed class ExportRunner
         }
 
         return result;
-    }
-
-    private static async Task<long> StragglerGuardCountAsync(
-        NpgsqlConnectionStringBuilder connectionStringBuilder, DateTime collectionTo, CancellationToken ct)
-    {
-        await using var connection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
-        await using var command = new NpgsqlCommand(StragglerGuard.Sql, connection);
-        command.Parameters.Add(new NpgsqlParameter("application_name", NpgsqlTypes.NpgsqlDbType.Text)
-        {
-            Value = connectionStringBuilder.ApplicationName ?? "",
-        });
-        command.Parameters.Add(new NpgsqlParameter("collection_to", NpgsqlTypes.NpgsqlDbType.Timestamp)
-        {
-            Value = DateTime.SpecifyKind(collectionTo, DateTimeKind.Unspecified),
-        });
-        var scalar = await command.ExecuteScalarAsync(ct).ConfigureAwait(false);
-        return scalar is null or DBNull ? 0 : Convert.ToInt64(scalar);
     }
 }
 
