@@ -695,6 +695,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
         new(245, "hasProtectionThresholds",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
+        // V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. The column is the probe's newest
+        // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
+        new(247, "hasXeSessionDatabases",
+            @"ALTER TABLE IF EXISTS config.config_monitored_servers DROP COLUMN IF EXISTS xe_session_databases;"),
     ];
 
     /// <summary>
