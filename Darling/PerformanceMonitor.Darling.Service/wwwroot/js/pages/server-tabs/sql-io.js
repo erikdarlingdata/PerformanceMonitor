@@ -6,9 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter } from "../../util.js";
+import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter, parseUtc } from "../../util.js";
 import { getPanelSignal } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
+import { bucketMsOf } from "../../chart-gaps.js";
 import { READ_FIELDS } from "../../read-fields.js";
 import { panelShell, discontinuityStrip, linePanel } from "./shared.js";
 
@@ -42,6 +43,8 @@ export function fileIoPanel(server, ctx) {
       ...r,
       line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
     }));
+    /* #7572: the step a gap is judged by, from every row (a row with no figure still marks a collection), so a collector slower than the bucket keeps its line. */
+    const bucketMs = bucketMsOf(res.data.bucket_minutes, rows.map((r) => { const d = parseUtc(r.time); return d ? d.getTime() : NaN; }));
     /* The desktop draws read and write latency as two stacked charts over the same lines; so does this panel, one read
        feeding both. Each chart keeps its own top series by its own peak; a bucket with no reads (or no writes) has a null figure and is left out of that chart rather than drawn as 0. */
     const read = pivot(rows.filter((r) => r.avg_read_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_read_latency_ms" });
@@ -53,7 +56,7 @@ export function fileIoPanel(server, ctx) {
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours), bucketMs }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
