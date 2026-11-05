@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -138,20 +138,23 @@ export function fanout(read, params, specs, intro = null) {
     const res = await readToolWithinKeptHistory(read, params, signal);
     if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
-      mount(introNode, [noticeStrip(intro.text)]);
+      mount(introNode, [captionStrip(intro.text)]);
     }
     /* #7410: panels over one read that all come back empty share one message, so the first says it and the rest point at it. The pointer says "the panel that says why" because span panels can sit side by side, so the
        first one may be to the left rather than above. A panel that shows its own emptyWins sentence does not say the message, so it neither
        claims it nor gets the pointer. */
     let saidEmpty = false;
+    let saidBy = "";
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") {
         const repeats = saidEmpty && emptyHeadline(spec, res) === res.message;
+        if (!saidEmpty && emptyHeadline(spec, res) === res.message) saidBy = spec.title;
         saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
-        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as the panel that says why.") : panelEmptyStrip(spec, res)]);
+        /* #7552: the pointer names the panel that says why. */
+        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as " + (saidBy || "the panel that says why") + ".") : panelEmptyStrip(spec, res)]);
       }
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so

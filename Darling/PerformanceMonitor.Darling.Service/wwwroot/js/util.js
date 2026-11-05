@@ -1005,6 +1005,12 @@ function placesFor(o, min = 0, per = 1) {
   const step = stepOf(o);
   return Math.max(min, step == null ? 0 : tickDecimals(step / per));
 }
+/* #7552: the decimals a figure keeps. An axis tick (it has a step) keeps only what the step needs, so a 100 step reads 0, 100, 200 and not 0.00, 100.00, 200.00;
+   a tooltip or table cell (no step) keeps its `min` decimals. */
+export function axisPlaces(o, min) {
+  const step = stepOf(o);
+  return step == null ? min : tickDecimals(step);
+}
 function fixed(n, places) {
   return n.toLocaleString(undefined, { minimumFractionDigits: places, maximumFractionDigits: places });
 }
@@ -1185,8 +1191,10 @@ export function fmtBool(v) {
 /** Named formatters a panel descriptor can reference (the #1563-friendly, string-keyed registry). */
 export const FORMATTERS = {
   int: fmtInt,
-  num1: (v, o) => fmtNum(v, placesFor(o, 1)),
-  num2: (v, o) => fmtNum(v, placesFor(o, 2)),
+  /* #7552: an identifier (a process id, a query id) is a name and not a quantity: no thousands separator, so it can be copied into pg_terminate_backend or sp_query_store_force_plan. */
+  id: (v) => (v == null || v === "" ? "—" : String(v)),
+  num1: (v, o) => fmtNum(v, axisPlaces(o, 1)),
+  num2: (v, o) => fmtNum(v, axisPlaces(o, 2)),
   rate: fmtRate,
   pct: fmtPct,
   ms: fmtMs,
