@@ -655,19 +655,22 @@ public static class DarlingPgBlockingReader
     /// distinguishable — but only by looking there.</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    public const string PgBlockingCaptureCountsSql = """
-        SELECT
-            count(*) FILTER (WHERE l.rows_collected > 0),
-            count(*),
-            min(l.collection_time),
-            max(l.collection_time)
-        FROM collection_log AS l
-        WHERE l.server_id = $1
-        AND   l.collector_name = 'pg_blocking'
-        AND   l.status = 'SUCCESS'
-        AND   l.collection_time >= $2
-        AND   l.collection_time <= $3
-        """;
+    public const string PgBlockingCaptureCountsSql =
+        "SELECT count(*) FILTER (WHERE l.rows_collected > 0), count(*), min(l.collection_time), max(l.collection_time) " +
+        PgBlockingCaptureLogWhere + " AND l.server_id = $1";
+
+    /// <summary>The captures' rows in <c>collection_log</c> and the window, written once for the one-server read above and the
+    /// fleet read below (#7616), so the fleet card counts exactly what the Blocking tab's denominator counts.
+    /// $2/$3 are the window (naive UTC).</summary>
+    private const string PgBlockingCaptureLogWhere =
+        "FROM collection_log AS l WHERE l.collector_name = 'pg_blocking' AND l.status = 'SUCCESS' " +
+        "AND l.collection_time >= $2 AND l.collection_time <= $3";
+
+    /// <summary>#7616: the same counts for many servers at once, one row per server that has any capture in the window. $1 is the
+    /// server ids (int[]), $2/$3 the window.</summary>
+    public const string PgBlockingCaptureCountsByServerSql =
+        "SELECT l.server_id, count(*) FILTER (WHERE l.rows_collected > 0), count(*), min(l.collection_time), max(l.collection_time) " +
+        PgBlockingCaptureLogWhere + " AND l.server_id = ANY($1) GROUP BY l.server_id";
 
     public sealed record PgBlockingCaptureCounts(
         long CapturesWithBlocking,
@@ -699,5 +702,35 @@ public static class DarlingPgBlockingReader
         }
 
         return new PgBlockingCaptureCounts(0, 0, null, null);
+    }
+
+    /// <summary>#7616: <see cref="GetPgBlockingCaptureCountsAsync"/> for several servers in one read (the fleet card). A server with
+    /// no capture in the window has no entry, which a caller must read as "no capture ran", not as zero blocking.</summary>
+    public static async Task<Dictionary<int, PgBlockingCaptureCounts>> GetPgBlockingCaptureCountsByServerAsync(
+        NpgsqlDataSource postgres, int[] serverIds, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var counts = new Dictionary<int, PgBlockingCaptureCounts>();
+        if (serverIds.Length == 0)
+        {
+            return counts;
+        }
+
+        await using var command = postgres.CreateCommand(PgBlockingCaptureCountsByServerSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverIds);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            counts[reader.GetInt32(0)] = new PgBlockingCaptureCounts(
+                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+        }
+
+        return counts;
     }
 }

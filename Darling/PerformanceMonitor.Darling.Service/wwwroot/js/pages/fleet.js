@@ -862,6 +862,17 @@ export function metricBands(c, store) {
   const windowWords = windowPhrase(c.window_hours);
   const blockingWait = c.blocking_count > 0 && c.max_blocking_wait_ms > 0 ? "max wait " + fmtMs(c.max_blocking_wait_ms) : null;
   const blockingDetail = [windowWords, blockingWait].filter(Boolean).join(" · ") || null;
+  const blockingUnmeasured = c.is_postgres === true && c.blocking_measured !== true;
+  const blockingValue = blockingUnmeasured
+    ? "n/a"
+    : c.is_postgres === true
+    ? fmtInt(c.blocking_count) + (c.blocking_count === 1 ? " capture" : " captures")
+    : fmtInt(c.blocking_count);
+  const blockingChipDetail = blockingUnmeasured
+    ? "no blocking capture ran" + (windowWords ? " " + windowWords : "")
+    : c.is_postgres === true && c.blocking_captures != null
+    ? [windowWords, "of " + fmtInt(c.blocking_captures) + " sampled"].filter(Boolean).join(" · ")
+    : blockingDetail;
   /* #3368: the chip's VALUE is the count and its colour is banded on the RATE, so the detail carries the
      rate — a chip that bands on a figure it does not show leaves "Deadlocks 3" against an amber border with
      no way to see which tier was crossed, and "3" is the same string over an hour and over a day. Null when
@@ -931,9 +942,9 @@ export function metricBands(c, store) {
     chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
     chip("Threads", threadsValue, sevOf(c.threads_severity), known(threadsDetail)),
     chip("Memory", memValue, sevOf(c.memory_severity), known(memDetail)),
-    /* #7560: blocking_count is a structural 0 on PostgreSQL (nothing in the fleet read counts its blocking), and blocking_severity reads Unknown
-       there, so the chip says "n/a" instead of a 0 that looks measured. get_pg_blocking has the PostgreSQL blocking captures. */
-    chip("Blocking", c.is_postgres === true ? "n/a" : fmtInt(c.blocking_count), sevOf(c.blocking_severity), c.is_postgres === true ? null : known(blockingDetail)),
+    /* #7616 / #7654: a PostgreSQL target's Blocking is how many of its per-minute blocking captures saw any blocking, so the value names that unit.
+       A measured 0 prints "0 captures". "n/a" is only for a target with no capture in the window, and the detail says so in words. */
+    chip("Blocking", blockingValue, sevOf(c.blocking_severity), known(blockingChipDetail)),
     chip("Deadlocks", fmtInt(c.deadlock_count), sevOf(c.deadlock_severity), known(deadlockDetail)),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */

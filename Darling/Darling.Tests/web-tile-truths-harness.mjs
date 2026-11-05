@@ -186,6 +186,11 @@ try {
   const engineChips = {
     postgres: unmeasuredChips({ server_name: "pg", display_name: "pg", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_severity: "Unknown" }),
     sqlServer: unmeasuredChips({ server_name: "sq", display_name: "sq", is_online: true, is_postgres: false, has_memory_pressure: false, memory_severity: "Healthy", blocking_count: 0, blocking_severity: "Healthy" }),
+    /* #7616 / #7654: a PostgreSQL card with captures prints the count of captures that saw blocking, a measured 0 prints 0, and only a target
+       with no capture in the window prints n/a with a plain sentence. */
+    postgresBlocking: unmeasuredChips({ server_name: "pgb", display_name: "pgb", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 2, blocking_captures: 60, blocking_measured: true, blocking_severity: "Healthy" }),
+    postgresQuiet: unmeasuredChips({ server_name: "pgq", display_name: "pgq", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_captures: 60, blocking_measured: true, blocking_severity: "Healthy" }),
+    postgresNoCapture: unmeasuredChips({ server_name: "pgn", display_name: "pgn", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_captures: 0, blocking_measured: false, blocking_severity: "Unknown" }),
   };
   const quietChips = Object.fromEntries(findAll(quietCard, (n) => hasClass(n, "metric-chip")).map((n) => [n.textContent, true]));
   /* #7507: the Blocking and Deadlocks tiles name the window the reply covered. The reply is read through the shipped apiGetFleet, so the

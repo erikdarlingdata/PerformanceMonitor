@@ -732,22 +732,12 @@ namespace PerformanceMonitor.Common
     /// the window — because a difference of fewer than two samples is not a zero, where a <c>COUNT(*)</c>
     /// over an event table is; the two fleet readers hold that decision beside the read.</para>
     ///
-    /// <para><b>Blocking stays here on purpose, and the reason is the shape of the evidence, not its
-    /// absence.</b> A PostgreSQL target's blocking IS collected (<c>pg_blocking</c>, <c>pg_lock_stats</c>),
-    /// but as per-minute SAMPLES of <c>pg_stat_activity</c>: a waiter seen in three consecutive captures is
-    /// one wait observed three times, where SQL Server's blocked-process report is one engine-recorded event
-    /// per threshold crossing. <see cref="ServerHealthClassifier.BlockingSeverity"/>'s count tiers were
-    /// measured in reports per server-hour on that engine-recorded shape (#3596), and a sampled sighting
-    /// count fed through them would band on a denominator the tiers were never measured against — three
-    /// sightings of one 3-minute wait is not three reports. An honest PostgreSQL band needs its own
-    /// sampled-shape tiers (share of captures holding a waiter, longest observed wait) measured on that
-    /// fleet, which is a distribution nobody has taken yet; until then Unknown is the reading, and the
-    /// alert (<c>DarlingWorker.EvaluatePgBlockingAsync</c>, root blockers per rolling window) is the
-    /// surface that speaks for PostgreSQL blocking. Tiering pending: #3601's <c>lock_wait</c> log-event
-    /// family (<c>log_lock_waits</c> "still waiting" lines) is the EVENT-grain evidence a report-rate band
-    /// would read — one line per wait past <c>deadlock_timeout</c>, the shape the SQL Server tiers were
-    /// measured on — and is the join point for a future PostgreSQL arm here; nothing reads it yet. The
-    /// Darling README's engine-coverage table states this beside the band.</para>
+    /// <para><b>Blocking left this set in #7616.</b> A PostgreSQL target's blocking IS collected (<c>pg_blocking</c>) as per-minute SAMPLES of
+    /// <c>pg_stat_activity</c>, a different unit from SQL Server's blocked-process report: a waiter seen in three consecutive captures is one
+    /// wait observed three times. So the PostgreSQL card does not borrow SQL Server's wait count. It counts the captures in the window that
+    /// saw any blocking, and <see cref="ServerHealthClassifier.PostgresBlockingSeverity"/> bands that count per hour against the same
+    /// store tiers, with no longest-wait arm. A target with no capture in the window is still not measured: Unknown, never a 0 (#7654).
+    /// The <c>lock_wait</c> log-event family (#3601) remains the event-grain evidence a future report-rate arm could read.</para>
     ///
     /// <para><b>It names the ENGINE, not the collector state.</b> A SQL Server whose deadlock collector is
     /// permission-denied also reads zero, and that stays Healthy here on purpose: #3017 routed that case to
@@ -1128,6 +1118,21 @@ namespace PerformanceMonitor.Common
 
             return arms.Rate;
         }
+
+        /// <summary>
+        /// #7616: the PostgreSQL blocking band. The count is the number of per-minute captures in the window that saw any
+        /// blocking (the capture <c>get_pg_blocking</c> reads), or <c>null</c> when no capture ran in the window (Unknown,
+        /// never a Healthy zero). It bands exactly as the SQL Server count arm of <see cref="BlockingSeverity"/> does:
+        /// captures per hour against the same per-hour tiers (<see cref="BlockingBandThresholds"/>, the store's #6927 bars,
+        /// 5 and 20 by default). With one capture a minute that is 5 and 20 minutes an hour with a blocked session
+        /// in view. There is no longest-wait arm: a capture records who waits behind whom at one instant, not how long
+        /// the wait has run, so the wait arms read zero rather than an invented duration.
+        /// </summary>
+        public static HealthSeverity PostgresBlockingSeverity(
+            long? capturesWithBlockingOrNullWhenNoCapture,
+            TimeSpan window,
+            BlockingBandThresholds? thresholds = null) =>
+            BlockingSeverity(capturesWithBlockingOrNullWhenNoCapture, 0, window, thresholds);
 
         /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
         /// the arm that fired it come from ONE evaluation and cannot disagree about which arm crossed. Wait and

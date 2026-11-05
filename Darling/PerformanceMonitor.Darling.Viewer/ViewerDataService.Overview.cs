@@ -551,6 +551,11 @@ LIMIT 1";
             }
         }
 
+        /* #7616: a PostgreSQL target's blocking is read from its capture, through the reader the Blocking tab uses. Like the deadlock arm above it
+           is read for every card (this method does not know the engine yet): a SQL Server has no such capture, so its total is 0 and the card
+           ignores both numbers. */
+        var pgBlockingCaptures = await DarlingPgBlockingReader.GetPgBlockingCaptureCountsAsync(_dataSource, serverId, windowStart, scopeEnd, cancellationToken);
+
         /* No deadlock "Last" for a master with separately monitored databases, for the blocking reason above. */
         lastDeadlockMinutesAgo = separate.Count > 0 ? null : MinutesAgo(lastDeadlock, nowUtc);
 
@@ -598,6 +603,8 @@ LIMIT 1";
             DeadlockCount = deadlockCount,
             LastDeadlockMinutesAgo = lastDeadlockMinutesAgo,
             PgDeadlockIntervals = pgDeadlockIntervals,
+            PgBlockingCapturesTotal = pgBlockingCaptures.CapturesTotal,
+            PgBlockingCapturesWithBlocking = pgBlockingCaptures.CapturesWithBlocking,
             /* #3368: the count's denominator and the store's tiers, so this card bands on the same rate and
                the same numbers the service's fleet card does. #3539 A3: the blocking count was read over the
                same window, and carries it on its own terms. */
@@ -860,6 +867,15 @@ public sealed class ServerSummaryItem
 
     public int BlockingCount { get; set; }
 
+    /// <summary>#7616: how many of a PostgreSQL target's per-minute blocking captures ran in the card's window, and how many of those saw any
+    /// blocking. Both are 0 on a SQL Server. A PostgreSQL target with 0 captures has no blocking reading (shown as "--"), which is not a 0.</summary>
+    public long PgBlockingCapturesTotal { get; set; }
+
+    public long PgBlockingCapturesWithBlocking { get; set; }
+
+    /// <summary>Whether a PostgreSQL target's blocking was measured: at least one capture ran in the window.</summary>
+    public bool PgBlockingMeasured => PgBlockingCapturesTotal > 0;
+
     /// <summary>The worst blocking wait (ms) observed in the window — the "max: Ns" detail + Critical band input.</summary>
     public long MaxBlockingWaitMs { get; set; }
 
@@ -1118,7 +1134,9 @@ public sealed class ServerSummaryItem
 
     /* #7560: PostgreSQL has no blocked-process reports or blocking DMV snapshots behind this count, so its 0 is structural
        (the band reads Unknown through BlockingCountForBand). "--" is the word the tile uses for a reading it does not have. */
-    public string BlockingDisplay => IsOffline || IsPostgres ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    public string BlockingDisplay => IsOffline ? "--"
+        : IsPostgres ? (PgBlockingMeasured ? PgBlockingCapturesWithBlocking + (PgBlockingCapturesWithBlocking == 1 ? " capture" : " captures") : "--")
+        : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -1132,6 +1150,16 @@ public sealed class ServerSummaryItem
         get
         {
             if (IsOffline) return "";
+            /* #7616: PostgreSQL has captures, not waits, so no longest wait and no "Last"; the rate it banded on, then the sample size. */
+            if (IsPostgres)
+            {
+                if (!PgBlockingMeasured) return "no capture in the hour";
+                var of = $"of {PgBlockingCapturesTotal} sampled";
+                return BlockingRatePerHour.HasValue
+                    ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {of}"
+                    : of;
+            }
+
             if (BlockingCount > 0)
             {
                 var max = $"max: {MaxBlockedSeconds:F0}s";
@@ -1342,7 +1370,9 @@ public sealed class ServerSummaryItem
     /// <summary>Blocking as a BANDABLE reading - null when this card reads no blocking source for this engine. It is
     /// the wait count the card shows (<see cref="BlockingCount"/>, #5644 W1 and #7028): the unit the blocking alerts
     /// count, so a tier set to the alert's number means the same thing on the card.</summary>
-    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingCount, IsPostgres);
+    public int? BlockingCountForBand => IsPostgres
+        ? (PgBlockingMeasured ? (int)Math.Min(PgBlockingCapturesWithBlocking, int.MaxValue) : null)
+        : BlockingCount;
 
     /// <summary>#7028: the blocking band's snapshot arm in milliseconds, the largest total blocked wait of one DMV
     /// snapshot in the window after the Blocking Wait Time alert's persistence gate. 0 when the window holds no
