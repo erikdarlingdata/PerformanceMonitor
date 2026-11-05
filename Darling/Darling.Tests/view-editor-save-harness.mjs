@@ -145,8 +145,10 @@ async function notebookRun() {
   await flush();
   await press(main, "Create notebook");
   const afterFirst = writes.map((w) => `${w.method} ${w.path}`);
-  await press(main, "Create notebook");
-  return { afterFirst, all: writes.map((w) => `${w.method} ${w.path}`), versions: writes.map((w) => w.version ?? null) };
+  /* After the first (warned) save the view has an id, so the button must no longer say it creates one. */
+  const labelAfterFirst = all(main).find((n) => n.tag === "button" && ["Create notebook", "Save changes"].includes(n.textContent)).textContent;
+  await press(main, labelAfterFirst);
+  return { labelAfterFirst, afterFirst, all: writes.map((w) => `${w.method} ${w.path}`), versions: writes.map((w) => w.version ?? null) };
 }
 
 /* The dashboard: a name and one composed panel (a metric, an aggregate and a chart type) is a valid view. */
@@ -165,8 +167,9 @@ async function editorRun() {
   }
   await press(main, "Create view");
   const afterFirst = writes.map((w) => `${w.method} ${w.path}`);
-  await press(main, "Create view");
-  return { afterFirst, all: writes.map((w) => `${w.method} ${w.path}`), versions: writes.map((w) => w.version ?? null) };
+  const labelAfterFirst = all(main).find((n) => n.tag === "button" && ["Create view", "Save changes"].includes(n.textContent)).textContent;
+  await press(main, labelAfterFirst);
+  return { labelAfterFirst, afterFirst, all: writes.map((w) => `${w.method} ${w.path}`), versions: writes.map((w) => w.version ?? null) };
 }
 
 const result = { notebook: await notebookRun(), editor: await editorRun() };

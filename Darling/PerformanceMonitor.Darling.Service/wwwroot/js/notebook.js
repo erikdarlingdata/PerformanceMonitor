@@ -323,6 +323,7 @@ function buildNotebookEditor(main, ctx) {
       if (warnings.length > 0) {
         ctx.editingId = res.data.id;
         ctx.loadedVersion = res.data.version;
+        saveBtn.textContent = "Save changes"; /* the saved notebook has an id now, so the button updates it rather than creating */
         saveBtn.disabled = false;
         mount(saveStatus, buildSaveWarningsStrip(warnings, storeHash("#/notebook/") + encodeURIComponent(res.data.id)));
         return;

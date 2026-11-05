@@ -789,7 +789,7 @@ public sealed class CustomAlertEvaluator
         var broken = new List<CustomAlertRuleHealthIssue>();
         foreach (var row in rows)
         {
-            var (definition, error) = CustomAlertRuleDefinition.TryParse(row.DefinitionJson);
+            var (definition, error) = CustomAlertRuleDefinition.TryParse(row.DefinitionJson, enforcePerfmonRate: false);
             if (error is not null || definition is null)
             {
                 broken.Add(new CustomAlertRuleHealthIssue(

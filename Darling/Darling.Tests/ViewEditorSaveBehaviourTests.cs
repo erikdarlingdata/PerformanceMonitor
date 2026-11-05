@@ -66,5 +66,7 @@ public sealed class ViewEditorSaveBehaviourTests
         /* The second press is a PUT to the id the first save returned, at the version it returned: no second POST. */
         Assert.Equal(new[] { "POST /api/views", "PUT /api/views/41" }, run.GetProperty("all").EnumerateArray().Select(x => x.GetString()!).ToArray());
         Assert.Equal(1, run.GetProperty("versions")[1].GetInt32());
+        /* The saved view has an id after the first press, so the button reads "Save changes", not "Create view" / "Create notebook". */
+        Assert.Equal("Save changes", run.GetProperty("labelAfterFirst").GetString());
     }
 }

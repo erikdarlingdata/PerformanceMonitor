@@ -447,7 +447,7 @@ public sealed class DarlingMcpCustomAlertTools
                     return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
                 }
 
-                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson, enforcePerfmonRate: false);
                 if (parsedSaved is null || savedError is not null)
                 {
                     // A drifted saved rule: surface the validator error rather than throwing (test-now on a
@@ -618,7 +618,7 @@ public sealed class DarlingMcpCustomAlertTools
                     return Outcome("not_found", $"No custom alert rule with id {rule_id.Value}.");
                 }
 
-                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson);
+                var (parsedSaved, savedError) = CustomAlertRuleDefinition.TryParse(ok.Rule.DefinitionJson, enforcePerfmonRate: false);
                 if (parsedSaved is null || savedError is not null)
                 {
                     return Outcome("invalid", $"The saved rule no longer validates: {savedError}");

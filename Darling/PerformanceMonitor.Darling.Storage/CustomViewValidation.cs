@@ -497,7 +497,7 @@ public static partial class CustomViewValidation
                     return DefinitionValidation.Fail($"panel {i}: {composeError}");
                 }
 
-                if (PerfmonRateError(composePlan!, variables!, $"panel {i}") is string rateError)
+                if (PerfmonRate.Error(composePlan!, variables!, $"panel {i}") is string rateError)
                 {
                     return DefinitionValidation.Fail(rateError);
                 }
@@ -591,58 +591,6 @@ public static partial class CustomViewValidation
         {
             AddCumulativePerfmonWarning(warnings, plan.Filters, where, "overlay measure");
         }
-    }
-
-    private const string PerfmonRateKey = "perfmon_value_per_second";
-
-    /// <summary>
-    /// #7565: <c>perfmon_value_per_second</c> compiles to SUM(delta) / SUM(interval seconds). Every instance row of a counter, and
-    /// every server in the bucket, repeats the same sweep interval, so the rate is exact only for ONE counter on ONE instance on
-    /// ONE server per series, and reads (instance count x server count) times too low otherwise (a median of 12 and up to 17 rows
-    /// per collection for Transactions/sec, <c>DarlingTrendReader</c>). The validator refuses the panel instead of charting a wrong
-    /// rate. A dimension is pinned by an <c>eq</c> filter with one literal (or a variable, which holds one value), or by being in
-    /// groupBy. The server is also pinned by a declared <c>server</c> variable: the validator cannot see the run's server picker,
-    /// so the variable is the one place a saved view says it is one server. A variable has no multi-select mode, so a declared
-    /// <c>server</c> variable always counts, even though a run that picks All for it is not caught (documented, #7565). Returns the error, or null when the panel is fine.
-    /// </summary>
-    private static string? PerfmonRateError(PanelPlan plan, IReadOnlyList<ComposeVariable> variables, string where)
-    {
-        var role = string.Equals(plan.Measure.Key, PerfmonRateKey, StringComparison.Ordinal) ? "measure"
-            : plan.Overlay is { } overlay && string.Equals(overlay.Measure.Key, PerfmonRateKey, StringComparison.Ordinal) ? "overlay measure"
-            : null;
-        if (role is null)
-        {
-            return null;
-        }
-
-        bool Pinned(string dimension) =>
-            plan.GroupBy.Any(d => string.Equals(d.Name, dimension, StringComparison.Ordinal))
-            || plan.Filters.Any(f => string.Equals(f.Dimension.Name, dimension, StringComparison.Ordinal)
-                && f.Op == ComposeFilterOp.Eq
-                && (f.Value.IsVariable || f.Value.Literals is { Count: 1 }));
-
-        var fixes = new List<string>();
-        if (!Pinned("counter_name"))
-        {
-            fixes.Add("filter counter_name eq 'Transactions/sec' (or group by counter_name)");
-        }
-
-        if (!Pinned("instance_name"))
-        {
-            fixes.Add("filter instance_name eq '_Total' (or group by instance_name)");
-        }
-
-        if (!Pinned(MeasureCatalog.ServerDimensionName)
-            && !variables.Any(v => string.Equals(v.Dimension, ComposeVariable.ServerDimension, StringComparison.Ordinal)))
-        {
-            fixes.Add("filter server eq '<server name>' (or group by server, or declare a server variable)");
-        }
-
-        return fixes.Count == 0
-            ? null
-            : $"{where}: the {role} 'perfmon_value_per_second' is a rate only for one counter, one instance and one server per series. " +
-              "Every instance and server in a bucket repeats the sample interval, so the rate would read that many times too low. Add: " +
-              string.Join("; ", fixes) + ".";
     }
 
     private const string PerfmonValueKey = "perfmon_value";
@@ -915,7 +863,7 @@ public static partial class CustomViewValidation
                         return DefinitionValidation.Fail($"cell {i}: {panelError}");
                     }
 
-                    if (PerfmonRateError(cellPlan!, variables!, $"cell {i}") is string rateError)
+                    if (PerfmonRate.Error(cellPlan!, variables!, $"cell {i}") is string rateError)
                     {
                         return DefinitionValidation.Fail(rateError);
                     }
