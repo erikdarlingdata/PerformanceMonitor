@@ -11,8 +11,15 @@
    the read returns them. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMbFit, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
+
+/* #7562: a file cap is often a whole number of terabytes (2,097,152 MB), which the shared size text prints as "2,048.0 GB". From 1 TB up it is written in TB. */
+function maxSizeText(mb) {
+  return mb >= 1024 * 1024
+    ? (mb / (1024 * 1024)).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " TB"
+    : fmtMbFit(mb);
+}
 
 // The desktop's Auto Growth text: a percentage step, a MB step, "Disabled" when growth is off, "-" when unknown.
 function growthText(row) {
@@ -34,14 +41,14 @@ export const COLUMNS = [
   { key: "file_type", label: "Type" },
   { key: "total_size_mb", label: "Total", format: "mbfit" },
   { key: "used_size_mb", label: "Used", format: "mbfit" },
-  { key: "free_space_mb", label: "Free MB", format: "mbfit" },
+  { key: "free_space_mb", label: "Free", format: "mbfit" },
   { key: "used_pct", label: "Used %", format: "num1" },
   {
     key: "max_size_mb",
     label: "Max size",
     align: "right",
     sortValue: (row) => (row.max_size_mb === -1 ? Infinity : row.max_size_mb),
-    render: (row) => el("span", { text: row.max_size_mb === -1 ? "Unlimited" : row.max_size_mb == null ? "—" : fmtMb(row.max_size_mb) }),
+    render: (row) => el("span", { text: row.max_size_mb === -1 ? "Unlimited" : row.max_size_mb == null ? "—" : maxSizeText(row.max_size_mb) }),
   },
   {
     key: "auto_growth_mb",

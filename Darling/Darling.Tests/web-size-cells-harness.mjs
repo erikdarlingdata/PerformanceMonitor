@@ -122,7 +122,7 @@ out.r2 = {
   growth: cells(rf("get_default_trace_events"), [{ growth_mb: 0.5 }], "Growth"),
   finopsTotal: cells(dbSizes.COLUMNS, [{ total_size_mb: 0.5 }], "Total"),
   finopsUsed: cells(dbSizes.COLUMNS, [{ used_size_mb: 0.25 }], "Used"),
-  finopsFree: cells(dbSizes.COLUMNS, [{ free_space_mb: 0.25 }], "Free MB"),
+  finopsFree: cells(dbSizes.COLUMNS, [{ free_space_mb: 0.25 }], "Free"),
   finopsVolumeFree: cells(dbSizes.COLUMNS, [{ volume_free_mb: 0.5 }], "Volume free"),
   versionStoreData: cells(versionStore.COLUMNS, [{ database_data_size_mb: 4.5 }], "Database data size"),
 };

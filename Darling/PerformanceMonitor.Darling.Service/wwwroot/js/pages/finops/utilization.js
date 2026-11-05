@@ -30,6 +30,14 @@ const SUMMARY_SUBTITLE = "Last 24 hours";
 const VERDICT_SEV = { RIGHT_SIZED: "Healthy", OVER_PROVISIONED: "Warning", UNDER_PROVISIONED: "Critical" };
 const BAND_SEV = { good: "Healthy", fair: "Warning", poor: "Critical" };
 
+/* #7562: the sentence under the tiles names two colors, amber from 60% and red above 85%. The service sends that sentence only from 60%, so the tile is
+   colored when the sentence is there: amber, and red above 85%, the same line both desktop bars use. */
+const STOLEN_RED_PCT = 85;
+function stolenSev(memory) {
+  if (!memory || memory.stolen_memory_pct == null || !memory.stolen_memory_note) return undefined;
+  return memory.stolen_memory_pct > STOLEN_RED_PCT ? "Critical" : "Warning";
+}
+
 /* Both come from the shared catalog, so a label or format changed there changes here (the Server page does the same). */
 const CPU_SERIES = READ_FIELDS.get_cpu_utilization.line.series;
 const SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
@@ -59,7 +67,8 @@ export const MEMORY_STATS = [
 const DERIVED_KEYS = ["verdict_label", "verdict_sev", "day_label", "monthly_cost_text", "annual_cost_text", "workers_in_use"];
 
 const SUMMARY_STATS = [
-  { key: "verdict_label", label: "Verdict", format: "text" },
+  /* #7562: the word UNDER PROVISIONED is wider than a tile at the full value size and broke before its last letter, so it takes the small size. */
+  { key: "verdict_label", label: "Verdict", format: "text", small: true },
   { key: "health_score", label: "Health", format: "int" },
   { key: "monthly_cost_text", label: "Budget", format: "text" },
   { key: "annual_cost_text", label: "Annual", format: "text" },
@@ -144,6 +153,7 @@ function loadUtilization(body, server, ctx) {
         .map((s) =>
           s.key === "verdict_label" ? { ...s, sev: VERDICT_SEV[data.verdict] }
             : s.key === "health_score" ? { ...s, sev: BAND_SEV[data.health_band] }
+            : s.key === "memory.stolen_memory_pct" ? { ...s, sev: stolenSev(data.memory) }
             : s);
       const trend = (data.provisioning_trend || []).map((r) => ({
         ...r,

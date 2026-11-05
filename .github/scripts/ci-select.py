@@ -531,6 +531,57 @@ def scan_classes(root: str = ROOT) -> dict[str, dict[str, set[str]]]:
     return out
 
 
+# #7739: scan_classes() reads class declarations and [Fact]/[Theory] lines as plain text, so it also finds a private nested
+# fixture class (xunit lists only public classes), an abstract base, and a `class W { }` or `[Fact]` that sits inside a test's
+# string (a census test's sample source). The test host lists none of them, and a plan that names one stops the leg (#6734).
+# The nightly map holds the classes the host listed, so a name in the map is real. A name the map has never seen (a class
+# added since it was built) is checked here against the source with its comments and strings blanked, which is slow (about
+# 12 ms a file) and is therefore asked only for those names, never for the whole tree.
+_CLASS_MODS = re.compile(r"^[ \t]*((?:(?:public|internal|private|protected|sealed|static|abstract|partial)\s+)*)class\s+(\w+)")
+_NOT_LISTED_WORDS = frozenset({"private", "protected", "internal", "abstract", "static"})
+
+
+def _listed_in_code(text: str, cls: str) -> bool:
+    """Does `text` declare `cls` in code (not in a string or a comment) as a class the test host lists: public, or partial
+    with no access word (another part may say public), not abstract or static, and holding a [Fact]/[Theory] of its own or
+    naming a base class (it may inherit the tests; the caller already knows the class holds or inherits one)."""
+    lines = cs_code_and_literals(text)[0].split("\n")
+    holders = _holders_of(lines)
+    for n, line in enumerate(lines):
+        m = _CLASS_MODS.match(line)
+        if not m or m.group(2) != cls:
+            continue
+        words = set(m.group(1).split())
+        if words & _NOT_LISTED_WORDS or not words & {"public", "partial"}:
+            continue
+        tail = line[m.end():]
+        if ":" not in tail and "{" not in tail and n + 1 < len(lines):
+            tail += " " + lines[n + 1]
+        if cls in holders or _BASE_LIST.match(tail):
+            return True
+    return False
+
+
+def listed_checker(root: str = ROOT) -> "Callable[[str, str], bool]":
+    """`(suite, Class) -> bool`: is it a class the test host lists (#7739, see _listed_in_code)? Parses the files that declare
+    the class the first time it is asked and remembers the answer. A class no test file declares is not listed."""
+    homes: "dict[tuple[str, str], list[str]] | None" = None
+    memo: "dict[tuple[str, str], bool]" = {}
+
+    def check(suite: str, cls: str) -> bool:
+        nonlocal homes
+        if (suite, cls) not in memo:
+            if homes is None:
+                homes = {}
+                for s, rel, name, _traits in _walk_classes(root):
+                    homes.setdefault((s, name), []).append(rel)
+            memo[(suite, cls)] = any(_listed_in_code(read_source(os.path.join(root, rel), "replace"), cls)
+                                     for rel in dict.fromkeys(homes.get((suite, cls), ())))
+        return memo[(suite, cls)]
+
+    return check
+
+
 def class_selected(suite: str, traits: set[str], d: dict) -> bool:
     """Would today's rules run this class for this decision?"""
     guard = "Stage=Guard" in traits
@@ -1392,7 +1443,8 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                now: "datetime.datetime | None" = None, max_age_days: "float | None" = MAP_MAX_AGE_DAYS,
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
                named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False,
-               shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS) -> dict:
+               shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS,
+               listed: "Callable[[str, str], bool] | None" = None) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -1410,6 +1462,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     scan_classes() returns it, which is how a class the map has never seen is found. `named` is `{suite: {Class, ...}}`:
     the test classes whose source names a symbol the pull request declares or changes (symbol_classes(), tight tokens
     only, #5776); None or empty adds nothing.
+    `listed` is listed_checker()'s answer (#7739): a selected class the map has never seen is kept only when it says the test
+    host lists it (not a private nested fixture, an abstract base, or a class declared inside a test's string). A class in the
+    map ran, so it is never asked. None asks nothing.
 
     A class is selected when it carries Stage=Guard, its own file changed, it covers a changed file, a text pattern
     of it matches a changed file, it reads the whole tree and any non-documentation file changed, the map has
@@ -1600,6 +1655,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         for cls in sorted({} if docs_only else (named or {}).get(suite, ())):
             if cls in mapped or cls in found:
                 reasons.setdefault(cls, "names a changed symbol")
+        # #7739: a class the map has never seen (it only reaches `reasons` through the tree scan's text rules) must be one the
+        # test host lists, or a plan that names it stops its leg (#6734).
+        if listed is not None:
+            for c in [c for c in reasons if c not in mapped and not listed(suite, c)]:
+                del reasons[c]
         # #5894: the caller runs the whole Stage=Guard trait on its own, so a Guard class in the selection would run twice.
         # It keeps its `why` entry (the printed summary still counts it) but is not selected.
         in_guard_stage = {c for c in reasons if "Stage=Guard" in found.get(c, ())} if guard_stage_separate else set()
@@ -2263,7 +2323,7 @@ def local_classes(root: str, base: str, map_path: "str | None" = None, wide: boo
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), shared_diff=text,
-                         **selection_args(Rules()))
+                         listed=listed_checker(root), **selection_args(Rules()))
         lines.append(f"MAP coverage answer ({map_path}):")
         if sel["full"]:
             lines.append(f"MAP FULL: {sel['reason']}")
@@ -2352,7 +2412,8 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         args = selection_args(Rules())
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text, **args)
+        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text,
+                         listed=listed_checker(root), **args)
         count = sum(len(v) for v in sel["selected"].values())
         part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
                 "map that matches a changed file")
@@ -2718,7 +2779,7 @@ def main(argv: list[str]) -> int:
             shared_diff = sd[1] if sd else None
         result = map_select(test_map, files, drift, discovered, event=args.event, base_ref=args.base_ref,
                             named=named, guard_stage_separate=args.guard_stage_separate, shared_diff=shared_diff,
-                            **selection_args(Rules()))
+                            listed=listed_checker(args.root), **selection_args(Rules()))
         if result.get("docs_only"):
             print(f"::notice::test map: {result['reason']}")
         if result["full"]:
