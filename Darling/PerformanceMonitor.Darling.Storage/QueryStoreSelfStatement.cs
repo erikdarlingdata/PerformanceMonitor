@@ -82,4 +82,31 @@ public static class QueryStoreSelfStatement
     /// </summary>
     public static string NotSelfOfKey(string serverIdExpression, string databaseExpression, string queryIdExpression) =>
         $"NOT EXISTS (SELECT 1 FROM {QueryStoreSelfKeys.TableName} AS sk WHERE sk.server_id = {serverIdExpression} AND sk.database_name = {databaseExpression} AND sk.query_id = {queryIdExpression})";
+
+    /// <summary>
+    /// #7736: the slots a Query Store top read keeps in <c>ranked</c>'s WHERE, one for each row source that read ranks
+    /// (<c>deduped</c> for the raw and interval-table reads, <c>parts</c> for the daily read). The candidate limit
+    /// (<c>LIMIT</c> in <c>ranked</c>) is applied there, so the monitor's own statements must be gone before it: removed after it
+    /// (in the tail) they have already used up the candidates, and a page can come back with none of the real rows. A slot is a
+    /// comment, so a statement that was never given <see cref="WithRankedKeyTest"/> runs unchanged.
+    /// </summary>
+    public const string RankedDedupedSlot = "/*SELFKEY:deduped*/";
+
+    /// <summary>The slot of the daily read's <c>parts</c> source (see <see cref="RankedDedupedSlot"/>).</summary>
+    public const string RankedPartsSlot = "/*SELFKEY:parts*/";
+
+    /// <summary>
+    /// #7736: <paramref name="sql"/> with the key-table test in each ranked slot, as <see cref="NotSelfOfKey"/>. The caller passes it
+    /// only when <see cref="QueryStoreSelfKeys.ReadyAsync"/> answered true inside the read's own snapshot; before that the table misses
+    /// the text stored earlier, so the read keeps the tail's text test alone. The tail's test stays in every case. The server id is
+    /// <c>$1</c> in every one of these statements. The row source's columns are qualified, because an unqualified name inside the
+    /// subquery would resolve to the key table's own column.
+    /// </summary>
+    public static string WithRankedKeyTest(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        return sql
+            .Replace(RankedDedupedSlot, "AND   " + NotSelfOfKey("$1", "deduped.database_name", "deduped.query_id"), StringComparison.Ordinal)
+            .Replace(RankedPartsSlot, "AND   " + NotSelfOfKey("$1", "parts.database_name", "parts.query_id"), StringComparison.Ordinal);
+    }
 }
