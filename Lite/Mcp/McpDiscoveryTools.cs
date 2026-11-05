@@ -72,7 +72,7 @@ public sealed class McpDiscoveryTools
         }
     }
 
-    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances with their current status and last collection time. A server whose connection check is failing reads Offline and its row carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; all three are null otherwise.")]
     public static async Task<string> ListServers(ServerManager serverManager, LocalDataService dataService)
     {
         var servers = serverManager.GetEnabledServers();
@@ -109,6 +109,11 @@ public sealed class McpDiscoveryTools
                 server_name = s.ServerName,
                 display_name = string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName,
                 status = statusText,
+                /* #7590: an unreachable server says since when and why, from the in-process connection check (the same sentence
+                   Darling's list_servers gives from its stored one); all three are null while the server is online or unchecked. */
+                reason = status.UnreachableReason,
+                connect_down_since = status.UnreachableReason is null ? null : (status.StatusChangedAt ?? status.LastChecked)?.ToUniversalTime().ToString("o"),
+                last_connect_error = status.UnreachableReason is null ? null : status.ErrorMessage,
                 read_only = s.ReadOnlyIntent,
                 /* #7527: a UTC stamp, the same shape Darling's list_servers answers. The store keeps collection times in UTC. */
                 last_collection = lastCollection is { } at ? DateTime.SpecifyKind(at, DateTimeKind.Utc).ToString("o") : null,

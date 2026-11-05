@@ -300,7 +300,9 @@ internal static class DarlingDataReader
         DateTime? RegisteredAt = null,
         int? SqlEngineEdition = null,
         IReadOnlyList<string>? SameMachineAs = null,
-        decimal MonthlyCostUsd = 0m);
+        decimal MonthlyCostUsd = 0m,
+        DateTime? ConnectDownSince = null,
+        string? LastConnectError = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -1043,7 +1045,7 @@ internal static class DarlingDataReader
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name, instance_name
         """;
 
     public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
@@ -3348,7 +3350,9 @@ internal static class DarlingDataReader
             s.created_date,
             s.sql_engine_edition,
             {SameMachineAsColumnSql},
-            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd
+            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
+            s.connect_down_since,
+            s.last_connect_error
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3384,7 +3388,9 @@ internal static class DarlingDataReader
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
                 reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
-                reader.GetDecimal(10)));
+                reader.GetDecimal(10),
+                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
         return rows;

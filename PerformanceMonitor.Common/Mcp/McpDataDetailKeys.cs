@@ -102,6 +102,9 @@ public static class McpDataDetailKeys
             // get_alert_history (Darling and Lite): why a notification was not delivered, which can quote a channel's URL
             // or the login a mail server refused.
             "send_error",
+            // list_servers and get_collection_health (#7590): why the service could not connect to a server, which is the
+            // connect exception's message, so it can quote the host, the port or the login the server refused.
+            "last_connect_error",
             // Free text that can quote collected text: the generic "message" key (a tool's status sentence, which can
             // quote what the monitored server said) and the job-failure alert context label "Message" (the step's
             // output, normalized to the same entry).

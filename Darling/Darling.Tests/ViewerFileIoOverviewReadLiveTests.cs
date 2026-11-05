@@ -97,6 +97,12 @@ VALUES (1, $1, $2, 'viewer-6970', $3, $4, $5, $6, 0, 0, $7, $8, 0, 0, $9)", conn
             Assert.Equal(expected[i].Value, actual[i].ReadLatencyMs, 9);
         }
 
+        /* #7624: each point carries the reads its latency averages over (the per-file reads of that time summed) and the bucket width the read used. */
+        var expectedReads = perFile.GroupBy(p => p.CollectionTime).OrderBy(g => g.Key).Select(g => g.Sum(p => p.Reads)).ToList();
+        Assert.Equal(expectedReads, actual.Select(a => a.Reads).ToList());
+        Assert.Contains(actual, a => a.Reads > 0);
+        Assert.All(actual, a => Assert.True(a.BucketMinutes >= 1, $"bucket width {a.BucketMinutes}"));
+
         Assert.True(actual.Count < perFile.Count, "the overview read returns fewer rows than the per-file read");
     }
 

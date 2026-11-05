@@ -332,9 +332,14 @@ public static partial class CustomViewValidation
     }
 
     /// <summary>The outcome of <see cref="ValidateDefinition"/>: valid, or invalid with a caller-facing reason.</summary>
-    public readonly record struct DefinitionValidation(bool IsValid, string? Error)
+    public readonly record struct DefinitionValidation(bool IsValid, string? Error, IReadOnlyList<string>? Warnings = null)
     {
         public static DefinitionValidation Valid => new(true, null);
+
+        /// <summary>Valid, with advice about a definition that saves and runs but will not draw what its author meant
+        /// (#7565). A warning never makes a definition invalid. Null or empty <paramref name="warnings"/> is plain <see cref="Valid"/>.</summary>
+        public static DefinitionValidation ValidWith(IReadOnlyList<string> warnings) =>
+            warnings.Count == 0 ? Valid : new(true, null, warnings);
 
         public static DefinitionValidation Fail(string error) => new(false, error);
     }
@@ -459,6 +464,7 @@ public static partial class CustomViewValidation
         }
 
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        var warnings = new List<string>();
 
         for (var i = 0; i < panels.Count; i++)
         {
@@ -485,11 +491,18 @@ public static partial class CustomViewValidation
                     return DefinitionValidation.Fail($"panel {i}: {strayKeyError}");
                 }
 
-                var (_, composeError) = ComposeSpec.TryParsePanel(panel, declaredVariables);
+                var (composePlan, composeError) = ComposeSpec.TryParsePanel(panel, declaredVariables);
                 if (composeError is not null)
                 {
                     return DefinitionValidation.Fail($"panel {i}: {composeError}");
                 }
+
+                if (PerfmonRate.Error(composePlan!, variables!, $"panel {i}") is string rateError)
+                {
+                    return DefinitionValidation.Fail(rateError);
+                }
+
+                AddCumulativePerfmonWarnings(warnings, composePlan!, $"panel {i}");
             }
             else
             {
@@ -554,7 +567,78 @@ public static partial class CustomViewValidation
             }
         }
 
-        return DefinitionValidation.Valid;
+        return DefinitionValidation.ValidWith(warnings);
+    }
+
+    /// <summary>
+    /// #7565: a composed panel that charts <c>perfmon_value</c> for a cumulative counter draws a line that only climbs.
+    /// <c>perfmon_stats.cntr_value</c> is SQL Server's own number, which for a counter whose name ends in <c>/sec</c> is
+    /// the running total since startup, so an average of it is not a rate. The panel saves and runs, so this is a
+    /// warning, not an error, and it names the measure that charts the rate (<c>perfmon_value_per_second</c>, SUM of the
+    /// stored delta over SUM of the stored interval seconds). Fires when the panel (or its overlay) uses
+    /// <c>perfmon_value</c> and either names a counter ending in <c>/sec</c> (an exact name, or a LIKE pattern for one) or
+    /// filters on no counter at all, so every counter is in play. A counter filter bound to a view variable cannot be
+    /// read here and stays quiet.
+    /// </summary>
+    private static void AddCumulativePerfmonWarnings(List<string> warnings, PanelPlan plan, string where)
+    {
+        if (string.Equals(plan.Measure.Key, PerfmonValueKey, StringComparison.Ordinal))
+        {
+            AddCumulativePerfmonWarning(warnings, plan.Filters, where, "measure");
+        }
+
+        if (plan.Overlay is { } overlay && string.Equals(overlay.Measure.Key, PerfmonValueKey, StringComparison.Ordinal))
+        {
+            AddCumulativePerfmonWarning(warnings, plan.Filters, where, "overlay measure");
+        }
+    }
+
+    private const string PerfmonValueKey = "perfmon_value";
+
+    private static void AddCumulativePerfmonWarning(List<string> warnings, IReadOnlyList<ComposeFilter> filters, string where, string role)
+    {
+        var counterFilters = filters
+            .Where(f => string.Equals(f.Dimension.Name, "counter_name", StringComparison.Ordinal)
+                && (f.Op == ComposeFilterOp.Eq || f.Op == ComposeFilterOp.Like))
+            .ToList();
+
+        string? counter = null;
+        foreach (var filter in counterFilters)
+        {
+            if (filter.Value.IsVariable)
+            {
+                continue;
+            }
+
+            foreach (var literal in filter.Value.Literals ?? Array.Empty<string>())
+            {
+                var rate = filter.Op == ComposeFilterOp.Like
+                    ? literal.Contains("/sec", StringComparison.OrdinalIgnoreCase)
+                    : literal.Trim().EndsWith("/sec", StringComparison.OrdinalIgnoreCase);
+                if (rate)
+                {
+                    counter = literal.Trim();
+                    break;
+                }
+            }
+
+            if (counter is not null)
+            {
+                break;
+            }
+        }
+
+        if (counter is not null)
+        {
+            warnings.Add($"{where}: the {role} 'perfmon_value' on counter '{counter}' charts SQL Server's running total since startup, " +
+                "which only climbs, not a per-second rate. Use the ratio 'perfmon_value_per_second' for a counter whose name ends in /sec, with one counter, one instance and one server per series.");
+        }
+        else if (counterFilters.Count == 0)
+        {
+            warnings.Add($"{where}: the {role} 'perfmon_value' pins no counter (no counter_name eq or like filter), so it includes counters whose name ends in /sec, " +
+                "where it is SQL Server's running total since startup (a line that only climbs), not a per-second rate. " +
+                "Filter to one counter, and use the ratio 'perfmon_value_per_second' for a /sec counter, with one counter, one instance and one server per series.");
+        }
     }
 
     /// <summary>The extra keys a notebook READ cell carries beyond the shared v1 read-panel keys (design D7,
@@ -726,6 +810,7 @@ public static partial class CustomViewValidation
         }
 
         var declaredVariables = variables!.Select(v => v.Name).ToHashSet(StringComparer.Ordinal);
+        var warnings = new List<string>();
 
         for (var i = 0; i < cells.Count; i++)
         {
@@ -772,11 +857,18 @@ public static partial class CustomViewValidation
                     /* A panel cell is a v2 composed panel, validated by the SAME ComposeSpec.TryParsePanel authority
                        a dashboard's composed panel routes through (against the notebook's declared variables) — so a
                        stored notebook panel cell can always compile and carries all the v2 safety. */
-                    var (_, panelError) = ComposeSpec.TryParsePanel(cell, declaredVariables);
+                    var (cellPlan, panelError) = ComposeSpec.TryParsePanel(cell, declaredVariables);
                     if (panelError is not null)
                     {
                         return DefinitionValidation.Fail($"cell {i}: {panelError}");
                     }
+
+                    if (PerfmonRate.Error(cellPlan!, variables!, $"cell {i}") is string rateError)
+                    {
+                        return DefinitionValidation.Fail(rateError);
+                    }
+
+                    AddCumulativePerfmonWarnings(warnings, cellPlan!, $"cell {i}");
 
                     /* The per-cell window pin (#2735): an optional 'range' — relative ({hours}) or absolute
                        ({windowStart, windowEnd}, the shape the run path already accepts) — that the renderer
@@ -849,7 +941,7 @@ public static partial class CustomViewValidation
             }
         }
 
-        return DefinitionValidation.Valid;
+        return DefinitionValidation.ValidWith(warnings);
     }
 
     /// <summary>PURE: whether a series color is a <c>#rrggbb</c> hex literal (case-insensitive) — the ONLY form a

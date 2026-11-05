@@ -38,16 +38,9 @@ internal static class EventLaneGeometry
     public static double HoverToleranceDays(double windowSpanDays)
         => Math.Max(MinHoverToleranceDays, BarWidthDays(windowSpanDays));
 
-    /// <summary>
-    /// The value of the bucket nearest <paramref name="targetX"/>, null when there is no usable bucket. An event series
-    /// whose nearest bucket is further than <paramref name="toleranceDays"/> away reads 0 (nothing happened there); a
-    /// level series (CPU, memory) always reads its nearest sample. <paramref name="times"/> is ascending.
-    /// </summary>
-    public static double? NearestValue(double[]? times, double[]? values, double targetX, bool isEventBased, double toleranceDays)
+    /// <summary>The index of the entry of ascending, non-empty <paramref name="times"/> nearest <paramref name="targetX"/>.</summary>
+    public static int NearestIndex(double[] times, double targetX)
     {
-        if (times == null || values == null || times.Length == 0)
-            return null;
-
         int lo = 0, hi = times.Length - 1;
         while (lo < hi)
         {
@@ -61,7 +54,20 @@ internal static class EventLaneGeometry
         int best = lo;
         if (lo > 0 && Math.Abs(times[lo - 1] - targetX) < Math.Abs(times[lo] - targetX))
             best = lo - 1;
+        return best;
+    }
 
+    /// <summary>
+    /// The value of the bucket nearest <paramref name="targetX"/>, null when there is no usable bucket. An event series
+    /// whose nearest bucket is further than <paramref name="toleranceDays"/> away reads 0 (nothing happened there); a
+    /// level series (CPU, memory) always reads its nearest sample. <paramref name="times"/> is ascending.
+    /// </summary>
+    public static double? NearestValue(double[]? times, double[]? values, double targetX, bool isEventBased, double toleranceDays)
+    {
+        if (times == null || values == null || times.Length == 0)
+            return null;
+
+        int best = NearestIndex(times, targetX);
         double val = values[best];
         if (double.IsNaN(val)) return null;
 

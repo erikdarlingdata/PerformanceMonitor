@@ -733,6 +733,24 @@ public static partial class DarlingWebEndpoints
     internal static CustomViewValidation.DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject) =>
         CustomViewValidation.ValidateNotebookDefinition(rootObject, ReadPanelParams);
 
+    /// <summary>#7565: adds the validator's warnings to a saved view's reply as <c>warnings</c> (a list of text), only when it
+    /// has some, so the builder shows what the validator said rather than judging the definition a second time.</summary>
+    internal static JsonObject WithValidationWarnings(JsonObject viewNode, CustomViewValidation.DefinitionValidation validation)
+    {
+        if (validation.Warnings is { Count: > 0 } warnings)
+        {
+            var list = new JsonArray();
+            foreach (var warning in warnings)
+            {
+                list.Add(warning);
+            }
+
+            viewNode["warnings"] = list;
+        }
+
+        return viewNode;
+    }
+
     internal static bool IsHexColor(string? color) => CustomViewValidation.IsHexColor(color);
 
     private static string? TryGetString(JsonObject obj, string key) =>
@@ -1208,6 +1226,12 @@ public static partial class DarlingWebEndpoints
                 node["labelSuffix"] = labelSuffix;
             }
 
+            /* #7565: a reading hint, only on the measures that carry one (perfmon_value is a running total for a /sec counter). */
+            if (m.Note is not null)
+            {
+                node["note"] = m.Note;
+            }
+
             measures.Add(node);
         }
 
@@ -1300,6 +1324,9 @@ public static partial class DarlingWebEndpoints
             var measures = new JsonArray();
             foreach (var m in sourceGroup)
             {
+                /* #7565: a measure's reading hint ("note") is left out of the compact view on purpose: the default call sits
+                   within a few hundred bytes of its headroom floor, so the hint rides the display name here ("running total",
+                   "per second") and the full text is one source= drill-down away. */
                 measures.Add(new JsonObject
                 {
                     ["key"] = m["key"]!.GetValue<string>(),

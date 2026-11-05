@@ -687,6 +687,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // alone, and the re-run of V243 adds it back. Safe on a store that never had it.
         new(243, "hasWaitingTasksProgramName",
             @"ALTER TABLE IF EXISTS collect.waiting_tasks DROP COLUMN IF EXISTS program_name;"),
+        // V244 (#7590): the connect-failure state on the server registry. The last column is the probe's newest sentinel. The rewind drops the three
+        // columns so a re-run of V244 adds them again. Safe on a store that never had them.
+        new(244, "hasServerConnectDownState",
+            @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error, DROP COLUMN IF EXISTS next_connect_attempt;"),
         // V245 (#7611): the three Database Protection thresholds on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
         // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
         new(245, "hasProtectionThresholds",

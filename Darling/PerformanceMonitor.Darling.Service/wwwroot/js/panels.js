@@ -52,7 +52,8 @@ import {
   windowFromHours,
   dbScopeChip,
   dbFilteredEmptyText,
-  sourceStrip,
+  sourceSpan,
+  applySourceSubtitle,
   clampText,
   plainEmptyStrip,
   noteStrip,
@@ -160,7 +161,7 @@ export function renderPanel(desc, onSettled, gate = null) {
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : ""), "data-panel": desc.read || desc.title, "data-title": desc.title }, [
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
        (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
-    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
+    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, sourceSpan(desc), dbScopeChip(desc.read, desc.dbScope)]),
     /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
        load that replaces the body never replaces it. Absent on every other panel. */
     desc.control || null,
@@ -276,13 +277,14 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     desc = applySourceWording(desc, res.data, body.parentNode);
+    /* #5244, #7543: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`), goes in the heading
+       beside the window label, so no row above the chart takes height from the plot. Nothing for every other panel. */
+    applySourceSubtitle(body.parentNode, res.data, desc);
     const rendered = render(res.data, desc);
 
     mount(body, [
       kept,
       floor,
-      /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
-      sourceStrip(res.data, desc),
       typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
@@ -1545,6 +1547,13 @@ function vizLine(data, desc) {
      Say what happened, in the read's own words when it has a message, instead of a chart with nothing on it. */
   const drawable = (v) => v != null && v !== "" && Number.isFinite(Number(v));
   if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
+  /* #7549: `allZeroText` is the one line drawn in place of a chart whose every measured value, in every series, is 0: a healthy server's counters are flat
+     lines on a 0 to 1 axis, a full card each, that say less than a sentence. One value above 0, in any series, keeps the chart. */
+  if (desc.allZeroText && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key]) && Number(p[s.key]) > 0))) {
+    /* The line keeps the stats-reset fact the chart's marker would have carried: a window that crossed a reset differenced against a fresh baseline. */
+    const crossedReset = desc.resetKey && points.some((p) => p && p[desc.resetKey] === true);
+    return emptyStrip(crossedReset ? desc.allZeroText + " (statistics were reset in this window)" : desc.allZeroText);
+  }
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,
@@ -1586,8 +1595,9 @@ function vizLine(data, desc) {
     /* #7571: "stacked-bar" draws a grouped read as one bar per time, one segment per group. Absent: the chart's default line. */
     mode: desc.mode || undefined,
     /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). #7555: a bytes chart likewise. */
-    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : null,
-    unit: desc.unit ?? null,
+    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : desc.format === "ms" ? "ms" : null,
+    /* #7586: a duration axis carries its unit on every tick (fmtMs), so an "ms" caption above it would name a second unit. */
+    unit: desc.format === "ms" && desc.unit === "ms" ? null : (desc.unit ?? null),
     title: desc.title || null,
     atTime: desc.atTime || null,
     source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,

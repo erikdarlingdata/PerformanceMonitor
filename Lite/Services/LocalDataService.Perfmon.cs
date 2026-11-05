@@ -43,7 +43,7 @@ SELECT
 FROM {perfmonRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {perfmonRelation} WHERE server_id = $1)
-ORDER BY counter_name";
+ORDER BY lower(counter_name), counter_name, instance_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
@@ -82,12 +82,13 @@ ORDER BY counter_name";
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
-SELECT DISTINCT counter_name
+/* #7550: DISTINCT may only order on what it selects, so the lower-cased name rides along as a second column and the reader ignores it. */
+SELECT DISTINCT counter_name, lower(counter_name) AS name_key
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY counter_name";
+ORDER BY lower(counter_name), counter_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

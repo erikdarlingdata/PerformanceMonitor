@@ -793,7 +793,10 @@ public sealed class FleetRollup
            its first collection — see ServerCollectionStatus. */
         if (s.CardStatus == ServerCollectionStatus.Offline)
         {
-            return OfflineNote;
+            /* #7590: the service's own connect failed, so the reason is that and its error, not an age. */
+            return s.ConnectDownSince.HasValue
+                ? ServerHealthClassifier.UnreachableReason(s.ConnectDownSince.Value, s.LastConnectError)
+                : OfflineNote;
         }
 
         if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)

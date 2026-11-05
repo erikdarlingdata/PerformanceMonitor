@@ -4,7 +4,8 @@
   //
   // The service refuses a config with no servers ("servers must contain at least one entry"), so one SQL Server and one
   // PostgreSQL are registered at addresses nothing listens on (127.0.0.1 port 1). The connect fails at once, the service retries quietly, and nothing
-  // is ever collected over the rows seed.sql writes. Alerts and analysis stay off, so a failed connect sends nothing.
+  // is ever collected over the rows seed.sql writes (#7590: the failed connect itself is stored on the registry row too, so seed.sql
+  // freezes those columns with a trigger and "ui-down-sql" is the one server seeded as unreachable). Alerts and analysis stay off, so a failed connect sends nothing.
   // The web host asks for its token on loopback too, so the "network" block holds only a token (no listen). The runner
   // makes a fresh one per run, signs in once and hands the session cookie to the browser walks, which therefore see
   // the dashboard as a signed-in editor does (the baselines show the edit controls).
@@ -14,7 +15,8 @@
   "servers": [
     { "name": "ui-sql", "host": "127.0.0.1,1", "auth": "integrated" },
     { "name": "ui-pg", "engine": "postgres", "host": "127.0.0.1", "port": 1, "auth": "sql", "username": "ui-smoke", "password": "unused" },
-    { "name": "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary", "host": "127.0.0.2,1", "auth": "integrated" }
+    { "name": "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary", "host": "127.0.0.2,1", "auth": "integrated" },
+    { "name": "ui-down-sql", "host": "127.0.0.3,1", "auth": "integrated" }
   ],
   "alerts": { "enabled": false },
   "analysis": { "enabled": false },

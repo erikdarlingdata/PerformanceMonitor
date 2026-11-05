@@ -33,7 +33,7 @@ public sealed partial class ViewerDataService
         FROM v_server_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-        ORDER BY configuration_name
+        ORDER BY lower(configuration_name), configuration_name
         """;
 
     /* 28 columns, then capture_time (#4966), in Lite's exact SELECT order — the database-config reader below maps them by
@@ -52,7 +52,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     public const string DatabaseScopedConfigSql = """
@@ -61,7 +61,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name, configuration_name
+        ORDER BY lower(database_name), database_name, lower(configuration_name), configuration_name
         """;
 
 
@@ -76,7 +76,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     /// <summary>

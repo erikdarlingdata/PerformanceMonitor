@@ -64,6 +64,39 @@ public sealed class WebPgTrendChartsBehaviourTests
 
     private static string[] Labels(JsonElement chart) => Strings(chart.GetProperty("labels"));
 
+    /// <summary>#7549: a window with no temp bytes, no temp files and no deadlock draws one line each in place of two flat charts.</summary>
+    [Fact]
+    public void AQuietDatabase_SaysSoInOneLine_InPlaceOfFlatTempAndDeadlockCharts()
+    {
+        var r = Run("databaseQuiet");
+        Assert.Equal(new[] { "Database Trend", "Database Transactions per Second" }, Strings(r.GetProperty("titles")));
+        var empties = Strings(r.GetProperty("empties"));
+        Assert.Contains("No temp bytes were written in this window.", empties);
+        Assert.Contains("No temp files were created and no deadlocks were recorded in this window.", empties);
+    }
+
+    /// <summary>#7549: a quiet window that crossed a statistics reset says so in the one line, and one that did not leaves the line as it was.</summary>
+    [Fact]
+    public void AQuietWindowThatCrossedAStatsReset_SaysSoInTheOneLine()
+    {
+        var empties = Strings(Run("databaseQuietReset").GetProperty("empties"));
+        Assert.Contains("No temp bytes were written in this window. (statistics were reset in this window)", empties);
+        Assert.Contains("No temp files were created and no deadlocks were recorded in this window. (statistics were reset in this window)", empties);
+
+        Assert.DoesNotContain(Strings(Run("databaseQuiet").GetProperty("empties")), e => e.Contains("reset", StringComparison.Ordinal));
+    }
+
+    /// <summary>#7549: one point above 0 in any series keeps the chart.</summary>
+    [Fact]
+    public void OnePointAboveZero_KeepsTheTempBytesChart_AndADeadlockKeepsTheCountsChart()
+    {
+        var r = Run("databaseOneDeadlock");
+        Assert.Equal(
+            new[] { "Database Trend", "Database Transactions per Second", "Database Temp Bytes", "Database Temp Files and Deadlocks" },
+            Strings(r.GetProperty("titles")));
+        Assert.DoesNotContain(Strings(r.GetProperty("empties")), e => e.StartsWith("No temp ", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void TheDatabaseTrend_DrawsTheDesktopsFourSeriesGroups_AsCharts_NotATable()
     {

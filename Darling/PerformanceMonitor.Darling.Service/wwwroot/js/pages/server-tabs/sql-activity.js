@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, windowFromHours, clampText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, fmtPlain, windowFromHours, clampText } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -54,7 +54,12 @@ export function perfmonPanel(server, ctx) {
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
-    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort();
+    /* #7550: the store sends these in its name order without case, but the picker must not depend on reply order, so the page
+       sorts the same way: names folded to lower case (A-Z only, as the store's lower() does), then the raw name. A plain .sort()
+       put every capitalized counter above every lower-case one. */
+    const fold = (n) => n.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+    const byName = (a, b) => { const x = fold(a), y = fold(b); return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0; };
+    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort(byName);
     if (!names.length) return mount(body, emptyStrip("The latest snapshot holds no perfmon counters."));
 
     /* The snapshot table lives HERE rather than in its own descriptor: this composite has already fetched the
@@ -166,7 +171,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
          average prints plain numbers, since one axis serves every line. */
       ...(allRates
         ? { unit: "/s", formatValue: fmtRate }
-        : { formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) }),
+        : { formatValue: fmtPlain }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(keptHours || ctx.hours),
@@ -242,7 +247,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         points,
         xKey: "time",
         series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
-        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        formatValue: fmtPlain,
         unit: "sessions",
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),

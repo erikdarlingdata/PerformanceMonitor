@@ -125,6 +125,28 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
         Assert.Equal("High plan churn, Query Store read-only", qs.GetProperty("graded").GetString());
     }
 
+    /// <summary>#7586: a read-only database showed <c>qs_read_only_state</c> raw in the Reasons column. Every reason token the server can emit
+    /// reads in the words <c>QueryStoreClutter.ReasonText</c> gives it, and none prints as the token.</summary>
+    [Fact]
+    public void EveryQueryStoreReasonToken_ReadsInWords_NotAsTheToken()
+    {
+        var all = Result.Value.GetProperty("qs").GetProperty("all");
+        var tokens = typeof(PerformanceMonitor.Darling.Storage.QueryStoreClutter)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.Name.StartsWith("Reason", StringComparison.Ordinal))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToArray();
+        Assert.Equal(11, tokens.Length);
+        foreach (var token in tokens)
+        {
+            Assert.True(all.TryGetProperty(token, out var words), "the page has no words for " + token);
+            Assert.Equal(PerformanceMonitor.Darling.Storage.QueryStoreClutter.ReasonText(token), words.GetString());
+            Assert.NotEqual(token, words.GetString());
+        }
+
+        Assert.Equal("Query Store read-only (database state)", all.GetProperty("qs_read_only_state").GetString());
+    }
+
     [Fact]
     public void RunLiveNow_PutsItsSentenceBesideTheButton_InTheSharedRunRow()
     {

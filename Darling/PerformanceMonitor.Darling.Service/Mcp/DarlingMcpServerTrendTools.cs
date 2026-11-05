@@ -528,7 +528,9 @@ public sealed class DarlingMcpServerTrendTools
         return items;
     }
 
-    /// <summary>Adds a number rounded to 2 places, a text column as it is, or nothing when the column is NULL.</summary>
+    /// <summary>Adds a number, a text column as it is, or nothing when the column is NULL. A number is rounded to 2 places, except a rate
+    /// (a column named <c>..._per_sec</c> or <c>..._per_second</c>), which keeps 4 significant digits and never fewer than 2 places (#7586): a
+    /// file moving 0.0042 MB/s is not 0, and a steady small rate is not a line that jumps between 0.01 and 0.02.</summary>
     private static void AddNumber(Dictionary<string, object?> point, string key, NpgsqlDataReader reader, int ordinal)
     {
         if (reader.IsDBNull(ordinal))
@@ -540,8 +542,22 @@ public sealed class DarlingMcpServerTrendTools
         {
             var type when type == typeof(string) => reader.GetString(ordinal),
             var type when type == typeof(int) => reader.GetInt32(ordinal),
-            _ => Math.Round(reader.GetDouble(ordinal), 2),
+            _ => Rounded(reader.GetDouble(ordinal), IsRate(key)),
         };
+    }
+
+    internal static bool IsRate(string key) => key.EndsWith("_per_sec", StringComparison.Ordinal) || key.EndsWith("_per_second", StringComparison.Ordinal);
+
+    /// <summary>2 places, or for a rate 4 significant digits (at least 2 places): 0.0042 stays 0.0042, 1234.5678 reads 1234.57.</summary>
+    internal static double Rounded(double value, bool rate)
+    {
+        if (!rate || value == 0 || !double.IsFinite(value))
+        {
+            return Math.Round(value, 2);
+        }
+
+        var places = Math.Clamp(3 - (int)Math.Floor(Math.Log10(Math.Abs(value))), 2, 15);
+        return Math.Round(value, places);
     }
 
     private static string Stamp(DateTime value) =>
