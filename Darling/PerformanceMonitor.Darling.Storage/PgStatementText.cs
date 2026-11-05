@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -123,6 +126,76 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
         + ") OVER (PARTITION BY s.queryid) AS own_entries";
 
     /// <summary>
+    /// The window aggregate that carries the entries the marker cannot name (#7681): a JSON array of <c>{"u": userid, "d": dbid,
+    /// "t": text}</c> over the entries of the fetching session's OWN role whose text does not end with the marker, NULL when there
+    /// is none. <c>pg_stat_statements</c> keeps the text of the call that created an entry, so an entry created by the service's
+    /// old, unmarked statement never gets the marker; <see cref="WithMatchedEntries"/> matches these texts against the
+    /// statements the service sends. The role test keeps the application's entries under other logins out of the array, and
+    /// out of the transfer when the service has a login of its own.
+    /// </summary>
+    private static readonly string CandidateEntriesWindow =
+        "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint, 't', s.query)) FILTER (WHERE s.userid = "
+        + "(SELECT r.oid FROM pg_catalog.pg_roles AS r WHERE r.rolname = current_user) AND NOT " + PgOwnStatement.IsOwnSql("s.query")
+        + ") OVER (PARTITION BY s.queryid) AS candidate_entries";
+
+    /// <summary>
+    /// The own entries of a queryid after the shape match (#7681): <paramref name="markedEntries"/>, the entries whose text carries
+    /// the marker, plus every entry of <paramref name="candidateEntries"/> (<see cref="CandidateEntriesWindow"/>) whose text has
+    /// the shape of a statement this process has marked (<see cref="PgOwnStatement.IsServiceStatementText"/>). Returns
+    /// <paramref name="markedEntries"/> as it came when nothing is added, NULL included, so a queryid with no own entry keeps
+    /// <c>own_entries</c> NULL. The result is the JSON text <see cref="UpsertSql"/> binds.
+    /// </summary>
+    public static string? WithMatchedEntries(string? markedEntries, string? candidateEntries)
+    {
+        if (string.IsNullOrEmpty(candidateEntries))
+        {
+            return markedEntries;
+        }
+
+        var pairs = new List<(long User, long Database)>();
+        if (!string.IsNullOrEmpty(markedEntries))
+        {
+            using var marked = JsonDocument.Parse(markedEntries);
+            foreach (var entry in marked.RootElement.EnumerateArray())
+            {
+                pairs.Add((entry.GetProperty("u").GetInt64(), entry.GetProperty("d").GetInt64()));
+            }
+        }
+
+        var added = false;
+        using var candidates = JsonDocument.Parse(candidateEntries);
+        foreach (var entry in candidates.RootElement.EnumerateArray())
+        {
+            if (!entry.TryGetProperty("t", out var text) || !PgOwnStatement.IsServiceStatementText(text.GetString()))
+            {
+                continue;
+            }
+
+            var pair = (entry.GetProperty("u").GetInt64(), entry.GetProperty("d").GetInt64());
+            if (!pairs.Contains(pair))
+            {
+                pairs.Add(pair);
+                added = true;
+            }
+        }
+
+        if (!added)
+        {
+            return markedEntries;
+        }
+
+        var json = new StringBuilder("[");
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            json.Append(i == 0 ? "" : ",")
+                .Append("{\"u\":").Append(pairs[i].User.ToString(CultureInfo.InvariantCulture))
+                .Append(",\"d\":").Append(pairs[i].Database.ToString(CultureInfo.InvariantCulture)).Append('}');
+        }
+
+        return json.Append(']').ToString();
+    }
+
+    /// <summary>
     /// The text fetch, against the monitored PostgreSQL server. <c>$1</c> caps the rows.
     ///
     /// <para><c>showtext = true</c> is the entire point of this query and the reason it is separate from
@@ -151,7 +224,8 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
 SELECT
     queryid,
     " + SensitiveTextCase + @",
-    own_entries
+    own_entries,
+    candidate_entries
 FROM
 (
     /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
@@ -169,7 +243,8 @@ FROM
         s.queryid AS queryid,
         s.query AS query_text,
         s.total_exec_time AS total_exec_time,
-        " + OwnEntriesWindow + @"
+        " + OwnEntriesWindow + @",
+        " + CandidateEntriesWindow + @"
     FROM {AURORA_SCHEMA}.aurora_stat_statements(true) AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
@@ -195,7 +270,8 @@ LIMIT $1";
 SELECT
     queryid,
     " + SensitiveTextCase + @",
-    own_entries
+    own_entries,
+    candidate_entries
 FROM
 (
     /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
@@ -212,7 +288,8 @@ FROM
         s.queryid AS queryid,
         s.query AS query_text,
         s.{TOTAL_TIME} AS total_exec_time,
-        " + OwnEntriesWindow + @"
+        " + OwnEntriesWindow + @",
+        " + CandidateEntriesWindow + @"
     FROM {STATEMENTS_SCHEMA}.pg_stat_statements AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL

@@ -970,7 +970,7 @@ public sealed partial class DarlingWorker
     {
         var queryIds = new List<long>();
         var texts = new List<string>();
-        /* #7567: per queryid, the JSON list of [userid, dbid] entries whose text carries the service's marker, or null. */
+        /* #7567: per queryid, the JSON list of {"u", "d"} entries whose text carries the service's marker or has the shape of its statements (#7681), or null. */
         var ownEntries = new List<string?>();
 
         /* The upsert keys on (server_id, queryid) and a batch carrying one queryid twice does not lose one
@@ -1021,7 +1021,11 @@ public sealed partial class DarlingWorker
 
             queryIds.Add(queryId);
             texts.Add(reader.GetString(1));
-            ownEntries.Add(reader.IsDBNull(2) ? null : reader.GetString(2));
+            /* #7681: an entry the old, unmarked statement created has no marker in its stored text; the fetch also returns the
+               service's login's unmarked entries, and the ones whose text has the shape of a statement this process sends join. */
+            ownEntries.Add(PgStatementText.WithMatchedEntries(
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return (queryIds, texts, ownEntries);

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -33,16 +34,52 @@ namespace PerformanceMonitor.Collectors;
 /// PostgreSQL 18.6: <c>/* x */ SELECT 1</c> is stored as <c>SELECT $1</c>) and keeps one that sits inside the
 /// statement's own span, so the marker goes at the end of each statement, before its semicolon.</para>
 ///
-/// <para><b>What it still gets wrong.</b> Two limits, both measured. First, a SHARED login: when the service and the
+/// <para><b>Entries that predate the marker (#7681).</b> The stored text is the FIRST call's, so on a server the service
+/// monitored before the marker shipped every service entry was created by the old, unmarked text, and a marked call only adds
+/// its calls to that entry. The comment never changes the <c>queryid</c>, so the entry is the same one. The hourly fetch
+/// therefore also reads each unmarked entry of the fetching login and counts it as the service's when its text has the same
+/// shape (<see cref="PgStatementShape"/>: comments, case and literals ignored) as a statement this process has sent through
+/// <see cref="Mark"/> or <see cref="MarkBatch"/>. Every PostgreSQL statement the service sends goes through those two, so the
+/// set fills as collectors run.</para>
+///
+/// <para><b>What it still gets wrong.</b> Three limits, all measured. First, a SHARED login: when the service and the
 /// application connect as the same role (<c>postgres</c>) and the service ran a statement first since the last
 /// <c>pg_stat_statements_reset()</c>, the one shared entry carries the marker and ALL its calls, the application's
-/// included, are left out of Analysis. Second, the store learns own entries hourly, so a statement is shown until its
-/// text is read. Everything not known to be the service's is shown.</para>
+/// included, are left out of Analysis; the shape match has the same limit, since an application statement with the service's
+/// exact shape under the service's login is one entry. Second, the store learns own entries hourly, so a statement is shown
+/// until its text is read. Third, the shape set starts empty with the process: a statement of a collector that has not run
+/// yet since the service started (a daily one, say) is learned at the first hourly fetch after it runs. Everything not known
+/// to be the service's is shown.</para>
 /// </summary>
 public static class PgOwnStatement
 {
     /// <summary>The marker comment. One constant, used by every statement the PostgreSQL collectors send.</summary>
     public const string Marker = "/* PerformanceMonitor Darling */";
+
+    /// <summary>
+    /// The shapes (<see cref="PgStatementShape.Key"/>) of the statements this process has marked (#7681). Keyed by shape, so a
+    /// statement whose literals change from call to call is one key. The cap is for a statement built with a variable number of
+    /// fragments (a VALUES list per batch size), which would otherwise add a key per size for the life of the process.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, byte> ServiceShapes = new(StringComparer.Ordinal);
+
+    private const int MaxServiceShapes = 4096;
+
+    private static void Register(string statementWithoutMarker)
+    {
+        var key = PgStatementShape.Key(statementWithoutMarker);
+        if (!ServiceShapes.ContainsKey(key) && ServiceShapes.Count < MaxServiceShapes)
+        {
+            ServiceShapes.TryAdd(key, 0);
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="storedText"/>, the text <c>pg_stat_statements</c> stored for an entry, has the shape of a statement
+    /// this process has marked (#7681). How the fetch recognizes an entry the OLD, unmarked statement created.
+    /// </summary>
+    public static bool IsServiceStatementText(string? storedText) =>
+        !string.IsNullOrWhiteSpace(storedText) && ServiceShapes.ContainsKey(PgStatementShape.Key(storedText));
 
     /// <summary>
     /// A SQL predicate, true when the <c>pg_statement_stats</c> row is NOT one of the service's own entries: its
@@ -86,9 +123,11 @@ public static class PgOwnStatement
 
         if (body.EndsWith(Marker, StringComparison.Ordinal))
         {
+            Register(body[..^Marker.Length]);
             return sql;
         }
 
+        Register(body);
         return body + "\n" + Marker + (semicolon ? ";" : string.Empty);
     }
 
