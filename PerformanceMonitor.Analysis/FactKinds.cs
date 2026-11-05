@@ -42,7 +42,7 @@ public static class FactKinds
         if (string.IsNullOrEmpty(key))
             return false;
 
-        return key is "DISK_SPACE" or "TRACE_FLAGS" or "DATABASE_TOTAL_SIZE_MB" or "DB_CONFIG" or "PG_SERVER_MAJOR_VERSION"
+        return key is "DISK_SPACE" or "TRACE_FLAGS" or "DATABASE_TOTAL_SIZE_MB" or "DB_CONFIG" or "QUERY_STORE_ERROR" or "PG_SERVER_MAJOR_VERSION"
             || key.StartsWith("CONFIG_", StringComparison.Ordinal)
             || key.StartsWith("SERVER_", StringComparison.Ordinal)
             || key.StartsWith("PG_POSTURE_", StringComparison.Ordinal)
