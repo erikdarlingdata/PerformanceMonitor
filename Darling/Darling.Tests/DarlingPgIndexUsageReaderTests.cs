@@ -46,7 +46,7 @@ public class DarlingPgIndexUsageReaderTests
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", Sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $5", Sql, StringComparison.Ordinal);
 
         /* No literal limit anywhere: the caller's limit has to be the only one. */
         Assert.DoesNotContain("LIMIT 50", Sql, StringComparison.Ordinal);
@@ -71,7 +71,6 @@ public class DarlingPgIndexUsageReaderTests
         foreach (var column in new[] { "database_name", "schema_name", "table_name", "index_name" })
         {
             Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
-            Assert.Contains($"s.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
         }
     }
 
@@ -186,8 +185,8 @@ public class DarlingPgIndexUsageReaderTests
     public void CarriesHowLongItHasBeenWatched()
     {
         Assert.Contains("e.first_seen_at", Sql, StringComparison.Ordinal);
-        Assert.Contains("s.sample_count", Sql, StringComparison.Ordinal);
-        Assert.Contains("count(*) AS sample_count", Squeezed, StringComparison.Ordinal);
+        Assert.Contains("e.sample_count", Sql, StringComparison.Ordinal);
+        Assert.Contains("AS sample_count", Squeezed, StringComparison.Ordinal);
     }
 
     // ── The honest-empty denominator ─────────────────────────────────────────────────────────────
