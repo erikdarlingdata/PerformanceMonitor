@@ -114,6 +114,8 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
         Assert.Equal(10, r.GetProperty("checked").GetArrayLength());
         Assert.Equal(4, r.GetProperty("disabled").GetInt32());
         Assert.Contains("Limit reached", Strings(r.GetProperty("hint")).Single());
+        // #7578: reaching the cap is not a warning, so the text carries the muted marker (the stylesheet colors it).
+        Assert.True(r.GetProperty("hintIsLimit")[0].GetBoolean());
         Assert.True(r.GetProperty("emptyChart").GetInt32() >= 1);
         Assert.Equal(FirstTen, Strings(r.GetProperty("top")));
     }

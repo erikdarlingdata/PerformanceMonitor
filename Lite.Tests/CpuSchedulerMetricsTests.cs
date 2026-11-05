@@ -96,7 +96,8 @@ public class CpuSchedulerMetricsTests
 
         Assert.Equal("N/A", rows.Single(r => r.Metric == "Runnable Requests").Value);
         Assert.Equal("N/A", rows.Single(r => r.Metric == "Total Requests").Value);
-        Assert.Equal("N/A", rows.Single(r => r.Metric == "Runnable %").Value);
+        Assert.Equal("0.00", rows.Single(r => r.Metric == "Runnable %").Value);
+        Assert.Equal(CpuSchedulerMetrics.RunnablePercentHint, rows.Single(r => r.Metric == "Runnable %").Hint);
     }
 
     [Theory]

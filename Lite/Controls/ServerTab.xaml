@@ -2623,6 +2623,7 @@
                               CanUserSortColumns="False" Margin="0,8,0,0">
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow" BasedOn="{StaticResource GridRowStyle}">
+                                <Setter Property="ToolTip" Value="{Binding Hint}"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsWarning}" Value="True">
                                         <Setter Property="Background" Value="#33FF6B6B"/>
