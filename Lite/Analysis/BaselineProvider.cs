@@ -105,6 +105,7 @@ public class BaselineProvider
         [MetricNames.IoWriteLatency] = "file_io_stats",
         [MetricNames.Blocking] = "blocked_process_report",
         [MetricNames.BlockingPerMinute] = "blocked_process_report",
+        [MetricNames.BlockingSnapshot] = "dmv_blocking_snapshot",
         [MetricNames.Deadlock] = "deadlocks",
         [MetricNames.Memory] = "memory_stats",
     };
@@ -235,7 +236,7 @@ public class BaselineProvider
     /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
     /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -730,6 +731,12 @@ WITH clean AS (
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
             MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
                 StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + " AS ev", "COUNT(*)"), "event_time"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts v_dmv_blocking_snapshots rows (same self-wait
+               filter), so its history is those rows, covered by the snapshot collector's own runs. A snapshot's event_time IS its
+               collection_time, so the events keep the helper's collection_time key and need no OnEventTime. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "v_collection_log",
+                "(SELECT * FROM v_dmv_blocking_snapshots WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + ") AS snap", "COUNT(*)"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
