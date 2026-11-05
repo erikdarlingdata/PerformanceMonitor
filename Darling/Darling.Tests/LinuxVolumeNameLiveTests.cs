@@ -34,7 +34,7 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class LinuxVolumeNameLiveTests
 {
-    private const int LinuxServer = -7704, WindowsServer = -7705;
+    private const int LinuxServer = -7704, WindowsServer = -7705, MixedServer = -7706;
     private const int LiveTimeoutSeconds = 60;
     private const string LinuxDirectory = "/var/opt/mssql/data";
 
@@ -51,7 +51,7 @@ public sealed class LinuxVolumeNameLiveTests
     private static async Task DeleteSentinelsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            string.Create(CultureInfo.InvariantCulture, $"DELETE FROM database_size_stats WHERE server_id IN ({LinuxServer}, {WindowsServer});"), connection)
+            string.Create(CultureInfo.InvariantCulture, $"DELETE FROM database_size_stats WHERE server_id IN ({LinuxServer}, {WindowsServer}, {MixedServer});"), connection)
         { CommandTimeout = LiveTimeoutSeconds };
         await cleanup.ExecuteNonQueryAsync(ct);
     }
@@ -196,6 +196,45 @@ VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, 
             Assert.Equal(0.075, disk.Value, precision: 6);
             Assert.Equal("D:\\", disk.ObjectName);
             Assert.Equal(2, disk.Metadata["volume_count"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (c, token) => DeleteSentinelsAsync(c, token));
+        }
+    }
+
+    [Fact]
+    public async Task DataAndLogDirectoriesOnOneDisk_AreOneDiskInTheDiskSpaceSumAndCount()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        using var connection = (await OpenAsync(connectionString, ct))!;
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var now = Now();
+            var at = now.AddMinutes(-5);
+            /* NULL names, data and log directories on one 1,000,000 MB disk with 30,000 MB free, plus a second disk with a real name. */
+            await InsertAsync(connection, MixedServer, at, "SalesDb", 1, "/var/opt/mssql/data/SalesDb.mdf", null, 1_000_000, 30_000, ct);
+            await InsertAsync(connection, MixedServer, at, "SalesDb", 2, "/var/opt/mssql/log/SalesDb_log.ldf", null, 1_000_000, 30_000, ct);
+            await InsertAsync(connection, MixedServer, at, "Archive", 1, "/mnt/backup/Archive.mdf", "/mnt/backup", 500_000, 200_000, ct);
+
+            var context = new AnalysisContext
+            {
+                ServerId = MixedServer,
+                ServerName = "linux-volume-7704",
+                TimeRangeStart = now.AddHours(-4),
+                TimeRangeEnd = now,
+                ServerUtcOffset = TimeSpan.Zero,
+            };
+            var disk = (await new PgFactCollector(dataSource).CollectFactsAsync(context)).Single(f => f.Key == "DISK_SPACE");
+            Assert.Equal(2, disk.Metadata["volume_count"]);
+            Assert.Equal(1_500_000, disk.Metadata["total_volume_mb"]);
+            Assert.Equal(230_000, disk.Metadata["total_free_mb"]);
+            Assert.Equal(30_000, disk.Metadata["min_free_mb"]);
 
             bodySucceeded = true;
         }

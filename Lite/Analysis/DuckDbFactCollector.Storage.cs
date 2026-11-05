@@ -359,11 +359,11 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
             using var cmd = connection.CreateCommand();
             cmd.CommandText = $@"
 WITH latest AS (
-    SELECT volume_mount_point, volume_total_mb, volume_free_mb,
+    SELECT volume_mount_point, volume_total_mb, volume_free_mb, collection_time, named,
            ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
     FROM (
         /* #7704: the volume key (VolumeKey) names a volume with no stored name by its files' directory. */
-        SELECT {VolumeKey.Sql} AS volume_mount_point, volume_total_mb, volume_free_mb, collection_time
+        SELECT volume_mount_point IS NOT NULL AS named, {VolumeKey.Sql} AS volume_mount_point, volume_total_mb, volume_free_mb, collection_time
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time >= $2
@@ -379,6 +379,15 @@ tightest AS (
     FROM latest WHERE rn = 1
     ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
     LIMIT 1
+),
+disks AS (
+    /* #7704: a volume with a stored name counts as itself. The directory keys (a volume with no stored name) of one
+       collection that report the same total and free figures are one disk (data and log directories on one disk), so the
+       sum and the count take each such pair once. Two different disks with identical figures at one collection are counted
+       once too, which is accepted: the figures are the same either way and the card only quotes the sum. */
+    SELECT volume_mount_point, volume_total_mb, volume_free_mb, named,
+           ROW_NUMBER() OVER (PARTITION BY named, collection_time, volume_total_mb, volume_free_mb ORDER BY volume_mount_point) AS disk_rn
+    FROM latest WHERE rn = 1
 )
 SELECT
     MIN(volume_free_mb * 1.0 / volume_total_mb) AS min_free_pct,
@@ -387,7 +396,7 @@ SELECT
     SUM(volume_total_mb) AS total_volume_mb,
     SUM(volume_free_mb) AS total_free_mb,
     (SELECT volume_mount_point FROM tightest) AS tightest_mount_point
-FROM latest WHERE rn = 1";
+FROM disks WHERE named OR disk_rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });

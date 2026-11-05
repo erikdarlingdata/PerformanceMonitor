@@ -27,6 +27,7 @@ public sealed class LinuxVolumeNameTests : IClassFixture<SharedDuckDbFixture>
 {
     private const int LinuxServer = -770_401;
     private const int WindowsServer = -770_402;
+    private const int MixedServer = -770_403;
     private const string LinuxDirectory = "/var/opt/mssql/data";
 
     private readonly DuckDbInitializer _duckDb;
@@ -130,5 +131,28 @@ VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, 
         Assert.Equal(0.075, disk.Value, precision: 6);
         Assert.Equal("D:\\", disk.ObjectName);
         Assert.Equal(2, disk.Metadata["volume_count"]);
+    }
+
+    [Fact]
+    public async Task DataAndLogDirectoriesOnOneDisk_AreOneDiskInTheDiskSpaceSumAndCount()
+    {
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        var at = end.AddMinutes(-5);
+        using (var readLock = _duckDb.AcquireReadLock())
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            /* NULL names, data and log directories on one 1,000,000 MB disk with 30,000 MB free, plus a second disk with a real name. */
+            await InsertAsync(connection, MixedServer, at, "SalesDb", 1, "/var/opt/mssql/data/SalesDb.mdf", null, 1_000_000, 30_000);
+            await InsertAsync(connection, MixedServer, at, "SalesDb", 2, "/var/opt/mssql/log/SalesDb_log.ldf", null, 1_000_000, 30_000);
+            await InsertAsync(connection, MixedServer, at, "Archive", 1, "/mnt/backup/Archive.mdf", "/mnt/backup", 500_000, 200_000);
+        }
+
+        var disk = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(MixedServer, end)))
+            .Single(f => f.Key == "DISK_SPACE");
+        Assert.Equal(2, disk.Metadata["volume_count"]);
+        Assert.Equal(1_500_000, disk.Metadata["total_volume_mb"]);
+        Assert.Equal(230_000, disk.Metadata["total_free_mb"]);
+        Assert.Equal(30_000, disk.Metadata["min_free_mb"]);
     }
 }
