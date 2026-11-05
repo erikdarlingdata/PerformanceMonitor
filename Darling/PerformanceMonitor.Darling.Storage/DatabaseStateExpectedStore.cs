@@ -78,7 +78,7 @@ FROM latest l
 LEFT JOIN config.database_state_expected e
   ON  e.server_id = $1
   AND e.database_name = l.database_name
-ORDER BY l.database_name";
+ORDER BY lower(l.database_name), l.database_name";
 
     public const string SetSql = @"
 INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at)

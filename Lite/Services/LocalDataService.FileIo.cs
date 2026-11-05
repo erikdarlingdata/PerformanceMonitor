@@ -183,7 +183,7 @@ SELECT
 FROM rated
 GROUP BY database_name, file_name, 3
 HAVING COUNT(rated_reads) > 0
-ORDER BY database_name, file_name, 3";
+ORDER BY lower(database_name), database_name, file_name, 3";
 
     /// <summary>
     /// Gets file I/O latency trend data broken down by file for charting (the top 10 files by reads and the top 10 by writes).
