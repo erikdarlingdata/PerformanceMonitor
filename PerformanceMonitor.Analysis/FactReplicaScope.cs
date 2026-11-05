@@ -41,6 +41,7 @@ public static class FactReplicaScope
     private static readonly string[] ReplicatedKeys =
     [
         "DB_CONFIG",
+        "QUERY_STORE_ERROR",
         "FILE_AUTOGROWTH_PERCENT",
         "PLAN_REGRESSION",
         "ANOMALY_OBJECT_GROWTH",

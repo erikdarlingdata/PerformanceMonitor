@@ -660,7 +660,7 @@ export const SERVER_TABS = [
             "truncation_note",
             /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
                drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
-            ["approximation_note"],
+            ["approximation_note", "query_store_error_note"],
             null,
             picker,
             null,
@@ -1017,7 +1017,10 @@ export const SERVER_TABS = [
         "issues",
         SCHEDULER_ISSUE_COLUMNS,
         ctx.label,
-        "No scheduler issues in this window, which is the healthy state."
+        "No scheduler issues in this window, which is the healthy state.",
+        2,
+        /* #7688: on SQL Server on Linux the read leaves Other-Process CPU and Idle out (idle reads 0 there) and says why here. */
+        "system_cpu_note"
       ),
       tablePanel(
         "I/O Issues",
