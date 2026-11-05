@@ -106,6 +106,36 @@ public sealed class InvestigationsPageTests
         Assert.Equal(0, picked.GetProperty("closeButtons").GetInt32());
     }
 
+    /// <summary>#7700: a signed-in admin on a store with web.allowAdminWrites off gets no Close form (the service refuses it), and the
+    /// section says why; with the switch on the form is back.</summary>
+    [Fact]
+    public void WithTheSwitchOff_TheCloseForm_IsNotDrawn_AndTheSectionNamesTheSwitch()
+    {
+        var run = Run();
+        var off = run.GetProperty("writesOff");
+        Assert.Equal(0, off.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, off.GetProperty("closeButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("signInLines").GetInt32());
+        var line = Assert.Single(Strings(off.GetProperty("offLines")));
+        Assert.Contains("set web.allowAdminWrites to true in darling.json", line, StringComparison.Ordinal);
+        Assert.Equal(1, run.GetProperty("writesOn").GetProperty("closeInputs").GetInt32());
+    }
+
+    /// <summary>#7700: the single-request view (#/investigations?request=id) says the same, for a signed-in admin and for a seat that is
+    /// not signed in (the switch comes first: signing in would not help, so the sign-in sentence is not shown).</summary>
+    [Theory]
+    [InlineData("oneWritesOff")]
+    [InlineData("oneWritesOffSignedOut")]
+    public void TheSingleRequestView_WithTheSwitchOff_NamesTheSwitch_AndDrawsNoCloseForm_AndNoSignInSentence(string phase)
+    {
+        var off = Run().GetProperty(phase);
+        Assert.Equal(0, off.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, off.GetProperty("closeButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("signInLines").GetInt32());
+        var line = Assert.Single(Strings(off.GetProperty("offLines")));
+        Assert.Contains("set web.allowAdminWrites to true in darling.json", line, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheRebuild_KeepsTheOpenRequest_AndCloseEmptiesThePane()
     {
