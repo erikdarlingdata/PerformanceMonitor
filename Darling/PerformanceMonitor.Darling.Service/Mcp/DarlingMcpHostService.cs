@@ -1534,6 +1534,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpWhoDroveItTools>()
             /* #6074: find_database, which monitored server holds a database. */
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
+            /* #7609: get_query_fleet_summary, one statement's cost on every server. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
             .WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —
