@@ -313,7 +313,7 @@ public sealed class ViewerServerSummaryDisplayTests
     }
 
     [Theory]
-    [InlineData(60.0, null, "60%")]                    // SQL-only when other-process is unavailable
+    [InlineData(60.0, null, "SQL CPU 60%")]            // SQL-only when other-process is unavailable (#7682)
     [InlineData(60.0, 15.0, "75% (SQL 60%)")]          // total prominently, SQL alongside
     public void CpuDisplay_ShowsTotalWithSqlAlongside(double sqlCpu, double? otherCpu, string expected)
     {

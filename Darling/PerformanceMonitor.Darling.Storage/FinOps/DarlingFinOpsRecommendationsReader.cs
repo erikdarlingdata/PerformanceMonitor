@@ -336,12 +336,17 @@ ORDER BY database_name";
            read (compression) applies the same set at its own read. */
         var currentDatabases = await CurrentDatabaseScope.ReadAsync(dataSource, serverId, logger: logger, cancellationToken: cancellationToken);
 
+        /* #7705: set by rule 1 from the collected role (the edition advice's own read, #980). A secondary's load is only its work as a
+           secondary, so rules 2, 3 and 12 give it one informational row in place of the CPU and memory right-sizing rows. */
+        var isAgSecondary = false;
+
         // 1. Enterprise feature / license audit (collected server_properties + database_config.is_encrypted).
         try
         {
             var facts = await GetEditionFactsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
             if (facts is { } f)
             {
+                isAgSecondary = ProvisioningVerdict.IsSecondaryReplicaRole(f.AgReplicaRole);
                 var isEnterprise = FinOpsRecommendationFigures.EditionNeedsLicensingAdvice(f.Edition);
 
                 // TDE is only the deciding factor on pre-2019 Enterprise — read the config snapshot just then.
@@ -396,7 +401,7 @@ ORDER BY database_name";
         try
         {
             var util = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
-            computeCpuRow = cpu24HourWatched ? FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost) : null;
+            computeCpuRow = cpu24HourWatched && !isAgSecondary ? FinOpsRecommendationFigures.CpuRightSizing(util, monthlyCost) : null;
             if (computeCpuRow != null)
             {
                 computeCpuTarget = FinOpsRecommendationFigures.CpuRightSizingTargetCores(util);
@@ -417,7 +422,7 @@ ORDER BY database_name";
                and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
                (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
                denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
-            if (util != null && util.PhysicalMemoryMb > 8192
+            if (!isAgSecondary && util != null && util.PhysicalMemoryMb > 8192
                 && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 var (p95Mb, sampleCount, window) = await GetMemoryP95Async(dataSource, serverId, memoryCutoff, commandTimeoutSeconds, cancellationToken);
@@ -516,9 +521,13 @@ ORDER BY database_name";
         try
         {
             var vmUtil = await DarlingFinOpsUtilizationReader.GetUtilizationEfficiencyAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken);
+            if (isAgSecondary)
+            {
+                recommendations.AddRange(FinOpsRecommendationFigures.VmRightSizing(0m, "", 0, 0, 0, 0, "", monthlyCost, includeCpuRow: false, isAgSecondary: true));
+            }
             /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
                and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
-            if (vmUtil != null && FinOpsUtilizationFigures.HasCpuSample(vmUtil)
+            else if (vmUtil != null && FinOpsUtilizationFigures.HasCpuSample(vmUtil)
                 && await GetEngineEditionAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 /* The CPU row reads the Utilization view's own window and P95 (the last 24 hours), not a 7-day P95 of its own: two

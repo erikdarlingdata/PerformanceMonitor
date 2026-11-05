@@ -84,19 +84,64 @@ public sealed class AlertCadenceLiveTests
         }
     }
 
+    [Fact]
+    public async Task LiveStore_TheRecentSamplesRead_BuildsNoTotalForARowWithNoOtherProcessFigure_ButTotalsAMeasuredRow()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live recent-samples read.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var now = DateTime.UtcNow;
+            var newest = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
+
+            /* #7682: a Linux row (SQL Server older than 2025 CU1) stores no other-process figure; the older row is measured. */
+            await InsertAsync(connection, FirstCollectionId + 200, newest.AddMinutes(-2), newest.AddMinutes(-2), sqlCpu: 40, ct, otherCpu: 5);
+            await InsertAsync(connection, FirstCollectionId + 201, newest.AddMinutes(-1), newest.AddMinutes(-1), sqlCpu: 60, ct, otherCpu: null);
+
+            var worker = SelfAlertFleetPassTests.MakeWorker();
+            worker.StoreForTests = postgres;
+
+            var samples = await worker.ReadRecentCpuSamplesAsync(LiveServerId, now, ct);
+
+            Assert.Equal(2, samples.Count);
+            Assert.Equal(45, samples[0].TotalCpuPercent);
+            Assert.Equal(60, samples[1].SqlCpuPercent);
+            Assert.Null(samples[1].TotalCpuPercent);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     private static async Task InsertAsync(
-        NpgsqlConnection connection, long collectionId, DateTime collectionTime, DateTime? sampleTimeUtc, int sqlCpu, CancellationToken ct)
+        NpgsqlConnection connection, long collectionId, DateTime collectionTime, DateTime? sampleTimeUtc, int sqlCpu, CancellationToken ct, int? otherCpu = 0)
     {
         using var insert = new NpgsqlCommand(
             "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, "
             + "sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time_utc) "
-            + "VALUES ($1, $2, $3, 'example-sql-live', $4, $5, 0, $6)", connection);
+            + "VALUES ($1, $2, $3, 'example-sql-live', $4, $5, $7, $6)", connection);
         insert.Parameters.AddWithValue(collectionId);
         insert.Parameters.AddWithValue(collectionTime);
         insert.Parameters.AddWithValue(LiveServerId);
         insert.Parameters.AddWithValue(collectionTime);
         insert.Parameters.AddWithValue(sqlCpu);
         insert.Parameters.Add(new NpgsqlParameter { Value = sampleTimeUtc is { } utc ? utc : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        insert.Parameters.Add(new NpgsqlParameter { Value = otherCpu is { } other ? other : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
         await insert.ExecuteNonQueryAsync(ct);
     }
 
