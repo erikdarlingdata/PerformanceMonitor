@@ -38,6 +38,19 @@ public sealed class NextToolsForAdviceKeysTests
         "RUNNABLE_TASKS", "SERVER_MEMORY_DUMPS", "THREADPOOL_BLOCKING", "THREADPOOL_MIXED", "THREADPOOL_PARALLEL",
     };
 
+    /// <summary>#7608: a get_query_trend point where two plans both ran has a null query_plan_hash and plan_count 2, so the
+    /// regression recommendation sends the reader to get_query_store_top to see the plans apart.</summary>
+    [Fact]
+    public void ThePlanRegressionQueryTrendReason_PointsAtQueryStoreTop_WhereThePlansAreFolded()
+    {
+        var json = JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath("PLAN_REGRESSION")));
+        var reason = JsonDocument.Parse(json).RootElement.EnumerateArray()
+            .Single(e => e.GetProperty("tool").GetString() == "get_query_trend").GetProperty("reason").GetString();
+
+        Assert.Contains("plan_count is above 1", reason, StringComparison.Ordinal);
+        Assert.Contains("get_query_store_top", reason, StringComparison.Ordinal);
+    }
+
     private static string[] ToolsFor(string factKey)
     {
         var json = JsonSerializer.Serialize(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath(factKey)));
