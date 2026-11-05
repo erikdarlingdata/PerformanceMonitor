@@ -102,6 +102,42 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", _nextId--, at, ServerId, "NameOrderServer"
         Assert.Equal(["Alpha", "Beta", "delta", "epsilon", "Gamma"], await _dataService.GetCollectedDatabaseNamesAsync(ServerId));
     }
 
+    /// <summary>
+    /// #7689: the two reads that DISTINCT the database name. DuckDB refuses ORDER BY lower(x) on a DISTINCT whose select list
+    /// lacks it, so each is wrapped; running them is the proof the wrap is valid and the order is case-blind.
+    /// </summary>
+    [Fact]
+    public async Task DistinctDatabaseReads_OrderNamesWithoutCase()
+    {
+        var at = DateTime.UtcNow.AddMinutes(-5);
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+
+        foreach (var name in new[] { "Gamma", "delta", "Alpha", "epsilon", "Beta" })
+        {
+            /* Two lock rows per database: the DISTINCT must still return each name once. */
+            foreach (var table in new[] { "t1", "t2" })
+            {
+                await ExecAsync(
+                    @"INSERT INTO index_object_stats
+(collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
+ schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows,
+ user_seeks, user_scans, user_lookups, user_updates, row_lock_wait_in_ms, index_lock_promotion_count)
+VALUES ($1, $2, $3, 'NameOrderServer', $4, $5, 7, 'dbo', 100, $6, 1, 'IX', 'NONCLUSTERED', 1, 1, 10, 0, 0, 0, 0, 100, 0)",
+                    _nextId--, at, ServerId, at.AddDays(-1), name, table);
+            }
+
+            await ExecAsync(
+                @"INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name,
+ force_last_good_plan_desired_state, force_last_good_plan_actual_state, force_last_good_plan_reason, recommendation_name, recommendation_state, score, query_id, query_text)
+VALUES ($1, $2, $3, 'NameOrderServer', $4, 'Enabled', 'Enabled', 'ok', $5, 'Active', 50, 1000, 'SELECT 1')",
+                _nextId--, at, ServerId, name, "Rec_" + name);
+        }
+
+        string[] inOrder = ["Alpha", "Beta", "delta", "epsilon", "Gamma"];
+        Assert.Equal(inOrder, await _dataService.GetIndexLockingDatabasesAsync(ServerId));
+        Assert.Equal(inOrder, (await _dataService.GetLatestAutomaticTuningAsync(ServerId)).Select(r => r.DatabaseName));
+    }
+
     [Fact]
     public async Task PerfmonCounters_OrderNamesWithoutCase_ThenByInstance()
     {

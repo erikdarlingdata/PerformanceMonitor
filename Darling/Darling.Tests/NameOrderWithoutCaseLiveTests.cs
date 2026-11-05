@@ -191,6 +191,50 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)", CollectionIdGenerator.Next(), at, ServerId, Serv
         Assert.Equal(MixedCaseNamesInOrder, protection.Databases.Select(d => d.DatabaseName));
     }
 
+    /// <summary>
+    /// #7689: the plan correction enablement reads (Service and Viewer) and the Viewer's object locking database list are
+    /// <c>SELECT DISTINCT</c> reads. PostgreSQL refuses <c>ORDER BY lower(x)</c> on a DISTINCT whose select list lacks it, so each
+    /// is wrapped; running them is the proof the wrap is valid and the order is case-blind.
+    /// </summary>
+    [Fact]
+    public async Task DistinctDatabaseReads_OrderNamesWithoutCase_AgainstLivePostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live name-order test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, cCollation: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        var at = DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5));
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+
+        foreach (var name in MixedCaseNames)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_desired_state, force_last_good_plan_actual_state, recommendation_name, recommendation_state, query_id, query_text)
+VALUES ($1,$2,$3,$4,$5,'Enabled','Enabled',$6,'Active',1000,'SELECT 1')", CollectionIdGenerator.Next(), at, ServerId, ServerName, name, "Rec_" + name);
+
+            /* Two lock rows per database: the DISTINCT must still return each name once. */
+            foreach (var table in new[] { "t1", "t2" })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, object_id, schema_name, table_name, index_id, index_name, reserved_mb, row_lock_wait_in_ms, index_lock_promotion_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, name, 1, "dbo", table, 1, "PK_" + table, 10m, 100L, 0L);
+            }
+        }
+
+        Assert.Equal(MixedCaseNamesInOrder,
+            (await DarlingPlanCorrectionReader.GetLatestAutomaticTuningAsync(postgres, ServerId, cancellationToken: ct)).Select(r => r.DatabaseName));
+        Assert.Equal(MixedCaseNamesInOrder,
+            (await viewer.GetLatestAutomaticTuningAsync(ServerId, null, ct)).Select(r => r.DatabaseName));
+        Assert.Equal(MixedCaseNamesInOrder, await viewer.GetIndexLockingDatabasesAsync(ServerId, null, ct));
+    }
+
     [Fact]
     public async Task PerfmonCounterPicker_ListsNamesWithoutCase_AgainstLivePostgres()
     {
