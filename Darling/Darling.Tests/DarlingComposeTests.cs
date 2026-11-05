@@ -3025,9 +3025,8 @@ public sealed class DarlingComposeTests
             StringComparison.Ordinal);
 
         /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
-           real one: the drill path and the series cap. */
+           real one: the drill path and the series cap (the cap half is run by SeriesColorBehaviourTests). */
         Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
-        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
 
         /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
            rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and

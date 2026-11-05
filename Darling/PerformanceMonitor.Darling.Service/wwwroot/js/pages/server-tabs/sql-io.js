@@ -47,6 +47,7 @@ export function fileIoPanel(server, ctx) {
     const read = pivot(rows.filter((r) => r.avg_read_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_read_latency_ms" });
     const write = pivot(rows.filter((r) => r.avg_write_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_write_latency_ms" });
     if (!read.series.length && !write.series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
+    colorByName(read.series, write.series);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
        narrowed read spans the hours it answered for. */
@@ -79,8 +80,23 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
   }
   const names = [...peak.keys()].sort((a, b) => peak.get(b) - peak.get(a)).slice(0, maxSeries);
   const points = [...byTime.values()].sort((a, b) => String(a[xKey]).localeCompare(String(b[xKey])));
-  const series = names.map((n, i) => ({ key: n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
+  const series = names.map((n) => ({ key: n, label: n }));
   return { points, series };
+}
+
+/**
+ * #7535: the Read and Write charts each keep their own top series, so each list has its own order, and a color given by a list's own
+ * order put one file in two colors. The colors come from the two lists together instead: the Read chart's series first (the order it
+ * had before), then the Write series it does not hold, so one name has one color in both charts. The #7401 palette, as before.
+ */
+export function colorByName(...lists) {
+  const colors = new Map();
+  for (const list of lists) {
+    for (const s of list) if (!colors.has(s.key)) colors.set(s.key, SERIES_COLORS[colors.size % SERIES_COLORS.length]);
+  }
+  for (const list of lists) {
+    for (const s of list) s.color = colors.get(s.key);
+  }
 }
 
 export const TEMPDB_SERIES = READ_FIELDS.get_tempdb_trend.line.series;
