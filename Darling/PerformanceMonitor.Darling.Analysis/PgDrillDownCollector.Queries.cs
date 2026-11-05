@@ -1509,6 +1509,7 @@ SELECT collection_time,
        timeout_error_count_delta, forced_grant_count_delta
 FROM v_memory_grant_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
 AND   waiter_count > 0
 ORDER BY waiter_count DESC
 LIMIT 5";

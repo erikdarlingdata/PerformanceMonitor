@@ -71,7 +71,6 @@ SELECT /* PerformanceMonitorLite */
     timeout_error_count = ISNULL(deqrs.timeout_error_count, 0),
     forced_grant_count = ISNULL(deqrs.forced_grant_count, 0)
 FROM sys.dm_exec_query_resource_semaphores AS deqrs
-WHERE deqrs.max_target_memory_kb IS NOT NULL
 OPTION(RECOMPILE);";
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]

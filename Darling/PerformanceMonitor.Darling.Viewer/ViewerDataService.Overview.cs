@@ -103,8 +103,8 @@ LIMIT 1";
     /// <c>get_resource_semaphore</c> / <c>ServerHealthStatus.MemorySeverity</c> reads: grant waiters,
     /// timeout-error and forced-grant deltas, and total granted MB, summed across every pool at the newest
     /// collection instant. The Dashboard live-sums <c>sys.dm_exec_query_resource_semaphores.waiter_count</c>
-    /// (WHERE max_target_memory_kb IS NOT NULL, which the <c>memory_grant_stats</c> collector already
-    /// applies at capture); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
+    /// (WHERE max_target_memory_kb IS NOT NULL, which is the regular semaphore: this read filters
+    /// <c>resource_semaphore_id = 0</c> because the <c>memory_grant_stats</c> collector now keeps the small-query row too, #7676); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
     /// </summary>
     public const string ServerSummaryMemoryPressureSql = @"
 SELECT
@@ -114,6 +114,7 @@ SELECT
     CAST(COALESCE(SUM(granted_memory_mb), 0) AS double precision)
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: the small-query semaphore (id 1) is collected too; the Dashboard's filter now lives here */
 AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_grant_stats WHERE server_id = $1)";
 
     /// <summary>

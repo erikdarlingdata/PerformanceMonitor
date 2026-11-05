@@ -299,7 +299,12 @@ public static class ComposeCompiler
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
         {
-            return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+            /* #7676: memory_grant_stats keeps the small-query semaphore (id 1) beside the regular one (id 0). The grant
+               measures are pool-grain figures of the regular semaphore, so a panel reads id 0 only: AVG/MAX over both
+               rows would blend in the small semaphore's own 0 grants. */
+            return string.Equals(sourceTable, "memory_grant_stats", StringComparison.Ordinal)
+                ? $"(SELECT * FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} WHERE COALESCE(resource_semaphore_id, 0) = 0)"
+                : $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
         }
 
         /* #4605: query_store_interval_wide (V145) already holds the latest snapshot per

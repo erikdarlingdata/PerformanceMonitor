@@ -1,0 +1,112 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #7676: the memory-grant collector now keeps the small-query semaphore (resource_semaphore_id 1) beside the regular one (id 0).
+/// The per-semaphore reads show both rows; the per-pool reads still sum a pool's semaphores into one row, so the pool panels add up
+/// to the two semaphore rows and show a pool's small-query waiters.
+/// </summary>
+public sealed class ResourceSemaphoreSmallQueryRowLiveTests
+{
+    private const string ServerName = "darling-small-query-semaphore";
+    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task ASmallQuerySemaphoreRow_ShowsInThePerSemaphoreReads_AndThePerPoolReadsSumBoth()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live small-query semaphore test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            /* One pool, one collection: the regular semaphore (3 waiters, 100 MB granted) and the small-query semaphore (5 waiters,
+               7 MB granted, no max target: the DMV returns NULL and the collector stores 0). */
+            foreach (var (semaphore, target, maxTarget, available, granted, used, grantees, waiters) in new[]
+            {
+                ((short)0, 8000m, 12000m, 50m, 100m, 40m, 2, 3),
+                ((short)1, 700m, 0m, 20m, 7m, 6m, 1, 5),
+            })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO memory_grant_stats (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb, grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta, sample_interval_seconds)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, semaphore, 1, target, maxTarget, target, available, granted, used, grantees, waiters, 0L, 0L, 0L, 0L, 60);
+            }
+
+            var start = t.AddMinutes(-5);
+            var end = t.AddMinutes(5);
+
+            /* Per semaphore: both rows, regular first within the pool. */
+            var perSemaphore = await DarlingResourceSemaphoreReader.GetLatestAsync(postgres, ServerId, start, end, 30, ct);
+            Assert.Equal(new short[] { 0, 1 }, perSemaphore.Select(r => r.ResourceSemaphoreId).ToArray());
+            var perSemaphoreWindow = await DarlingResourceSemaphoreReader.GetWindowAsync(postgres, ServerId, start, end, 30, ct);
+            Assert.Equal(new short?[] { 0, 1 }, perSemaphoreWindow.Select(r => r.ResourceSemaphoreId).ToArray());
+
+            /* Per pool: the two semaphores summed into one row. */
+            var perPool = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(postgres, ServerId, start, end, ct);
+            var pool = Assert.Single(perPool);
+            Assert.Equal(107d, pool.GrantedMemoryMb);
+            Assert.Equal(70d, pool.AvailableMemoryMb);
+            Assert.Equal(8, pool.WaiterCount);
+            Assert.Equal(3, pool.GranteeCount);
+            var perPoolWindow = await DarlingMemoryGrantReader.GetMemoryGrantsWindowAsync(postgres, ServerId, start, end, ct);
+            var poolWindow = Assert.Single(perPoolWindow);
+            Assert.Equal(8, poolWindow.PeakWaiterCount);
+            Assert.Equal(107d, poolWindow.PeakGrantedMemoryMb);
+            Assert.Equal(70d, poolWindow.MinAvailableMemoryMb);
+
+            /* The per-collection granted-memory trend sums them too. */
+            await using (var trend = postgres.CreateCommand(TrendBucketSql.MemoryGrantPerCollectionSql))
+            {
+                StoreReadParameters.AddWindow(trend, ServerId, start, end);
+                await using var reader = await trend.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(107d, reader.GetDouble(1));
+                Assert.False(await reader.ReadAsync(ct));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM memory_grant_stats WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+}

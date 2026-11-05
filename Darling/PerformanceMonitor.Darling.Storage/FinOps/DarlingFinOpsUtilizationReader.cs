@@ -121,6 +121,7 @@ grants AS (
     FROM v_memory_grant_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
 )
 SELECT
     c.avg_cpu_pct,
@@ -185,6 +186,7 @@ daily_grants AS (
     FROM v_memory_grant_stats
     WHERE server_id = $1
     AND   collection_time >= $2
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
     GROUP BY CAST(collection_time AS DATE)
 )
 SELECT
@@ -234,6 +236,7 @@ SELECT
 FROM v_memory_grant_stats
 WHERE server_id = $1
 AND   collection_time >= $2
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
 GROUP BY CAST(collection_time AS DATE)
 ORDER BY CAST(collection_time AS DATE)";
 

@@ -59,6 +59,15 @@ public sealed class MemoryGrantsCollectorDefinitionTests
             interval.Type);
     }
 
+    /// <summary>#7676: the small-query semaphore (resource_semaphore_id 1) has a NULL max_target_memory_kb, so the old
+    /// <c>WHERE max_target_memory_kb IS NOT NULL</c> dropped it and every pool had one row. The query keeps both semaphores.</summary>
+    [Fact]
+    public void TheQuery_KeepsTheSmallQuerySemaphoreRow()
+    {
+        var text = MemoryGrantsCollector.Instance.BuildQuery(CollectorTestContext.Make(new RecordingCollectorDeltaCalculator())).Text;
+        Assert.DoesNotContain("max_target_memory_kb IS NOT NULL", text, System.StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void NameAndTable_MatchTheDispatchAndSchema()
     {

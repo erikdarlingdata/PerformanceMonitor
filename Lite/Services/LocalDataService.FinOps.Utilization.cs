@@ -75,6 +75,7 @@ grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE server_id = $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     AND   collection_time >= $2
 )
 SELECT
@@ -206,6 +207,7 @@ daily_grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE server_id = $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     AND   collection_time >= $2
     GROUP BY CAST(collection_time AS DATE)
 )
@@ -302,6 +304,7 @@ SELECT
     SUM(forced_grant_count_delta) AS forced_grants
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
 AND   collection_time >= $2
 GROUP BY CAST(collection_time AS DATE)
 ORDER BY CAST(collection_time AS DATE)";
