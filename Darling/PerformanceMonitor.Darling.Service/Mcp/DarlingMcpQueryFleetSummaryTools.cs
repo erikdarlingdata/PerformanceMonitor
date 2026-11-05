@@ -265,8 +265,8 @@ public sealed class DarlingMcpQueryFleetSummaryTools
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
             /* The tier decision get_query_trend makes, over the same legacy pair. */
-            var tier = DarlingTrendReader.ResolveTier(
-                start, DateTime.UtcNow, rollups.QueryGrainHourly,
+            var tier = DarlingTrendReader.ResolveTierAtWallClock(
+                start, rollups.QueryGrainHourly,
                 coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
             string? hourlyRelation = null;
@@ -292,7 +292,7 @@ public sealed class DarlingMcpQueryFleetSummaryTools
 
             /* #7609: the Query Store source, capped at seven days. It reads the corrected hourly rollup below the rollup's boundary and the
                deduped raw rows from it up, the split get_query_store_duration_trend makes. */
-            var qsHours = Math.Min(hours_back, QueryStoreMaxHours);
+            var qsHours = hours_back > QueryStoreMaxHours ? QueryStoreMaxHours : hours_back;
             var qsStart = windowEnd.AddHours(-qsHours);
             var qsRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
             var (qsRows, qsPairs) = await ReadFleetAsync(
