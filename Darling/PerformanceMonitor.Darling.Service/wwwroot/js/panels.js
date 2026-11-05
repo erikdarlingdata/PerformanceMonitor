@@ -1581,7 +1581,10 @@ function vizLine(data, desc) {
   /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
      Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
   const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
-  return zoomableLineChart({
+  /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
+     (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
+  const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  const chart = zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
@@ -1604,6 +1607,7 @@ function vizLine(data, desc) {
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
+  return typeof footNote === "string" && footNote ? el("div", {}, [chart, noticeStrip(footNote)]) : chart;
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
