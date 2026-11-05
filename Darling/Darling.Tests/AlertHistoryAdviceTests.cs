@@ -163,10 +163,17 @@ public sealed class AlertHistoryAdviceTests
     [Fact]
     public void AStateOnlyRow_ShowsADashForItsStoredZero_AndOtherValuesStayNumbers()
     {
-        var cells = Run("stateOnlyValue").GetProperty("cells");
+        var r = Run("stateOnlyValue");
+        var cells = r.GetProperty("cells");
         Assert.Equal(new[] { "—", "—" }, Strings(cells.GetProperty("Database State")));
         Assert.Equal(new[] { "3.0", "—" }, Strings(cells.GetProperty("Agent Not Running")));
         Assert.Equal(new[] { "0.0", "0.0" }, Strings(cells.GetProperty("High CPU")));
+
+        /* The CSV export writes the same dash for a state-only zero (#7646) and the raw stored number elsewhere, not the grid's "3.0". */
+        var csv = r.GetProperty("csv");
+        Assert.Equal(new[] { "—", "—" }, Strings(csv.GetProperty("Database State")));
+        Assert.Equal(new[] { "3", "—" }, Strings(csv.GetProperty("Agent Not Running")));
+        Assert.Equal(new[] { "0", "0" }, Strings(csv.GetProperty("High CPU")));
     }
 
     /// <summary>#5825: a resolution row's expanded detail shows what its send did (outcome, channels, when), and its

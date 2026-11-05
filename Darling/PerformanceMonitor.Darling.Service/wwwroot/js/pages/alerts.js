@@ -43,10 +43,15 @@ const SEVERITY_RANK = { critical: 0, warning: 1, info: 2, resolution: 3 };
 
 /* #7646: a state-only alert (get_alert_history's state_only, the server's AlertMetricClassifier.IsStateOnly) never had a number, so
    its stored 0 shows as a dash, as the Viewer's grid does, not as "0.0". A nonzero value on such a row is a real measurement and
-   stays a number. */
+   stays a number. The CSV export and the copy commands carry the same dash (copyValue), and the raw number on every other row. */
+function isStateZero(a, key) {
+  return a.state_only === true && Number(a[key]) === 0;
+}
 function stateOrNumber(a, key) {
-  const v = a[key];
-  return a.state_only === true && Number(v) === 0 ? "—" : applyFormat("num1", v);
+  return isStateZero(a, key) ? "—" : applyFormat("num1", a[key]);
+}
+function stateOrRaw(a, key) {
+  return isStateZero(a, key) ? "—" : a[key];
 }
 
 const ALERT_COLUMNS = [
@@ -54,8 +59,8 @@ const ALERT_COLUMNS = [
   { key: "server_name", label: "Server" },
   { key: "metric_name", label: "Metric" },
   { key: "severity", label: "Severity", sortValue: (a) => (a.severity == null ? null : (SEVERITY_RANK[a.severity] ?? 9)), render: (a) => severityCell(a) },
-  { key: "current_value", label: "Value", format: "num1", display: (a) => stateOrNumber(a, "current_value") },
-  { key: "threshold_value", label: "Threshold", format: "num1", display: (a) => stateOrNumber(a, "threshold_value") },
+  { key: "current_value", label: "Value", format: "num1", display: (a) => stateOrNumber(a, "current_value"), copyValue: (a) => stateOrRaw(a, "current_value") },
+  { key: "threshold_value", label: "Threshold", format: "num1", display: (a) => stateOrNumber(a, "threshold_value"), copyValue: (a) => stateOrRaw(a, "threshold_value") },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a), copyValue: (a) => detailFullText(a) },
 ];

@@ -40,7 +40,13 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+const bodyNode = new FakeNode("body");
+globalThis.document = { body: bodyNode, createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+/* The Export CSV button hands a Blob to a download link: keep each blob so a scenario can read the file text. */
+const downloads = [];
+URL.createObjectURL = (blob) => { downloads.push(blob); return "blob:fake"; };
+URL.revokeObjectURL = () => {};
+bodyNode.appendChild = (a) => { a.click = () => {}; return FakeNode.prototype.appendChild.call(bodyNode, a); };
 globalThis.location = { hash: "#/alerts" };
 
 const jsDir = process.argv[2];
@@ -210,6 +216,16 @@ try {
       const at = (label) => heads.indexOf(label);
       for (const tr of bodyRows(main)) {
         out.cells[tr.children[at("Metric")].textContent] = [tr.children[at("Value")].textContent, tr.children[at("Threshold")].textContent];
+      }
+      /* #7646: the CSV export writes the same dash for a state-only zero, and the raw stored number on every other row. */
+      main.all("button").find((b) => b.textContent === "Export CSV").fire("click");
+      const csv = (await downloads[downloads.length - 1].text()).replace(/^﻿/, "");
+      const lines = csv.split("\r\n");
+      const csvHeads = lines[0].split(",");
+      out.csv = {};
+      for (const line of lines.slice(1)) {
+        const f = line.split(",");
+        out.csv[f[csvHeads.indexOf("Metric")]] = [f[csvHeads.indexOf("Value")], f[csvHeads.indexOf("Threshold")]];
       }
     },
     async failedFetch() {
