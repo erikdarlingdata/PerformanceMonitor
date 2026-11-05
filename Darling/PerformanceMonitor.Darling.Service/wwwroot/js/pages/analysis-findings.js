@@ -59,37 +59,6 @@ function rootKeyOf(f) {
   return (f.root_fact && f.root_fact.key) || "";
 }
 
-/**
- * One card per root fact in a group (#7416): the chain seen most recently speaks, with its own figures, and the other chains on the
- * same root are named under it in `also`. The read keeps every chain; only the page folds them. A finding with no root key is never folded.
- */
-function foldByRoot(items) {
-  const byRoot = new Map();
-  const out = [];
-  for (const f of items) {
-    const root = rootKeyOf(f);
-    if (!root) {
-      out.push({ ...f, also: [] });
-      continue;
-    }
-    const seen = byRoot.get(root);
-    if (!seen) {
-      const card = { ...f, also: [] };
-      byRoot.set(root, card);
-      out.push(card);
-      continue;
-    }
-    const newer = (Date.parse(f.last_seen) || 0) > (Date.parse(seen.last_seen) || 0);
-    if (newer) {
-      const { also, ...rest } = seen;
-      Object.assign(seen, f, { also: [...also, rest] });
-    } else {
-      seen.also.push(f);
-    }
-  }
-  return out;
-}
-
 /** A finite number, or null. A missing score is not 0: a row with none keeps showing none. */
 function finiteOrNull(v) {
   const n = v == null || v === "" ? NaN : Number(v);
@@ -163,7 +132,8 @@ function mergeKeyOf(f) {
  * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
  * One exception: a path that names a statement (a same-statement pileup's hash) keeps the statement in the merge key, so two pileups
  * on different statements with the same headline stay two rows, each with its own advice and remediation. The same statement on two
- * incidents still merges.
+ * incidents still merges. This is the one place rows fold: groupFindings takes the merged rows as they are, so a row never hides
+ * another row's remediation, and two pileups or two tables in one incident are two cards.
  */
 export function mergeBySentence(findings) {
   const order = [];
@@ -239,7 +209,7 @@ export function groupFindings(findings) {
     buckets.get(key).push(f);
   }
   const groups = order.map((key) => {
-    const items = foldByRoot(buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0)));
+    const items = buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0));
     const primary = items[0];
     return { key, items, primary, label: severityLabel(primary.severity) };
   });
@@ -441,11 +411,6 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
-/** One folded chain, named under the card that stands for its root: its facts in words (as the merged chains are, #7582), its band and when it was last seen. */
-function alsoText(f) {
-  return plainChain(f) + " (" + severityLabel(f.severity) + ", last seen " + localTime(f.last_seen) + ")";
-}
-
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -462,9 +427,6 @@ function card(server, f, showTitle) {
   ];
   if (f.chains && f.chains.length > 1) {
     kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
-  }
-  if (f.also && f.also.length) {
-    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join(" · ") }));
   }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));

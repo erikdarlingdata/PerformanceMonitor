@@ -217,6 +217,28 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void TwoPileupsOnDifferentStatements_InOneIncident_AreTwoCards_EachWithItsOwnRemediation()
+    {
+        var r = Run("pileupTwoStatementsOneIncident");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Fix statement A", text, StringComparison.Ordinal);
+        Assert.Contains("Fix statement B", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TwoTablesAndTwoContendedObjects_InOneIncident_AreFourCards_EachNamingItsSubject()
+    {
+        var r = Run("objectAnomalyOneIncident");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(4, r.GetProperty("cards").GetInt32());
+        Assert.Equal(4, r.GetProperty("titles").GetArrayLength());
+        foreach (var subject in new[] { "dbo.Orders", "dbo.Events", "dbo.Queue", "dbo.Jobs" })
+            Assert.Contains(subject, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoCards_EachWithItsOwnRemediation_AndNoHash()
     {
         var r = Run("pileupTwoStatements");

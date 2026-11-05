@@ -133,7 +133,7 @@ try {
       return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").map((a) => a.textContent) }));
     },
     sameRoot: async () => {
-      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures and the other chain named under it. */
+      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures. */
       const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, advice: { headline: "Latch contention", investigation: "i", remediation: "r" }, ...over });
       const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5 });
       const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2 });
@@ -143,7 +143,7 @@ try {
       return { headers: groups.map(sum), cards: byTag(root, "h4").map((h) => h.textContent), text: root.textContent };
     },
     sameRootOtherSentence: async () => {
-      /* #7416 still holds where the headlines differ: two chains on one root with two sentences are one card, the other chain named under it. */
+      /* #7416, #7696: two chains on one root with two sentences are one card, whatever the headlines say: the chains are listed in words under it. */
       const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, ...over });
       const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5, advice: { headline: "Latch contention", investigation: "i", remediation: "r" } });
       const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2, advice: { headline: "Tempdb latch contention", investigation: "i", remediation: "r" } });
@@ -166,12 +166,34 @@ try {
       return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
     },
     pileupAlsoSeen: async () => {
-      /* #7582: one incident's pileup read back under two headlines: the other is named under the card as "also seen as", with no hash. */
+      /* #7582, #7696: one incident's pileup read back under two headlines that differ only in the figures is one card at the newest headline, with no hash. */
       const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", ...over });
       const newer = pile({ finding_id: 1, last_seen: "2026-01-01T10:00:00Z", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" } });
       const older = pile({ finding_id: 2, last_seen: "2026-01-01T08:00:00Z", advice: { headline: "3 sessions ran one statement for 20 s", investigation: "i", remediation: "r" } });
       const root = await run("srv-a", { findings: [newer, older] });
       return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupTwoStatementsOneIncident: async () => {
+      /* #7696: two pileups on different statements in ONE incident print one headline and stay two cards, each with its own remediation. */
+      const head = "4 sessions ran one statement for 30 s";
+      const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, ...over });
+      const a = pile({ finding_id: 1, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", advice: { headline: head, investigation: "i", remediation: "Fix statement A" } });
+      const b = pile({ finding_id: 2, story_path: "SAME_STATEMENT_PILEUP → 0x99887766AABBCCDD", advice: { headline: head, investigation: "i", remediation: "Fix statement B" } });
+      const root = await run("srv-a", { findings: [a, b] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    objectAnomalyOneIncident: async () => {
+      /* #7696: two tables (growth) and two objects (contention) under one root fact each, in ONE incident: every one keeps its own card, so no subject is lost. */
+      const row = (key, id, headline) => finding({ finding_id: id, incident_id: "inc-a", root_fact: { key, value: 1 }, story_path: key, advice: { headline, investigation: "i", remediation: "r" } });
+      const findings = [
+        row("ANOMALY_OBJECT_GROWTH", 1, "dbo.Orders grew 900 MB day-over-day"),
+        row("ANOMALY_OBJECT_GROWTH", 2, "dbo.Events grew 700 MB day-over-day"),
+        row("ANOMALY_OBJECT_CONTENTION", 3, "dbo.Queue accrued 40 s of new lock-wait time"),
+        row("ANOMALY_OBJECT_CONTENTION", 4, "dbo.Jobs accrued 30 s of new lock-wait time"),
+      ];
+      const root = await run("srv-a", { findings });
+      const merged = mod.mergeBySentence(findings);
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, titles: merged.map((m) => m.finding_title), text: root.textContent };
     },
     sameSentence: async () => {
       /* #7582: one sentence on rows of two incidents is one card, Critical, with the occurrences added up, and the chains it covers named in words. */
