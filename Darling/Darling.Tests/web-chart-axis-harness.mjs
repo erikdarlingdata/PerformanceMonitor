@@ -278,6 +278,34 @@ out.integerAxis = {
   drawn: axes({ points: rows([0, 1, 0, 1]), formatValue: (v) => util.fmtInt(v), integerTicks: true }).leftLabels,
 };
 
+/* #7587: a small-range rate axis. Six gridlines 0 ... 0.01 (step 0.002) read 0, 0, 0, 0.01, 0.01, 0.01 through a formatter that rounds to two places,
+   so the 0.006 gridline kept the "0.01" label. The page formatter now takes its decimals from the step. */
+const rateTicks = [0, 0.002, 0.004, 0.006, 0.008, 0.01];
+const mbps = (v, o) => util.fmtPlain(v, o) + " MB/s";
+/* a formatter that is a decimal short of what the step needs: formatted again with a finer step, it grows the decimals instead of blanking */
+const oneShort = (v, o) => Number(v).toFixed(Math.max(0, util.tickDecimals(o.step) - 1));
+const rateAxis = axes({ points: rows([0.01, 0.004, 0.0042, 0.002]), formatValue: mbps });
+out.smallRate = {
+  labels: charts.axisTickLabels(rateTicks, 0.002, mbps),
+  scale: charts.niceScale(0, 0.01, 5, null),
+  drawn: rateAxis.leftLabels,
+  tooltip: [0.0042, 1234.5678, 0].map((v) => util.fmtPlain(v)),
+  oneShort: charts.axisTickLabels(rateTicks, 0.002, oneShort),
+  blind: charts.axisTickLabels(rateTicks, 0.002, (v) => (Math.round(v * 100) / 100).toLocaleString()),
+};
+/* #7586: a duration axis (the per-query history chart) prints one unit, taken from its largest tick, and picks its ticks in that unit. */
+const msUnits = (labels) => [...new Set(labels.filter((l) => l !== "").map((l) => l.split(" ").pop()))];
+const msAxis30s = axes({ points: rows([20000, 33700, 31000, 28000]), formatValue: ms, sizeUnit: "ms" });
+const msAxis5m = axes({ points: rows([100000, 240000, 300000]), formatValue: ms, sizeUnit: "ms" });
+out.durationAxis = {
+  s30: msAxis30s.leftLabels,
+  s30Units: msUnits(msAxis30s.leftLabels),
+  m5: msAxis5m.leftLabels,
+  m5Units: msUnits(msAxis5m.leftLabels),
+  small: axes({ points: rows([120, 340, 500, 410]), formatValue: ms, sizeUnit: "ms" }).leftLabels,
+  cell: [999, 1500, 90000, 5400000].map((v) => util.fmtMs(v)),
+};
+
 out.composed = {
   mb: [0.5, 512, 1023, 1024, 1536, 80000, 2000000].map((v) => compose.formatComposedValue(v, "mb")),
   kb: compose.formatComposedValue(2048, "kb"),

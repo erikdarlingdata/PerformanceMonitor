@@ -1586,8 +1586,9 @@ function vizLine(data, desc) {
     /* #7571: "stacked-bar" draws a grouped read as one bar per time, one segment per group. Absent: the chart's default line. */
     mode: desc.mode || undefined,
     /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). #7555: a bytes chart likewise. */
-    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : null,
-    unit: desc.unit ?? null,
+    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : desc.format === "ms" ? "ms" : null,
+    /* #7586: a duration axis carries its unit on every tick (fmtMs), so an "ms" caption above it would name a second unit. */
+    unit: desc.format === "ms" && desc.unit === "ms" ? null : (desc.unit ?? null),
     title: desc.title || null,
     atTime: desc.atTime || null,
     source: desc.read || desc.path ? { read: desc.read || desc.path, params: desc.params || null } : null,

@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, windowFromHours, clampText } from "../../util.js";
+import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, fmtPlain, windowFromHours, clampText } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -166,7 +166,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
          average prints plain numbers, since one axis serves every line. */
       ...(allRates
         ? { unit: "/s", formatValue: fmtRate }
-        : { formatValue: (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }) }),
+        : { formatValue: fmtPlain }),
       /* #2802: axis spans the requested window (ctx.hours ending now), not the data's own extent. A narrowed
          read spans the hours it answered for. */
       ...windowFromHours(keptHours || ctx.hours),
@@ -242,7 +242,7 @@ export function sessionStatsTrendPanel(server, ctx) {
         points,
         xKey: "time",
         series: SESSION_TREND_SERIES.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
-        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        formatValue: fmtPlain,
         unit: "sessions",
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|session_stats", chartZoomScope(ctx.hours)),

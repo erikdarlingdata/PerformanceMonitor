@@ -171,6 +171,8 @@ out.qs = {
   off: M.queries.qsReasonsText({ verdict: "Unknown", verdict_reasons: ["qs_off"] }),
   none: M.queries.qsReasonsText({ verdict: "Unknown", verdict_reasons: [] }),
   graded: M.queries.qsReasonsText({ verdict: "Warning", verdict_reasons: ["plan_churn_high", "qs_read_only"] }),
+  /* #7586: every token QueryStoreClutter can emit, in the words the page prints (a token with no entry prints raw). */
+  all: Object.fromEntries(["read_cost_dominant", "plan_churn_high", "one_shot_plans", "plans_per_query_at_cap", "storage_near_cap", "qs_read_only", "qs_off", "qs_read_only_state", "qs_read_only_operator", "qs_read_only_replica", "not_measured"].map((t) => [t, M.queries.qsReasonsText({ verdict: "Warning", verdict_reasons: [t] })])),
 };
 
 /* 24. Run live now: the button, then its sentence beside it in the shared run row (wrapping when the panel is narrow). */

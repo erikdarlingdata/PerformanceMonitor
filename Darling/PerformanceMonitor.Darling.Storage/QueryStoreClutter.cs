@@ -122,6 +122,8 @@ public static class QueryStoreClutter
         ReasonStorageNearCap => "Storage near the cap",
         ReasonQueryStoreReadOnly => "Query Store read-only",
         ReasonQueryStoreOff => "Query Store off",
+        ReasonReadOnlyDatabaseState => "Query Store read-only (database state)",
+        ReasonReadOnlyOperator => "Query Store read-only (set by an operator)",
         ReasonReplica => "Query Store read-only (replica)",
         ReasonNotMeasured => "Nothing measured in this window",
         _ => token,

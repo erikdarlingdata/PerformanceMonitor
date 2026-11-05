@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, parseUtc, windowFromHours } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, parseUtc, fmtPlain, windowFromHours } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -266,7 +266,7 @@ export async function drawClerkTrends(slot, server, ctx, checked) {
       points: mergeSeriesRows(drawn, "time", "memory_mb"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
-      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      formatValue: fmtPlain,
       unit: "MB",
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, "clerk-trend|" + server, chartZoomScope(ctx.hours)),

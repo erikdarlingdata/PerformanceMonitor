@@ -1042,7 +1042,7 @@ export function renderPieChart(spec) {
  * Render a two-measure SCATTER into a returned `.chart` node (#1606 — the compose "scatter" viz): one point
  * per ranked group, x = the primary measure's value, y = the overlay's. Both axes get nice scales + unit
  * captions; each point carries a native <title> (label · x · y) and an optional drill click (design D6).
- * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, onSelect? }
+ * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, sizeUnitX?, sizeUnitY?, onSelect? }
  */
 export function renderScatterChart(spec) {
   const widthKey = spec.widthKey || null;
@@ -1052,8 +1052,9 @@ export function renderScatterChart(spec) {
 
   const xMax = Math.max(...pts.map((d) => Number(d.x)));
   const yMax = Math.max(...pts.map((d) => Number(d.y)));
-  const sx = niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null);
-  const sy = niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null);
+  /* #7586: a size or duration axis picks its ticks in the unit its labels print in, as a line chart does. */
+  const sx = sizedScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null, false, spec.sizeUnitX);
+  const sy = sizedScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null, false, spec.sizeUnitY);
   /* Tick labels with the step each axis moved by, and the room the widest y label needs (#6158). */
   const yLabels = axisTickLabels(sy.ticks, sy.step, formatY);
   const xLabels = axisTickLabels(sx.ticks, sx.step, formatX);
@@ -1343,15 +1344,22 @@ function niceNum(range, round) {
 
 /**
  * The labels for one axis's ticks (#6158): each tick formatted with its step (so a small range prints the decimals it
- * needs), and a label that repeats one already drawn is left blank, so no two ticks on an axis ever read the same even
- * when a custom formatter ignores the step. The gridline of a blanked tick stays.
+ * needs). #7587: when two ticks still format to the same text (a formatter that rounds a little too hard), every tick is
+ * formatted again with a step one tenth as large, at most twice, so the labels grow decimals and each stays on its own
+ * gridline. Only a label that still repeats after that (a formatter that ignores the step altogether) is left blank, so
+ * no two ticks on an axis ever read the same. The gridline of a blanked tick stays.
  */
 export function axisTickLabels(ticks, step, format) {
-  const seen = new Set();
   /* #7555: the largest tick goes with each one, so a size formatter prints the whole axis in one unit (0 GB, 0.5 GB, 1.0 GB, 1.5 GB). */
   const axisMax = Math.max(0, ...ticks.map((t) => Math.abs(Number(t)) || 0));
-  return ticks.map((t) => {
-    const text = String(format(t, { step, axisMax }));
+  let texts = [];
+  for (let finer = 0; finer <= 2; finer++) {
+    const s = step > 0 ? step / Math.pow(10, finer) : step;
+    texts = ticks.map((t) => String(format(t, { step: s, axisMax })));
+    if (new Set(texts).size === texts.length || !(step > 0)) break;
+  }
+  const seen = new Set();
+  return texts.map((text) => {
     if (seen.has(text)) return "";
     seen.add(text);
     return text;

@@ -101,6 +101,35 @@ public sealed class StatsHistoryBehaviourTests
         Assert.Equal(0, r.GetProperty("selects").GetInt32());
     }
 
+    /// <summary>#7586: on a page that has its own Query picker and chart, the History button selects the row there and opens nothing in the
+    /// row, so the page never holds two copies of the chart and its two notes. A row without the keys is still a dash.</summary>
+    [Fact]
+    public void WithAPicker_TheHistoryButtonSelectsTheRow_AndOpensNoPanelInTheRow()
+    {
+        var r = Run("pickerRoute");
+        var picked = r.GetProperty("picked").EnumerateArray().ToArray();
+        Assert.Single(picked);
+        Assert.Equal("0xABC", picked[0].GetProperty("query_hash").GetString());
+        Assert.Equal(0, r.GetProperty("fetches").GetInt32());
+        Assert.Equal(0, r.GetProperty("charts").GetInt32());
+        Assert.Equal(0, r.GetProperty("panels").GetInt32());
+        Assert.False(r.GetProperty("hideButton").GetBoolean());
+        Assert.Equal("—", r.GetProperty("noHashStillDash").GetString());
+    }
+
+    /// <summary>#7586: a query averaging 30 s read "0 ms ... 80,000 ms" with another "ms" above the axis. Every tick now prints seconds, the
+    /// way the grid does, from the largest tick, and the caption is gone because every tick carries its unit.</summary>
+    [Fact]
+    public void TheQueryHistoryAxis_PrintsOneUnitFromTheLargestTick_WithNoCaption()
+    {
+        var r = Run("queryAxis");
+        Assert.Equal(JsonValueKind.Null, r.GetProperty("axisUnit").ValueKind);
+        Assert.Equal("ms", r.GetProperty("sizeUnit").GetString());
+        Assert.Equal(1000, r.GetProperty("perAtTop").GetInt32());
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, r.GetProperty("labels").EnumerateArray().Select(l => l.GetString()));
+        Assert.Equal("33.7 s", r.GetProperty("tooltip").GetString());
+    }
+
     [Fact]
     public void AnOpenPanel_SurvivesARebuild_AndAChangedWindowReadsAgain()
     {
