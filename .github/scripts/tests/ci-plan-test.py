@@ -375,6 +375,139 @@ check("real table: some helper files are unsafe", bool(unsafe), True)
 r = cp.plan("pull_request", "dev", "x", [], ["README.md", one, unsafe[0]], live_rules, real_cat)
 check("real table: an unsafe file is full", r["darling_scope"], "full")
 
+# --- a ready pull request picks its classes from the nightly test map (#7728) ----------------------------------
+import datetime as _dt
+
+NOW = _dt.datetime(2026, 11, 5, 12, 0, tzinfo=_dt.timezone.utc)
+SVC_Y = "Darling/PerformanceMonitor.Darling.Service/Y.cs"
+MAP_FILES = [SERVICE, SVC_Y, LITE_SRC, DT + "D1Tests.cs", DT + "D3Tests.cs", LT + "L1Tests.cs", LT + "L2Tests.cs",
+             "PerformanceMonitor.Common/Shared.cs"]
+
+
+def fid(path):
+    return MAP_FILES.index(path)
+
+
+def make_map(built="2026-11-05T06:00:00Z", gone=False):
+    """A stand-in nightly map: D2 covers SERVICE, D3 covers Y.cs, L2 covers LITE_SRC; D1 is the Guard class."""
+    darling = {"D1": {"own": fid(DT + "D1Tests.cs"), "files": [], "seconds": 60.0},
+               "D2": {"own": fid(DT + "D3Tests.cs"), "files": [fid(SERVICE)], "seconds": 60.0},
+               "D3": {"own": fid(DT + "D3Tests.cs"), "files": [fid(SVC_Y)], "seconds": 60.0},
+               "D4": {"own": fid(DT + "D3Tests.cs"), "files": [], "seconds": 60.0}}
+    if gone:  # a class the tree no longer has
+        darling["Gone"] = {"own": fid(DT + "D3Tests.cs"), "files": [fid(SERVICE)], "seconds": 60.0}
+    lite = {"L1": {"own": fid(LT + "L1Tests.cs"), "files": [], "seconds": 600.0},
+            "L2": {"own": fid(LT + "L2Tests.cs"), "files": [fid(LITE_SRC)], "seconds": 600.0},
+            "L3": {"own": fid(LT + "L2Tests.cs"), "files": [], "seconds": 600.0}}
+    return {"schema": 1, "sha": "abc", "built_at": built, "tool": "ci-plan-test", "files": MAP_FILES,
+            "classes": {"darling": darling, "lite": lite}, "text_patterns": {}}
+
+
+def sel(**kw):
+    return {"map": make_map(), "error": "", "now": NOW, "shared_diff": "", "named": None, **kw}
+
+
+def ready_run(files, selection="default", draft=False, event="pull_request", base="dev", cat=cc_cat):
+    """A plan with the map input. A plan that has no such input answers as it did before the map, so only the checks that need the
+    map fail."""
+    selection = sel() if selection == "default" else selection
+    try:
+        return cp.plan(event, base, "feature/x", [], files, rules, cat, draft=draft, selection=selection)
+    except TypeError:
+        return cp.plan(event, base, "feature/x", [], files, rules, cat, draft=draft)
+
+
+r = ready_run([SERVICE])
+check("map: a mapped product file selects its class and the Guard class", (r.get("areas"), r.get("darling_classes")), ("classes", "D1,D2"))
+check("map: a mapped product file: Lite is not run", (r.get("darling_scope"), r.get("lite_scope"), r.get("lite_classes")), ("classes", "none", ""))
+check("map: a mapped product file: minutes and legs", (r.get("test_minutes"), r.get("legs"), r.get("build")), ("2.0", "1", "true"))
+check("map: the why line names the rule and the map's age",
+      ("ready pull request runs the classes the nightly test map selects" in r.get("why", ""),
+       "map built 2026-11-05 06:00 UTC, 6.0 hours old" in r.get("why", "")), (True, True))
+r = ready_run([LITE_SRC])
+check("map: a Lite product file: its Lite class and the Darling Guard class", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L2"))
+check("map: a Lite product file: scopes", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("classes", "classes", "classes"))
+r = ready_run([SERVICE, DT + "D3Tests.cs"])
+check("map: a changed test file's classes join the map's", r.get("darling_classes"), "D1,D2,D3,D4")
+r = ready_run([SERVICE, DT + "D3Tests.cs", LT + "L1Tests.cs"])
+check("map: a changed Lite test file's class joins", r.get("lite_classes"), "L1")
+# A new test class the map has never seen runs, whatever the map holds.
+new_cat = {**cc_cat, "classes": {"darling": {**d_cls, "NewOne": set()}, "lite": l_cls},
+           "files": {**cc_files, DT + "NewOneTests.cs": {"suite": "darling", "classes": ["NewOne"], "tests": ["NewOne"], "safe": True}}}
+r = ready_run([SERVICE, DT + "NewOneTests.cs"], cat=new_cat)
+check("map: a new test file's class is picked", r.get("darling_classes"), "D1,D2,NewOne")
+# A class the map holds and the tree no longer has is never named.
+r = ready_run([SERVICE], selection=sel(map=make_map(gone=True)))
+check("map: a class the tree lost is not named", r.get("darling_classes"), "D1,D2")
+# Keep-full files and files the map does not know are every class of the areas.
+for label, files in (("global.json", [SERVICE, "global.json"]), (".csproj", [SERVICE, "Darling/PerformanceMonitor.Darling.Service/X.csproj"])):
+    r = ready_run(files)
+    check(f"map: {label} is a keep-full file", (r.get("areas"), r.get("darling_scope")), ("all" if label == "global.json" else "darling", "full"))
+    check(f"map: {label}: the why line", "is a keep-full file" in r.get("why", ""), True)
+r = ready_run([SERVICE, "Darling/PerformanceMonitor.Darling.Service/NewFile.cs"])
+check("map: an unknown product file is FULL", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("darling", "full", "reads"))
+check("map: an unknown product file: the why line", "unknown file: Darling/PerformanceMonitor.Darling.Service/NewFile.cs" in r.get("why", ""), True)
+r = ready_run(["PerformanceMonitor.Common/Shared.cs"], selection=sel(shared_diff=None))
+check("map: a shared-project file whose diff cannot be read is FULL", r.get("darling_scope"), "full")
+# A stale map is FULL, a fresh one is not, and the why line says the age.
+r = ready_run([SERVICE], selection=sel(map=make_map(built="2026-11-03T11:00:00Z")))   # 49 hours
+check("map: a map 49 hours old is FULL", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("darling", "full", ""))
+check("map: a stale map: the why line", ("older than 2 days" in r.get("why", ""), "49.0 hours old" in r.get("why", "")), (True, True))
+r = ready_run([SERVICE], selection=sel(map=make_map(built="2026-11-03T13:00:00Z")))   # 47 hours
+check("map: a map 47 hours old still selects", (r.get("areas"), r.get("darling_classes")), ("classes", "D1,D2"))
+r = ready_run([SERVICE], selection=sel(map=make_map(built="not a time")))
+check("map: a map with no build time is FULL", r.get("darling_scope"), "full")
+# A missing, unreadable or unconsulted map is FULL, with the reason in `why`.
+r = ready_run([SERVICE], selection={"map": None, "error": "no nightly run has a test-map artifact", "now": NOW})
+check("map: a missing map is FULL", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("darling", "full", ""))
+check("map: a missing map: the why line", "no nightly run has a test-map artifact" in r.get("why", ""), True)
+check("map: a map that is not a map is FULL", ready_run([SERVICE], selection={"map": ["x"], "error": "", "now": NOW}).get("darling_scope"), "full")
+check("map: a broken map never raises", ready_run([SERVICE], selection=sel(map={"schema": 1, "files": 5, "classes": 7})).get("darling_scope"), "full")
+check("map: no selection input leaves the rule off", cp.plan("pull_request", "dev", "x", [], [SERVICE], rules, cc_cat)["darling_scope"], "full")
+# A class list longer than the runner's environment variable holds is FULL.
+saved_cap = getattr(cp, "MAX_CLASS_LIST_CHARS", None)
+cp.MAX_CLASS_LIST_CHARS = 4
+try:
+    r = ready_run([SERVICE])
+finally:
+    if saved_cap is None:
+        del cp.MAX_CLASS_LIST_CHARS
+    else:
+        cp.MAX_CLASS_LIST_CHARS = saved_cap
+check("map: a class list over the environment limit is FULL", (r.get("darling_scope"), "over the 4" in r.get("why", "")), ("full", True))
+# A draft keeps the #7727 rule, a dev push and a base other than dev run everything, docs-only and test-only are as before.
+r = ready_run([SERVICE], draft=True)
+check("map: a draft keeps its rule", (r.get("areas"), r.get("darling_classes"), "a draft runs only" in r.get("why", "")), ("classes", "D1", True))
+check("map: a draft never uses the map", "nightly test map" in ready_run([SERVICE], draft=True).get("why", ""), False)
+r = ready_run([SERVICE], event="push")
+check("map: a dev push is FULL", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("all", "full", "full"))
+check("map: a base other than dev is FULL", ready_run([SERVICE], base="main").get("areas"), "all")
+check("map: docs-only stays docs-only", ready_run(["README.md"]).get("areas"), "docs-only")
+r = ready_run(["README.md", DT + "D3Tests.cs"])
+check("map: test-only stays test-only (no Guard class)", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+r = ready_run([SERVICE, "no-such-area/odd.bin"])
+check("map: a path no area knows is every area", r.get("areas"), "all")
+
+# The command line: a pull request with a map error is FULL and the why line says why; a map file that is not at hand says so.
+real_rules2 = cs.Rules
+cs.Rules = lambda: rules
+try:
+    for extra, needle in ((["--map", "", "--map-error", "no nightly run has a test-map artifact"], "no nightly run has a test-map artifact"),
+                          (["--map", os.path.join(tmp, "absent.json.gz")], "no test map was downloaded")):
+        with open(os.path.join(tmp, "svc.txt"), "w", encoding="utf-8") as fh:
+            fh.write(SERVICE + "\n")
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                code = cp.main(["--event", "pull_request", "--base", "dev", "--files-file", os.path.join(tmp, "svc.txt")] + extra)
+        except SystemExit as exc:  # a command line that does not know --map
+            code = exc.code
+        lines = dict(x.split("=", 1) for x in buf.getvalue().splitlines() if "=" in x)
+        check(f"main: map error {needle!r}: exit and scope", (code, lines.get("darling_scope")), (0, "full"))
+        check(f"main: map error {needle!r}: the why line", needle in lines.get("why", ""), True)
+finally:
+    cs.Rules = real_rules2
+
 # --- the command line writes $GITHUB_OUTPUT --------------------------------------------------------------------
 files_path = os.path.join(tmp, "files.txt")
 out_path = os.path.join(tmp, "out.txt")
