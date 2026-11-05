@@ -230,6 +230,17 @@ out.bucketNullMiddle = marks(charts.renderLineChart({
   points: [0, 15, 30, 45, 60].map((m, i) => ({ t: iso(T0 + m * MIN), a: i === 2 ? null : 10 + i })),
   xKey: "t", series: oneSeries, bucketMs: 15 * MIN,
 }));
+/* A collector scheduled every 5 minutes on a chart of 1 minute buckets: rows 5 minutes apart (some with no figure, which still mark a collection).
+   The rows' own cadence is the step, so it stays one line; the same rows judged by the bucket alone are all dots. */
+const slowTimes = seq(0, 120, 5);
+const slowStep = charts.bucketMsOf(1, slowTimes.map((m) => T0 + m * MIN));
+out.slowCollector = marks(draw(slowTimes, { series: oneSeries, bucketMs: slowStep }));
+out.slowCollectorStep = slowStep;
+/* ...and an outage (no rows from minute 60 to 90) still breaks it */
+const slowWithOutage = slowTimes.filter((m) => m < 60 || m > 90);
+out.slowCollectorOutage = marks(draw(slowWithOutage, { series: oneSeries, bucketMs: charts.bucketMsOf(1, slowWithOutage.map((m) => T0 + m * MIN)) }));
+/* a quiet file at 15 minute buckets whose rows (figure-less ones included) are every bucket keeps the bucket */
+out.quietRowsStep = charts.bucketMsOf(15, seq(0, 360, 15).map((m) => T0 + m * MIN));
 out.bucketThreshold = {
   stated: charts.gapThresholdMs(quiet.map((m) => m * MIN), null, 15 * MIN),
   ignoredWhenAbsent: String(charts.gapThresholdMs(quiet.map((m) => m * MIN), null, null)),
@@ -254,9 +265,11 @@ out.stripNever = shape(slicer.stripPaths(stripAt(holey), stripWin, null, Infinit
 const twoGrains = seq(0, 3 * 60, 60).concat(seq(4 * 60, 4 * 60 + 30));
 out.stripSeam = shape(slicer.stripPaths(stripAt(twoGrains), stripWin, null, { seamMs: T0 + 4 * 60 * MIN }));
 out.stripValues = [null, undefined, "", 0, "3.5", 7].map((v) => String(slicer.stripValue(v)));
+/* a query strip on a collector every 5 minutes, whose reply states a 1 minute bucket: still one line */
+out.stripSlowCollector = shape(slicer.stripPaths(stripAt(seq(0, 115, 5)), stripWin, null, slicer.stripGap({}, { bucket_minutes: 1 })));
 out.stripGaps = {
   blocking: slicer.stripGap({ stepMs: 60000 }, { bucket_minutes: 10 }),
-  bucket: slicer.stripGap({}, { bucket_minutes: 10 }),
+  bucket: String(slicer.stripGap({}, { bucket_minutes: 10 })),
   none: String(slicer.stripGap({}, {})),
   seam: slicer.stripGap({ bucketed: false, seam: (d) => d.routing.raw_from }, { bucket_minutes: 60, routing: { raw_from: "2026-01-01T04:00:00" } }),
 };

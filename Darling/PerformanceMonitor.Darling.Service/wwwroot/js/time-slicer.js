@@ -28,7 +28,7 @@
 
 import { el, localTime, parseUtc, TRIM_TO } from "./util.js";
 import { MINIMUM_SPAN_MS } from "./time-range.js";
-import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
+import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
 
 const HOUR_MS = 3600000;
 const MINUTE_MS = 60000;
@@ -186,14 +186,12 @@ export function stripValue(v) {
 /**
  * What breaks a strip's line (#7544): a step between two samples longer than the series' normal step, the line charts' rule (chart-gaps.js).
  * A strip names its step itself (`stepMs`: the blocking and deadlock trends are per-minute counts that exist only where something happened, and
- * their reply states no bucket), else the reply's own `bucket_minutes`, else (null) the cadence the samples show for themselves. A strip that
- * joins two grains (`seam`, the Query Store duration trend's routing.raw_from) is judged on each side of it, and `bucketed: false` keeps
- * that strip off the reply's single bucket figure. Returns what stripPaths takes as its `gap`.
+ * their reply states no bucket), else (null) the cadence the samples show for themselves. The reply's `bucket_minutes` is not used: it is the chart's
+ * width (1 minute for a day), not the collector's cadence, and a collector scheduled slower than that would draw every step as a stem. A strip that
+ * joins two grains (`seam`, the Query Store duration trend's routing.raw_from) is judged on each side of it. Returns what stripPaths takes as its `gap`.
  */
 export function stripGap(strip, data) {
   if (strip && strip.stepMs > 0) return strip.stepMs;
-  const bucket = strip && strip.bucketed === false ? null : bucketMsOf(data && data.bucket_minutes);
-  if (bucket) return bucket;
   const seam = strip && strip.seam ? parseUtc(strip.seam(data)) : null;
   return seam ? { seamMs: seam.getTime() } : null;
 }

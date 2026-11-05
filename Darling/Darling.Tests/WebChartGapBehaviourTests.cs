@@ -276,6 +276,24 @@ public sealed class WebChartGapBehaviourTests
         Assert.Equal(0, N(r, "bucketQuietNoBucket", "dots"));
     }
 
+    /// <summary>
+    /// #7572: a bucket is the chart's width (1 minute for a day), not the collector's cadence. A collector scheduled every 5 minutes leaves a row
+    /// every fifth bucket: the rows' own step (5 minutes, with half again for a collection a bucket early or late) is what a gap is judged by, so the
+    /// chart stays one line, an outage still breaks it, and a strip whose reply states a 1 minute bucket stays one line too.
+    /// </summary>
+    [Fact]
+    public void ACollectorSlowerThanTheBucket_KeepsItsLine_AndAnOutageStillBreaksIt()
+    {
+        var r = Run();
+        Assert.Equal(1, N(r, "slowCollector", "lines"));
+        Assert.Equal(0, N(r, "slowCollector", "dots"));
+        Assert.Equal(2, N(r, "slowCollectorOutage", "lines"));
+        Assert.Equal(15 * 60000, r.GetProperty("quietRowsStep").GetDouble());
+        Assert.Equal(7.5 * 60000, r.GetProperty("slowCollectorStep").GetDouble());
+        Assert.Equal(1, N(r, "stripSlowCollector", "lineRuns"));
+        Assert.Equal(0, N(r, "stripSlowCollector", "dots"));
+    }
+
     [Fact]
     public void ATrendWithAKnownBucket_StaysOneLine_WhenEveryBucketIsPresent_AndBreaksAtAFigureLessBucket()
     {
@@ -334,7 +352,7 @@ public sealed class WebChartGapBehaviourTests
         Assert.Equal(new[] { "NaN", "NaN", "NaN", "0", "3.5", "7" }, values);
         var g = r.GetProperty("stripGaps");
         Assert.Equal(60000, g.GetProperty("blocking").GetDouble());
-        Assert.Equal(600000, g.GetProperty("bucket").GetDouble());
+        Assert.Equal("null", g.GetProperty("bucket").GetString());
         Assert.Equal("null", g.GetProperty("none").GetString());
         Assert.Equal(DateTimeOffset.Parse("2026-01-01T04:00:00Z").ToUnixTimeMilliseconds(), g.GetProperty("seam").GetProperty("seamMs").GetInt64());
     }

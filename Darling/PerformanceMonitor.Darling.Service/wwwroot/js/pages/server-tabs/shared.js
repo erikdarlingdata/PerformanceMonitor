@@ -527,7 +527,7 @@ function stripOf(kind, server, ctx) {
     return { title: blocking ? "Blocked process reports" : "Deadlocks", tool: blocking ? "get_blocking_trend" : "get_deadlock_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "count", stepMs: 60000 };
   }
   if (kind === "querystore") {
-    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", bucketed: false, seam: (d) => d && d.routing && d.routing.raw_from };
+    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", seam: (d) => d && d.routing && d.routing.raw_from };
   }
   const queries = kind === "queries";
   return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
@@ -812,8 +812,6 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     sourceKey: opts.sourceKey,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
-    /* #7572: the answer's field holding the bucket width in minutes (`bucket_minutes`) on a trend that states it; absent on an event series. */
-    bucketKey: opts.bucketKey,
     /* #5644 W16: wording that follows the collector that answered (see BLOCKING_BY_SOURCE); absent on every other line. */
     bySource: opts.bySource,
     /* The panel is not drawn when the server answers "not collected" (it does not apply to this kind of server). */

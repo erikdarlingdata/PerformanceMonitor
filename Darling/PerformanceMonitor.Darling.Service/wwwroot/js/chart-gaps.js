@@ -69,10 +69,24 @@ export function gapThresholdMs(times, seamMs = null, bucketMs = null) {
   return Math.max(GAP_FACTOR * median, GAP_FLOOR_MS);
 }
 
-/* A reply's `bucket_minutes` as milliseconds, or null when it states none (#7572). */
-export function bucketMsOf(minutes) {
+/* A reply's `bucket_minutes` as milliseconds, or null when it states none (#7572).
+   A bucket is the chart's width (the Chart budget sizes it from the window, 1 minute for a day), not the collector's cadence: a collector
+   scheduled slower than the bucket leaves a row every few buckets, and a step longer than one bucket would break all of them into dots.
+   `rowTimes` (epoch ms of EVERY row the reply returned, rows with no figure included, since a row with no figure still marks a
+   collection) tells the two apart: when the rows' own median step is longer than the bucket, that cadence is the step, with half
+   again for a collection that lands a bucket early or late. When the rows keep the bucket (the usual case) it is the bucket. */
+export function bucketMsOf(minutes, rowTimes = null) {
   const m = Number(minutes);
-  return minutes != null && minutes !== "" && Number.isFinite(m) && m > 0 ? m * 60000 : null;
+  const bucketMs = minutes != null && minutes !== "" && Number.isFinite(m) && m > 0 ? m * 60000 : null;
+  if (bucketMs === null || !Array.isArray(rowTimes)) return bucketMs;
+  const times = [...new Set(rowTimes.filter((t) => Number.isFinite(t)))].sort((a, b) => a - b);
+  const steps = [];
+  for (let i = 1; i < times.length; i++) steps.push(times[i] - times[i - 1]);
+  if (!steps.length) return bucketMs;
+  steps.sort((a, b) => a - b);
+  const mid = steps.length >> 1;
+  const median = steps.length % 2 ? steps[mid] : (steps[mid - 1] + steps[mid]) / 2;
+  return median > bucketMs ? 1.5 * median : bucketMs;
 }
 
 /* Splits ascending positions (indices into times) into runs of neighbours no further apart than thresholdMs: a number, or

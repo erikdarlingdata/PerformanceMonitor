@@ -258,6 +258,22 @@ if (scenario === "crosshair") {
   };
   out.oneRead = one(1);
   out.manyReads = one(300);
+  /* A collector scheduled every 5 minutes on a chart of 1 minute buckets (the Chart budget for a day): six rows 5 minutes apart. Every step is longer
+     than the bucket, but it is the rows' own cadence, so the strip stays one line. The last row holds `last` reads at 81 ms: the floor is per bucket
+     width, 250 per 15 minutes, so a 1 minute bucket needs 17 reads and a 30 minute bucket needs 500. */
+  const slow = (bucketMinutes, last, stepMinutes = 5) => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ time: iso(i * stepMinutes), database_name: "A", file_type: "ROWS", reads: i === 5 ? last : 1000, avg_read_latency_ms: i === 5 ? 81 : 0.5 }));
+    const built = strips.applyBaselines(strips.buildStrips({ ...reads, io: data({ bucket_minutes: bucketMinutes, trend: rows }) }), baseline, { windowStart: T0, windowEnd: T0 + 60 * MIN }, {});
+    const g = find(strips.drawStrips(built, domain, 1000, null).node, (n) => n.attrs["data-strip"] === "io")[0];
+    return {
+      lines: find(g, (n) => n.tag === "polyline").map((n) => n.attrs.points.split(" ").length),
+      dots: find(g, (n) => n.tag === "circle" && n.attrs.class !== "strip-anomaly").length,
+      markers: built.find((s) => s.key === "io").markers.length,
+    };
+  };
+  out.slowCollector = slow(1, 1000);
+  out.floorOneMinute = { enough: slow(1, 17, 1).markers, short: slow(1, 16, 1).markers };
+  out.floorThirtyMinute = { short: slow(30, 499, 30).markers, enough: slow(30, 500, 30).markers };
   out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);
 } else if (scenario === "empty") {
   const none = {

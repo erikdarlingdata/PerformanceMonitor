@@ -324,4 +324,23 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal(1, many.GetProperty("markers").GetInt32());
         Assert.Equal(1, many.GetProperty("anomalyDots").GetInt32());
     }
+
+    /// <summary>
+    /// #7572: a bucket is the chart's width (1 minute for a day), not the collector's cadence. A file I/O collector scheduled every 5 minutes leaves a
+    /// row every fifth bucket, and the strip stays one line instead of six dots. The read floor is stated per 15 minutes of bucket (250, the bar the
+    /// PostgreSQL I/O baseline puts on a bucket) and scaled to the bucket the reply states: 17 reads in a 1 minute bucket, 500 in a 30 minute one.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_KeepsItsLineForACollectorSlowerThanTheBucket_AndScalesTheReadFloorToTheBucket()
+    {
+        var r = Run("iogaps");
+
+        var slow = r.GetProperty("slowCollector");
+        Assert.Equal(new[] { 6 }, slow.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, slow.GetProperty("dots").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorOneMinute").GetProperty("enough").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorOneMinute").GetProperty("short").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorThirtyMinute").GetProperty("short").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorThirtyMinute").GetProperty("enough").GetInt32());
+    }
 }
