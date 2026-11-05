@@ -2127,3 +2127,12 @@ export function dbScopeChip(read, override) {
   }
   return el("span", { class: "badge db-scope db-scope-" + state + look, title, text, dataset: { dbScope: state } });
 }
+
+/**
+ * #7578: whether an axis's tick labels already print the unit (400 MB, 200 ms, 0.3 MB/s: a number, a space and a unit word). The unit is
+ * then not printed again as a caption over the axis, so every chart says its unit once, on the ticks or in the caption, never both.
+ * A bare number ("150") or a compact one ("1.5K") carries no unit, so its axis keeps the caption.
+ */
+export function ticksCarryUnit(labels) {
+  return labels.some((l) => /\d\s+[A-Za-z%][A-Za-z%/]*$/.test(String(l).trim()));
+}

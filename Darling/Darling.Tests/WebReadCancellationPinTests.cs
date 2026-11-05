@@ -60,8 +60,10 @@ public sealed class WebReadCancellationPinTests
     /// </summary>
     private static HttpContext CancelledRequest()
     {
+        /* #7644 get_overview_baselines refuses a window_start older than 30 days (or in the future) before any read, so
+           a fixed calendar date goes stale: the start is a day back from now, a valid request that reaches the store call. */
         var context = new DefaultHttpContext();
-        context.Request.QueryString = new QueryString("?kind=query_hash&query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&query_id=1&plan_id=1&sql_handle=0x01&collection_time=2026-01-01T00:00:00.000000Z&window_start=2026-01-01T00:00:00.000000Z&session_id=1&event_time=2026-01-01T00:00:00.000000Z&blocked_spid=1&blocking_spid=2&deadlock_time=2026-01-01T00:00:00.000000Z&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
+        context.Request.QueryString = new QueryString("?kind=query_hash&query_hash=deadbeef&database_name=probe&counter_name=x&wait_type=CXPACKET&metric=total_waits&query_id=1&plan_id=1&sql_handle=0x01&collection_time=2026-01-01T00:00:00.000000Z&window_start=" + DateTime.UtcNow.AddDays(-1).ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ", System.Globalization.CultureInfo.InvariantCulture) + "&session_id=1&event_time=2026-01-01T00:00:00.000000Z&blocked_spid=1&blocking_spid=2&deadlock_time=2026-01-01T00:00:00.000000Z&server_id=1&metric_name=x&alert_time=2026-01-01T00:00:00Z");
         context.RequestAborted = new CancellationToken(canceled: true);
         return context;
     }

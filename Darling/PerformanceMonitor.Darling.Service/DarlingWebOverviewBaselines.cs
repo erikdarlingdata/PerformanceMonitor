@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -24,18 +26,35 @@ namespace PerformanceMonitor.Darling.Service;
 /// #6291: the web Overview's baseline read, <c>get_overview_baselines</c>. Web only, with no MCP tool behind it (see
 /// <see cref="DarlingWebEndpoints.WebOnlyReadNames"/>; agents already get baselines through analyze_server): the strips
 /// draw the Viewer's band and anomaly markers from it. It asks the SAME provider the Viewer's Overview lanes ask
-/// (<see cref="PgBaselineProvider.GetBaselineAsync(int, string, DateTime, CancellationToken)"/>, as
-/// <c>ViewerDataService.GetBaselineForLaneAsync</c> does) for the same four metrics at the window START, and adds no
-/// statistics of its own: the page turns each bucket into mean +- 2 effective sigma, as the Viewer's lanes do.
+/// (<see cref="PgBaselineProvider.GetBaselineStepsSharedAsync"/>, over the same four metrics: CPU, waits, the
+/// <see cref="MetricNames.IoLatencyChart"/> arm the Viewer's I/O lane reads, and blocking) and adds no statistics of its own.
+/// #7644: the answer is a stepped series, one step per local hour from the window start to now, so a window that crosses
+/// hours of the week draws each hour's own band; the page turns each step into mean +- 2 effective sigma, as the Viewer's
+/// lanes do. Because the read costs one step per hour of the window, <c>window_start</c> is bounded:
+/// <see cref="ValidateWindowStart"/> refuses one in the future (beyond <see cref="FutureSkew"/>) or older than
+/// <see cref="MaxWindowHours"/> plus <see cref="WindowSlack"/> before now, never clamping it.
 /// </summary>
 internal static class DarlingWebOverviewBaselines
 {
+    /// <summary>
+    /// The longest window the Overview page can ask for, in hours: the raw-table trends' reach (<see cref="WebReadReach.RawTrendHours"/>,
+    /// 30 days), the largest <c>max_hours</c> any of the reads <c>overview-strips.js</c> sends <c>ctx.hours</c> to accepts
+    /// (get_cpu_utilization, get_blocking_trend, get_deadlock_trend, get_memory_trend and get_file_io_trend; get_server_trend stops at 168).
+    /// </summary>
+    internal const int MaxWindowHours = WebReadReach.RawTrendHours;
+
+    /// <summary>Room past <see cref="MaxWindowHours"/> for a custom range picked a moment ago: one day.</summary>
+    internal static readonly TimeSpan WindowSlack = TimeSpan.FromDays(1);
+
+    /// <summary>A browser clock a few minutes ahead of the service's still sends a window start that is "now" to the page: this much is not refused as future.</summary>
+    internal static readonly TimeSpan FutureSkew = TimeSpan.FromMinutes(5);
+
     /// <summary>The four lane metrics, in the order the Viewer's Overview fetches them, with the name the page keys them by.</summary>
     private static readonly (string Key, string Metric)[] Lanes =
     [
         ("cpu", MetricNames.Cpu),
         ("waits", MetricNames.WaitMsPerSec),
-        ("io", MetricNames.IoLatency),
+        ("io", MetricNames.IoLatencyChart),
         ("blocking", MetricNames.BlockingPerMinute),
     ];
 
@@ -53,25 +72,26 @@ internal static class DarlingWebOverviewBaselines
         if (!DarlingMcpPlanTools.TryParseCollectionTime(windowStart, out var startUtc))
             return McpHelpers.Refusal("window_start", "Expected the window start as an ISO 8601 UTC time.");
 
+        /* #7644: the read costs one step per local hour from the window start to now, so an unbounded start (0001-01-01 is about 70 million steps)
+           is refused before anything is read or allocated, and a future one is refused instead of answering "not enough history". */
+        var windowError = ValidateWindowStart(startUtc, DateTime.UtcNow);
+        if (windowError != null) return windowError;
+
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var provider = ProviderFor(postgres, analysis);
-            var tasks = new Task<BaselineBucket>[Lanes.Length];
-            for (var i = 0; i < Lanes.Length; i++)
-                tasks[i] = provider.GetBaselineAsync(resolved.ServerId, Lanes[i].Metric, startUtc, cancellationToken);
-            await Task.WhenAll(tasks);
+            var lanes = await ReadLaneStepsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
 
             var baselines = new JsonObject();
             var any = false;
             for (var i = 0; i < Lanes.Length; i++)
             {
-                var bucket = tasks[i].Result;
-                var usable = Usable(bucket);
+                var usable = lanes[i].Count > 0;
                 any |= usable;
-                baselines[Lanes[i].Key] = usable ? Bucket(bucket) : null;
+                baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
             }
 
             /* Not enough history is its own answer, never a band at 0: the page draws no band and no markers and says why. */
@@ -93,14 +113,48 @@ internal static class DarlingWebOverviewBaselines
         }
     }
 
+    /// <summary>
+    /// #7644: null when <paramref name="windowStartUtc"/> is a window the page can ask for at <paramref name="nowUtc"/>, else the
+    /// <see cref="McpHelpers.Refusal"/> envelope. Refused, never clamped: a shorter window than the one asked would draw a band
+    /// for a different span than the strips beside it.
+    /// </summary>
+    internal static string? ValidateWindowStart(DateTime windowStartUtc, DateTime nowUtc)
+    {
+        if (windowStartUtc > nowUtc + FutureSkew)
+            return McpHelpers.Refusal("window_start", "window_start is in the future. Use the start of the window the strips show, which is never later than now.");
+        if (windowStartUtc < nowUtc - TimeSpan.FromHours(MaxWindowHours) - WindowSlack)
+            return McpHelpers.Refusal("window_start",
+                $"window_start is more than {MaxWindowHours} hours (plus {WindowSlack.TotalHours:0} hours of slack) before now, the longest window the Overview can show. Use a later start.");
+        return null;
+    }
+
+    /// <summary>
+    /// #7644: the four lanes' usable hourly steps over the window, in <see cref="Lanes"/> order. The series is computed and cached
+    /// at <paramref name="nowUtc"/>, not at the window start: the answer holds all 168 hour-of-week buckets, and a
+    /// daily-cache arm (I/O latency, CPU, blocking) keys on the UTC day of the instant it is asked at, so a window
+    /// start of now minus 24 hours landed on yesterday's key, which the worker's pass never fills. Keyed on now it is the
+    /// key the worker uses and the shared tier holds. An hour with no usable bucket has no step.
+    /// </summary>
+    internal static async Task<IReadOnlyList<PgBaselineProvider.BaselineStep>[]> ReadLaneStepsAsync(
+        PgBaselineProvider provider, int serverId, DateTime windowStartUtc, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var tasks = new Task<IReadOnlyList<PgBaselineProvider.BaselineStep>>[Lanes.Length];
+        for (var i = 0; i < Lanes.Length; i++)
+            tasks[i] = provider.GetBaselineStepsSharedAsync(serverId, Lanes[i].Metric, windowStartUtc, nowUtc, nowUtc, cancellationToken);
+        var all = await Task.WhenAll(tasks);
+        return all.Select(steps => (IReadOnlyList<PgBaselineProvider.BaselineStep>)steps.Where(s => Usable(s.Bucket)).ToList()).ToArray();
+    }
+
     /// <summary>The Viewer's own guard: a bucket with samples and a dispersion above zero draws a band; anything else draws none.</summary>
     internal static bool Usable(BaselineBucket bucket) => bucket.SampleCount > 0 && bucket.EffectiveStdDev > 0;
 
-    internal static JsonObject Bucket(BaselineBucket bucket) => new()
+    internal static JsonObject Step(PgBaselineProvider.BaselineStep step) => new()
     {
-        ["mean"] = bucket.Mean,
-        ["effective_std_dev"] = bucket.EffectiveStdDev,
-        ["sample_count"] = bucket.SampleCount,
-        ["tier"] = bucket.Tier.ToString(),
+        ["from"] = DateTime.SpecifyKind(step.FromUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+        ["to"] = DateTime.SpecifyKind(step.ToUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+        ["mean"] = step.Bucket.Mean,
+        ["effective_std_dev"] = step.Bucket.EffectiveStdDev,
+        ["sample_count"] = step.Bucket.SampleCount,
+        ["tier"] = step.Bucket.Tier.ToString(),
     };
 }

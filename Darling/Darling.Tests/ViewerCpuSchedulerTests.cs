@@ -213,7 +213,9 @@ public sealed class ViewerCpuSchedulerProjectionTests
 
         Assert.Equal("N/A", rows.Single(r => r.Metric == "Runnable Requests").Value);
         Assert.Equal("N/A", rows.Single(r => r.Metric == "Total Requests").Value);
-        Assert.Equal("N/A", rows.Single(r => r.Metric == "Runnable %").Value);
+        /* #7578: no other request running is a 0 share, as the web tile says, with the same words in the tooltip. */
+        Assert.Equal("0.00", rows.Single(r => r.Metric == "Runnable %").Value);
+        Assert.Equal(CpuSchedulerMetrics.RunnablePercentHint, rows.Single(r => r.Metric == "Runnable %").Hint);
     }
 
     [Fact]

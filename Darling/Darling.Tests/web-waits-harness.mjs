@@ -374,11 +374,12 @@ const scenarios = {
     await click(button(root, "Select All"));
     const disabled = boxes(root).filter((b) => b.disabled).length;
     const hint = all(root, (n) => n.className === "mp-hint").map((n) => n.textContent);
+    const hintIsLimit = all(root, (n) => n.className === "mp-hint").map((n) => n.dataset.limit === "1");
     const checked = checkedNames(root);
     await click(button(root, "Clear All"));
     const emptyChart = notes(root).length + all(root, (n) => n.className === "strip empty").length;
     await click(button(root, "Top waits"));
-    return { afterClear, checked, disabled, hint, emptyChart, top: checkedNames(root), readsLast: trendReads().length };
+    return { afterClear, checked, disabled, hint, hintIsLimit, emptyChart, top: checkedNames(root), readsLast: trendReads().length };
   },
   survives: async () => {
     const first = await build("SRV1");

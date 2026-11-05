@@ -63,7 +63,8 @@ const svg = (tag, attrs) => {
 const M_LEFT = 54;
 const M_RIGHT = 12;
 const HEADER_H = 30;
-const PLOT_H = 54;
+/* #7644: each strip's plot is 96 px high (it was 54), so five strips with their headers and the axis take about 690 px, not 480: the CPU and waits lines read clearly at 1920x1080. */
+const PLOT_H = 96;
 const STRIP_GAP = 8;
 const STRIP_H = HEADER_H + PLOT_H;
 const AXIS_H = 22;
@@ -202,9 +203,11 @@ const DATABASE_SCOPED = new Set(["io", "blocking"]);
 
 /**
  * The Viewer's baseline band and anomaly markers (CorrelatedTimelineLanesControl), from get_overview_baselines. `res` is the read's
- * reply as readTool returns it (`{ kind, data, message }`); its `data.baselines` holds `{ mean, effective_std_dev, sample_count }` per
- * lane or null where the store has too little history. A strip gets a flat band, mean +- 2 effective sigma (lower clamped at 0), over
- * the whole window, and a marker on every point above the band at or above the lane's floor (CPU 10, waits 100, I/O 2) or below it.
+ * reply as readTool returns it (`{ kind, data, message }`); its `data.baselines` holds `{ steps: [{ from, to, mean, effective_std_dev,
+ * sample_count }] }` per lane (ISO UTC times, one step per hour of the week the window crosses) or null where the store has too little
+ * history. #7644: a strip gets one band step per hour, mean +- 2 effective sigma (lower clamped at 0), each from its own hour's bucket (an
+ * hour with no usable bucket has no band), and a marker on every point above its own hour's band at or above the lane's floor (CPU 10,
+ * waits 100, I/O 2) or below it.
  * Markers sit on the SQL CPU line only; blocking gets a band and no markers. A lane with no usable baseline gets NO band and NO
  * markers and a `baselineNote` that says why, never a band at 0. `opts.databaseFiltered` is true when the page's database filter
  * narrows the I/O and blocking reads: their baseline is server-wide, so it is not drawn against a filtered line.
@@ -219,19 +222,34 @@ export function applyBaselines(strips, res, window, opts) {
     if (!s.series.some((ser) => ser.points.length)) continue; /* nothing drawn: the strip's own note says so */
     if (opts && opts.databaseFiltered && DATABASE_SCOPED.has(s.key)) { s.baselineNote = "Baseline is server-wide: not drawn for a database filter."; continue; }
     if (!(s.key in ANOMALY_FLOOR) && s.key !== "blocking") continue; /* the buffer pool has no baseline */
-    const b = baselines ? baselines[s.key] : null;
-    if (!b || !(b.sample_count > 0) || !(b.effective_std_dev > 0)) { if (reason) s.baselineNote = reason; continue; }
-    const upper = b.mean + 2 * b.effective_std_dev;
-    const lower = Math.max(0, b.mean - 2 * b.effective_std_dev);
-    s.band = [{ from: window ? window.windowStart : 0, to: window ? window.windowEnd : Number.MAX_SAFE_INTEGER, lower, upper, mean: b.mean }];
+    const band = usableSteps(baselines ? baselines[s.key] : null);
+    if (!band.length) { if (reason) s.baselineNote = reason; continue; }
+    s.band = band;
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
       const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
       const minReads = minReadsFor(s.key, line.readSpanMs);
-      s.markers = line.points.filter((p) => (minReads === 0 || p.reads >= minReads) && ((p.v > upper && p.v >= floor) || p.v < lower)).map((p) => ({ t: p.t, v: p.v }));
+      s.markers = line.points.filter((p) => {
+        if (minReads !== 0 && !(p.reads >= minReads)) return false;
+        const step = band.find((x) => p.t >= x.from && p.t < x.to); /* #7644: judged against its own hour's band only */
+        return !!step && ((p.v > step.upper && p.v >= floor) || p.v < step.lower);
+      }).map((p) => ({ t: p.t, v: p.v }));
     }
   }
   return strips;
+}
+
+/** #7644: a lane's reply as band steps in epoch ms (mean +- 2 effective sigma, lower clamped at 0), in time order. A step without samples or a spread above zero is dropped, so that hour has no band. */
+function usableSteps(lane) {
+  const out = [];
+  for (const st of lane && Array.isArray(lane.steps) ? lane.steps : []) {
+    if (!st || !(st.sample_count > 0) || !(st.effective_std_dev > 0)) continue;
+    const from = parseUtc(st.from);
+    const to = parseUtc(st.to);
+    if (!from || !to || !(to.getTime() > from.getTime())) continue;
+    out.push({ from: from.getTime(), to: to.getTime(), lower: Math.max(0, st.mean - 2 * st.effective_std_dev), upper: st.mean + 2 * st.effective_std_dev, mean: st.mean });
+  }
+  return out.sort((a, c) => a.from - c.from);
 }
 
 /**
@@ -505,14 +523,21 @@ export function fillOverviewStrips(body, server, ctx) {
   (async () => {
     const asked = windowFromHours(ctx.hours);
     const baselineStart = new Date(asked ? asked.windowStart : Date.now() - ctx.hours * 3600000).toISOString();
-    const [results, baselineRes] = await Promise.all([
-      Promise.all(READS.map(([, tool, extra]) =>
-        readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })))),
-      /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. */
-      readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })),
-    ]);
+    /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. #7644: it can
+       take many seconds on a busy server (the I/O baseline reads a month of per-file rows), so the strips are drawn when their own reads
+       return and the band and markers are added when this one does. */
+    let baselineRes = null;
+    let onBaseline = null;
+    readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal)
+      .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))
+      .then((res) => {
+        baselineRes = res;
+        if (onBaseline) onBaseline();
+      });
+    const results = await Promise.all(READS.map(([, tool, extra]) =>
+      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
     /* #6793: the batch was cancelled (a redraw, or the user left the page). Nothing is drawn into a body nobody is looking at. */
-    if (baselineRes.kind === "aborted" || results.some((r) => r.kind === "aborted")) return;
+    if (results.some((r) => r.kind === "aborted")) return;
     const reads = {};
     READS.forEach(([key], i) => { reads[key] = results[i]; });
     const strips = buildStrips(reads);
@@ -524,7 +549,9 @@ export function fillOverviewStrips(body, server, ctx) {
     const kept = results.map((r) => r.keptHours).filter(Boolean);
     const window = windowFromHours(kept.length ? Math.min(...kept) : ctx.hours);
     const dbFilter = getActiveDatabaseFilter();
-    applyBaselines(strips, baselineRes, window, { databaseFiltered: !!(dbFilter && dbFilter.server === server) });
+    const applyOpts = { databaseFiltered: !!(dbFilter && dbFilter.server === server) };
+    /* The baseline may already be back (a cached one is); an aborted one adds nothing. */
+    if (baselineRes && baselineRes.kind !== "aborted") applyBaselines(strips, baselineRes, window, applyOpts);
     const id = "overview-strips|" + server;
     const scope = chartZoomScope(ctx.hours);
     const host = el("div", { class: "chart overview-strips-host" });
@@ -550,6 +577,15 @@ export function fillOverviewStrips(body, server, ctx) {
     };
     draw();
     mount(body, [keptWindowStrip(results.find((r) => r.keptHours || r.presetHours) || null), host]);
+    /* The baseline arrives after the strips: add the band and markers and draw again, with the held zoom. A read that failed adds its note and no band. */
+    if (!baselineRes) {
+      onBaseline = () => {
+        onBaseline = null;
+        if (baselineRes.kind === "aborted" || host.isConnected === false) return;
+        applyBaselines(strips, baselineRes, window, applyOpts);
+        draw();
+      };
+    }
     /* The first draw ran before the host was in the page, so it measured 0 and drew at the default width, which the browser then scaled
        down to the real one (#6360). A resize (a phone turned, a panel widened) redraws at the new width, as the line charts do, and so
        does the observer's first report, which is the host's laid-out width: it is compared with the width the strips were drawn at, not

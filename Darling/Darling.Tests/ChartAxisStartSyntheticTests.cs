@@ -58,8 +58,15 @@ public sealed class ChartAxisStartSyntheticTests
 
             typeof(CorrelatedTimelineLanesControl).GetField("_crosshairManager", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(lanes, manager);
 
-            var baseline = new BaselineBucket { Mean = 20, StdDev = 5, SampleCount = 100, Median = 20, Mad = 3, Tier = BaselineTier.Flat };
-            Assert.True(baseline.EffectiveStdDev > 0);
+            /* #7644: the lanes take one band step per local hour. Hourly steps from four hours back to one hour ahead cover the data and
+               the whole axis, so the band, its mean segments and the markers are all drawn, the way a refresh with a baseline leaves them. */
+            var bucket = new BaselineBucket { Mean = 20, StdDev = 5, SampleCount = 100, Median = 20, Mad = 3, Tier = BaselineTier.Flat };
+            Assert.True(bucket.EffectiveStdDev > 0);
+            var hourStart = DateTime.UtcNow.AddHours(-4);
+            IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep> baseline = Enumerable.Range(0, 5)
+                .Select(h => PerformanceMonitor.Ui.BaselineBand.MakeStep(
+                    hourStart.AddHours(h).ToOADate(), hourStart.AddHours(h + 1).ToOADate(), bucket.Mean, bucket.EffectiveStdDev))
+                .ToList();
             var data = withData ? ThreeHours() : new List<(double Time, double Value)>();
             var empty = new List<(double Time, double Value)>();
             manager.PrepareForRefresh();

@@ -1106,19 +1106,23 @@
                             <DataGrid x:Name="FinOpsIndexAnalysisRollupGrid" Grid.Row="1" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" MaxHeight="220" HorizontalScrollBarVisibility="Auto" AutoGenerateColumns="False" IsReadOnly="True">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Binding="{Binding Scope}" Width="180"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Scope" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Database" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                    <!-- #7701: next to the database name. When this database's newest snapshot was collected; blank on the overall row, which spans databases. -->
+                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
+                                    <!-- #7701: "Not collected since ..." on a database whose snapshot is left over; such a row is in no total or recommendation. -->
+                                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="230"/>
                                     <DataGridTextColumn Header="Tables" Binding="{Binding TablesAnalyzed, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Indexes" Binding="{Binding IndexCount, StringFormat=N0}" Width="75" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=N2}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding TotalSizeGb, StringFormat=#\,##0.00####}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding TotalRows, StringFormat=N0}" Width="110" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Disable" Binding="{Binding IndexesToDisable, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="To Merge" Binding="{Binding IndexesToMerge, StringFormat=N0}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Compressable" Binding="{Binding CompressableIndexes, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Unused" Binding="{Binding UnusedIndexes, StringFormat=N0}" Width="70" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=N2}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=N2}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=N2}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
-                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=N2}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Disable GB" Binding="{Binding UnusedSizeGb, StringFormat=#\,##0.00####}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Min GB" Binding="{Binding CompressionMinSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Compress Max GB" Binding="{Binding CompressionMaxSavingsGb, StringFormat=#\,##0.00####}" Width="120" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Min GB" Binding="{Binding TotalMinSavingsGb, StringFormat=#\,##0.00####}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Total Max GB" Binding="{Binding TotalMaxSavingsGb, StringFormat=#\,##0.00####}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <!-- Workload-impact columns (sp_IndexCleanup #index_reporting_stats parity): pre-formatted strings,
                                          'N/A' on the overall row; numeric SortMemberPath keys keep sorting correct. Reads shows the
                                          seeks/scans/lookups breakdown (left-aligned text, like Lite). -->
@@ -1130,8 +1134,6 @@
                                     <DataGridTextColumn Header="Avg Lock Wait ms" Binding="{Binding AvgLockWaitMs}" SortMemberPath="AvgLockWaitMsSort" Width="120" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Latch Waits" Binding="{Binding LatchWaitCount}" SortMemberPath="LatchWaitCountSort" Width="95" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Avg Latch Wait ms" Binding="{Binding AvgLatchWaitMs}" SortMemberPath="AvgLatchWaitMsSort" Width="130" ElementStyle="{StaticResource NumericCell}"/>
-                                    <!-- When this database's newest snapshot was collected; blank on the overall row, which spans databases. -->
-                                    <DataGridTextColumn Header="Collected" Binding="{Binding CollectionTime}" Width="150" SortMemberPath="CollectionTimeUtc"/>
                                 </DataGrid.Columns>
                             </DataGrid>
 
@@ -1148,7 +1150,7 @@
                                     <DataGridTextColumn Binding="{Binding SchemaName}" Width="90"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="SchemaName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Schema" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding TableName}" Width="170"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TableName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Table" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                     <DataGridTextColumn Binding="{Binding IndexName}" Width="200"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="IndexName" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Index" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=N3}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
+                                    <DataGridTextColumn Header="Size GB" Binding="{Binding IndexSizeGb, StringFormat=#\,##0.00####}" Width="80" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Rows" Binding="{Binding IndexRows, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Reads" Binding="{Binding IndexReads, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
                                     <DataGridTextColumn Header="Writes" Binding="{Binding IndexWrites, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"/>
