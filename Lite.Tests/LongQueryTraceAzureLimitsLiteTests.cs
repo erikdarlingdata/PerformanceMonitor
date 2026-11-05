@@ -326,4 +326,31 @@ public sealed class LongQueryTraceAzureLimitsLiteTests : IDisposable
         Assert.DoesNotContain("gamma", run.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(rig.Calls, call => call == "gamma");
     }
+
+    /// <summary>
+    /// #7639: a list that names no database the server has creates nothing and refuses nothing. The long query run says so in its note
+    /// instead of recording SUCCESS with no rows and no reason. A list that names a live database carries no such note.
+    /// </summary>
+    [Fact]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheRun_AndAMatchingListDoesNot()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await ReconcileAsync(rig);
+        await rig.Service.RunCollectorAsync(rig.Server, Collector, CancellationToken.None);
+
+        Assert.Empty(rig.Calls);
+        var run = await LastRunAsync(rig);
+        Assert.Equal("SUCCESS", run.Status);
+        Assert.Contains("matches no database on this server", run.Message, StringComparison.Ordinal);
+
+        rig.Server.XeSessionDatabases = new List<string> { "alpha" };
+        await ReconcileAsync(rig);
+        await rig.Service.RunCollectorAsync(rig.Server, Collector, CancellationToken.None);
+
+        run = await LastRunAsync(rig);
+        Assert.Equal("SUCCESS", run.Status);
+        Assert.DoesNotContain("matches no database", run.Message ?? string.Empty, StringComparison.Ordinal);
+    }
 }

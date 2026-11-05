@@ -132,7 +132,7 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
     /// <see cref="ReadXeSessionAsync"/>), so the run records PERMISSIONS or ERROR with the XE session
     /// flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private async Task<int> CollectDeadlocksAsync(ServerConnection server, XeSessionEnsureException? ensureFailure, CancellationToken cancellationToken)
+    private async Task<int> CollectDeadlocksAsync(ServerConnection server, Exception? ensureFailure, CancellationToken cancellationToken)
     {
         if (ensureFailure is null)
         {

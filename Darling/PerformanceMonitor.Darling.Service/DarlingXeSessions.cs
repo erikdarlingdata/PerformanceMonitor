@@ -394,6 +394,7 @@ public static class DarlingXeSessions
         AttentionEnsureFault? attentionDenied = null;
         var attentionDeniedIn = 0;
         List<string> databases;
+        var listMatchesNone = false;
         try
         {
             /* No #3477 scope here, deliberately: this list provisions the always-on SESSIONS for two
@@ -410,7 +411,9 @@ public static class DarlingXeSessions
             /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates, after the excluded databases
                (the list above already leaves those out, so they win). Empty = every database. A database left off is never attempted, so
                it is neither refused nor in any run note, and a per-install session already there is left alone. */
+            var beforeTheList = databases;
             databases = XeSessionDatabaseList.Apply(databases, server.Config.XeSessionDatabases).ToList();
+            listMatchesNone = XeSessionDatabaseList.MatchesNone(beforeTheList, server.Config.XeSessionDatabases, databases);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -488,6 +491,14 @@ public static class DarlingXeSessions
         {
             (outcome.Deadlock, outcome.DeadlockPartialNote) = deadlockTally.Result();
             (outcome.BlockedProcess, outcome.BlockedProcessPartialNote) = blockedTally.Result();
+
+            /* A list that names no database the server has attempts nothing and refuses nothing, so the tallies are empty. The two
+               runs say so in their note instead of recording SUCCESS with no rows and no reason. */
+            if (listMatchesNone)
+            {
+                outcome.DeadlockPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
+                outcome.BlockedProcessPartialNote = XeSessionDatabaseList.MatchesNoDatabaseNote;
+            }
         }
 
         return attentionTried > 0 && attentionDeniedIn == attentionTried ? attentionDenied : null;
@@ -1570,7 +1581,8 @@ SELECT /* PerformanceMonitorDarling */
            #2623 composer, so this loss is worded exactly as the runners word theirs; null when nothing
            failed, which is the ordinary sweep. The first failure is worded as the per-database line above words it, so a
            create or start refused on Azure SQL Database carries the caps sentence in the note too (#4961). */
-        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure));
+        var partialNote = EnumeratedCollectorDriver.BuildPartialFailureNote(failed, attempted, failedDatabases, firstFailure is null ? null : AlwaysOnXeSessions.DescribeFailure(firstFailure))
+            ?? (XeSessionDatabaseList.MatchesNone(plannedCreates, server.Config.XeSessionDatabases, narrowedCreates) ? XeSessionDatabaseList.MatchesNoDatabaseNote : null);
 
         /* The worker's hourly pass while the trace is on stops here: it brings back a session dropped from outside,
            and leaves the drop side to a connect, a change of the state key, or an attempt after the cap. */

@@ -283,7 +283,8 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 ensureInDatabase is null
                     ? alwaysOnInDatabase
                     : (databaseName, token) => ensureInDatabase(server, sessionName, databaseName, token),
-                onPartialRefusal: XeEnsurePartialRefusalSink(server, captureName, warnedKey, () => partialRefusal = true));
+                onPartialRefusal: XeEnsurePartialRefusalSink(server, captureName, warnedKey, () => partialRefusal = true),
+                onNoListedDatabase: note => _xeEnsurePartialNotes[warnedKey] = note);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -473,7 +474,8 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
         Func<string, CancellationToken, Task>? ensureInDatabase = null,
         Func<Exception, string?>? explainRefusal = null,
         Action<IReadOnlyList<string>, int, Exception>? onPartialRefusal = null,
-        bool holdRepeatedRefusals = false)
+        bool holdRepeatedRefusals = false,
+        Action<string>? onNoListedDatabase = null)
     {
         IReadOnlyList<string> databases;
         if (plannedDatabases is not null)
@@ -496,7 +498,12 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
 
                 /* #7639: the server's "Databases that get Extended Events sessions" list narrows the always-on creates (deadlock,
                    blocked process, client timeout). After the excluded databases, which win. Empty = every database. */
+                var beforeTheList = databases;
                 databases = XeSessionDatabaseList.Apply(databases, server.XeSessionDatabases);
+                if (XeSessionDatabaseList.MatchesNone(beforeTheList, server.XeSessionDatabases, databases))
+                {
+                    onNoListedDatabase?.Invoke(XeSessionDatabaseList.MatchesNoDatabaseNote);
+                }
             }
             catch (SqlException ex)
             {

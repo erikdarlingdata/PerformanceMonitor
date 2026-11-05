@@ -893,7 +893,7 @@ public partial class RemoteCollectorService
 
             AppLogger.Debug("Collector", $"Running collector '{collectorName}' for server '{server.DisplayName}'");
 
-            XeSessionEnsureException? deadlockEnsureFailure = null;
+            Exception? deadlockEnsureFailure = null;
 
             /* Ensure the backing XE session exists before reading its ring buffer.
                Runs on every cycle (cheap existence check when already present) so a
@@ -914,8 +914,10 @@ public partial class RemoteCollectorService
                 {
                     await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
                 }
-                catch (XeSessionEnsureException ex) when (engineEdition == 5)
+                catch (Exception ex) when (engineEdition == 5 && ex is not OperationCanceledException)
                 {
+                    /* A non-SQL failure in every database (a token or connection-open fault) comes out of the shared driver raw, and
+                       Darling reads first for it too (it records it as an ensure failure), so it is held the same way. */
                     deadlockEnsureFailure = ex;
                 }
             }

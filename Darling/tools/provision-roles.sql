@@ -2909,8 +2909,8 @@ REVOKE UPDATE ON config.config_monitored_servers FROM mcp;
 -- unless it is one of those.
 GRANT UPDATE (server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password)
    ON config.config_monitored_servers TO mcp;
--- V247 (#7639): the databases that get Extended Events sessions are an ordinary column the edit tool writes, so mcp updates it directly like the
--- others. Its own statement, guarded on the column, so a store below V247 still commits the rest of the script.
+-- V247 (#7639): the databases that get Extended Events sessions are a column that set_server_xe_session_databases writes with a plain UPDATE (edit_server
+-- refuses it), so mcp updates it directly like the others. Its own statement, guarded on the column, so a store below V247 still commits the rest of the script.
 DO $$
 BEGIN
    IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute

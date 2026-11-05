@@ -257,7 +257,8 @@ public partial class RemoteCollectorService
 
                 /* #7639: a cycle refused in some databases and ensured in others is still a failing cycle for the log: the cycles
                    after it tell the same refusals at Debug until a cycle has none. */
-                if (_xeEnsurePartialNotes.ContainsKey(LongQueryPartialNoteKey(server)))
+                if (_xeEnsurePartialNotes.TryGetValue(LongQueryPartialNoteKey(server), out var keptNote)
+                    && !string.Equals(keptNote, XeSessionDatabaseList.MatchesNoDatabaseNote, StringComparison.Ordinal))
                 {
                     _longQueryTraceCreateWarned[server.Id] = true;
                 }
@@ -431,9 +432,8 @@ public partial class RemoteCollectorService
             /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates only. The set returned for the
                drop stays the monitored one, so a session this install made in a database left off the list is kept, not dropped. The legacy ownerless session is still dropped
                there (RunLegacyLongQuerySessionAsync is not narrowed by the list). */
-            var create = XeSessionDatabaseList.Apply(
-                LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create,
-                server.XeSessionDatabases);
+            var planned = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
+            var create = XeSessionDatabaseList.Apply(planned, server.XeSessionDatabases);
 
             /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
                still drives it: the same per-database isolation, log lines and all-refused throw as in production. Below
@@ -444,6 +444,13 @@ public partial class RemoteCollectorService
 
             /* #7639: this cycle's account of the databases refused while others were ensured; the driver sets it, the run's note reads it. */
             _xeEnsurePartialNotes.TryRemove(LongQueryPartialNoteKey(server), out _);
+
+            /* A list that names no database the plan has creates nothing and refuses nothing: the run's note says so. */
+            if (XeSessionDatabaseList.MatchesNone(planned, server.XeSessionDatabases, create))
+            {
+                _xeEnsurePartialNotes[LongQueryPartialNoteKey(server)] = XeSessionDatabaseList.MatchesNoDatabaseNote;
+            }
+
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", sessionName,
                 (connection, token) => new SqlConnectionStringBuilder(connection.ConnectionString).ApplicationIntent == ApplicationIntent.ReadOnly

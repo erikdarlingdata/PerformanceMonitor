@@ -213,6 +213,28 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Empty(rig.Beta.Statements);
     }
 
+    /* #7639: a list that names no database the server has attempts nothing and refuses nothing. The deadlock and blocked process runs used
+       to record SUCCESS with no rows and no reason, so each now carries a note that the list matches no database. An empty list (every
+       database) and a list that names a live database carry no such note. */
+    [Theory]
+    [InlineData("dropped_last_week", true)]
+    [InlineData("", false)]
+    [InlineData("alpha", false)]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheDeadlockAndBlockedProcessRuns(string list, bool expectNote)
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = list.Length == 0 ? new List<string>() : new List<string> { list };
+        var outcome = new DarlingXeSessions.CaptureEnsureOutcome();
+
+        await DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None, outcome: outcome);
+
+        foreach (var note in new[] { outcome.DeadlockPartialNote, outcome.BlockedProcessPartialNote })
+        {
+            Assert.Equal(expectNote, note?.Contains("matches no database on this server", StringComparison.Ordinal) ?? false);
+        }
+    }
+
     /* #7639: an empty list is how it worked before the setting: every database gets its sessions. */
     [Fact]
     public async Task AnEmptyXeSessionDatabaseList_EnsuresEveryDatabase()

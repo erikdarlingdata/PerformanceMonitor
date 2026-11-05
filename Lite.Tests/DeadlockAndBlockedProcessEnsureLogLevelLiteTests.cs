@@ -801,6 +801,55 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7639: a list that is set but names no database the server has attempts nothing and refuses nothing. The run used to record
+    /// SUCCESS with no rows and no reason, which reads as a quiet server. Its note now says the list matches no database. An empty
+    /// list (every database) and a list that names a live database carry no such note.
+    /// </summary>
+    [Theory]
+    [InlineData(Deadlock, "dropped_last_week", true)]
+    [InlineData(BlockedProcess, "dropped_last_week", true)]
+    [InlineData(Attention, "dropped_last_week", true)]
+    [InlineData(BlockedProcess, "", false)]
+    [InlineData(BlockedProcess, "alpha", false)]
+    public async Task AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheRun_AndAnEmptyOrMatchingListDoesNot(string session, string list, bool expectNote)
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = list.Length == 0 ? new List<string>() : new List<string> { list };
+        foreach (var database in new[] { "master", "alpha", "beta", "gamma" })
+        {
+            rig.Readable[database] = () => new FakeDeadlockReader(Array.Empty<object[]>(), session == Deadlock ? new[] { new object[] { 100L, false } } : Array.Empty<object[]>());
+        }
+
+        await RunCollectorAsync(rig, session);
+
+        var run = Assert.Single(await ReadRunsAsync(rig, session));
+        Assert.True(run.Status == "SUCCESS", run.Status + ": " + run.Error);
+        Assert.Equal(expectNote, run.Error?.Contains("matches no database on this server", StringComparison.Ordinal) ?? false);
+    }
+
+    /// <summary>
+    /// #7639: every database failed its ensure with an exception that is not a SQL error (a token or connection-open fault). The
+    /// shared driver raises it raw, and the deadlock run used to end before the read. Darling records it as an ensure failure and reads
+    /// first, so Lite does too: the master item's telemetry arm still stores its deadlock, and the run then records the failure.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureFailedInEveryDatabaseWithANonSqlFault_StillStoresTheTelemetryDeadlocks_AndRecordsTheFailureAfterIt()
+    {
+        var rig = await BuildRigAsync();
+        rig.Service.XeSessionDatabaseEnsureOverrideForTests = (_, _, _, _) =>
+            Task.FromException(new InvalidOperationException("The access token could not be acquired."));
+        rig.Readable["master"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), "alpha", "<deadlock id=\"telemetry\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"telemetry\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("ERROR", run.Status);
+        Assert.Contains("The access token could not be acquired.", run.Error, StringComparison.Ordinal);
+    }
+
     private sealed class FakeDeadlockReader(object[][] rows, object[][] gate) : System.Data.Common.DbDataReader
     {
         private readonly object[][][] _sets = { rows, gate };

@@ -23,6 +23,22 @@ namespace PerformanceMonitor.Collectors;
 public static class XeSessionDatabaseList
 {
     /// <summary>
+    /// The run note for a list that is set but names no database the server has: nothing is attempted, so nothing is refused, and
+    /// without this the capture's runs record SUCCESS with no rows and no explanation. What gets created does not change.
+    /// </summary>
+    public const string MatchesNoDatabaseNote =
+        "The XE session database list matches no database on this server, so no XE session was created. Edit the list, or clear it to use every database.";
+
+    /// <summary>
+    /// Whether <paramref name="included"/> names at least one database and <see cref="Apply"/> left none of the
+    /// <paramref name="before"/> databases. A list that is empty, or a server with nothing to narrow, is not this case.
+    /// </summary>
+    public static bool MatchesNone(IReadOnlyCollection<string> before, IEnumerable<string>? included, IReadOnlyCollection<string> after) =>
+        before.Count > 0
+        && after.Count == 0
+        && (included ?? Array.Empty<string>()).Any(name => !string.IsNullOrWhiteSpace(name));
+
+    /// <summary>
     /// <paramref name="databases"/> narrowed to the names on <paramref name="included"/> (case-insensitive, trimmed), in the
     /// order given. Returns every database when <paramref name="included"/> is null, empty or only blanks. Only a create list
     /// goes through here: a session this install made in a database left off the list is left alone, never dropped. The ownerless legacy long-query session is not governed by the list.

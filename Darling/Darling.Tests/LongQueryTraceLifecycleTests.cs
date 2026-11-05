@@ -1555,6 +1555,26 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.DoesNotContain(rig.Calls, call => call.Database == "beta");
     }
 
+    /* #7639: a list that names no database the server has creates nothing and refuses nothing. The long query run's note says so instead of
+       the run recording SUCCESS with no rows and no reason. A list that names a live database carries no such note. */
+    [Fact]
+    public async Task Azure_AnXeSessionDatabaseList_MatchingNoDatabase_PutsANoteOnTheRun_AndAMatchingListDoesNot()
+    {
+        var rig = BuildRig();
+        rig.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Empty(rig.Created);
+        Assert.Contains("matches no database on this server", rig.State.LongQueryTracePartialNote ?? string.Empty, StringComparison.Ordinal);
+
+        rig.Config.XeSessionDatabases = new List<string> { "alpha" };
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "alpha" }, rig.Created);
+        Assert.Null(rig.State.LongQueryTracePartialNote);
+    }
+
     [Fact]
     public async Task Legacy_ARecordThatCannotBeRead_SkipsTheLegacyStep_NeverDropsTwice_AndTriesAgainOnTheNextPass()
     {
