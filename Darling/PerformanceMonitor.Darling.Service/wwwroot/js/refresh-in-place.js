@@ -7,6 +7,7 @@
  */
 
 import { el, mount, clear } from "./util.js";
+import { SOLO } from "./panel-layout.js";
 
 /* The auto-refresh keeps what is on screen (#6933). A poll used to clear the page and draw a "Loading..." strip, so every
    minute the screen blinked and a reader lost their place. Now a poll reads again with the old content still showing and
@@ -222,9 +223,15 @@ export function notePanelKey(panel, key) {
   panelParams.set(panel, key);
 }
 
+/* #7534: panel-layout.js marks a lone half-width panel `span-solo` on the live panel, and a freshly built panel never has it. The mark
+   is left out of the key so a poll still finds the same panels, and swapUnit keeps it. */
+function classKey(n) {
+  return typeof n.className === "string" ? n.className.split(/\s+/).filter((c) => c && c !== SOLO).join(" ") : "";
+}
+
 function unitSig(n) {
   const attr = (k) => (typeof n.getAttribute === "function" ? n.getAttribute(k) : null);
-  return [n.tag || n.tagName, typeof n.className === "string" ? n.className : "", attr("data-panel"), attr("data-title"), panelParams.get(n) || ""].join("|");
+  return [n.tag || n.tagName, classKey(n), attr("data-panel"), attr("data-title"), panelParams.get(n) || ""].join("|");
 }
 
 /**
@@ -265,9 +272,10 @@ function swapUnit(live, old, fresh) {
     return;
   }
   keepScroll(() => {
+    const solo = hasClass(old, SOLO);
     clear(old);
     while (fresh.firstChild) old.appendChild(fresh.firstChild);
-    old.className = fresh.className;
+    old.className = fresh.className + (solo ? " " + SOLO : "");
     old.hidden = fresh.hidden;
     if (old.style && fresh.style) old.style.display = fresh.style.display;
   });

@@ -1284,6 +1284,47 @@ try {
       await settle(30);
       return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
     },
+    /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
+       `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
+       showed before, what was sent, and what the page said after. A save under the bounds answers 200; the service's own refusal is
+       simulated by a 400 for a value the page let through. */
+    protectionAges: async (param) => {
+      const [seat, typed] = param.split("/");
+      state.canEdit = seat === "editor";
+      const settings = {
+        alerts_enabled: true,
+        backup_overdue: { enabled: false, threshold_hours: 168 },
+        log_backup_overdue: { enabled: false, threshold_minutes: 60 },
+        checkdb_overdue: { enabled: true, threshold_hours: 336 },
+      };
+      state.responder = (method, url, body) => {
+        if (method === "GET" && url === "/api/read/get_alert_settings") return { status: 200, body: settings };
+        if (method === "PUT" && url === "/api/alert-settings/database-protection") {
+          if (body.checkdb_overdue.threshold_hours === 8760) return { status: 400, body: { error: "The service refused 8760." } };
+          return { status: 200, body: { status: "updated" } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("settings");
+      const boxFor = (g) => field("database-protection-" + g);
+      const rowTexts = textsUnder(main).filter((t) => /overdue/i.test(t) && /\(hours\)|\(minutes\)|^(168|60|336)$/.test(t));
+      const before = boxFor("backup_overdue") ? ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].map((g) => boxFor(g).value) : null;
+      const labels = all(main, (n) => n.tag === "span" && (n.textContent || "").includes("when older than")).map((n) => n.textContent);
+      let after = null;
+      if (typed && before) {
+        const values = typed.split(",");
+        await typeInto(boxFor("backup_overdue"), values[0]);
+        await typeInto(boxFor("log_backup_overdue"), values[1]);
+        await typeInto(boxFor("checkdb_overdue"), values[2]);
+        await fire(byAttr(main, "data-action", "save-database-protection")[0], "click");
+        await settle(30);
+        after = {
+          status: all(main, (n) => n.attrs && n.attrs["data-field"] === "database-protection-status").map(text),
+          boxes: boxFor("backup_overdue") ? ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].map((g) => boxFor(g).value) : null,
+        };
+      }
+      return { rowTexts, form: before !== null, before, labels, after, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body })) };
+    },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */

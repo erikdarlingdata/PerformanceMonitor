@@ -691,6 +691,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // columns so a re-run of V244 adds them again. Safe on a store that never had them.
         new(244, "hasServerConnectDownState",
             @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error, DROP COLUMN IF EXISTS next_connect_attempt;"),
+        // V245 (#7611): the three Database Protection thresholds on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
+        new(245, "hasProtectionThresholds",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
     ];
 
     /// <summary>

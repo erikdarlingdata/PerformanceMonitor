@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -51,11 +51,11 @@ export function listCell(values) {
    "unfiltered" or "process-rows"): together they draw the database-scope chip while the page's database filter is active
    (#5245, dbScopeChip in util.js). A panel with no read of its own passes none and draws no chip. `control` (#5226) is a node
    drawn under the title, before the body: the ranking selector of the Top Queries card. */
-export function panelShell(title, subtitle, span = 2, read = null, dbScope = null, control = null) {
+export function panelShell(title, subtitle, span = 2, read = null, dbScope = null, control = null, sourceKey = null) {
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   /* #5701: `data-panel` (the read) and `data-title` are the hooks the web UI smoke check finds a panel by. */
   const panel = el("div", { class: "panel card" + (span === 2 ? " span-2" : ""), "data-panel": read || title, "data-title": title }, [
-    el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null, dbScopeChip(read, dbScope)]),
+    el("h3", {}, [title, subtitle ? el("span", { class: "panel-sub", text: " " + subtitle }) : null, sourceSpan({ sourceKey }), dbScopeChip(read, dbScope)]),
     control,
     body,
   ]);
@@ -124,7 +124,7 @@ export function fanout(read, params, specs, intro = null) {
       throw new Error("fanout(" + spec.title + "): a data panel must explain its own empty state.");
     }
   }
-  const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2, read, s.dbScope));
+  const shells = specs.map((s) => panelShell(s.title, s.subtitle, s.span ?? 2, read, s.dbScope, null, s.sourceKey));
   const keys = specs.map((s) => panelMemoryKey(read, params, s));
   specs.forEach((s, i) => {
     if (s.hideWhenNoRows && !panelHadRows.get(keys[i])) shells[i].panel.style.display = "none";
@@ -168,7 +168,9 @@ export function fanout(read, params, specs, intro = null) {
 
         applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), sourceStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
+        /* #5244, #7543: the collector that answered goes in the heading beside the window label, not in a row above the chart. */
+        applySourceSubtitle(shells[i].panel, res.data, spec);
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }

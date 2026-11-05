@@ -50,8 +50,8 @@ public sealed record DatabaseProtectionSummary(
     string Text);
 
 /// <summary>One overdue fact of one database (#6873): <see cref="Kind"/> is one of <see cref="DatabaseProtectionBands"/>'s kind words, <see cref="State"/> the banded
-/// state word (<c>overdue</c>, <c>never</c> or <c>none_in_window</c>) and <see cref="Age"/> the age at the capture, null when there is no time to measure.</summary>
-public sealed record DatabaseProtectionOverdue(string Kind, string Database, string State, TimeSpan? Age)
+/// state word (<c>overdue</c>, <c>never</c> or <c>none_in_window</c>) and <see cref="Age"/> the age at the capture, null when there is no time to measure and <see cref="Threshold"/> the age this database was judged against (#7611).</summary>
+public sealed record DatabaseProtectionOverdue(string Kind, string Database, string State, TimeSpan? Age, TimeSpan? Threshold = null)
 {
     /// <summary>The words the alert detail and the fleet chip use for this fact, for example <c>Sales (9 days 4 hours old)</c> or <c>Sales (never checked)</c>.</summary>
     public string Text => DatabaseProtectionBands.DescribeOverdue(this);
@@ -175,15 +175,25 @@ public static class DatabaseProtectionBands
     public static IReadOnlyList<DatabaseProtectionOverdue> OverdueFacts(
         IReadOnlyList<DatabaseProtectionFact> facts, DateTime capturedAt, DatabaseProtectionThresholds? thresholds = null)
     {
-        ArgumentNullException.ThrowIfNull(facts);
         var t = thresholds ?? DatabaseProtectionThresholds.Default;
+        return OverdueFacts(facts, capturedAt, _ => t);
+    }
+
+    /// <summary>The same judgment with the ages chosen per database (#7611): <paramref name="thresholdsFor"/> takes the database name and answers the ages
+    /// in force for it (<see cref="DatabaseProtectionThresholdResolver.ForDatabase"/>). Each fact carries the age it was judged against.</summary>
+    public static IReadOnlyList<DatabaseProtectionOverdue> OverdueFacts(
+        IReadOnlyList<DatabaseProtectionFact> facts, DateTime capturedAt, Func<string, DatabaseProtectionThresholds> thresholdsFor)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(thresholdsFor);
         var list = new List<DatabaseProtectionOverdue>();
         foreach (var fact in facts)
         {
+            var t = thresholdsFor(fact.DatabaseName);
             var band = Evaluate(fact, capturedAt, t);
-            if (band.FullBackup.Overdue) list.Add(new(KindFullBackup, fact.DatabaseName, band.FullBackup.State, band.FullBackup.Age));
-            if (band.LogBackup.Overdue) list.Add(new(KindLogBackup, fact.DatabaseName, band.LogBackup.State, band.LogBackup.Age));
-            if (band.CheckDb.Overdue) list.Add(new(KindCheckDb, fact.DatabaseName, band.CheckDb.State, band.CheckDb.Age));
+            if (band.FullBackup.Overdue) list.Add(new(KindFullBackup, fact.DatabaseName, band.FullBackup.State, band.FullBackup.Age, t.FullBackup));
+            if (band.LogBackup.Overdue) list.Add(new(KindLogBackup, fact.DatabaseName, band.LogBackup.State, band.LogBackup.Age, t.LogBackup));
+            if (band.CheckDb.Overdue) list.Add(new(KindCheckDb, fact.DatabaseName, band.CheckDb.State, band.CheckDb.Age, t.CheckDb));
         }
 
         return list;
