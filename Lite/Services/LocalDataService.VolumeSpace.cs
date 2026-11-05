@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -31,7 +32,7 @@ public partial class LocalDataService
 
         command.CommandText = $@"
 SELECT
-    volume_mount_point,
+    {VolumeKey.Sql} AS volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
     MIN(volume_free_mb) AS volume_free_mb,
     MAX(collection_time) AS newest_sample
@@ -42,9 +43,9 @@ AND   collection_time = (
     FROM {sizeRelation}
     WHERE server_id = $1
 )
-AND   volume_mount_point IS NOT NULL
+AND   {VolumeKey.Sql} IS NOT NULL
 AND   volume_total_mb > 0
-GROUP BY volume_mount_point
+GROUP BY {VolumeKey.Sql}
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
