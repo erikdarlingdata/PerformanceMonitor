@@ -248,6 +248,25 @@ VALUES ({++_reportId}, '{Ts(collectedAt)}', '{Ts(eventAt)}', {Server}, 'srv', 'A
 
     private static JsonObject OnlyRow(JsonNode section) => Assert.Single(section["rows"]!.AsArray())!.AsObject();
 
+    /* #7573: the monitor's own sessions are stored again and are heavier here than the application's. The old read had no program
+       predicate, so the monitor's host was a row of its own and counted its CPU. */
+    [Fact]
+    public async Task ActiveRequests_LeaveTheMonitorsOwnSessionsOut()
+    {
+        var at = T0.AddMinutes(-5);
+        var sections = await HighCpuSections(() =>
+        {
+            Exec($@"INSERT INTO query_snapshots (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id, cpu_time_ms, total_elapsed_time_ms, login_name, host_name, program_name)
+VALUES (2, '{Ts(at)}', {Server}, 'srv', 61, 'AppDb', 'SELECT 1', 'running', 0, 100, 5000, 'app_login', 'web01', 'AppSvc'),
+       (3, '{Ts(at)}', {Server}, 'srv', 62, 'AppDb', 'SELECT 1', 'running', 0, 9000, 5000, 'sa', 'MONHOST', 'PerformanceMonitorLite'),
+       (4, '{Ts(at)}', {Server}, 'srv', 63, 'AppDb', 'SELECT 1', 'running', 0, 8000, 5000, 'sa', 'MONHOST2', 'PerformanceMonitorDarling')");
+        });
+
+        var active = OnlyRow(sections["active_requests"]);
+        Assert.Equal("web01", active["host_name"]!.GetValue<string>());
+        Assert.Equal(100L, active["total_cpu_ms"]!.GetValue<long>());
+    }
+
     [Fact]
     public async Task HighCpuSections_EachFreezeTheRowCollectedInTheWindow()
     {

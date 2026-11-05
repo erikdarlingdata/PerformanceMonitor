@@ -69,6 +69,20 @@ public partial class ServerTab
         await RefreshAllDataAsync();
     }
 
+    /// <summary>#7573: whether the Active Queries grid includes the monitor's own statements (off by default, the same switch as Long Query
+    /// Completions). Read on the UI thread, before a read is handed to a worker.</summary>
+    private bool ActiveQueriesIncludeMonitor => ActiveQueriesIncludeMonitorCheckBox.IsChecked == true;
+
+    private async void ActiveQueriesIncludeMonitorCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await RefreshAllDataAsync();
+    }
+
     private async Task RefreshLongQueriesAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         LongQueriesDisabledWarning.Text = LongQueriesDisabledText(_isAzureSqlDatabase);

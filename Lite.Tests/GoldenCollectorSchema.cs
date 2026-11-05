@@ -388,7 +388,8 @@ internal static class GoldenCollectorSchema
     wait_duration_ms BIGINT,
     blocking_session_id INTEGER,
     resource_description VARCHAR,
-    database_name VARCHAR
+    database_name VARCHAR,
+    program_name VARCHAR
 )",
         ["procedure_stats"] = @"CREATE TABLE IF NOT EXISTS procedure_stats (
     collection_id BIGINT PRIMARY KEY,

@@ -76,7 +76,7 @@ public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnaps
         public int RequestId { get; set; }
     }
 
-    private static readonly string SnapshotsBase = $$"""
+    private const string SnapshotsBase = """
 
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 1000;
@@ -225,7 +225,6 @@ WHERE der.session_id <> @@SPID
 AND   der.session_id >= 50
 AND   dest.text IS NOT NULL
 AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
-AND   {{MonitorApplicationNames.SqlNotMonitorSessionPredicate("des")}}
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);
 """;
@@ -241,7 +240,7 @@ OPTION(MAXDOP 1, RECOMPILE);
      * into a #temp table first guarantees the DMFs only see handles from
      * the current database. See #857.
      */
-    private static readonly string SnapshotsAzureBase = $$"""
+    private const string SnapshotsAzureBase = """
 
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET LOCK_TIMEOUT 1000;
@@ -387,7 +386,6 @@ OUTER APPLY
 ) AS trn
 {1}
 WHERE dest.text IS NOT NULL
-AND   {{MonitorApplicationNames.SqlNotMonitorSessionPredicate("des")}}
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);
 

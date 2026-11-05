@@ -31,7 +31,7 @@ public sealed class WaitingTasksCollector : CollectorDefinitionBase<WaitingTasks
     {
     }
 
-    public readonly record struct Row(short SessionId, string? WaitType, long WaitDurationMs, short? BlockingSessionId, string? DatabaseName);
+    public readonly record struct Row(short SessionId, string? WaitType, long WaitDurationMs, short? BlockingSessionId, string? DatabaseName, string? ProgramName);
 
     private const string QueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -42,8 +42,12 @@ SELECT /* PerformanceMonitorLite */
     wait_duration_ms = wt.wait_duration_ms,
     /* #6896: a memory-grant wait can name this collector's own session as the blocker. The wait is real, so keep the row and drop the blocker. */
     blocking_session_id = NULLIF(wt.blocking_session_id, @@SPID),
-    database_name = d.name
+    database_name = d.name,
+    /* #7573: the session's program name, so a reader can leave the monitor's own waits out. NULL when the session is gone by the time of the join. */
+    program_name = es.program_name
 FROM sys.dm_os_waiting_tasks AS wt
+LEFT JOIN sys.dm_exec_sessions AS es
+  ON es.session_id = wt.session_id
 LEFT JOIN sys.dm_exec_requests AS er
   ON er.session_id = wt.session_id
 LEFT JOIN sys.databases AS d
@@ -75,6 +79,8 @@ OPTION(RECOMPILE);";
         new CollectorColumn("blocking_session_id", CollectorColumnType.Integer),
         new CollectorColumn("resource_description", CollectorColumnType.Varchar),
         new CollectorColumn("database_name", CollectorColumnType.Varchar),
+        /* #7573: appended LAST (the writer is a positional COPY), nullable; NULL on a row stored before it. */
+        new CollectorColumn("program_name", CollectorColumnType.Varchar),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -101,7 +107,8 @@ OPTION(RECOMPILE);";
                 waitType,
                 reader.IsDBNull(2) ? 0L : reader.GetInt64(2),
                 reader.IsDBNull(3) ? null : reader.GetInt16(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4)));
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return rows;
@@ -115,6 +122,7 @@ OPTION(RECOMPILE);";
             .Value(row.WaitDurationMs)                                              /* wait_duration_ms BIGINT */
             .Value(row.BlockingSessionId.HasValue ? row.BlockingSessionId.Value : (int?)null) /* blocking_session_id INTEGER (widened) */
             .Value((string?)null)                                                   /* resource_description — no longer collected */
-            .Value(row.DatabaseName);                                               /* database_name VARCHAR */
+            .Value(row.DatabaseName)                                                /* database_name VARCHAR */
+            .Value(row.ProgramName);                                                /* program_name VARCHAR, nullable (#7573) */
     }
 }

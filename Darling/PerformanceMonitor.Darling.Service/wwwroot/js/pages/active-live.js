@@ -31,9 +31,16 @@ export function snakeKey(name) {
   return String(name).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }
 
-/** The grid rows for a finished read: each running request with snake_case keys and the read's own time as its collection_time. */
-export function liveRows(result) {
-  const rows = result && Array.isArray(result.rows) ? result.rows : [];
+/* #7573: the monitor's own sessions, by the one rule every read uses: a program name that begins with "PerformanceMonitor" (the match ignores case), never a missing one. */
+function isMonitorProgram(row) {
+  const name = row && typeof row.ProgramName === "string" ? row.ProgramName : "";
+  return name.toLowerCase().startsWith("performancemonitor");
+}
+
+/** The grid rows for a finished read: each running request with snake_case keys and the read's own time as its collection_time.
+ *  The monitor's own sessions are left out unless the page's Monitor statements switch asks for them (#7573). */
+export function liveRows(result, includeMonitor = false) {
+  const rows = (result && Array.isArray(result.rows) ? result.rows : []).filter((row) => includeMonitor || !isMonitorProgram(row));
   return rows.map((row) => {
     const out = { collection_time: result.fetchedAtUtc };
     for (const [key, value] of Object.entries(row || {})) out[snakeKey(key)] = value;
@@ -132,7 +139,7 @@ function say(server, text, rows) {
 /**
  * The "Run live now" block for the Active Queries panel. `columns` are the stored grid's columns. A read-only seat gets the list-only note and no button.
  */
-export function activeQueriesLiveBar(server, columns) {
+export function activeQueriesLiveBar(server, columns, includeMonitor = false) {
   const slot = el("div", { class: "active-live" }, []);
   slot.style.gridColumn = "1 / -1";
   /* The probe takes this render's abort signal (taken now, the panel signal moves on), so a render the next tick replaced does not leave it running. */
@@ -176,11 +183,11 @@ export function activeQueriesLiveBar(server, columns) {
           say(server, "Not read: " + outcome.message, []);
           return;
         }
-        const rows = liveRows(outcome.result);
+        const rows = liveRows(outcome.result, includeMonitor);
         say(
           server,
           rows.length === 0
-            ? "Nothing is running on this server right now."
+            ? "Nothing is running on this server right now." + (includeMonitor ? "" : " The monitor's own statements are left out.")
             : rows.length + (rows.length === 1 ? " running request" : " running requests") + " read live, kept on the store for about an hour.",
           rows
         );

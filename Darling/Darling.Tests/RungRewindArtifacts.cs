@@ -683,6 +683,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // rewind drops it and a re-run of V242 adds it again. Safe on a store that never had it.
         new(242, "hasStatementTextOwnEntries",
             @"ALTER TABLE IF EXISTS collect.pg_statement_text DROP COLUMN IF EXISTS own_entries;"),
+        // V243 (#7573): the session's program name on the waiting tasks. A plain nullable column with no view over it, so the rewind is the drop
+        // alone, and the re-run of V243 adds it back. Safe on a store that never had it.
+        new(243, "hasWaitingTasksProgramName",
+            @"ALTER TABLE IF EXISTS collect.waiting_tasks DROP COLUMN IF EXISTS program_name;"),
     ];
 
     /// <summary>

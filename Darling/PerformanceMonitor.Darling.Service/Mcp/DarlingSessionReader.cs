@@ -166,6 +166,10 @@ internal static class DarlingSessionReader
             /*TAG:hash:w.query_hash*/
             AND   (NOT $6::boolean OR w.blocking_session_id > 0 OR h.session_id IS NOT NULL)
             AND   ($7::text IS NULL OR upper(w.wait_type) IN (upper($7), upper($7) || ' '))
+            /* #7573: the monitor's own statements, left out unless $8 asks. The rows stay stored; a NULL program name is never hidden.
+               A monitor session that heads a blocking chain stays, as a WAITFOR head does: a monitor query that blocks has to be findable,
+               and its victim's blocker is then named instead of reading as filtered. */
+            AND   ($8::boolean OR h.session_id IS NOT NULL OR {{PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("w.program_name")}})
         )
         """;
 
@@ -269,19 +273,23 @@ internal static class DarlingSessionReader
     /// keeps victims and the head blockers of victims in the same capture; <paramref name="waitType"/> null = every
     /// wait (#5235), else only the rows waiting on that wait type at the capture, any case. One database name, as <see cref="DatabaseFilter.One"/>.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     public static Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        string? databaseName = null, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
-        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.One(databaseName), blockingOnly, waitType, cancellationToken);
+        string? databaseName = null, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default, bool includeMonitor = false) =>
+    #pragma warning restore CA1068
+        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, DatabaseFilter.One(databaseName), blockingOnly, waitType, cancellationToken, includeMonitor);
 
     /// <summary>
     /// The same read over a SET of databases (#5245): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is
     /// every database, otherwise only the rows of the named databases are the population.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
-        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, cancellationToken);
+        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default, bool includeMonitor = false) =>
+    #pragma warning restore CA1068
+        GetActiveQueriesAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, includeMonitor, cancellationToken);
 
     /// <summary>
     /// The same read narrowed to a query tag (#5984): <paramref name="tags"/> keeps only snapshot rows whose <c>query_hash</c> carries the tag
@@ -289,7 +297,7 @@ internal static class DarlingSessionReader
     /// </summary>
     internal static async Task<ActiveQueriesPage> GetActiveQueriesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, CancellationToken cancellationToken)
+        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, bool includeMonitor, CancellationToken cancellationToken)
     {
         var rows = new List<ActiveQueryRow>();
         long populationCount = 0;
@@ -300,6 +308,7 @@ internal static class DarlingSessionReader
         command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
         DarlingMcpReadParameters.AddNullableText(command, waitType);
+        DarlingMcpReadParameters.AddBoolean(command, includeMonitor);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -375,15 +384,17 @@ internal static class DarlingSessionReader
     public sealed record ActiveQuerySnapshotsPage(List<ActiveQuerySnapshot> Snapshots, long SnapshotCount);
 
     /// <summary>The snapshot list over the window (#6302); callers detecting truncation pass <c>cap + 1</c>.</summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static Task<ActiveQuerySnapshotsPage> GetActiveQuerySnapshotsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default) =>
-        GetActiveQuerySnapshotsAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, cancellationToken);
+        DatabaseFilter databases, bool blockingOnly = false, string? waitType = null, CancellationToken cancellationToken = default, bool includeMonitor = false) =>
+    #pragma warning restore CA1068
+        GetActiveQuerySnapshotsAsync(postgres, serverId, startUtc, endUtc, cap, databases, blockingOnly, waitType, tags: null, includeMonitor, cancellationToken);
 
     /// <summary>The same list narrowed to a query tag (#5984), as the row read is: the tag sits in the population.</summary>
     internal static async Task<ActiveQuerySnapshotsPage> GetActiveQuerySnapshotsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap,
-        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, CancellationToken cancellationToken)
+        DatabaseFilter databases, bool blockingOnly, string? waitType, QueryTagFilter? tags, bool includeMonitor, CancellationToken cancellationToken)
     {
         var snapshots = new List<ActiveQuerySnapshot>();
         long count = 0;
@@ -394,6 +405,7 @@ internal static class DarlingSessionReader
         command.Parameters.Add(databases.Parameter());
         DarlingMcpReadParameters.AddBoolean(command, blockingOnly);
         DarlingMcpReadParameters.AddNullableText(command, waitType);
+        DarlingMcpReadParameters.AddBoolean(command, includeMonitor);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -459,6 +471,8 @@ internal static class DarlingSessionReader
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}
+        /* #7573: the monitor's own waits, left out unless $6 asks. The rows stay stored; a row stored before program_name existed has NULL and is never hidden. */
+        AND   ($6::boolean OR {{PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("program_name")}})
         GROUP BY collection_time, session_id, rtrim(wait_type), database_name
         ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC
         LIMIT $4
@@ -474,16 +488,19 @@ internal static class DarlingSessionReader
     /// The same read over a SET of databases (#5244): <paramref name="databases"/> empty (<see cref="DatabaseFilter.All"/>) is every
     /// database, otherwise only the named databases' waiting tasks are the population, and the cap applies to them.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int cap, DatabaseFilter databases,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool includeMonitor = false)
     {
+    #pragma warning restore CA1068
         var rows = new List<WaitingTaskRow>();
         await using var command = postgres.CreateCommand(WaitingTasksSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, cap);
         command.Parameters.Add(databases.Parameter());
+        DarlingMcpReadParameters.AddBoolean(command, includeMonitor);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

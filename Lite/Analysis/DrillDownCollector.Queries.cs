@@ -53,7 +53,7 @@ LIMIT 1";
 
         // Step 2: Get queries active within 2 minutes of peak
         using var queryCmd = connection.CreateCommand();
-        queryCmd.CommandText = @"
+        queryCmd.CommandText = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
@@ -63,6 +63,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 

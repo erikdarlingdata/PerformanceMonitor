@@ -467,7 +467,8 @@ public partial class ServerTab : UserControl
                         UpdateExecutionCountTrendChart(ect.Result, hoursBack, fromDate, toDate, disc.Result);
                         break;
                     case ActiveQueriesSubTabIndex: // Active Queries
-                        var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
+                        var includeMonitor = ActiveQueriesIncludeMonitor;
+                        var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitor));
                         _querySnapshotsFilterMgr!.UpdateData(snapshots);
                         LiveSnapshotIndicator.Text = "";
                         _ = LoadActiveQueriesSlicerAsync();
@@ -540,7 +541,8 @@ public partial class ServerTab : UserControl
             }
 
             /* Full refresh: load all sub-tabs */
-            var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
+            var includeMonitorSnapshots = ActiveQueriesIncludeMonitor;
+            var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter, includeMonitor: includeMonitorSnapshots)));
             var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter, tags: tags))));
             var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => ReadTopProceduresAsync(hoursBack, fromDate, toDate));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => QueryTagGrid.ReadAsync(_dataService, _serverId, _queryTagChoice, tags => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter, tags: tags))));
