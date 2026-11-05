@@ -1346,7 +1346,9 @@ function cell(row, c) {
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
-  const raw = getPath(row, c.key);
+  const found = getPath(row, c.key);
+  /* #7578: `nullAs` is the value a missing figure means (see the stat tile). */
+  const raw = found == null && c.nullAs != null ? c.nullAs : found;
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
   if (c.name) cls.push(c.path ? "name-cell path-cell" : "name-cell");
@@ -1446,7 +1448,9 @@ function vizStat(data, desc) {
     const sev = s.sev || s.severity;
     /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
     const made = typeof s.display === "function" ? s.display(data) : null;
-    const raw = made != null ? made : getPath(data, s.key);
+    const found = made != null ? made : getPath(data, s.key);
+    /* #7578: `nullAs` is the value a missing figure means when the read answered at all (Runnable %: no other request was running, so the share is 0). */
+    const raw = found == null && s.nullAs != null ? s.nullAs : found;
     const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
     /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
        smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
@@ -1455,7 +1459,7 @@ function vizStat(data, desc) {
     /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
     const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
     const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
-    return el("div", { class: "stat" }, [
+    return el("div", { class: "stat", title: s.hint || null }, [
       el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
       el("div", { class: "label", text: s.label }),
     ]);

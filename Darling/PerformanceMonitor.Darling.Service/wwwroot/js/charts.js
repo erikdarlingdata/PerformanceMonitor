@@ -433,7 +433,7 @@ export function renderLineChart(spec) {
     /* Y-axis unit caption. Skipped for "%" (the tick labels already carry the unit, and stacking a caption
        on the top tick collided with its label — the design review's must-fix); for bare-number axes it sits
        in the extra top headroom reserved above (well clear of the top tick's label). */
-    if (unit && unit !== "%") {
+    if (unit && unit !== "%" && !ticksCarryUnit(yLabels)) {
       const cap = svg("text", { class: "axis-unit", x: M.l - 8, y: 11, "text-anchor": "end" });
       cap.textContent = unit;
       axis.appendChild(cap);
@@ -480,7 +480,7 @@ export function renderLineChart(spec) {
         label.textContent = yLabels2[ti];
         axis.appendChild(label);
       }
-      if (series2.unit && series2.unit !== "%") {
+      if (series2.unit && series2.unit !== "%" && !ticksCarryUnit(yLabels2)) {
         const cap2 = svg("text", { class: "axis-unit", x: plotRight + 8, y: 11, "text-anchor": "start", fill: normalizeColor(series2.color) });
         cap2.textContent = series2.unit;
         axis.appendChild(cap2);
@@ -1340,6 +1340,15 @@ function niceNum(range, round) {
     nf = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
   }
   return nf * Math.pow(10, exp);
+}
+
+/**
+ * #7578: whether an axis's tick labels already print the unit (400 MB, 200 ms, 0.3 MB/s: a number, a space and a unit word). The unit is
+ * then not printed again as a caption over the axis, so every chart says its unit once, on the ticks or in the caption, never both.
+ * A bare number ("150") or a compact one ("1.5K") carries no unit, so its axis keeps the caption.
+ */
+export function ticksCarryUnit(labels) {
+  return labels.some((l) => /\d\s+[A-Za-z%][A-Za-z%/]*$/.test(String(l).trim()));
 }
 
 /**

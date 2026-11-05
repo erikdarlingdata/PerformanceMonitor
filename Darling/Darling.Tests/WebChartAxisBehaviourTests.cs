@@ -345,4 +345,15 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(t.AddMinutes(30), buckets[1].Start);
         Assert.Null(DarlingMcpHealthParserTools.BucketCpu(new[] { new SystemHealthRecord { EventTime = t, SqlCpuUtilization = 1 } }, 10)[0].SystemCpu);
     }
+
+    /// <summary>#7578: a chart says its unit once. Ticks that carry the unit (200 ms, 0.3 MB/s) draw no caption over the axis, bare ticks keep it.</summary>
+    [Fact]
+    public void AUnit_IsPrintedOnTheTicksOrInTheCaption_NeverBoth()
+    {
+        var c = Run().GetProperty("unitCaptions");
+        Assert.Empty(Strings(c.GetProperty("ticksWithUnit")));
+        Assert.Empty(Strings(c.GetProperty("ticksWithRateUnit")));
+        Assert.Equal(new[] { "MB" }, Strings(c.GetProperty("bareTicks")));
+        Assert.Equal(new[] { "n" }, Strings(c.GetProperty("secondAxisWithUnit")));
+    }
 }

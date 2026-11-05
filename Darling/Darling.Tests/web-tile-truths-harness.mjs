@@ -223,6 +223,19 @@ try {
   /* #7416: the Pool column of the Memory Grants grids reads the pool's name. */
   const poolRow = (id) => ({ pool_id: id, resource_semaphore_id: 0, snapshots_in_window: 9 });
   const poolCells = (columns) => cellsOf(panels.VIZ.table({ rows: [poolRow(1), poolRow(2), poolRow(7)] }, { rowsKey: "rows", columns }));
+  /* #7578: the Semaphore column prints the semaphore's name, and the scheduler's Runnable % tile prints 0.0 when the read answered with no share. */
+  const semaphoreRow = (id) => ({ pool_id: 1, resource_semaphore_id: id });
+  const semaphoreWords = {
+    window: cellsOf(panels.VIZ.table({ rows: [semaphoreRow(0), semaphoreRow(1), semaphoreRow(5)] }, { rowsKey: "rows", columns: memory.SEMAPHORE_WINDOW_COLUMNS })),
+    newest: cellsOf(panels.VIZ.table({ rows: [semaphoreRow(0), semaphoreRow(1)] }, { rowsKey: "rows", columns: memory.SEMAPHORE_COLUMNS })),
+  };
+  const fileIo = (await imp("read-fields.js")).READ_FIELDS.get_file_io_stats.table;
+  const fileIoHeaders = headersOf(panels.VIZ.table({ rows: [{}] }, { ...fileIo, rowsKey: "rows" }));
+  const runnable = {
+    nullPercent: tiles(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: null }, { stats: cpu.SCHEDULER_STATS }))["Runnable %"],
+    value: tiles(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: 12.34 }, { stats: cpu.SCHEDULER_STATS }))["Runnable %"],
+    tooltip: findAll(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: null }, { stats: cpu.SCHEDULER_STATS }), (n) => hasClass(n, "stat") && n.children[1].textContent === "Runnable %").map((n) => n.attrs.title),
+  };
   const pools = {
     grants: poolCells(memory.GRANT_COLUMNS),
     semaphores: poolCells(memory.SEMAPHORE_COLUMNS),
@@ -248,7 +261,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, platform, unrateable,
+    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, semaphoreWords, fileIoHeaders, runnable, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,

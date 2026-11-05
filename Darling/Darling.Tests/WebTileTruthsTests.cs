@@ -235,6 +235,39 @@ public sealed class WebTileTruthsTests
         }
     }
 
+    /// <summary>#7578: the Semaphore column of the Memory grids prints "Regular" and "Small query", not the bare 0 and 1.</summary>
+    [Fact]
+    public void TheSemaphoreColumn_NamesTheSemaphore()
+    {
+        var words = Run().GetProperty("semaphoreWords");
+        var window = Strings(words.GetProperty("window"));
+        Assert.Contains("Regular", window);
+        Assert.Contains("Small query", window);
+        Assert.Contains("5", window);
+        var newest = Strings(words.GetProperty("newest"));
+        Assert.Contains("Regular", newest);
+        Assert.Contains("Small query", newest);
+    }
+
+    /// <summary>#7578: the File I/O Stats latency columns carry their unit, as the charts on the same tab do.</summary>
+    [Fact]
+    public void TheFileIoLatencyColumns_NameTheirUnit()
+    {
+        var headers = Strings(Run().GetProperty("fileIoHeaders"));
+        Assert.Contains("Read latency (ms)", headers);
+        Assert.Contains("Write latency (ms)", headers);
+    }
+
+    /// <summary>#7578: a quiet server's null Runnable % is a real answer (no other request was running), so the tile prints 0.0, not a dash, and says what the figure is.</summary>
+    [Fact]
+    public void TheRunnableTile_PrintsZeroForANullShare_AndExplainsTheFigure()
+    {
+        var runnable = Run().GetProperty("runnable");
+        Assert.Matches("^0[.,]0$", runnable.GetProperty("nullPercent").GetString()!);
+        Assert.NotEqual("—", runnable.GetProperty("value").GetString());
+        Assert.Contains("no other request was running", Strings(runnable.GetProperty("tooltip")).Single(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ThePlatformColumn_IsDroppedWhenNoRowNamesAPlatform_AndKeptWhenOneDoes()
     {
