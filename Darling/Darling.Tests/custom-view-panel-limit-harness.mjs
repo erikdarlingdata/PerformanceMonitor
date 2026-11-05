@@ -63,7 +63,8 @@ globalThis.document = {
 /* The page watches a refreshing panel for its loading strip to go; here the watcher checks on a short timer instead. */
 globalThis.MutationObserver = class {
   constructor(fn) { this.fn = fn; this.timer = null; }
-  observe() { if (!this.timer) this.timer = setInterval(() => this.fn(), 5); }
+  /* unref: the grid's lone-panel watcher (#7534) never disconnects, so its timer must not keep the process alive. */
+  observe() { if (!this.timer) { this.timer = setInterval(() => this.fn(), 5); this.timer.unref(); } }
   disconnect() { clearInterval(this.timer); this.timer = null; }
 };
 globalThis.location = { hash: "#/view/v1" };

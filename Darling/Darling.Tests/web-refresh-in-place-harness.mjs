@@ -300,6 +300,41 @@ try {
       out.sameHidden = live.children[0] === hiddenLive;
       out.textAfter = text(shownLive);
     },
+    /* #7534: a lone half-width panel carries `span-solo` on the live grid. A poll must still take the per-panel path (the same elements
+       stay) and the panel must keep the mark. */
+    async soloPanelPoll() {
+      const rip = await load("refresh-in-place.js");
+      const layout = await load("panel-layout.js");
+      const withClasses = (n) => {
+        n.classList = {
+          toggle(c, force) {
+            const set = new Set(n.className.split(/\s+/).filter(Boolean));
+            if (force) set.add(c); else set.delete(c);
+            n.className = [...set].join(" ");
+          },
+        };
+        return n;
+      };
+      const panel = (title, body, cls) => {
+        const p = withClasses(new FakeNode("div")); p.className = cls; p.setAttribute("data-panel", title); p.setAttribute("data-title", title);
+        const b = new FakeNode("div"); b.className = "panel-body"; p.appendChild(b);
+        const c = new FakeNode("div"); c.className = "stub-result"; c.textContent = body; b.appendChild(c);
+        return p;
+      };
+      const build = (body) => [panel("Wide", body, "panel card span-2"), panel("Lone", body, "panel card")];
+      const live = new FakeNode("div"); live.className = "panel-grid"; live.isRoot = true;
+      const liveUnits = build("old");
+      liveUnits.forEach((u) => live.appendChild(u));
+      layout.soloPanels(live);
+      out.markedBefore = (" " + liveUnits[1].className + " ").includes(" span-solo ");
+      rip.refreshGridInPlace(live, build("new"));
+      await settle();
+      out.sameWide = live.children[0] === liveUnits[0];
+      out.sameLone = live.children[1] === liveUnits[1];
+      out.loneText = text(liveUnits[1]);
+      out.loneClass = liveUnits[1].className;
+      out.wideClass = liveUnits[0].className;
+    },
     /* The reader's own navigation (the same tab again, as a click or a range change does) draws a fresh grid with a loading strip. */
     async serverNavigation() {
       const server = await load("pages/server.js");
