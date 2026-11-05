@@ -89,6 +89,13 @@ jobs:
               - 'PerformanceMonitor.Notifications/**/!(*.md)'
               - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
               - 'PerformanceMonitor.Ui/**/!(*.md)'
+            # The Darling export tool (Exporter/). It reads PerformanceMonitor.PlanAnalysis (and Common through it), so a change
+            # there reaches it too. pr.yml's exporter job reads this filter through ci-select.py. The root files are covered
+            # by the `root` filter above.
+            exporter:
+              - 'Exporter/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
@@ -362,6 +369,8 @@ jobs:
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
           dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj --locked-mode
 
       - name: Build Lite.Tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -562,6 +571,13 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack
 
+      # The Darling export tool (Exporter/): one self-contained win-x64 folder, zipped as PerformanceMonitorDarlingExport-<version>-win-x64.zip.
+      # It is its own artifact and its own SignPath configuration, and it is not part of the Darling zip. The linux-x64 zip is
+      # built in the darling-linux job, unsigned, like the other Linux assets.
+      - name: Publish Darling Export
+        if: github.event_name == 'release'
+        run: dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r win-x64 --self-contained -o publish/DarlingExport
+
       # Darling bundles a PostgreSQL 18 + TimescaleDB runtime (pg-runtime.zip) that ships beside
       # the service exe; DarlingManagedPostgres extracts it on first run. The fetch script pulls
       # ~340MB of pinned EDB/TimescaleDB archives, so this is release-only and cached. The key is
@@ -623,6 +639,21 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
+      - name: Stage Darling Export for signing
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          # The three documents ride along unsigned: SignPath signs the executables and libraries and leaves other files as they are.
+          Copy-Item 'Exporter/README.md', 'Exporter/file-contract.md', 'Exporter/darling-export.sample.json' 'publish/DarlingExport'
+
+      - name: Upload Darling Export for signing
+        if: github.event_name == 'release'
+        id: upload-darling-export
+        uses: actions/upload-artifact@v6
+        with:
+          name: DarlingExport-unsigned
+          path: publish/DarlingExport/
+
       # v3 of this action talks to SignPath's Pipeline Connector, which needs the SignPath
       # GitHub App installed on this repository (v2's connector did not). Without it every
       # attempt fails with "Failed to retrieve GitHub App token" (erikdarlingdata/PerformanceStudio#569,
@@ -655,6 +686,21 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Darling'
 
+      # Needs the SignPath artifact configuration 'DarlingExport' (the same rules as 'Darling': sign every exe and dll).
+      # A step that names a slug that does not exist fails the release (the standing #1340 prerequisite).
+      - name: Sign Darling Export
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'DarlingExport'
+          github-artifact-id: '${{ steps.upload-darling-export.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/DarlingExport'
+
       - name: Replace with signed artifacts
         if: github.event_name == 'release'
         shell: pwsh
@@ -679,6 +725,14 @@ jobs:
 
           Remove-Item "releases/PerformanceMonitorDarling-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-$version.zip" -Force
+
+      - name: Package Darling Export (signed)
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          Remove-Item "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/DarlingExport/*' -DestinationPath "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -Force
 
       # #6480: the Darling MSI, built from the same signed tree the zip above holds (signed/Darling: the service at the
       # root, viewer\, the three signed scripts, pg-runtime.zip), the way darling-msi.yml builds it. It goes to
@@ -954,7 +1008,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $zips = @(Get-ChildItem -Path releases -Filter '*.zip' -File |
-            Where-Object { $_.Name -match 'darling' -and $_.Name -notmatch 'darlingviewer' })
+            Where-Object { $_.Name -match 'darling' -and $_.Name -notmatch 'darlingviewer' -and $_.Name -notmatch 'darlingexport' })
           if ($zips.Count -ne 1) {
             Write-Host "::error::Expected one Darling zip in releases/, found $($zips.Count): $($zips.Name -join ', ')"
             exit 1
@@ -1155,6 +1209,19 @@ jobs:
         if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
 
+      # The Darling export tool for Linux: self-contained linux-x64, zipped in the package step below. It is not signed
+      # (SignPath signs Windows PE files), so it stays out of the Windows job and its signature guard, like the tarball.
+      - name: Publish Darling Export (linux-x64)
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r linux-x64 --self-contained -o publish/DarlingExport-linux
+          cp Exporter/README.md Exporter/file-contract.md Exporter/darling-export.sample.json publish/DarlingExport-linux/
+          chmod 755 publish/DarlingExport-linux/darling-export
+
       - name: Build container image
         if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
@@ -1229,7 +1296,14 @@ jobs:
             echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
+          export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
+          (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+            echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
+            exit 1
+          fi
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" "${export_zip}" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
       # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
@@ -1297,13 +1371,14 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           test -f "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz"
           test -f "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
+          test -f "releases/PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd releases && sha256sum -c SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz releases/PerformanceMonitorDarlingExport-*-linux-x64.zip --clobber
 
       - name: Build and push container image (ghcr, versioned + latest)
         if: github.event_name == 'release'

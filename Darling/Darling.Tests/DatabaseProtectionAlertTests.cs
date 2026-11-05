@@ -506,7 +506,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
         }, async (postgres, connection, ct) =>
         {
             await using var viewer = new ViewerDataService(postgres.ConnectionString);
-            var (value, detail) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
+            var (value, detail, _) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
             Assert.Equal("2 items on 1 database", value);
             Assert.Equal("Full backup: Sales (30 days old), CHECKDB: Sales (never checked)", detail);
 
@@ -518,7 +518,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
 
             var later = DateTime.UtcNow.AddMinutes(-1);
             await InsertCaptureAsync(connection, ct, later, Healthy("Sales", later));
-            Assert.Equal((null, null), await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct));
+            Assert.Equal((null, null, 0), await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct));
             var clearCard = await viewer.GetServerSummaryAsync(ServerId, "Protection card", null, ct);
             Assert.Null(clearCard.DatabaseProtectionChipValue);
             Assert.False(clearCard.HasDatabaseProtectionOverdue);

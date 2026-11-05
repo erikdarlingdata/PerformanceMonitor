@@ -68,7 +68,6 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
 
         var fleet = await DarlingFleetReader.GetFleetOverviewAsync(
             _postgres, start, end, DateTime.UtcNow, worstCount: int.MaxValue, cancellationToken: ct).ConfigureAwait(false);
-        var reasonById = fleet.WorstServers.ToDictionary(w => w.ServerId, w => w.Reason);
 
         var alertsByServer = await ReadAlertCountsAsync(start, end, ct).ConfigureAwait(false);
         var jobsByServer = await ReadFailedJobsAsync(start, end, fleet.Cards.Select(c => c.ServerId).ToList(), ct).ConfigureAwait(false);
@@ -78,11 +77,10 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
         var servers = new List<DailyHealthServerReport>(fleet.Cards.Count);
         foreach (var card in fleet.Cards)
         {
-            reasonById.TryGetValue(card.ServerId, out var reason);
             alertsByServer.TryGetValue(card.ServerId, out var alerts);
             jobsByServer.TryGetValue(card.ServerId, out var jobs);
             disks.TryGetValue(card.ServerId, out var volumes);
-            servers.Add(AssembleServer(card, reason, alerts, jobs, volumes, lowDiskPercent, lowDiskGb));
+            servers.Add(AssembleServer(card, alerts, jobs, volumes, lowDiskPercent, lowDiskGb));
         }
 
         servers = servers
@@ -102,7 +100,6 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
     /// </summary>
     internal static DailyHealthServerReport AssembleServer(
         FleetServerCard card,
-        string? rankedReason,
         IReadOnlyList<DailyHealthAlertCount>? alerts,
         IReadOnlyList<DailyHealthFailedJob>? failedJobs,
         List<VolumeFreeSpaceInfo>? volumes,
@@ -112,9 +109,10 @@ internal sealed class DailyHealthReportBuilder : IDailyHealthReportSource
         ArgumentNullException.ThrowIfNull(card);
 
         var reasons = new List<string>();
-        if (card.Band is not (FleetHealthBand.Healthy or FleetHealthBand.Offline) && !string.IsNullOrWhiteSpace(rankedReason))
+        if (card.Band is not (FleetHealthBand.Healthy or FleetHealthBand.Offline))
         {
-            reasons.Add(rankedReason);
+            /* #7561: the ranking's own reason, without its Protection clause: this report lists the overdue items in its Protection section below. */
+            reasons.Add(DarlingFleetReader.BuildReason(card, includeProtection: false));
         }
 
         var problems = new List<string>();

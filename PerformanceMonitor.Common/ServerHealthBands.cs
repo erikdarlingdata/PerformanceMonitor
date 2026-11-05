@@ -682,6 +682,12 @@ namespace PerformanceMonitor.Common
         /// sweep band on what the operator set. Lite has no such knobs and leaves it null.</summary>
         public BlockingBandThresholds? BlockingBandThresholds { get; init; }
 
+        /// <summary>#7561: true when an identity column on this server is at or past the critical bar (an insert that will fail). It is not a
+        /// seventh metric: <see cref="MetricSeverities"/> and <see cref="ServerHealthClassifier.MeasuredMetricCounts"/> do not see it. It raises
+        /// <see cref="ServerHealthClassifier.OverallMetricSeverity"/> to Critical and counts as one Critical in <see cref="ServerHealthClassifier.FleetHealthScore"/>,
+        /// so the dot, the strip counts, the severity sort and the MCP reply agree with the tile.</summary>
+        public bool IdentityCapacityCritical { get; init; }
+
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
 
@@ -1371,6 +1377,12 @@ namespace PerformanceMonitor.Common
         /// </summary>
         public static HealthSeverity OverallMetricSeverity(in ServerHealthMetrics m)
         {
+            /* #7561: a column at its critical bar is a failing insert, a Critical whatever the six metrics read (even none). */
+            if (m.IdentityCapacityCritical)
+            {
+                return HealthSeverity.Critical;
+            }
+
             var worst = HealthSeverity.Unknown;
             foreach (var s in MetricSeverities(m))
             {
@@ -1393,6 +1405,51 @@ namespace PerformanceMonitor.Common
 
             return worst;
         }
+
+        /// <summary>#7561: the tiles no band reads and that still want a person, by name: an identity capacity column at the warning bar (a column at the
+        /// critical bar bands the server instead, see <see cref="ServerHealthMetrics.IdentityCapacityCritical"/>), an Agent alerts setup gap, and an overdue
+        /// backup or CHECKDB (Protection). The ONE rule for the web fleet card, <c>get_fleet_overview</c> and the Viewer's Needs attention list, so none keeps its
+        /// own copy. Empty when the server has none.</summary>
+        public static IReadOnlyList<string> AdvisoryTiles(int agentAlertGapCount, int databaseProtectionOverdueCount, int identityColumnsAtBar, bool identityCritical)
+        {
+            var tiles = new List<string>(3);
+            if (identityColumnsAtBar > 0 && !identityCritical)
+            {
+                tiles.Add("Identity capacity");
+            }
+
+            if (agentAlertGapCount > 0)
+            {
+                tiles.Add("Agent alerts");
+            }
+
+            if (databaseProtectionOverdueCount > 0)
+            {
+                tiles.Add("Protection");
+            }
+
+            return tiles;
+        }
+
+        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. A column at the
+        /// critical bar is at its limit and a column at the warning bar is near it, and each count is its own, so one critical and four warning columns read
+        /// "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/> counts both kinds.</summary>
+        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns)
+        {
+            var critical = Math.Clamp(criticalColumns, 0, columnsAtBar);
+            var warning = columnsAtBar - critical;
+            if (critical == 0)
+            {
+                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {warning} column{(warning == 1 ? "" : "s")} at the warning bar");
+            }
+
+            var text = string.Create(CultureInfo.InvariantCulture, $"Identity capacity critical ({critical} column{(critical == 1 ? " at its" : "s at their")} limit");
+            return warning == 0 ? text + ")" : string.Create(CultureInfo.InvariantCulture, $"{text}, {warning} near it)");
+        }
+
+        /// <summary>#7561: the Needs attention reason clause for overdue backups and CHECKDBs, the service's words on every surface that prints it.</summary>
+        public static string ProtectionReason(int overdueCount) =>
+            string.Create(CultureInfo.InvariantCulture, $"Protection {overdueCount} overdue item{(overdueCount == 1 ? "" : "s")}");
 
         /// <summary>
         /// How many of the six card metrics carry a real reading (#3528): measured = severities that are
@@ -1474,7 +1531,7 @@ namespace PerformanceMonitor.Common
                 _ => 0,
             };
 
-            var criticals = 0;
+            var criticals = m.IdentityCapacityCritical ? 1 : 0;
             var warnings = 0;
             foreach (var sev in MetricSeverities(m))
             {
