@@ -20,6 +20,8 @@ import { HEATMAP_METRICS, HEATMAP_SHADES, heatmapBinMinutes, buildHeatmap, heatm
    until then a phone-width window opens on the table. */
 /* The chart menu's own item text (charts.js CHART_MENU_LABELS.atQueries), so the two read the same. */
 const AT_QUERIES_LABEL = "Show Active Queries at This Time";
+/* The width of the grid's row-head column, in rem: the same 5rem as `.qh-grid .qh-corner` in app.css. */
+const HEAD_REM = 5;
 const pick = { metric: HEATMAP_METRICS[0].value, view: null };
 
 function narrowScreen() {
@@ -75,6 +77,9 @@ export function renderHeatmapBody(data, opts) {
         "Query Heatmap by " + metricWord + ": " + grid.cellCount + " cells across " + grid.columns + " time bins of " + grid.binMinutes +
         " minutes. A picture; use Show as table for the values.",
     });
+    /* #7542: the columns share the panel's width (app.css: width 100%, fixed layout). The table's minimum keeps each column at 6 px plus
+       its 1 px gap, so a narrow window scrolls inside .qh-wrap instead of squeezing the cells away; the row-head column is HEAD_REM wide. */
+    table.style.minWidth = "calc(" + HEAD_REM + "rem + " + (grid.columns * 7 + 1) + "px)";
     /* A label every 12 columns: hourly at the Viewer's 5 minute bins. */
     const tick = grid.columns < 12 ? 1 : 12;
     const head = el("tr", {}, [el("th", { class: "qh-corner" })]);
