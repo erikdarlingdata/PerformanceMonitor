@@ -11,6 +11,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage.FinOps;
@@ -40,7 +41,7 @@ public sealed partial class DarlingMcpFinOpsTools
             .ToList();
 
     private static async Task<string> ReadDatabaseResourcesAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct, ILogger? logger = null)
     {
         /* The cutoff is taken before the rollup probe, the viewer's order. */
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -69,7 +70,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", false, ct);
         /* #7725: a database the server no longer lists keeps its row (the figures are real) and is marked database_dropped, so the page can say so. */
-        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: cutoff, logger: null, cancellationToken: ct);
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: cutoff, logger: logger, cancellationToken: ct);
         var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,

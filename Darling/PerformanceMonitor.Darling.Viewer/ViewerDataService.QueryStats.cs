@@ -434,7 +434,7 @@ public sealed partial class ViewerDataService
         var now = DateTime.UtcNow;
         var databases = await CurrentDatabaseScope.NarrowAsync(
             _dataSource, serverId, DatabaseFilter.Of(databaseNames), nowUtc: now, asOfUtc: endUtc < now ? endUtc : null,
-            windowStartUtc: startUtc, logger: null, cancellationToken: cancellationToken);
+            windowStartUtc: startUtc, logger: ViewerStoreLogger.Instance, cancellationToken: cancellationToken);
         var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
 
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);

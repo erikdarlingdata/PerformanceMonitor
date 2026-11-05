@@ -757,8 +757,9 @@ public sealed class DarlingMcpDataTools
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("'summary' (default) or 'full': full adds the remaining desktop columns (grants, threads, extremes, times), omitting nulls.")] string detail = "summary",
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
-        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag);
+        => GetTopQueriesRanked(postgres, server_name, hours_back, top, database_name, parallel_only, min_dop, group_by, as_of, detail, order_by: null, cancellationToken, tag, logger);
 
     /// <summary>
     /// #5226: the body of <see cref="GetTopQueriesByCpu"/> with the ranking choice the web page offers. The MCP tool
@@ -769,9 +770,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null) =>
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null) =>
         GetTopQueriesRanked(
-            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken, tag);
+            postgres, server_name, hours_back, top, DatabaseFilter.One(database_name), parallel_only, min_dop, group_by, as_of, detail, order_by, cancellationToken, tag, logger);
 
     /// <summary>
     /// #5245: <see cref="GetTopQueriesRanked(NpgsqlDataSource,string,int,int,string,bool,int,string,string,string,string,CancellationToken)"/>
@@ -781,7 +782,7 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetTopQueriesRanked(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, DatabaseFilter databases, bool parallel_only, int min_dop,
-        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null)
+        string group_by, string? as_of, string detail, string? order_by, CancellationToken cancellationToken, string? tag = null, ILogger? logger = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -850,7 +851,7 @@ public sealed class DarlingMcpDataTools
                and what the limit leaves is filled from the dropped databases, ranked the same way and marked database_dropped. `databases`
                itself stays the caller's choice for the empty-page probes below. */
             var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
-                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: null, cancellationToken: cancellationToken);
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: logger, cancellationToken: cancellationToken);
             var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
                 postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
