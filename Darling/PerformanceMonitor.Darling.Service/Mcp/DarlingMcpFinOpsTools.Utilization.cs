@@ -136,7 +136,7 @@ public sealed partial class DarlingMcpFinOpsTools
     /// <summary>The Stolen Mem % note (<see cref="ProvisioningVerdict.StolenMemoryNote"/>), or null while the figure is below amber, so the field is absent rather than empty.</summary>
     internal static string? StolenMemoryNoteOrNull(double stolenPercent)
     {
-        var note = ProvisioningVerdict.StolenMemoryNote(stolenPercent);
+        var note = ProvisioningVerdict.StolenMemoryNote(stolenPercent, System.Globalization.CultureInfo.InvariantCulture);
         return note.Length == 0 ? null : note;
     }
 }

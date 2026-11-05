@@ -48,7 +48,7 @@ public static partial class PgTargetAdvice
 
     private static readonly string s_anomalyRemediation =
         "If it was a one-time event — a report run, a backfill, a deploy — no action beyond awareness. If it " +
-        "recurs or sustains, it will cross the standard thresholds and surface as a first-class finding with its " +
+        "recurs or sustains, it will cross the standard thresholds and appear on the Recommendations tab with its " +
         "own detail on a later window; treat it then with the matching PostgreSQL advice. The hour-of-week " +
         "baseline is this server's own 30 days of one-minute history, so a server whose workload changed for " +
         "good will re-baseline itself over the following weeks.";
@@ -95,7 +95,7 @@ public static partial class PgTargetAdvice
             "relations and the lock modes on each side. A deadlock is a transaction-ordering fault in the " +
             "application; the durable fix is a consistent lock order or shorter transactions, and " +
             "deadlock_timeout only changes how long the engine waits before checking. If the rate recurs it will " +
-            "cross the deadlock-rate threshold and surface as a first-class finding.");
+            "cross the deadlock-rate threshold and appear on the Recommendations tab as a deadlock-rate finding.");
 
     private static readonly AdviceBlock s_waitProfileStatic = new(
         Headline: "The server's wait profile shifted well above its normal for this time of week (Aurora)",

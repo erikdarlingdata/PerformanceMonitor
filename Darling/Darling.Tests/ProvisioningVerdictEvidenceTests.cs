@@ -55,7 +55,55 @@ public sealed class ProvisioningVerdictEvidenceTests
     [Fact]
     public void StolenMemoryNote_ExplainsAnAmberOrRedFigure_AndIsSilentOtherwise()
     {
-        Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(40));
-        Assert.Contains("88%", ProvisioningVerdict.StolenMemoryNote(88));
+        Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(40, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Contains("88%", ProvisioningVerdict.StolenMemoryNote(88, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public void StolenMemoryNote_KeepsOneDecimal_SoAFigureUnderTheRedLineDoesNotReadAsOnTheLine()
+    {
+        // 84.8 rounded to a whole number reads "85%", the red line, while the figure is under it (#7562).
+        var note = ProvisioningVerdict.StolenMemoryNote(84.8, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
+        Assert.Contains("red above 85%", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("red from 85%", note, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StolenMemoryNote_AtExactlyTheRedLine_DoesNotPromiseRed_BecauseRedIsStrictlyAbove()
+    {
+        // Both desktop bars and the web tile turn red strictly above 85, so a host at exactly 85.0 is amber (#7562).
+        // The note must say "above 85%", never "from 85%", or it would tell the reader a red figure sits on an amber bar.
+        var atLine = ProvisioningVerdict.StolenMemoryNote(85.0, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.StartsWith("85% of the memory", atLine, System.StringComparison.Ordinal);
+        Assert.Contains("red above 85%", atLine, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("from 85", atLine, System.StringComparison.Ordinal);
+        Assert.Contains("Amber from 60%", atLine, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StolenMemoryNote_UsesTheInvariantDecimalPoint_OnAHostWithACommaDecimalCulture()
+    {
+        // The MCP tool promises invariant-culture text numbers: a comma-decimal host must still send "84.8%" (#7562).
+        var before = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            var note = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpFinOpsTools.StolenMemoryNoteOrNull(84.8);
+            Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = before;
+        }
+    }
+
+    [Fact]
+    public void StolenMemoryNote_WritesTheFigureInTheCultureItIsGiven_SoADesktopTooltipMatchesItsTile()
+    {
+        // The desktop tile prints N1 in the current culture ("84,8%" on de-DE), so the tooltip beside it must too (#7562).
+        var de = new System.Globalization.CultureInfo("de-DE");
+        Assert.StartsWith("84,8% of the memory", ProvisioningVerdict.StolenMemoryNote(84.8, de), System.StringComparison.Ordinal);
+        Assert.StartsWith("84.8% of the memory", ProvisioningVerdict.StolenMemoryNote(84.8, System.Globalization.CultureInfo.InvariantCulture), System.StringComparison.Ordinal);
     }
 }
