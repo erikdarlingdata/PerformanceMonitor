@@ -139,6 +139,26 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal("Collected", header[header.ToList().IndexOf("Database") + 1]);
     }
 
+    /* #7702 item 1, the size helper at its edges. The read sends GB; 0.005 MB is the point where two-decimal rounding turns 0.00 into
+       0.01. A positive size below it reads "<0.01 MB" (never 0.00), exactly 0 reads 0 MB (never "<0.01 MB"), a negative size does not
+       throw and a tiny negative one reads 0 MB (not "<0.01 MB", which is a positive size), under 1 MB prints two decimals, and from
+       1 MB up the normal path prints one. */
+    [Fact]
+    public void ASizeAtTheRoundingEdges_PrintsASensibleValue_NeverZeroForAPositiveOneOrSmallForAZero()
+    {
+        var edges = Run().GetProperty("edges");
+        string At(string name) => edges.GetProperty(name).GetString()!;
+        Assert.Equal("0.01 MB", At("Exact"));
+        Assert.Equal("<0.01 MB", At("Below"));
+        Assert.Equal("0 MB", At("Zero"));
+        Assert.Equal("-0.4 MB", At("Negative"));
+        Assert.Equal("0 MB", At("NegTiny"));
+        Assert.Equal("0.99 MB", At("Under1"));
+        Assert.Equal("1.0 MB", At("RoundsTo1"));
+        Assert.Equal("1.0 MB", At("Over1"));
+        Assert.Equal("1.5 MB", At("Over1Half"));
+    }
+
     [Fact]
     public void ALiveDatabaseSharingANameWithALeftOverOne_KeepsItsCollectedTimeOnItsRecommendations()
     {

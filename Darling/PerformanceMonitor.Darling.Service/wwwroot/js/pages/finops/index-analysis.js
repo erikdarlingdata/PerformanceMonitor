@@ -81,12 +81,14 @@ const RECOMMENDATION_COLUMNS = [
 
 // A size the read sends in GB, shown in the unit that fits it. The read rounds GB to six places, so an index of 0.4 MB arrives as
 // 0.000391 GB, and fmtMbFit would print it back as 0.400384 MB: digits nobody measured. Under 1 MB it prints at most two decimals
-// (0.4 MB); a positive size under 0.005 MB reads "<0.01 MB", never 0 (#7702 item 1). From 1 MB up fmtMbFit already rounds.
+// (0.4 MB); a positive size under 0.005 MB reads "<0.01 MB", never 0 (#7702 item 1). A negative size that tiny is not "<0.01 MB" (that
+// would read as a small positive one): it reads 0 MB. From 1 MB up fmtMbFit already rounds.
 function gbSizeText(gb) {
   const mb = gb * 1024;
   if (Math.abs(mb) >= 1 || mb === 0) return fmtMbFit(mb);
   const cents = Math.round(mb * 100);
-  return cents === 0 ? "<0.01 MB" : fmtMbFit(cents / 100);
+  if (cents === 0) return mb > 0 ? "<0.01 MB" : fmtMbFit(0);
+  return fmtMbFit(cents / 100);
 }
 
 // The reads cell as the desktop writes it. The overall row carries no counters, so its cell stays missing.

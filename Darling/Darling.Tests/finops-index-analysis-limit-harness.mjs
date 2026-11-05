@@ -192,6 +192,27 @@ try {
       rows: findAll(t, byTag("tr")).map((r) => findAll(r, byTag("td")).map((n) => n.textContent)).filter((r) => r.length),
     })),
   };
+  // #7702 item 1: the size helper at its edges. Each database carries one Size, sent in GB as the read sends it.
+  const mbToGb = (mb) => mb / 1024;
+  const edges = {
+    Exact: mbToGb(0.005), Below: mbToGb(0.004999), Zero: 0, Negative: mbToGb(-0.4), NegTiny: mbToGb(-0.001),
+    Under1: mbToGb(0.994), RoundsTo1: mbToGb(0.999), Over1: mbToGb(1.001), Over1Half: mbToGb(1.5),
+  };
+  body = JSON.stringify({
+    ...payload(1, 1, 500),
+    overall: { total_size_gb: 0 },
+    databases: Object.keys(edges).map((k) => ({ database_name: k, total_size_gb: edges[k], captured_at: "2026-01-15T12:00:00.0000000Z" })),
+    recommendations: [rec(1)],
+  });
+  root = tab.build("srv-g", {});
+  await settle();
+  const edgeGrid = findAll(root, byTag("table")).find((t) => findAll(t, byTag("th")).some((n) => n.textContent === "Size"));
+  const edgeHeader = findAll(edgeGrid, byTag("th")).map((n) => n.textContent);
+  out.edges = {};
+  for (const r of findAll(edgeGrid, byTag("tr"))) {
+    const cells = findAll(r, byTag("td")).map((n) => n.textContent);
+    if (cells.length && edges[cells[edgeHeader.indexOf("Database")]] !== undefined) out.edges[cells[edgeHeader.indexOf("Database")]] = cells[edgeHeader.indexOf("Size")];
+  }
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
