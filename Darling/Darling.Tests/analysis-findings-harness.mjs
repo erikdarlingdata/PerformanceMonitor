@@ -253,6 +253,24 @@ try {
         pgAnomalyDeadlock: one({ category: "anomaly", story_path: "ANOMALY_PG_DEADLOCK_RATE" }),
         tempdb: one({ category: "tempdb" }),
         pgTemp: one({ category: "pg_temp" }),
+        pgVacuum: one({ category: "pg_vacuum" }),
+        pgSessions: one({ category: "pg_sessions" }),
+        pgBuffer: one({ category: "pg_buffer" }),
+        pgWrite: one({ category: "pg_write" }),
+        pgCpu: one({ category: "pg_cpu" }),
+        pgDatabase: one({ category: "pg_database" }),
+        pgPlans: one({ category: "pg_plans" }),
+        pgKernel: one({ category: "pg_kernel" }),
+        pgPosture: one({ category: "pg_posture" }),
+        pgMemory: one({ category: "pg_memory" }),
+        badActor: one({ category: "bad_actor" }),
+        config: one({ category: "config" }),
+        databaseConfig: one({ category: "database_config" }),
+        jobs: one({ category: "jobs" }),
+        sessions: one({ category: "sessions" }),
+        disk: one({ category: "disk" }),
+        coverage: one({ category: "coverage" }),
+        absolution: one({ category: "absolution" }),
         configFix: one({ category: "waits", is_config_fix: true }),
         standingState: one({ category: "io", standing_state: true }),
         noWindow: one({ category: "waits", time_range: null }),
@@ -263,6 +281,15 @@ try {
         out[name] = byTag(root, "a").map((a) => ({ href: a.attrs.href, text: a.textContent }));
       }
       return out;
+    },
+    tabLabels: async () => {
+      /* #7677: FAMILY_TABS copies the tab ids and labels (server-tabs.js imports analysis-findings.js, so a lookup back would be circular).
+         Each entry is read against the registry of its engine, so a tab that is relabelled or removed there shows here. */
+      const reg = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs.js")).href);
+      return Object.entries(mod.FAMILY_TABS).map(([family, [id, label]]) => {
+        const tab = (family.startsWith("pg_") ? reg.POSTGRES_TABS : reg.SERVER_TABS).find((t) => t.id === id);
+        return { family, id, label, registryLabel: tab ? tab.label : null };
+      });
     },
     nullSeverity: async () => {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });

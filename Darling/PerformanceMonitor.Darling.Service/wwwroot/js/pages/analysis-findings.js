@@ -56,23 +56,42 @@ export function isIncidentFinding(f) {
 }
 
 /* #7677: the one map from a card's fact family (the finding's category) to the server tab that holds its evidence, [tab id, tab label].
-   The ids and labels are the ones SERVER_TABS and POSTGRES_TABS register in server-tabs.js. A family with no tab of its own is left out,
-   and its card gets no button: tempdb, disk, jobs, bad actors and the PostgreSQL families whose evidence sits on no PostgreSQL tab. */
-const FAMILY_TABS = {
+   The ids and labels are the ones SERVER_TABS and POSTGRES_TABS register in server-tabs.js. They are copied, not read from the registry,
+   because server-tabs.js imports this module and a lookup back would be a circular import. AnalysisFindingsTabTests compares every
+   label here with the registry's, so a relabel there fails a test until this map follows. A family left out has no tab that shows its
+   evidence, and its card gets no button: absolution (no problem found), coverage (it says data is missing, so no tab has it to show),
+   disk (volume free space is on no tab) and pg_memory (arithmetic over settings against host memory, shown by no panel). */
+export const FAMILY_TABS = {
   waits: ["waits", "Wait Stats"],
   blocking: ["blocking", "Blocking"], // deadlocks are facts of the blocking family
   cpu: ["cpu", "CPU"],
   memory: ["memory", "Memory"],
   io: ["io", "File I/O"],
+  tempdb: ["io", "File I/O"], // the tempdb trend chart sits on the File I/O tab
   queries: ["queries", "Queries"],
+  bad_actor: ["queries", "Queries"],
+  config: ["config", "Configuration"],
+  database_config: ["config", "Configuration"],
+  jobs: ["activity", "Activity"],
+  sessions: ["activity", "Activity"],
   pg_waits: ["waits", "Waits"],
+  pg_kernel: ["waits", "Waits"],
   pg_io: ["io", "I/O"],
+  pg_buffer: ["io", "I/O"],
+  pg_write: ["io", "I/O"],
   pg_blocking: ["activity", "Activity"],
   pg_queries: ["activity", "Activity"],
+  pg_plans: ["activity", "Activity"],
+  pg_database: ["activity", "Activity"],
+  pg_temp: ["activity", "Activity"], // the database temp bytes and files charts sit on the Activity tab
+  pg_cpu: ["overview", "Overview"],
   pg_replication: ["replication", "Replication"],
   pg_bloat: ["storage", "Storage"],
   pg_growth: ["storage", "Storage"],
+  pg_vacuum: ["vacuum", "Vacuum"],
+  pg_sessions: ["vacuum", "Vacuum"], // the session-state panel is on the Vacuum tab
   pg_config: ["config", "Configuration"],
+  pg_posture: ["config", "Configuration"],
 };
 
 /* An anomaly finding's category is just "anomaly"; its root fact key (the read's root_fact.key, else the first step of story_path)
