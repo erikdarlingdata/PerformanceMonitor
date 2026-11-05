@@ -678,6 +678,26 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
     }
 
     [Fact]
+    public async Task TheWorkersWiring_FeedsTheStoredGlobalAgesToTheEvaluator_InTheOrderFullLogCheckDb()
+    {
+        /* The worker hands the evaluator the stored ages through DarlingWorker.ProtectionThresholdsOf (#7611). Distinct values, so a swapped pair cannot pass. */
+        var config = new DarlingConfig();
+        config.Alerts.BackupOverdueThresholdHours = 24;
+        config.Alerts.LogBackupOverdueThresholdMinutes = 90;
+        config.Alerts.CheckDbOverdueThresholdHours = 500;
+        var wired = DarlingWorker.ProtectionThresholdsOf(new DarlingAlertSettings(config));
+        Assert.Equal(new DatabaseProtectionGlobalThresholds(24, 90, 500), wired);
+
+        /* Through the evaluator: a full backup 30 hours old is overdue against the stored 24, where the shipped 168 would stay quiet. */
+        var h = AllOn();
+        h.ProtectionThresholds = () => wired;
+        var read = ReadAt(h.Now, c => new[] { Db("A", c, TimeSpan.FromHours(30), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)) });
+        await h.Build().ApplyDatabaseProtectionAsync(ServerId, Name, read, Ct);
+        var detail = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Backup Overdue").DetailText;
+        Assert.Contains("older than 1 day", detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TheAlertDetail_NamesEachDatabasesOwnAge_WhenTheyDiffer_AndReadsAsBefore_WhenTheyDoNot()
     {
         var h = AllOn();

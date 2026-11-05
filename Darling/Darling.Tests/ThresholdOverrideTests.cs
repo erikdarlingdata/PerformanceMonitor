@@ -180,6 +180,12 @@ public sealed class ThresholdOverrideTests
         Assert.Null(DarlingMcpThresholdOverrideTools.AgentKindRule(cpu, 95));
         Assert.True(DarlingThresholdKeys.TryGet("blocking.count_threshold", out var blocking));
         Assert.Equal("threshold_disables_alert", DarlingMcpThresholdOverrideTools.AgentKindRule(blocking, int.MaxValue)!.Reason);
+        /* #7611: at the top of a Database Protection age a never-backed-up database is still overdue, so no value of these keys turns the alert off. */
+        foreach (var wire in new[] { DarlingThresholdKeys.BackupOverdueHours, DarlingThresholdKeys.LogBackupOverdueMinutes, DarlingThresholdKeys.CheckDbOverdueHours })
+        {
+            Assert.True(DarlingThresholdKeys.TryGet(wire, out var age));
+            Assert.Null(DarlingMcpThresholdOverrideTools.AgentKindRule(age, age.Max));
+        }
         Assert.Contains("set_alert_threshold_override", DarlingMcpWritePolicy.AgentActionTools);
         Assert.DoesNotContain("update_alert_settings", DarlingMcpWritePolicy.AgentActionTools);
         Assert.True(DarlingMcpWritePolicy.Effective.Off.Offers("set_alert_threshold_override") is false);
