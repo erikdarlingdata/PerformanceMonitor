@@ -45,6 +45,16 @@ FROM config_monitored_servers
 WHERE aws_role_arn IS NOT NULL OR aws_external_id IS NOT NULL";
 
     /// <summary>
+    /// The registry's list of databases that get Extended Events sessions (#7639, store version 247), for the name set: a list set
+    /// through the Viewer or MCP lives only in the store, like <c>excluded_databases</c>. A store older than 247 has no such column;
+    /// that read adds nothing instead of refusing the bundle.
+    /// </summary>
+    internal const string RegistryXeSessionDatabasesSql = @"
+SELECT xe_session_databases
+FROM config_monitored_servers
+WHERE cardinality(xe_session_databases) > 0";
+
+    /// <summary>
     /// The registry's Query Store replica (#6254, store version 213), for the name set: a host (or listener name) set through the
     /// Viewer, the web dashboard or MCP lives only in the store, so a bundle that seeded darling.json alone would show it in clear.
     /// A store older than 211 has no such column; that read adds nothing instead of refusing the bundle.
@@ -380,6 +390,7 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         string Registry = RegistryNamesSql,
         string RegistryAws = RegistryAwsSql,
         string RegistryReplica = RegistryReplicaSql,
+        string RegistryXeSessionDatabases = RegistryXeSessionDatabasesSql,
         string Servers = CollectServersSql,
         string Roles = StoreRolesSql,
         string Databases = StoreDatabasesSql,
@@ -434,6 +445,17 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
         }, ct, missingColumnIsEmpty: true))
         {
             failedNameSource ??= "config_monitored_servers (query store replica)";
+        }
+
+        if (!await TryReadAsync(postgres, sql.RegistryXeSessionDatabases, reader =>
+        {
+            foreach (var listed in reader.GetFieldValue<string[]>(0))
+            {
+                aliaser.AddName(AliasKind.Database, listed);
+            }
+        }, ct, missingColumnIsEmpty: true))
+        {
+            failedNameSource ??= "config_monitored_servers (xe session databases)";
         }
 
         /* Servers by id first so the alias order follows server_id; display names share their server's alias. */

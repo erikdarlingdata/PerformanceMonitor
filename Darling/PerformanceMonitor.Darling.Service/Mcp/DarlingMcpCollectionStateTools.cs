@@ -46,6 +46,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpCollectionStateTools
 {
     private const string TakesEffect = "The running service re-reads this on its next config poll; no restart is needed.";
+    private const string TakesEffectWithReconnect = "The running service reconnects this server on its next config poll to apply it; no service restart is needed.";
 
     private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded, decimal MonthlyCostUsd);
 
@@ -137,7 +138,7 @@ public sealed class DarlingMcpCollectionStateTools
     }
 
     [McpServerTool(Name = "set_server_xe_session_databases"), Description(
-        "Replaces ONE server's list of databases that get Extended Events sessions: only the listed databases get the deadlock, blocked process, client timeout and long query sessions, an empty list clears it and means every database, and the excluded-databases list still wins. It matters on Azure SQL Database, where each session is database-scoped and Azure caps them per pool; a box SQL Server covers every database and ignores it. The list you send is the whole new list. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is still dropped in every database. The service applies it on its next config poll. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that undoes it.")]
+        "Replaces ONE server's list of databases that get Extended Events sessions: only the listed databases get the deadlock, blocked process, client timeout and long query sessions, an empty list clears it and means every database, and the excluded-databases list still wins. It matters on Azure SQL Database, where each session is database-scoped and Azure caps them per pool; a box SQL Server covers every database and ignores it. The list you send is the whole new list. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is still dropped in every database. The service reconnects that server on its next config poll to apply it, so its collectors restart once. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that undoes it.")]
     public static async Task<string> SetServerXeSessionDatabases(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
@@ -187,7 +188,7 @@ public sealed class DarlingMcpCollectionStateTools
                 ["current"] = new JsonObject { ["xe_session_databases"] = Strings(after) },
                 ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(before) }),
                 ["check"] = "Calling this tool again with the same list answers unchanged; the current list is in this answer.",
-                ["takes_effect"] = TakesEffect,
+                ["takes_effect"] = TakesEffectWithReconnect,
             }.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

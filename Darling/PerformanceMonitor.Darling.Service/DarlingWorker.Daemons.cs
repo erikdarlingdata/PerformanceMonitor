@@ -1842,7 +1842,9 @@ public sealed partial class DarlingWorker
         && a.Port == b.Port
         && a.TargetEngine == b.TargetEngine
         && a.AwsRoleKey == b.AwsRoleKey
-        && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase);
+        && a.ExcludedDatabases.SequenceEqual(b.ExcludedDatabases, StringComparer.OrdinalIgnoreCase)
+        /* #7639: the Azure XE-session database list is read from the runtime's connect-time Config (the hourly ensure, the long-query creates and the long-query state key), and Config is init-only, so an edit has to reconnect the runtime to reach them. */
+        && a.XeSessionDatabases.SequenceEqual(b.XeSessionDatabases, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// #4732: whether a runtime this body connected still describes the server it was installed on. False when

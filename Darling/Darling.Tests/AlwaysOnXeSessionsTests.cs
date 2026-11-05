@@ -246,6 +246,65 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Empty(rig.Beta.Statements);
     }
 
+    private static DarlingWorker CreateReloadWorker()
+    {
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        return worker;
+    }
+
+    private static void Reload(DarlingWorker worker, DarlingWorker.ServerLoopState state, MonitoredServer desired) =>
+        typeof(DarlingWorker).GetMethod("ReconcileServers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(worker, new object[] { new List<DarlingWorker.ServerLoopState> { state }, new List<MonitoredServer> { desired } });
+
+    /* #7639: the ensure reads the list off the runtime's connect-time Config, which is init-only, so an edit made only to the list has to drop
+       the runtime on the reload. The reconnect builds the new runtime from the reloaded definition, and its next ensure narrows to the new list. */
+    [Fact]
+    public async Task AnEditedXeSessionDatabaseList_DropsTheRuntimeOnReload_AndTheNextEnsureNarrows()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        await EnsureAsync(rig);
+        var deadlock = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        Assert.True(rig.Alpha.Started[deadlock]);
+        Assert.True(rig.Beta.Started[deadlock]);
+
+        var edited = new MonitoredServer { Name = "alwayson", Host = Host, XeSessionDatabases = new List<string> { "Alpha" } };
+        Reload(CreateReloadWorker(), rig.State, edited);
+
+        Assert.Null(rig.State.Runtime);
+        Assert.Same(edited, rig.State.Config);
+
+        var reconnected = new ServerRuntime
+        {
+            Config = rig.State.Config,
+            ConnectionString = rig.Runtime.ConnectionString,
+            Target = rig.Runtime.Target,
+            StorageName = rig.Runtime.StorageName,
+            ServerId = rig.Runtime.ServerId,
+        };
+        var fresh = BuildRig();
+        fresh.Runner.XeEnsureOverrideForTests = null;
+        await DarlingXeSessions.EnsureAllAsync(reconnected, fresh.Runner, NullLogger.Instance, CancellationToken.None);
+
+        Assert.True(fresh.Alpha.Started[deadlock]);
+        Assert.Empty(fresh.Beta.Statements);
+    }
+
+    /* #7639: a reload that leaves the list as it was (any casing) keeps the runtime, so no server reconnects without cause. */
+    [Fact]
+    public void AnUnchangedXeSessionDatabaseList_KeepsTheRuntimeOnReload()
+    {
+        var rig = BuildRig();
+        rig.State.Config.XeSessionDatabases = new List<string> { "alpha", "beta" };
+
+        var same = new MonitoredServer { Name = "alwayson", Host = Host, XeSessionDatabases = new List<string> { "ALPHA", "Beta" } };
+        Reload(CreateReloadWorker(), rig.State, same);
+
+        Assert.Same(rig.Runtime, rig.State.Runtime);
+    }
+
     /* Test 16: a stopped shared session gets a START by name and no fallback. */
     [Fact]
     public async Task AStoppedSharedSession_GetsAStartByName_AndNoFallback()
