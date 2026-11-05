@@ -280,6 +280,77 @@ public sealed class WebTileTruthsTests
         }
     }
 
+    /// <summary>#7578: the Semaphore column of the Memory grids prints "Regular" and "Small query", not the bare 0 and 1.</summary>
+    [Fact]
+    public void TheSemaphoreColumn_NamesTheSemaphore()
+    {
+        var words = Run().GetProperty("semaphoreWords");
+        var window = Strings(words.GetProperty("window"));
+        Assert.Contains("Regular", window);
+        Assert.Contains("Small query", window);
+        Assert.Contains("5", window);
+        var newest = Strings(words.GetProperty("newest"));
+        Assert.Contains("Regular", newest);
+        Assert.Contains("Small query", newest);
+        // The Resource Semaphore read of the Memory tab's table (read-fields.js) names them too.
+        var read = Strings(words.GetProperty("read"));
+        Assert.Contains("Regular", read);
+        Assert.Contains("Small query", read);
+    }
+
+    /// <summary>#5644 W9: the window grid shows the time of each peak beside the peak (waiters, then granted), under names that say which peak.</summary>
+    [Fact]
+    public void TheMemoryGrantWindow_ShowsTheTimeOfEachPeakBesideThePeak()
+    {
+        var headers = Run().GetProperty("windowCellClasses").EnumerateObject().Select(p => p.Name).ToList();
+        Assert.Equal(headers.IndexOf("Peak waiters") + 1, headers.IndexOf("Peak waiters at"));
+        Assert.Equal(headers.IndexOf("Peak granted") + 1, headers.IndexOf("Peak granted at"));
+        Assert.DoesNotContain("Peak at", headers);
+    }
+
+    /// <summary>#7578: the date-time columns of Resource Semaphore Pressure wrap with the narrow flow-cell floor, so First and Last are not pushed past the panel.</summary>
+    [Fact]
+    public void TheSemaphorePressureGrid_WrapsItsDateTimeColumns()
+    {
+        var classes = Run().GetProperty("windowCellClasses");
+        foreach (var header in new[] { "Peak waiters at", "Peak granted at", "First", "Last" })
+        {
+            var cls = classes.GetProperty(header).GetString()!.Split(' ');
+            Assert.Contains("wrap", cls);
+            Assert.Contains("flow-cell", cls);
+            Assert.Contains("flow-tight", cls);
+        }
+        // #7578: every header wraps at its spaces, so twelve columns fit the 948 px panel of a 1280 px window (a header of nowrap text kept the grid at 1389 px).
+        var headers = Run().GetProperty("windowHeaderClasses");
+        foreach (var header in headers.EnumerateObject())
+            Assert.Contains("wrap-head", header.Value.GetString()!.Split(' '));
+        // Choosing a sort rewrites every header's class name, and the rewrite keeps the wrapping header.
+        Assert.Equal("ascending", Run().GetProperty("sortedState").GetString());
+        foreach (var header in Run().GetProperty("windowHeaderClassesAfterSort").EnumerateObject())
+            Assert.Contains("wrap-head", header.Value.GetString()!.Split(' '));
+        // A number column keeps its single line.
+        Assert.DoesNotContain("wrap", classes.GetProperty("Snapshots").GetString()!.Split(' '));
+    }
+
+    /// <summary>#7578: the File I/O Stats latency columns carry their unit, as the charts on the same tab do.</summary>
+    [Fact]
+    public void TheFileIoLatencyColumns_NameTheirUnit()
+    {
+        var headers = Strings(Run().GetProperty("fileIoHeaders"));
+        Assert.Contains("Read latency (ms)", headers);
+        Assert.Contains("Write latency (ms)", headers);
+    }
+
+    /// <summary>#7578: a quiet server's null Runnable % is a real answer (no other request was running), so the tile prints 0.0, not a dash, and says what the figure is.</summary>
+    [Fact]
+    public void TheRunnableTile_PrintsZeroForANullShare_AndExplainsTheFigure()
+    {
+        var runnable = Run().GetProperty("runnable");
+        Assert.Matches("^0[.,]0$", runnable.GetProperty("nullPercent").GetString()!);
+        Assert.NotEqual("—", runnable.GetProperty("value").GetString());
+        Assert.Contains("no other request was running", Strings(runnable.GetProperty("tooltip")).Single(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ThePlatformColumn_IsDroppedWhenNoRowNamesAPlatform_AndKeptWhenOneDoes()
     {
