@@ -608,7 +608,8 @@ try {
         labels: edits.map((b) => b.attrs["aria-label"]),
         ids: edits.map((b) => b.attrs["data-server-id"]),
         rows: tableRows(),
-        notice: all(main, (n) => n.className.split(/\s+/).includes("notice")).map(text),
+        /* #7558: the summary under the heading is a quiet caption now, not a yellow strip; it is read from its box, whatever its class. */
+        notice: strips("notice").map((s) => s.text),
         requests: requests.map((r) => r.method + " " + r.url),
         form: openForm() !== null,
       };
@@ -1087,7 +1088,8 @@ try {
       const table = byTag(main, "table")[0];
       const headRow = table.children[0].children[0];
       const rows = table.children[1].children;
-      const notice = all(main, (n) => n.className.split(/\s+/).includes("notice")).map(text);
+      /* #7558: the summary is a quiet caption now, so it is read from its box, whatever its class. */
+      const notice = strips("notice").map((s) => s.text);
       return {
         headers: headRow.children.map((th) => (th.children[0] || th).textContent),
         cells: rows.map((tr) => tr.children.map(text)),
@@ -1169,6 +1171,7 @@ try {
       const result = {
         formsBefore, readsBefore, tabs: all(main, (n) => n.tag === "a").map((n) => n.textContent),
         strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        stripClasses: all(main, (n) => n.classList.contains("strip")).map((n) => n.className),
         reported: all(main, (n) => n.tag === "p" && n.textContent.startsWith("Reported ")).map((n) => n.textContent),
         window: byAttr(main, "data-fb-window", "1").map((n) => n.textContent),
       };
@@ -1227,6 +1230,18 @@ try {
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
       };
     },
+    /* #7558: the Feedback tab with no reports in the window (param is the read's hours_back): returns the text the empty family table draws. */
+    feedbackEmpty: async (hours) => {
+      state.canEdit = false;
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: Number(hours), can_record: false, requests_returned: 0, truncated: false, families: [], requests: [] } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("feedback");
+      return { text: main.textContent };
+    },
     /* #6265: a seat that can edit but holds no sign-in (a dashboard with no web token) sees the Pending Notes and Practice Scores lists,
        the sign-in sentence, and none of the write forms or the Approve and Reject buttons. */
     signedout: async (tab) => {
@@ -1246,6 +1261,8 @@ try {
         noteForm: byAttr(main, "data-note-write").length,
         practiceForm: byAttr(main, "data-practice-start").length,
         writes: requests.filter((r) => r.method === "PUT").length,
+        practiceWindow: byAttr(main, "data-practice-window", "1").map((n) => n.textContent),
+        stripClasses: all(main, (n) => n.classList.contains("strip")).map((n) => n.className + "|" + n.textContent.slice(0, 40)),
       };
     },
     /* #6936: the Routes tab on an editing seat. Edit on route 7 (a stored Critical only route), choose `severity` in the Severity box, Save:
@@ -1394,6 +1411,45 @@ try {
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */
+    /* #7558: the strip a panel's note draws. A panel that names `noteQuiet` (its note only explains the table) draws the quiet caption, one
+       that does not keeps the yellow strip, with and without a short sentence behind "More detail". Returns each strip's class. */
+    noteStrips: async () => {
+      const draw = (desc) => util.noteStrip(desc, "A note the read sent.", {}).className;
+      return {
+        quiet: draw({ noteQuiet: true }),
+        loud: draw({}),
+        quietWithShort: draw({ noteQuiet: true, noteShort: "Short." }),
+        loudWithShort: draw({ noteShort: "Short." }),
+      };
+    },
+    /* #7558: a panel drawn through renderPanel (so loadPanelBody) whose read sends a main note and two more notes. Returns the class of each
+       strip the panel drew, main note first: a panel that names `noteQuiet` draws all three as captions, one that does not draws all three
+       yellow. */
+    panelNotes: async () => {
+      const panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+      state.responder = (method, url) => (url.startsWith("/api/read/get_panel_notes")
+        ? { status: 200, body: { rows: [{ a: 1 }], main_note: "Main note.", extra_one: "First extra note.", extra_two: "Second extra note." } }
+        : { status: 404, body: {} });
+      const draw = async (extra) => {
+        const holder = new FakeNode("div");
+        util.mount(holder, panels.renderPanel({
+          title: "Notes", read: "get_panel_notes", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [{ key: "a", label: "A" }],
+          noteKey: "main_note", moreNoteKeys: ["extra_one", "extra_two"], ...extra,
+        }));
+        await settle();
+        return all(holder, (n) => n.classList.contains("strip")).map((n) => ({ className: n.className, text: n.textContent }));
+      };
+      return { quiet: await draw({ noteQuiet: true }), loud: await draw({}) };
+    },
+    /* #7558: the Servers tab's summary line under a signed-in session. The param is "ok" (a quiet caption) or "probeFailed" (the sign-in
+       probe failed: a real warning, the yellow strip). Returns the class of the strip that carries the server count. */
+    serversSummary: async (param) => {
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false, probe_failed: param === "probeFailed" } });
+      await mountPage("servers");
+      const strip = all(main, (n) => n.classList.contains("strip") && /servers?\. /.test(n.textContent))[0];
+      return { className: strip ? strip.className : null, text: strip ? strip.textContent : null };
+    },
     pure: async () => {
       const request = JSON.parse(await readStdin());
       const call = ({ fn, args = [] }) => {

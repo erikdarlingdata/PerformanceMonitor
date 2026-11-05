@@ -21,7 +21,7 @@
    Self-contained: admin.js hands this file its helpers. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, emptyStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, emptyStrip, noticeStrip, captionStrip, adminListOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const AGENT_LEVEL_CHOICES = [
   { value: "", label: "Inherit" },
@@ -40,7 +40,7 @@ export const REPORT_NOTICE_CHOICES = [
 
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
-export const routesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
+export const routesListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
 export const ROUTES_EDITING_NOTE =
   "Add, edit and delete a route's agent channel, match, scope and destinations here. A webhook URL or key is sealed when saved and never " +
   "shown again: a box left blank keeps the saved one, and Remove deletes it. Email recipients are shown and edited as plain text.";
@@ -322,7 +322,7 @@ export function routeEditorNodes(options) {
   const nodes = [];
   const status = statusNode(routeStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(ROUTES_EDITING_NOTE));
+  nodes.push(captionStrip(ROUTES_EDITING_NOTE));
   nodes.push(routeForm(options));
   return nodes;
 }
@@ -331,7 +331,7 @@ export function routeEditorNodes(options) {
 /* #6274: a seat that is not a signed-in admin lists only, and the service says why in its own sentence (sign in as an admin, or use the Viewer). */
 export function routeListOnlyNodes(message, managed, adminWritesOff) {
   const status = statusNode(routeStatus);
-  return (status ? [status] : []).concat([noticeStrip(message || routesListOnly(managed, adminWritesOff))]);
+  return (status ? [status] : []).concat([captionStrip(message || routesListOnly(managed, adminWritesOff))]);
 }
 
 /** The Routes grid's extra columns: Agent use for everyone, Change (Edit and Delete) for an editing seat. */
@@ -368,7 +368,7 @@ export async function readAgentSetupAccess(session) {
 
 /* ───────────────────────────── Environment Profiles ───────────────────────────── */
 
-export const profilesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "profiles are listed only", "To change one", adminWritesOff);
+export const profilesListOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "profiles are listed only", "To change one", adminWritesOff);
 export const PROFILES_NOTE =
   "An environment profile is free text every agent brief carries for its scope: the fleet, one server or one tag. Write the server's role, " +
   "business hours, owners, read limits and patterns known to be noisy. Saving blank text removes the scope's profile. Every change is journaled.";
@@ -426,7 +426,7 @@ export async function buildProfiles(body, generation, ctx) {
   const nodes = [];
   const status = statusNode(profileStatus);
   if (status) nodes.push(status);
-  nodes.push(noticeStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
+  nodes.push(captionStrip(canEdit ? PROFILES_NOTE : (typeof d.sign_in_message === "string" && d.sign_in_message) || profilesListOnly(session.managed_store === true, session.admin_writes_off === true)));
   if (canEdit) nodes.push(profileForm(profiles, fleet, d.max_length || 4000, ctx));
   const rows = profiles.map((p) => ({ ...p, scope: profileScopeText(p, fleet.servers, fleet.tags) }));
   nodes.push(rows.length

@@ -79,14 +79,17 @@ public sealed class AdminReportFeedbackBehaviourTests
     }
 
     [Fact]
-    public void OnTheManagedStoreWithTheSwitchOff_TheListOnlyNote_NamesTheSwitch_InTheWordsOfThe403()
+    public void OnTheManagedStoreWithTheSwitchOff_TheSwitchIsNamedOnceOnThePage_AndTheRefusalNamesItInItsOwnWords()
     {
         var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
 
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
-        var note = Assert.Single(Strings(page.GetProperty("strips")), t => t.Contains("this page is list-only", System.StringComparison.Ordinal));
+        var strips = Strings(page.GetProperty("strips"));
+        // #7558: the switch is named once, under the Admin heading. The tab says only what it lists and where to change it.
+        Assert.Equal("This page is list-only. To record feedback, use the Viewer app.", Assert.Single(strips, t => t.Contains("page is list-only", System.StringComparison.Ordinal)));
+        Assert.Single(strips, t => t.Contains("turned off", System.StringComparison.Ordinal));
+        Assert.Single(strips, t => t.Contains("web.allowAdminWrites", System.StringComparison.Ordinal));
         const string SwitchSentence = " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service.";
-        Assert.Equal("Changes from this page are turned off, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
         Assert.EndsWith(SwitchSentence, PerformanceMonitor.Darling.Service.DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), System.StringComparison.Ordinal);
     }
 
@@ -121,5 +124,77 @@ public sealed class AdminReportFeedbackBehaviourTests
 
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         Assert.Contains("Report Feedback", Strings(page.GetProperty("tabs")));
+    }
+
+    [Fact]
+    public void AnExplanationIsAQuietCaption_AndOnlyARealWarningIsYellow()
+    {
+        // #7558: the tab's how-it-works text and the list-only line explain the page. Neither warns about anything.
+        var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
+        var strips = Strings(page.GetProperty("strips"));
+        var classes = Strings(page.GetProperty("stripClasses"));
+
+        Assert.Equal(strips.Length, classes.Length);
+        Assert.NotEmpty(strips);
+        Assert.All(classes, c => Assert.Equal("strip source", c));
+    }
+
+    [Fact]
+    public void ThePracticeWindow_IsWrittenInDays_NotRawHours()
+    {
+        // #7558: the read counts 720 hours; the page says 30 days.
+        var page = AdminServerEditBehaviourTests.Run("signedout:practice");
+
+        Assert.Equal("Practice requests opened in the last 30 days.", Assert.Single(Strings(page.GetProperty("practiceWindow"))));
+    }
+
+    [Theory]
+    [InlineData("168", "No investigation reports in the last 7 days.")]
+    [InlineData("24", "No investigation reports in the last 1 day.")]
+    [InlineData("36", "No investigation reports in the last 36 hours.")]
+    public void TheFeedbackEmptyText_IsWrittenInDays_WhenTheWindowIsWholeDays_AndInHoursOtherwise(string hoursBack, string expected)
+    {
+        // #7558: the family table's empty text counted raw hours ("168 hours"); a whole-day window reads in days, any other stays in hours.
+        var page = AdminServerEditBehaviourTests.Run("feedbackEmpty:" + hoursBack);
+
+        Assert.Contains(expected, page.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void APanelThatNamesNoteQuiet_DrawsACaption_AndAPanelThatDoesNot_KeepsTheYellowStrip()
+    {
+        // #7558: four panels name noteQuiet because their note explains why the table is blank: Query Store Overhead waits, Query Store Memory Clerk,
+        // PostgreSQL Sampled Waits and Checkpoints and WAL. Every other panel's note warns about data. (Memory Pressure Events per Hour and the
+        // System Events intro are captions too, but through captionStrip directly, not this flag.)
+        var page = AdminServerEditBehaviourTests.Run("noteStrips");
+
+        Assert.Equal("strip source", page.GetProperty("quiet").GetString());
+        Assert.Equal("strip notice", page.GetProperty("loud").GetString());
+        Assert.Equal("strip source plain-note", page.GetProperty("quietWithShort").GetString());
+        Assert.Equal("strip notice plain-note", page.GetProperty("loudWithShort").GetString());
+    }
+
+    [Fact]
+    public void ANoteQuietPanel_DrawsItsMainNoteAndItsExtraNotesAsCaptions_AndAPanelWithoutTheFlagKeepsAllThreeYellow()
+    {
+        // #7558: loadPanelBody passes noteQuiet to the main note and to every moreNoteKeys note, so one panel never mixes a caption with a yellow strip.
+        var page = AdminServerEditBehaviourTests.Run("panelNotes");
+
+        var quiet = page.GetProperty("quiet").EnumerateArray().Select(s => s.GetProperty("className").GetString()).ToArray();
+        var loud = page.GetProperty("loud").EnumerateArray().Select(s => s.GetProperty("className").GetString()).ToArray();
+
+        Assert.Equal(new[] { "strip source", "strip source", "strip source" }, quiet);
+        Assert.Equal(new[] { "strip notice", "strip notice", "strip notice" }, loud);
+    }
+
+    [Theory]
+    [InlineData("ok", "strip source")]
+    [InlineData("probeFailed", "strip notice")]
+    public void TheServersSummary_IsACaption_UnlessTheSignInProbeFailed(string kind, string expectedClass)
+    {
+        // #7558: a failed sign-in probe is a real warning, so its summary stays the yellow strip.
+        var page = AdminServerEditBehaviourTests.Run("serversSummary:" + kind);
+
+        Assert.Equal(expectedClass, page.GetProperty("className").GetString());
     }
 }

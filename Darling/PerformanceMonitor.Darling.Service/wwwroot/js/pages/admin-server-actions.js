@@ -15,7 +15,7 @@
    Self-contained: admin.js hands this file its helpers, so a change here never touches that file's tab code. */
 
 import { VIZ } from "../panels.js";
-import { el, mount, errorStrip, noticeStrip, listOnlyNote, apiGet, apiWrite } from "../util.js";
+import { el, mount, errorStrip, noticeStrip, captionStrip, adminListOnlyNote, apiGet, apiWrite } from "../util.js";
 
 export const SERVER_ACTION_COLUMNS = [
   { key: "server", label: "Server" },
@@ -35,7 +35,7 @@ export function serverActionChangedBy(setBy) {
 const ENGINE_CANNOT_RUN =
   "This server's engine can't run this action. Turn it off to clear it.";
 
-const listOnly = (managed, adminWritesOff) => listOnlyNote(managed, "this page lists the switches only", "To turn one on or off", adminWritesOff);
+const listOnly = (managed, adminWritesOff) => adminListOnlyNote(managed, "this page lists the switches only", "To turn one on or off", adminWritesOff);
 const NOT_SIGNED_IN =
   "Sign in to the dashboard as an admin to turn a switch on or off; this page lists the switches only. A dashboard with no sign-in configured " +
   "never changes them. Or use the Viewer app.";
@@ -152,7 +152,7 @@ export async function buildServerActions(body, generation, ctx) {
     const session = await ctx.getSession();
     notice = listOnly(session.managed_store === true, session.admin_writes_off === true);
   }
-  nodes.push(noticeStrip(notice));
+  nodes.push(captionStrip(notice));
   /* The on/off control sits before Note, so it stays on screen at 1280 px beside a long note. */
   const changeColumn = {
     key: "change", label: "Change", csv: false, copy: false,

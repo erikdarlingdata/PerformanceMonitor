@@ -124,7 +124,7 @@ export async function buildList(body, isCurrent = () => true) {
   const data = res.data || {};
   const rows = Array.isArray(data.proposals) ? data.proposals : [];
   const nodes = [];
-  if (!data.can_press && data.press_note) nodes.push(noticeStrip(data.press_note));
+  if (!data.can_press && data.press_note) nodes.push(captionStrip(data.press_note));
   if (!rows.length) return mount(body, nodes.concat([emptyStrip("No proposals.")]));
   const head = el("tr", {}, ["Kind", "Server", "Target", "State", "Proposed", "Expires", "First press"].map((t) => el("th", { text: t })));
   const lines = rows.map((p) => el("tr", { "data-role": "proposal-row" }, [
@@ -188,9 +188,9 @@ export async function buildProposal(body, id, isCurrent = () => true) {
   nodes.push(...pressResultNodes(lastPress.get(p.proposal_id)));
 
   if (!data.can_press) {
-    if (data.press_note) nodes.push(noticeStrip(data.press_note));
+    if (data.press_note) nodes.push(captionStrip(data.press_note));
   } else if (p.state === "pending") {
-    if (data.press_note) nodes.push(noticeStrip(data.press_note));
+    if (data.press_note) nodes.push(captionStrip(data.press_note));
     else if (data.person_name) nodes.push(captionStrip("You press as " + data.person_name + "."));
     /* #7207: both buttons stay disabled from the click until the reply arrives, so a double click sends one press, not two, and a draw
        that lands in between (the poll, Refresh) draws them disabled too. The reply draws the page again, which replaces the buttons. */
