@@ -66,7 +66,7 @@ internal static partial class ChartGroupAligner
     internal static void ClearFloors(Plot plot)
     {
         plot.Axes.Left.MinimumSize = 0f;
-        plot.Axes.Right.MinimumSize = 0f;
+        plot.Axes.Right.MinimumSize = AxesExtensions.RightEdgePadFor(plot); // #7606: a time axis' own right gutter is not a floor to clear
         plot.Axes.Bottom.MinimumSize = 0f;
         plot.Axes.Title.MinimumSize = 0f;
     }
@@ -101,7 +101,7 @@ internal static partial class ChartGroupAligner
             {
                 var plot = charts[i].Plot;
                 plot.Axes.Left.MinimumSize = Floor(anchors[i].Left, target.Left - natural[i].Left);
-                plot.Axes.Right.MinimumSize = Floor(anchors[i].Right, target.Right - natural[i].Right);
+                plot.Axes.Right.MinimumSize = Math.Max(AxesExtensions.RightEdgePadFor(plot), Floor(anchors[i].Right, target.Right - natural[i].Right));
                 plot.Axes.Bottom.MinimumSize = Floor(anchors[i].Bottom, target.Bottom - natural[i].Bottom);
                 plot.Axes.Title.MinimumSize = Floor(anchors[i].Top, target.Top - natural[i].Top);
             }
