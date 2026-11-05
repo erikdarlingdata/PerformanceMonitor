@@ -131,11 +131,11 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
             .Select(m => (Metric: m, Sql: BaselineProvider.GetBaselineQuery(m)))
             .Where(t => t.Sql is not null)
             .ToList();
-        Assert.Equal(12, statements.Count); // Lite's twelve arms (IoWriteLatency since #6696) — a thirteenth arrives censused
+        Assert.Equal(13, statements.Count); // Lite's thirteen arms (IoWriteLatency since #6696, BlockingSnapshot since #7588) — a fourteenth arrives censused
 
         var bareKey = new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase);
         var bareDate = new Regex(@"(?<![\w.])collection_time::DATE", RegexOptions.IgnoreCase);
-        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.Deadlock };
+        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.BlockingSnapshot, MetricNames.Deadlock };
 
         foreach (var (metric, sql) in statements)
         {
@@ -158,6 +158,13 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
             /* The log CTE keys on collection time (coverage is when the collector ran); the event CTE keys on the
                event's own time with the SAME expression over the other column. */
             var sql = BaselineProvider.GetBaselineQuery(metric)!;
+            if (metric == MetricNames.BlockingSnapshot)
+            {
+                /* #7588: a snapshot's event time is its collection time, so both CTEs key on collection time. */
+                Assert.Equal(2, Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")).Count);
+                continue;
+            }
+
             var eventColumn = metric == MetricNames.Blocking ? "event_time" : "deadlock_time";
             Assert.Single(Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")));
             Assert.Single(Regex.Matches(sql, Regex.Escape(BaselineProvider.LocalCollectionTime.Replace("collection_time", eventColumn) + "::DATE")));
