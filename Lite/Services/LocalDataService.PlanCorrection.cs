@@ -146,6 +146,7 @@ LIMIT $4";
         var planCorrectionRelation = await HotTableHasServerAsync(connection, "plan_correction", serverId) ? "plan_correction" : "v_plan_correction";
         var dbClause = BuildDbInClause(databaseNames, "database_name", 2, out var dbValues);
         command.CommandText = $@"
+SELECT * FROM (
 SELECT DISTINCT
     database_name,
     force_last_good_plan_desired_state,
@@ -157,7 +158,8 @@ SELECT DISTINCT
 FROM {planCorrectionRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {planCorrectionRelation} WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+) AS d
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)

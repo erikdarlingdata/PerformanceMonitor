@@ -164,7 +164,7 @@ internal static class DarlingConfigHistoryReader
         FROM v_database_config
         WHERE server_id = $1
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name, capture_time
+        ORDER BY lower(database_name), database_name, capture_time
         """;
 
     public static Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> GetDatabaseConfigSnapshotsAsync(

@@ -177,6 +177,7 @@ LIMIT $4";
     /// capture, so a filtered and an unfiltered call show the same capture.
     /// </summary>
     public const string AutomaticTuningSql = @"
+SELECT * FROM (
 SELECT DISTINCT
     database_name,
     force_last_good_plan_desired_state,
@@ -187,7 +188,8 @@ FROM plan_correction
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
-ORDER BY database_name";
+) AS d
+ORDER BY lower(database_name), database_name";
 
     /// <summary>One recommendation row the engine produced (or acted on) in the window.</summary>
     public sealed record PlanCorrectionRow(
