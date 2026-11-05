@@ -133,6 +133,7 @@ public static partial class CustomViewValidation
             ["get_procedure_duration_trend"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("bucket_minutes", false), new("database_name", false), new("procedure_name", false) },
             ["get_query_duration_trend"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("bucket_minutes", false), new("database_name", false) },
             ["get_query_store_duration_trend"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("database_name", false) },
+            ["get_query_fleet_summary"] = new ReadPanelParam[] { new("query_hash", true), new("hours", false), new("as_of", false), new("limit", false) },
             ["get_query_trend"] = new ReadPanelParam[] { new("query_hash", true), new("database_name", true), new("server", false), new("hours", false), new("as_of", false) },
             ["get_server_summary"] = new ReadPanelParam[] { new("server", false) },
             ["get_overview_baselines"] = new ReadPanelParam[] { new("server", false), new("window_start", true) },
