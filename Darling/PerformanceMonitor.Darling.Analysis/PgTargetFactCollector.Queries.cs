@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -29,7 +30,7 @@ public sealed partial class PgTargetFactCollector
     /// <summary>
     /// The top statements of the window from <c>pg_statement_stats</c> — the read behind
     /// <c>PG_BAD_ACTOR_&lt;queryid&gt;</c>. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC),
-    /// <c>$4</c> the row cap (<see cref="TopStatementCount"/>).
+    /// <c>$4</c> the row cap (<see cref="TopStatementCount"/>), <c>$5</c> <see cref="CollectorDeltaCalculator.DefaultMaxGapSeconds"/> (bound: a const string cannot interpolate an int).
     ///
     /// <para><b>The deltas are READ, not re-derived.</b> <c>delta_calls</c> and <c>delta_total_exec_time_ms</c>
     /// are written at collection, where the previous reading was in hand and the reset / eviction /
@@ -52,16 +53,18 @@ public sealed partial class PgTargetFactCollector
     /// <c>queryid</c> alone — the grain the key, the text store and <c>pg_plan_capture</c> share — and
     /// carries <c>database_count</c> so a statement shape running against several databases says so.</para>
     ///
-    /// <para><b>The interval is the three-state idiom from <c>QueryDurationTrendSql</c> (V128, #3540).</b>
-    /// Per snapshot the accrual span is the stored <c>sample_interval_seconds</c> — the span the delta
-    /// actually accrued over, which is NOT the gap between stored rows because the collector skips idle rows
-    /// at the write — taken as <c>MAX</c> over the queryid's rows and made NULL through <c>NULLIF(…, 0)</c>
-    /// when every row was unknowable (a first sighting or a <c>pg_stat_statements_reset()</c>); a NULL stored
-    /// interval (a pre-V128 row) falls back to the <c>LAG</c> over the queryid's snapshots; and there is no
-    /// <c>ELSE 0</c>, so the first snapshot of a pre-V128 series is absent rather than a fabricated zero. The
-    /// call RATE is then calls over the snapshots whose span is known, divided by that known span — a
-    /// first-sighting snapshot contributes 0 calls and 0 span, consistently — and is NULL when no snapshot's
-    /// span is known, which the C# renders as no <c>calls_per_sec</c> at all.</para>
+    /// <para><b>The rate's denominator is the seconds the collector's RUNS covered (#7566), the rule
+    /// <c>QueryDurationTrendBucketedSql</c> uses.</b> Per snapshot the stored <c>sample_interval_seconds</c> (V128,
+    /// #3540) is the span a delta accrued over, taken as <c>MAX</c> over the queryid's rows: 0 means every row was
+    /// unknowable (a first sighting or a <c>pg_stat_statements_reset()</c>) and NULL is a pre-V128 row. But this
+    /// collector skips idle rows at the write, so dividing a statement's calls by the seconds of only the snapshots it
+    /// had a row in reads a statement that runs a batch every 5 minutes at 0.48 per second where its rate is 0.097.
+    /// The denominator is therefore every SUCCESS run's seconds in the window (a run the statement had no row in is
+    /// zero calls over its real seconds), less the runs rated out for this statement: an outage gap, and a run whose
+    /// rows for the statement carry interval 0, which leave their calls out with their seconds. A snapshot no run
+    /// claims (a store without the log) is rated on its own, stored interval else the <c>LAG</c> over the queryid's
+    /// unclaimed snapshots, which is the old rule. The rate is NULL when no snapshot of the statement is rated, which
+    /// the C# renders as no <c>calls_per_sec</c> at all. There is no <c>ELSE 0</c>.</para>
     ///
     /// <para><b>The denominator of the share is the WINDOW's, not the page's (#3541 A7 / #3613).</b>
     /// <c>SUM(SUM(total_exec_ms)) OVER ()</c> is a window aggregate over the grouped result, evaluated after
@@ -112,16 +115,115 @@ per_snapshot AS (
         MAX(max_exec_time_ms)         AS max_exec_ms,
         MAX(max_exec_peakmem_bytes)   AS max_exec_peakmem_bytes,
         SUM(d_temp_blks_written)      AS temp_blks_written,
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (PARTITION BY queryid ORDER BY collection_time)))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END                           AS interval_seconds
+        MAX(sample_interval_seconds)  AS stored_interval
     FROM stmt_series
     GROUP BY queryid, collection_time
 ),
 databases AS (
     SELECT queryid, COUNT(DISTINCT database_id) AS database_count
     FROM stmt_series
+    GROUP BY queryid
+),
+runs AS (
+    /* The calls-per-second denominator (#7566): the seconds the collector's RUNS covered, the rule
+       DarlingPgTrendReader.QueryDurationTrendBucketedSql settled on, so the advice and the chart agree. This
+       collector skips idle rows at the write, so a statement that runs a batch every 5 minutes has a row in one
+       run of five, and the seconds of only those runs overstate its rate fivefold. A run is an axis point, not a
+       statement's: each SUCCESS run of the collector is a point, a snapshot belongs to the nearest run logged at or
+       after it (within ten minutes), and a run's seconds are the gap to the previous run point. A gap past
+       DefaultMaxGapSeconds ($5) is an outage and is unrated, and a run whose rows for the statement carry interval 0 (a
+       restart) is unrated for that statement alone, its calls out with its seconds. A snapshot no run claims (a store
+       without the log) keeps the stored interval, else the LAG, on its own. */
+    SELECT collection_time AS logged_at, COALESCE(duration_ms, 0)::bigint AS duration_ms
+    FROM collection_log
+    WHERE server_id = $1
+    AND   collector_name = 'pg_statement_stats'
+    AND   status = 'SUCCESS'
+    AND   collection_time >= $2 - $5 * INTERVAL '1 second'
+    AND   collection_time <= $3 + $5 * INTERVAL '1 second'
+),
+snapshot_events AS (
+    SELECT DISTINCT collection_time AS event_time, 0 AS is_run, CAST(NULL AS timestamp) AS logged_at
+    FROM stmt_series
+    UNION ALL
+    SELECT logged_at, 1, logged_at
+    FROM runs
+),
+claimed AS (
+    SELECT event_time, is_run,
+           MIN(logged_at) OVER (ORDER BY event_time DESC, is_run DESC) AS next_run
+    FROM snapshot_events
+),
+owned AS (
+    SELECT event_time AS collection_time, next_run AS run_logged_at
+    FROM claimed
+    WHERE is_run = 0
+    AND   next_run IS NOT NULL
+    AND   next_run - event_time <= INTERVAL '600 seconds'
+),
+run_points AS (
+    SELECT r.logged_at,
+           COALESCE(MIN(o.collection_time), r.logged_at - r.duration_ms * INTERVAL '1 millisecond') AS point_time
+    FROM runs AS r
+    LEFT JOIN owned AS o ON o.run_logged_at = r.logged_at
+    GROUP BY r.logged_at, r.duration_ms
+),
+run_gaps AS (
+    SELECT logged_at, point_time,
+           extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS gap_seconds
+    FROM run_points
+),
+run_rates AS (
+    SELECT logged_at, gap_seconds,
+           CASE WHEN gap_seconds <= $5 THEN gap_seconds END AS run_seconds
+    FROM run_gaps
+    WHERE point_time >= $2
+    AND   point_time <= $3
+),
+run_total AS (
+    SELECT COALESCE(SUM(run_seconds) FILTER (WHERE run_seconds > 0), 0) AS seconds
+    FROM run_rates
+),
+statement_runs AS (
+    SELECT s.queryid, o.run_logged_at, SUM(s.calls) AS calls, MAX(s.stored_interval) AS stored_interval
+    FROM per_snapshot AS s
+    JOIN owned AS o ON o.collection_time = s.collection_time
+    GROUP BY s.queryid, o.run_logged_at
+),
+statement_run_rates AS (
+    SELECT q.queryid, q.calls, r.run_seconds AS global_seconds,
+           CASE WHEN q.stored_interval = 0 THEN NULL
+                WHEN r.gap_seconds IS NOT NULL THEN r.run_seconds
+                ELSE NULLIF(q.stored_interval, 0)
+           END AS seconds
+    FROM statement_runs AS q
+    JOIN run_rates AS r ON r.logged_at = q.run_logged_at
+),
+loose AS (
+    SELECT p.queryid, p.calls,
+           CASE WHEN p.stored_interval IS NULL
+                THEN extract(epoch FROM (p.collection_time - LAG(p.collection_time) OVER (PARTITION BY p.queryid ORDER BY p.collection_time)))
+                ELSE NULLIF(p.stored_interval, 0)
+           END AS seconds
+    FROM per_snapshot AS p
+    WHERE NOT EXISTS (SELECT 1 FROM owned AS o WHERE o.collection_time = p.collection_time)
+),
+rate_points AS (
+    SELECT queryid,
+           CASE WHEN seconds > 0 THEN calls ELSE 0 END AS calls,
+           CASE WHEN seconds > 0 THEN 1 ELSE 0 END AS rated,
+           (CASE WHEN seconds > 0 THEN seconds ELSE 0 END) - (CASE WHEN global_seconds > 0 THEN global_seconds ELSE 0 END) AS extra_seconds
+    FROM statement_run_rates
+    UNION ALL
+    SELECT queryid,
+           CASE WHEN seconds > 0 THEN calls ELSE 0 END,
+           CASE WHEN seconds > 0 THEN 1 ELSE 0 END,
+           CASE WHEN seconds > 0 THEN seconds ELSE 0 END
+    FROM loose
+),
+statement_rates AS (
+    SELECT queryid, SUM(calls) AS rated_calls, SUM(rated) AS rated_snapshots, SUM(extra_seconds) AS extra_seconds
+    FROM rate_points
     GROUP BY queryid
 )
 SELECT
@@ -131,8 +233,8 @@ SELECT
     MAX(p.max_exec_ms)                                    AS max_exec_ms,
     MAX(p.max_exec_peakmem_bytes)                         AS max_exec_peakmem_bytes,
     CAST(COALESCE(SUM(p.temp_blks_written), 0) AS bigint) AS temp_blks_written,
-    CASE WHEN SUM(p.interval_seconds) > 0
-         THEN CAST(SUM(p.calls) FILTER (WHERE p.interval_seconds IS NOT NULL) AS double precision) / SUM(p.interval_seconds)
+    CASE WHEN MAX(r.rated_snapshots) > 0 AND MAX(t.seconds) + MAX(r.extra_seconds) > 0
+         THEN CAST(MAX(r.rated_calls) AS double precision) / (MAX(t.seconds) + MAX(r.extra_seconds))
     END                                                   AS calls_per_sec,
     MAX(d.database_count)                                 AS database_count,
     CAST(SUM(SUM(p.total_exec_ms)) OVER () AS bigint)     AS window_total_exec_ms
@@ -140,6 +242,9 @@ SELECT
 FROM per_snapshot AS p
 JOIN databases AS d
   ON d.queryid = p.queryid
+LEFT JOIN statement_rates AS r
+  ON r.queryid = p.queryid
+CROSS JOIN run_total AS t
 GROUP BY p.queryid
 HAVING SUM(p.total_exec_ms) > 0
 ORDER BY SUM(p.total_exec_ms) DESC
@@ -160,7 +265,8 @@ LIMIT $4";
     /// <see cref="AnalysisContext.ObservedDurationMs"/>, the "was this server doing anything" gate the scorer
     /// reads so that 60% of nothing on an idle box never roots a card; <c>calls</c>, <c>total_exec_ms</c>,
     /// <c>mean_exec_ms</c> (absent when calls is 0 — a mean over no calls is not 0 ms), <c>max_exec_ms</c>;
-    /// <c>calls_per_sec</c> over the statement's known accrual span (absent when unknowable — see the SQL);
+    /// <c>calls_per_sec</c> over the seconds the collector's runs covered in the window (#7566; absent when
+    /// the statement has no rated snapshot — see the SQL);
     /// <c>max_exec_peakmem_bytes</c> (#3691) — Aurora's per-query peak executor memory, present only where
     /// <c>aurora_stat_statements()</c> populated it, absent (never zero) off Aurora; a CONTEXT fact with no
     /// bar and no threshold, carried the same way <c>max_exec_ms</c> is, and read by nothing that grades a
@@ -193,6 +299,7 @@ LIMIT $4";
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
             cmd.Parameters.AddWithValue(TopStatementCount);
+            cmd.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))

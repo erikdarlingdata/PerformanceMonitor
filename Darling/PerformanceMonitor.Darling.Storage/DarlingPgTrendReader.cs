@@ -170,8 +170,10 @@ public static class DarlingPgTrendReader
         """;
 
 
-    /// <summary>The statement's per-snapshot read (#3960), shared by <see cref="QueryDurationTrendSql"/> and
-    /// <see cref="QueryDurationTrendBucketedSql"/> so both read the same rows with the same interval. A METHOD,
+    /// <summary>The statement's per-snapshot read (#3960), used only by <see cref="QueryDurationTrendSql"/>, which rates
+    /// a snapshot by its own stored interval. <see cref="QueryDurationTrendBucketedSql"/> does not use it: since #7566 it
+    /// rates a statement over the seconds the collector's runs covered, not the seconds of the snapshots the statement
+    /// had a row in, so the two reads rate a statement differently. A METHOD,
     /// not a field: its body contains a bare SELECT with no WITH of its own, so as a <c>const</c> or
     /// <c>static readonly</c> field it would parse-check itself as a standalone statement
     /// (<see cref="DarlingPgReadSqlParsesLiveTests"/> discovers every string field that contains SELECT) and fail —

@@ -189,6 +189,7 @@ export const READ_FIELDS = {
         { key: "session_id", label: "SPID", format: "int" },
         { key: "wait_type", label: "Wait" },
         { key: "wait_duration_ms", label: "Duration", format: "ms" },
+        { key: "thread_count", label: "Threads", format: "int" },
         { key: "blocking_session_id", label: "Blocked by", format: "int" },
         { key: "database_name", label: "Database" },
       ],

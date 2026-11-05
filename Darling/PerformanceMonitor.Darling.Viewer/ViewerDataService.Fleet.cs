@@ -71,7 +71,7 @@ public sealed partial class ViewerDataService
     /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
     /// A store older than V223 has no table: that is no chip, not an error on the card.
     /// </summary>
-    internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
+    internal async Task<(string? Value, string? Detail, int Count)> GetDatabaseProtectionChipAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         try
@@ -80,17 +80,17 @@ public sealed partial class ViewerDataService
                 _dataSource, serverId, nowUtc - DatabaseProtectionBands.CaptureFreshness, nowUtc, cancellationToken: cancellationToken);
             if (read.NewestCapture is null)
             {
-                return (null, null);
+                return (null, null, 0);
             }
 
             var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
             return overdue.Count == 0
-                ? (null, null)
-                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue));
+                ? (null, null, 0)
+                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue), overdue.Count);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return (null, null);
+            return (null, null, 0);
         }
     }
 
@@ -660,7 +660,7 @@ public sealed class FleetRollup
            name as the stable tiebreak. The composite score keeps offline > critical > warning and, within
            a band, ranks by how many metrics are bad — see FleetHealthScore. */
         var problems = summaries
-            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy)
+            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile)
             .OrderByDescending(FleetHealthScore)
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -851,6 +851,22 @@ public sealed class FleetRollup
         {
             parts.Add("collection stale");
         }
+        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
+        {
+            /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
+               (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+        }
+
+        if (s.AgentAlertGaps.Count > 0)
+        {
+            parts.Add($"Agent alerts {s.AgentAlertGaps.Count} gap{(s.AgentAlertGaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (s.HasDatabaseProtectionOverdue)
+        {
+            parts.Add(ServerHealthClassifier.ProtectionReason(s.DatabaseProtectionOverdueCount));
+        }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
         {
@@ -1008,7 +1024,8 @@ public sealed class FleetRollup
     {
         ArgumentNullException.ThrowIfNull(summaries);
 
-        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+        /* #7561: the same predicate as the web page's Needs attention filter: a band away from Healthy, or a Healthy server with a tile no band reads. */
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile).ToList();
     }
 
     /// <summary>
