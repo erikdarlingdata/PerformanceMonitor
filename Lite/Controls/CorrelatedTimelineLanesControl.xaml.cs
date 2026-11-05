@@ -234,7 +234,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             if (cpuTask.IsCompletedSuccessfully)
             {
                 var sqlSeries = cpuTask.Result.Select(d => (d.SampleTimeUtc.ToOADate(), (double)d.SqlServerCpu)).ToList();
-                var totalSeries = cpuTask.Result.Select(d => (d.SampleTimeUtc.ToOADate(), (double)d.TotalCpu)).ToList();
+                /* #7682: a bucket without other-process CPU (SQL Server on Linux before 2025 CU1) has no total. Plot the
+                   buckets that have one; with none, the SQL line is all that is known. */
+                var measuredTotals = cpuTask.Result.Where(d => d.TotalCpu.HasValue).ToList();
+                var totalSeries = measuredTotals.Count == 0
+                    ? sqlSeries
+                    : measuredTotals.Select(d => (d.SampleTimeUtc.ToOADate(), (double)d.TotalCpu!.Value)).ToList();
                 UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
             }
             else
@@ -313,8 +318,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     $"waitRows={(refWaitTask.IsCompletedSuccessfully ? refWaitTask.Result?.Count ?? 0 : 0)}");
 
                 if (refCpuTask.IsCompletedSuccessfully && refCpuTask.Result != null)
-                    AddGhostLine(CpuChart, refCpuTask.Result
-                        .Select(d => (TimeWindows.GhostX(d.SampleTimeUtc, days, zone).ToOADate(), (double)d.TotalCpu)).ToList(), "#FF7043");
+                    AddGhostLine(CpuChart, refCpuTask.Result.Where(d => d.TotalCpu.HasValue)
+                        .Select(d => (TimeWindows.GhostX(d.SampleTimeUtc, days, zone).ToOADate(), (double)d.TotalCpu!.Value)).ToList(), "#FF7043");
 
                 if (refWaitTask.IsCompletedSuccessfully && refWaitTask.Result != null)
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
