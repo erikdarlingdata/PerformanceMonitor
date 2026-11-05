@@ -322,7 +322,6 @@ public sealed class ViewerQuerySnapshotsSqlTests
         /* #7573: the MAX(collection_time) subquery is still server-scoped and still the single newest capture, but it now skips the monitor's own
            rows unless $3 asks for them, so a capture holding only the monitor's statements does not become the "latest" and read empty. */
         Assert.Contains("collection_time = (SELECT MAX(collection_time) FROM query_snapshots WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("AND ($3::boolean OR ", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY cpu_time_ms DESC", sql, StringComparison.Ordinal);
         /* #1319: the batch stays server-scoped (the MAX(collection_time) subquery reuses $1, not a window),

@@ -717,10 +717,12 @@ LIMIT 500";
     /// <summary>
     /// Gets ALL query snapshots in a time range (for chain walking).
     /// Used when a chain wait type (LCK_M_*, LATCH_EX/UP) needs blocking chain traversal.
+    /// #7573: a grid leaves the monitor's own sessions out, but the chain walk passes <paramref name="includeMonitor"/> so a chain
+    /// headed by a monitor session can still be walked to its head.
     /// </summary>
     public async Task<List<QuerySnapshotRow>> GetAllQuerySnapshotsInRangeAsync(
         int serverId, int hoursBack = 24,
-        DateTime? fromDate = null, DateTime? toDate = null)
+        DateTime? fromDate = null, DateTime? toDate = null, bool includeMonitor = false)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
@@ -788,7 +790,7 @@ LEFT JOIN blocked_counts bc
 WHERE q.server_id = $1
 AND   q.collection_time >= $2
 AND   q.collection_time <= $3
-{MonitorSnapshotClause("q.program_name", false)}
+{MonitorSnapshotClause("q.program_name", includeMonitor)}
 ORDER BY q.collection_time DESC
 LIMIT 2000";
         command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);

@@ -84,6 +84,44 @@ VALUES ($1, $2, $3, $4, $5, 'TestDb', $6, 'running', 0, 'LCK_M_X', 1000, 600000,
         Assert.DoesNotContain(inRange, r => r.ProgramName.StartsWith("PerformanceMonitor", StringComparison.Ordinal));
     }
 
+    /* The wait drill-down's chain view walks GetAllQuerySnapshotsInRangeAsync to find each waiter's head blocker. The monitor's session 60 heads the chain and
+       the application's session 61 waits on it. The grid read leaves 60 out, so the walk finds no head; the chain walk passes includeMonitor and reaches 60. */
+    [Fact]
+    public async Task TheWaitDrillDownChainWalk_ReachesAHeadBlockerThatIsAMonitorSession()
+    {
+        var at = DateTime.SpecifyKind(DateTime.UtcNow.AddSeconds(-30), DateTimeKind.Unspecified);
+        await ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status,
+     blocking_session_id, wait_type, cpu_time_ms, total_elapsed_time_ms, program_name, request_id, query_hash)
+VALUES ($1, $2, $3, $4, 60, 'TestDb', 'SELECT head', 'running', 0, NULL, 1000, 600000, 'PerformanceMonitorLite', 0, '0xABC')",
+            _nextId--, at, _serverId, ServerName);
+        await ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status,
+     blocking_session_id, wait_type, cpu_time_ms, total_elapsed_time_ms, program_name, request_id, query_hash)
+VALUES ($1, $2, $3, $4, 61, 'TestDb', 'SELECT victim', 'running', 60, 'LCK_M_X', 1000, 600000, 'Orders.Api', 0, '0xABD')",
+            _nextId--, at, _serverId, ServerName);
+
+        static PerformanceMonitor.Ui.WaitDrillDownHelper.SnapshotInfo Info(QuerySnapshotRow r) => new()
+        {
+            SessionId = r.SessionId,
+            BlockingSessionId = r.BlockingSessionId,
+            CollectionTime = r.CollectionTime,
+        };
+
+        var waiters = (await _dataService.GetQuerySnapshotsByWaitTypeAsync(_serverId, "LCK_M_X", hoursBack: 1)).Select(Info).ToList();
+        Assert.Equal(61, Assert.Single(waiters).SessionId);
+
+        var grid = (await _dataService.GetAllQuerySnapshotsInRangeAsync(_serverId, hoursBack: 1)).Select(Info);
+        Assert.Empty(PerformanceMonitor.Ui.WaitDrillDownHelper.WalkBlockingChains(waiters, grid));
+
+        var all = (await _dataService.GetAllQuerySnapshotsInRangeAsync(_serverId, hoursBack: 1, includeMonitor: true)).Select(Info);
+        var head = Assert.Single(PerformanceMonitor.Ui.WaitDrillDownHelper.WalkBlockingChains(waiters, all));
+        Assert.Equal(60, head.SessionId);
+        Assert.Equal(1, head.BlockedSessionCount);
+    }
+
     [Fact]
     public async Task TheLongRunningQueryAlertRead_LeavesTheMonitorOut()
     {

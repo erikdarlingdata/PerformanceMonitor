@@ -22,7 +22,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #7573: Waiting Tasks showed the monitor's own waits on a quiet server. The collector now stores the waiting task's session program name
-/// (V242, a nullable column). The read leaves out a row whose program name starts with the monitor's prefix, keeps a user's application that
+/// (V243, a nullable column). The read leaves out a row whose program name starts with the monitor's prefix, keeps a user's application that
 /// only contains the words and a row with no program name (every row stored before the column existed), and brings them back when asked
 /// (<c>include_monitor</c>). Skips without <c>DARLING_TEST_PG</c>, like its siblings.
 /// </summary>

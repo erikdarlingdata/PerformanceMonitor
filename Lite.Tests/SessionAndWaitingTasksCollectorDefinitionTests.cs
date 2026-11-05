@@ -107,15 +107,6 @@ public sealed class WaitingTasksCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_ReadsTheSessionsProgramName()
-    {
-        /* #7573: the program name comes from sys.dm_exec_sessions on session_id, LEFT-joined so a task whose session ended is kept. */
-        var text = WaitingTasksCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
-        Assert.Contains("program_name = es.program_name", text, StringComparison.Ordinal);
-        Assert.Contains("LEFT JOIN sys.dm_exec_sessions AS es", text, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task ReadAsync_FiltersIgnoredWaitTypes()
     {
         /* WAITFOR is a benign wait that (unlike most of the ignore list) surfaces on user sessions

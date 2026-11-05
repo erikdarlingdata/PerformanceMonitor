@@ -94,6 +94,48 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /* The wait drill-down's chain view walks the Viewer's snapshot read to find each waiter's head blocker. The monitor's session 50 heads the chain and the
+       application's session 60 waits on it. The grid read leaves 50 out, so the walk finds no head; the chain walk passes includeMonitor and reaches 50. */
+    [Fact]
+    public async Task TheWaitDrillDownChainWalk_ReachesAHeadBlockerThatIsAMonitorSession()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        try
+        {
+            using var connection = await OpenAndResetAsync(cs!, ct);
+            var end = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var at = end.AddMinutes(-2);
+            await InsertAsync(connection, at, 50, "PerformanceMonitorDarling", 0, "SELECT head", ct);
+            await InsertAsync(connection, at, 60, "Orders.Api", 50, "SELECT victim", ct);
+
+            await using var viewer = new ViewerDataService(cs!);
+            static PerformanceMonitor.Ui.WaitDrillDownHelper.SnapshotInfo Info(ViewerQuerySnapshotRow r) => new()
+            {
+                SessionId = r.SessionId,
+                BlockingSessionId = r.BlockingSessionId,
+                CollectionTime = r.CollectionTime,
+            };
+
+            var (_, grid) = await viewer.GetLatestQuerySnapshotsAsync(ServerId, end.AddHours(-1), end, cancellationToken: ct);
+            var waiters = grid.Select(Info).ToList();
+            Assert.Equal(60, Assert.Single(waiters).SessionId);
+            Assert.Empty(PerformanceMonitor.Ui.WaitDrillDownHelper.WalkBlockingChains(waiters, waiters));
+
+            var (_, all) = await viewer.GetLatestQuerySnapshotsAsync(ServerId, end.AddHours(-1), end, cancellationToken: ct, includeMonitor: true);
+            var head = Assert.Single(PerformanceMonitor.Ui.WaitDrillDownHelper.WalkBlockingChains(waiters, all.Select(Info)));
+            Assert.Equal(50, head.SessionId);
+            Assert.Equal(1, head.BlockedSessionCount);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* A monitor query that holds a lock is the thing someone is looking for when an application session is stuck behind it. One capture: the monitor's
        session 50 heads the chain, the application's session 60 waits on it, and the monitor's session 70 is idle noise that blocks nobody. */
     [Fact]
