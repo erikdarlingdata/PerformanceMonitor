@@ -2539,8 +2539,8 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     /// #7588: baseline relations that are ordinary views on every store. <see cref="EnsureBaselineFallbackViewsAsync"/> creates
     /// them, on a fresh store and on an upgraded one alike (it runs on every start and skips what exists). Not in
     /// <see cref="BaselineAggregates"/>, so they take no slot on the refresh grid, in the compression targets or in the retention
-    /// policies. The raw table behind them is floored at the baseline window by
-    /// <see cref="DarlingRetentionHorizons.BaselineServingRawCollectors"/>.
+    /// policies. The raw table behind them is purged at the collector's own retention, and the baseline read clamps its
+    /// window to that horizon (<c>PgBaselineProvider.EventSupplyFor</c>), the same as the report arm.
     /// </summary>
     public static readonly (string CreateSql, string View)[] PlainBaselineViews =
     {

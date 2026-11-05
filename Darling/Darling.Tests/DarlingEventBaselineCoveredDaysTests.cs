@@ -293,9 +293,13 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
     /// Feb 8 at 09:10, which is neither hour 14 nor the bucket under test (Tuesday 14:00).</summary>
     private static readonly DateTime ElsewhereEvent = new(2026, 2, 8, 9, 10, 0, DateTimeKind.Unspecified);
 
-    private static (string Metric, string Collector, int ServerId) Family(string name) => name == "blocking"
-        ? (MetricNames.Blocking, "blocked_process_report", -4731_21)
-        : (MetricNames.Deadlock, "deadlocks", -4731_22);
+    private static (string Metric, string Collector, int ServerId) Family(string name) => name switch
+    {
+        "blocking" => (MetricNames.Blocking, "blocked_process_report", -4731_21),
+        /* #7588: the snapshot arm of the blocking spike, over the dmv_blocking_snapshots rows. */
+        "snapshot" => (MetricNames.BlockingSnapshot, "dmv_blocking_snapshot", -4731_23),
+        _ => (MetricNames.Deadlock, "deadlocks", -4731_22),
+    };
 
     /// <summary>
     /// (a) A quiet hour on a server whose source has captured events: five weeks of <c>SUCCESS</c> runs every 15
@@ -558,6 +562,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
     [Theory]
     [InlineData("blocking")]
     [InlineData("deadlock")]
+    [InlineData("snapshot")]
     public async Task Live_RetentionBelowTheWindow_CountsOnlyTheDaysTheRawTableStillHolds(string family)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -632,7 +637,11 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
             LogIdBase + serverId * 1_000_000L, serverId, ServerName, collector, AnalysisTime.AddDays(-35), AnalysisTime.AddMinutes(-15));
 
     private static Task SeedEventAsync(NpgsqlConnection connection, string family, int serverId, DateTime at, CancellationToken ct) =>
-        family == "blocking"
+        family == "snapshot"
+            ? ExecAsync(connection, ct,
+                "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, blocked_spid, blocking_spid) VALUES ($1, $2, $3, $4, $5, 100, 60)",
+                CollectionIdGenerator.Next(), at, serverId, ServerName, at)
+            : family == "blocking"
             ? ExecAsync(connection, ct,
                 "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time) VALUES ($1, $2, $3, $4, $5)",
                 CollectionIdGenerator.Next(), at, serverId, ServerName, at)
@@ -644,11 +653,12 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
     private static async Task TearDownAsync(NpgsqlConnection cleanup, int serverId, CancellationToken ct)
     {
         await CleanupAsync(cleanup, serverId, ct);
-        foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+        foreach (var (_, view) in TimescaleSupport.BaselineAggregates.Concat(TimescaleSupport.PlainBaselineViews))
         {
             using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), cleanup);
             await drop.ExecuteNonQueryAsync(ct);
         }
+
     }
 
     private static async Task CleanupAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
@@ -656,6 +666,7 @@ public sealed class DarlingEventBaselineCoveredDaysLiveTests
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM collection_log WHERE server_id = {serverId}; " +
             $"DELETE FROM blocked_process_reports WHERE server_id = {serverId}; " +
+            $"DELETE FROM dmv_blocking_snapshots WHERE server_id = {serverId}; " +
             $"DELETE FROM deadlocks WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }

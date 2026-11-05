@@ -862,6 +862,8 @@ LIMIT 1";
     {
         MetricNames.Blocking => ("blocked_process_report", TimescaleSupport.BlockedProcessBaselineView),
         MetricNames.Deadlock => ("deadlocks", TimescaleSupport.DeadlockBaselineView),
+        /* #7588: the snapshot arm's view is plain on every store, so it always needs the clamp. */
+        MetricNames.BlockingSnapshot => ("dmv_blocking_snapshot", TimescaleSupport.DmvBlockingBaselineView),
         _ => null,
     };
 
@@ -1523,8 +1525,8 @@ WITH clean AS (
             MetricNames.Blocking => EventBaselineSql("blocked_process_report", "collection_log", "blocked_process_baseline", "SUM(event_count)"),
 
             /* #7588: the DMV snapshot arm of the blocking spike. Its window counts dmv_blocking_snapshots rows, so its history is
-               the same rows (dmv_blocking_baseline, a plain view over the raw table with the same self-wait filter, whose raw retention is
-               floored at the baseline window), covered by the snapshot collector's own runs. */
+               the same rows (dmv_blocking_baseline, a plain view over the raw table with the same self-wait filter, read through the same
+               purge-horizon clamp as the report arm, EventSupplyFor), covered by the snapshot collector's own runs. */
             MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "collection_log", "dmv_blocking_baseline", "SUM(event_count)"),
 
             // Event-based — same approach as blocking; the deadlocks collector's own runs cover the hours.

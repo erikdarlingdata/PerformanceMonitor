@@ -108,8 +108,6 @@ public static class DarlingRetentionHorizons
         new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "cpu_utilization", "file_io_stats",
-            /* #7588: the Blocking spike's snapshot-arm baseline reads dmv_blocking_snapshots directly (a plain view). */
-            "dmv_blocking_snapshot",
             "pg_database_stats", "pg_session_states", "pg_wait_stats", "pg_cpu_utilization",
             "pg_replication_stats", "pg_io_stats", "pg_write_stats",
             "pg_blocking",

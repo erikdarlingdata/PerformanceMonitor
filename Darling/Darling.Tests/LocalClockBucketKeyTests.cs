@@ -564,7 +564,7 @@ public sealed class LocalClockBucketKeyLiveTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 await CleanupAsync(cleanup, serverId, cleanupCt);
-                foreach (var (_, view) in TimescaleSupport.BaselineAggregates)
+                foreach (var (_, view) in TimescaleSupport.BaselineAggregates.Concat(TimescaleSupport.PlainBaselineViews))
                 {
                     using var drop = new NpgsqlCommand(TimescaleSupport.DropBaselineFallbackViewSql(view), cleanup);
                     await drop.ExecuteNonQueryAsync(cleanupCt);

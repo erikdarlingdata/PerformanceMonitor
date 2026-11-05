@@ -78,6 +78,19 @@ public class BlockingSpikeSnapshotBaselineTests : IClassFixture<SharedDuckDbFixt
             _nextId, ServerId, reports ? "blocked_process_report" : "dmv_blocking_snapshot", from, to);
     }
 
+    /// <summary>Self-wait snapshot rows (a session that is its own blocker: blocked_spid = blocking_spid), <paramref name="perCollection"/>
+    /// per quarter hour over [from, to). No collection log runs: the real rows seeded beside them already cover the hours.</summary>
+    private async Task SeedSelfWaitSnapshotsAsync(DateTime from, DateTime to, int perCollection)
+    {
+        _nextId -= 1_000_000;
+        await ExecAsync(
+            @"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, database_name, monitor_loop, blocked_spid, blocking_spid, wait_time_ms)
+              SELECT $1 - CAST(row_number() OVER () AS BIGINT), t, $2, 'TestServer', 'appdb', 1, 200 + j, 200 + j, 5000
+              FROM generate_series($3::TIMESTAMP, $4::TIMESTAMP - INTERVAL 1 SECOND, INTERVAL 15 MINUTE) AS g(t)
+              CROSS JOIN generate_series(1, $5) AS k(j)",
+            _nextId, ServerId, from, to, perCollection);
+    }
+
     private static DateTime WindowStart => Today.AddDays(-1).AddHours(12);
 
     private Task SeedWindowAsync(bool reports, int perCollection) => SeedAsync(reports, WindowStart, WindowStart.AddHours(4), perCollection);
@@ -158,5 +171,21 @@ public class BlockingSpikeSnapshotBaselineTests : IClassFixture<SharedDuckDbFixt
         Assert.NotNull(spike);
         Assert.Equal(1.0, spike!.Metadata[CountFamilyMetadata.FromDmvSnapshotsKey]);
         Assert.Equal(1.0, spike.Metadata["is_new"]);
+    }
+
+    /* #7588 review: the snapshot history leaves out self-wait rows, the same filter the window count uses (BlockingWaits.NotSelfWaitSql).
+       Here fifty self-wait rows per collection sit in the history beside the real ones. Counted, they would make the usual rate
+       about fifty times higher and hide a real five times window; left out, the baseline stays at the real rate. */
+    [Fact]
+    public async Task SnapshotHistory_LeavesOutSelfWaitRows()
+    {
+        await SeedHistoryAsync(reports: false, days: 12, RowsPerCollection);
+        await SeedSelfWaitSnapshotsAsync(Today.AddDays(-13), Today.AddDays(-1), 50);
+        await SeedWindowAsync(reports: false, RowsPerCollection * 5);
+
+        var spike = await SpikeAsync();
+        Assert.NotNull(spike);
+        Assert.Equal(RowsPerHour, spike!.Metadata["baseline_rate"], 1.0);
+        Assert.InRange(spike.Metadata["ratio"], 4.5, 5.5);
     }
 }
