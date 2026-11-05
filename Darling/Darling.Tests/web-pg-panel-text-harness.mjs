@@ -90,11 +90,15 @@ const BLOAT_TEXT =
   "answered_only excluded every row: pg-a has 40 candidate btree index(es) in this window and NOT ONE of them has a trusted bloat answer. This is not a clean bill of health and it is not an empty server - " +
   "the suppression breakdown below says why each index has no answer and which reasons are remediable. Re-run without answered_only to see the rows and their reasons. " +
   "NO COVERAGE AT ALL: every candidate index on this server carries a reason instead of an answer.";
-const bloatReply = (reason) => ({
+const bloatBuckets = (...buckets) => ({
   status: "no_answers",
   message: BLOAT_TEXT,
-  hints: { arm: "NothingTrusted", candidate_index_count: 40, suppressed_by_reason: [{ reason, index_count: 40, index_bytes: 1000000 }] },
+  hints: { arm: "NothingTrusted", candidate_index_count: 40, suppressed_by_reason: buckets },
 });
+const bloatReply = (reason) => bloatBuckets({ reason, index_count: 40, index_bytes: 1000000 });
+/* The list is sorted by bytes and then count, so the grant bucket can come first or second whatever its share of the indexes. */
+const GRANT_BUCKET = { reason: "ColumnWidthsNotVisible", index_count: 30, index_bytes: 4000000000 };
+const PARTIAL_BUCKET = { reason: "Partial", index_count: 10, index_bytes: 1000000000 };
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "pg-panel-text-"));
 try {
@@ -146,6 +150,8 @@ try {
   });
   const storage = await draw("storage", { get_pg_index_bloat: bloatReply("ColumnWidthsNotVisible") });
   const storageOther = await draw("storage", { get_pg_index_bloat: bloatReply("Partial") });
+  const storageGrantFirst = await draw("storage", { get_pg_index_bloat: bloatBuckets(GRANT_BUCKET, PARTIAL_BUCKET) });
+  const storageGrantSecond = await draw("storage", { get_pg_index_bloat: bloatBuckets({ ...PARTIAL_BUCKET, index_count: 2, index_bytes: 5000000000 }, { ...GRANT_BUCKET, index_count: 38, index_bytes: 1000000000 }) });
 
   /* #7548: the stored withheld marker reads as words in a statement cell and a plan, and only the exact marker does. */
   const shared = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "shared.js")).href);
@@ -173,6 +179,8 @@ try {
     columnsFloor: strip(panelTitled(columnFloor, "Column Statistics")),
     bloat: strip(panelTitled(storage, "Index Bloat (answered ranking)")),
     bloatOther: strip(panelTitled(storageOther, "Index Bloat (answered ranking)")),
+    bloatGrantFirst: strip(panelTitled(storageGrantFirst, "Index Bloat (answered ranking)")),
+    bloatGrantSecond: strip(panelTitled(storageGrantSecond, "Index Bloat (answered ranking)")),
     /* A parenthesized issue reference in a service sentence is dropped from any text the page shows. */
     refs: [
       plainText("The read went on without them (#4046, #6866). The next sentence stays."),

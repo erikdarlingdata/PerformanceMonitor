@@ -532,13 +532,20 @@ export function shortEmptyLine(res, extensionLine) {
     return "No query in this range changed enough between snapshots to attribute CPU to it." +
       (hours > 0 ? " A range of the last " + hours + (hours === 1 ? " hour" : " hours") + " or more reaches one that did." : " A longer range may.");
   }
-  /* #7548: the answered-only Index Bloat ranking when no index has an answer. The login that cannot read pg_stats is the commonest cause, and
-     it is the one a person can fix, so it gets the grant. Any other cause points at the table above that lists the reason for each index. */
+  /* #7548: the answered-only Index Bloat ranking when no index has an answer. The list is sorted by bytes and then count, so its first entry
+     is not the commonest cause. The grant is named as THE cause only when it is the one reason there is. When it is one of several, it is one
+     fix among others and the table above says why for the rest. */
   if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
-    const top = h.suppressed_by_reason[0];
-    return top && top.reason === "ColumnWidthsNotVisible"
-      ? "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT
-      : "No index has a bloat estimate. The Not Measured column of the Index Bloat (estimated) table above says why.";
+    const buckets = h.suppressed_by_reason;
+    const grantBucket = buckets.some((b) => b && b.reason === "ColumnWidthsNotVisible");
+    if (grantBucket && buckets.length === 1) {
+      return "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+    }
+    if (grantBucket) {
+      return "Some indexes have no bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT +
+        " The Not Measured column of the Index Bloat (estimated) table above says why for the rest.";
+    }
+    return "No index has a bloat estimate. The Not Measured column of the Index Bloat (estimated) table above says why.";
   }
   if (typeof h.reason !== "string") return null;
   if (h.reason === "pg_stats_unreadable") {

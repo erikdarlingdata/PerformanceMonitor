@@ -138,6 +138,21 @@ public sealed class WebPgPanelTextBehaviourTests
         Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
     }
 
+    [Theory]
+    [InlineData("bloatGrantFirst")]
+    [InlineData("bloatGrantSecond")]
+    public void IndexBloatRankingWithMixedReasons_NamesTheGrantAsOneFix_NotAsTheCauseOfEveryIndex(string key)
+    {
+        // The reasons are sorted by bytes, so the pg_stats bucket can be first or second. Either way the other indexes keep their own cause.
+        var p = Run().GetProperty(key);
+        var line = p.GetProperty("line").GetString()!;
+        Assert.StartsWith("Some indexes have no bloat estimate because the monitoring login cannot read pg_stats.", line, StringComparison.Ordinal);
+        Assert.Contains("GRANT pg_read_all_data TO <login>", line, StringComparison.Ordinal);
+        Assert.Contains("Not Measured", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("No index has", line, StringComparison.Ordinal);
+        Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
+    }
+
     [Fact]
     public void AParenthesizedIssueReference_IsDroppedFromTextThePageShows()
     {

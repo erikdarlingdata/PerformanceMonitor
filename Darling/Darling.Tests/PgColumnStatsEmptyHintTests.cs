@@ -42,4 +42,19 @@ public sealed class PgColumnStatsEmptyHintTests
             Assert.Null(DarlingMcpPgIndexTools.EmptyColumnStatsHints(arm));
         }
     }
+
+    [Fact]
+    public void TheEmptyReply_CarriesThePgStatsUnreadableHint_ForThePrivilegeFilter_AndNoneForAnotherCause()
+    {
+        // The reply the tool sends, not the helper alone: dropping the hints argument from the envelope must fail here.
+        var visible = new PgColumnStatsCoverageVerdict(PgColumnStatsCoverageArm.StatisticsNotVisible, "Census.", "Cause.");
+        using var unreadable = JsonDocument.Parse(DarlingMcpPgIndexTools.EmptyColumnStatsReply("pg-a", 24, visible));
+        Assert.Equal("empty", unreadable.RootElement.GetProperty("status").GetString());
+        Assert.Equal("pg_stats_unreadable", unreadable.RootElement.GetProperty("hints").GetProperty("reason").GetString());
+        Assert.Contains("No column statistics for pg-a in the last 24 hour(s).", unreadable.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+        var other = Enum.GetValues<PgColumnStatsCoverageArm>().First(a => a != PgColumnStatsCoverageArm.StatisticsNotVisible);
+        using var floor = JsonDocument.Parse(DarlingMcpPgIndexTools.EmptyColumnStatsReply("pg-a", 24, new PgColumnStatsCoverageVerdict(other, "Census.", "Cause.")));
+        Assert.False(floor.RootElement.TryGetProperty("hints", out var hints) && hints.TryGetProperty("reason", out _));
+    }
 }
