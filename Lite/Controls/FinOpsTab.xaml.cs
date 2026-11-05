@@ -275,10 +275,11 @@ public partial class FinOpsTab : UserControl
             case HighImpactQueryRow hi:
                 /* #5639: the stored plan feeds the data-modification check, read before the prompt (read-only); a
                    failed lookup is the same as no plan. The row's database (the one picked when the hash appears in
-                   several) is the database the prompt names and the run uses. */
+                   several) is the database the prompt names and the run uses. Since #7695 that is the database with the most CPU for the hash, and the
+                   prompt says when the figures also cover other databases. */
                 await PlanActions.GetActualPlanAsync(hi.FullQueryText, hi.DatabaseName, $"Actual Plan - {hi.QueryHash}",
                     fetchPlanXml: () => FetchFinOpsHighImpactPlanAsync(hi.QueryHash, serverId, connStr),
-                    target: target);
+                    target: target, databaseCount: hi.DatabaseCount);
                 break;
             case ExpensiveQueryRow ex:
                 /* #5639: these rows carry no query hash, so there is no plan to look up; the check treats the

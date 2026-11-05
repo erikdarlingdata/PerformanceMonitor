@@ -114,7 +114,7 @@ export const MEMORY_CONDITION_GROUPS = { groups: ["Process memory", "Pressure fl
 
 export const MEMORY_BROKER_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
-  { key: "broker_id", label: "Broker ID", format: "int" },
+  { key: "broker_id", label: "Broker ID", format: "id" },
   { key: "broker", label: "Broker" },
   { key: "notification", label: "Notification" },
   { key: "pool_metadata_id", label: "Pool Meta ID", format: "int" },
@@ -137,7 +137,7 @@ export const SIGNIFICANT_WAIT_COLUMNS = [
   { key: "duration_ms", label: "Duration", format: "ms" },
   { key: "signal_duration_ms", label: "Signal duration", format: "ms" },
   { key: "wait_resource", label: "Wait Resource", wrap: true },
-  { key: "session_id", label: "Session", format: "int" },
+  { key: "session_id", label: "Session", format: "id" },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
 ];
 
@@ -186,7 +186,7 @@ export const DEFAULT_TRACE_COLUMNS = [
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },
   { key: "application_name", label: "Application" },
-  { key: "spid", label: "SPID", format: "int" },
+  { key: "spid", label: "SPID", format: "id" },
   { key: "duration_ms", label: "Duration ms", format: "ms" },
   { key: "growth_mb", label: "Growth MB", format: "mbfit" },
   { key: "severity", label: "Severity", format: "int" },

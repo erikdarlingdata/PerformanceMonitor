@@ -19,6 +19,9 @@ public sealed class HighImpactQuery
 {
     public string QueryHash { get; set; } = "";
     public string DatabaseName { get; set; } = "";
+
+    /// <summary>How many databases the row's figures are summed across (#7695). <see cref="DatabaseName"/> is the one with the most CPU.</summary>
+    public int DatabaseCount { get; set; } = 1;
     public long TotalExecutions { get; set; }
     public decimal TotalCpuMs { get; set; }
     public decimal TotalDurationMs { get; set; }
@@ -59,6 +62,7 @@ WITH windowed AS
     -- scorer keeps ties in input order, so the window's plan must not decide which tied hash is kept.
     SELECT query_hash, database_name, delta_execution_count, delta_worker_time, delta_elapsed_time,
            delta_logical_reads, delta_logical_writes, max_grant_kb,
+           SUM(delta_worker_time) OVER (PARTITION BY query_hash, database_name) AS db_cpu,
            ROW_NUMBER() OVER
            (
                PARTITION BY query_hash
@@ -73,13 +77,17 @@ WITH windowed AS
 )
 SELECT
     query_hash,
-    MIN(database_name) AS database_name,
+    -- #7695: the database that did the most CPU for the hash in the window (its subtotal, db_cpu), not the alphabetically
+    -- first one. The name breaks a tie, case-insensitively and then exactly, so a tie picks the same database every read.
+    (ARRAY_AGG(database_name ORDER BY db_cpu DESC NULLS LAST, LOWER(database_name), database_name)
+        FILTER (WHERE database_name IS NOT NULL))[1] AS database_name,
     SUM(delta_execution_count) AS total_executions,
     SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
     SUM(delta_elapsed_time) / 1000.0 AS total_duration_ms,
     SUM(delta_logical_reads) AS total_reads,
     SUM(delta_logical_writes) AS total_writes,
-    COALESCE(MAX(CASE WHEN newest_rn = 1 THEN max_grant_kb END), 0) / 1024.0 AS peak_memory_mb
+    COALESCE(MAX(CASE WHEN newest_rn = 1 THEN max_grant_kb END), 0) / 1024.0 AS peak_memory_mb,
+    COUNT(DISTINCT database_name) AS database_count
 FROM windowed
 GROUP BY query_hash
 HAVING SUM(delta_execution_count) > 0
@@ -149,7 +157,8 @@ LEFT JOIN LATERAL (
                 TotalDurationMs = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
                 TotalReads = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
                 TotalWrites = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
-                PeakMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                PeakMemoryMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7)),
+                DatabaseCount = reader.IsDBNull(8) ? 1 : Convert.ToInt32(reader.GetValue(8))
             });
         }
 

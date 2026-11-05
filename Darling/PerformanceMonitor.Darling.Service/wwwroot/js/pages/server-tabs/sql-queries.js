@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, plainEmptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -65,7 +65,8 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     );
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);
+    /* #7552: the same plain sentence the CPU tab shows for a window with snapshots and no measured change, with the tool's paragraph behind "More detail". */
+    if (res.kind === "empty") return mount(body, [keptWindowStrip(res), plainEmptyStrip(res)]);
 
     const queries = res.data.queries || [];
     const parts = [
@@ -341,7 +342,7 @@ export const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "regression_reason", label: "Why" },
   { key: "database_name", label: "Database", name: true },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
-  { key: "query_id", label: "Query ID", format: "int" },
+  { key: "query_id", label: "Query ID", format: "id" },
   { key: "recent_aborted_count", label: "Recent Timeouts", format: "int" },
   { key: "recent_exception_count", label: "Recent Errors", format: "int" },
   { key: "additional_duration_ms", label: "Extra Duration", format: "ms" },
@@ -394,8 +395,8 @@ export const QUERY_STORE_COLUMNS = [
   { key: "database_name", label: "Database", name: true },
   tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
-  { key: "query_id", label: "Query ID", format: "int" },
-  { key: "plan_id", label: "Plan ID", format: "int" },
+  { key: "query_id", label: "Query ID", format: "id" },
+  { key: "plan_id", label: "Plan ID", format: "id" },
   { key: "execution_count", label: "Execs", format: "int" },
   { key: "avg_duration_ms", label: "Avg Duration", format: "ms" },
   { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
@@ -513,7 +514,7 @@ export const LONG_QUERY_COLUMNS = [
   { key: "result", label: "Result" },
   { key: "database_name", label: "Database", name: true },
   { key: "object_name", label: "Object" },
-  { key: "session_id", label: "SPID", group: "Session", format: "int" },
+  { key: "session_id", label: "SPID", group: "Session", format: "id" },
   { key: "client_app_name", label: "App", group: "Session" },
   { key: "server_principal_name", label: "Login", group: "Session" },
   { key: "query_hash", label: "Query Hash" },
@@ -537,9 +538,9 @@ export const PLAN_CORRECTION_COLUMNS = [
   { key: "recommendation_reason", label: "Reason", wrap: true },
   { key: "score", label: "Score", format: "int" },
   { key: "estimated_gain_seconds", label: "Est. gain (s)", format: "num1" },
-  { key: "query_id", label: "Query ID", format: "int" },
-  { key: "regressed_plan_id", label: "Regressed Plan", group: "Plans", format: "int" },
-  { key: "last_good_plan_id", label: "Last Good Plan", group: "Plans", format: "int" },
+  { key: "query_id", label: "Query ID", format: "id" },
+  { key: "regressed_plan_id", label: "Regressed Plan", group: "Plans", format: "id" },
+  { key: "last_good_plan_id", label: "Last Good Plan", group: "Plans", format: "id" },
   { key: "last_good_plan_forcing_type", label: "Forcing Type", group: "Plans" },
   { key: "last_good_plan_is_forced", label: "Forced", group: "Plans", format: "bool" },
   { key: "last_good_plan_force_failure_reason", label: "Force Failure", group: "Plans", wrap: true },
@@ -567,7 +568,7 @@ export const AUTO_TUNING_COLUMNS = [
 const ACTIVE_COLUMNS = [
   { key: "collection_time", label: "Collected", format: "time" },
   { key: "query_text", label: "Query Text", valueList: false, render: (r) => codeDisclosure(r.query_text) },
-  { key: "session_id", label: "SPID", format: "int" },
+  { key: "session_id", label: "SPID", format: "id" },
   tagColumn(),
   { key: "database_name", label: "Database", name: true },
   { key: "login_name", label: "Login" },
@@ -582,7 +583,7 @@ const ACTIVE_COLUMNS = [
   { key: "wait_type", label: "Wait Type" },
   { key: "wait_time_ms", label: "Wait (ms)", format: "int" },
   { key: "wait_resource", label: "Wait Resource" },
-  { key: "blocking_session_id", label: "Blocking", format: "int" },
+  { key: "blocking_session_id", label: "Blocking", format: "id" },
   { key: "dop", label: "DOP", format: "int" },
   { key: "parallel_worker_count", label: "Workers", format: "int" },
   { key: "granted_query_memory_gb", label: "Memory (GB)", format: "num2" },

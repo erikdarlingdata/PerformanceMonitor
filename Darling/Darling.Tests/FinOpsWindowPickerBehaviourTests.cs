@@ -108,6 +108,19 @@ public sealed class FinOpsWindowPickerBehaviourTests
     }
 
     [Fact]
+    public void TheHighImpactDatabaseCellNamesTheBusiestDatabaseAndCountsTheOthersWhenTheFiguresSpanSeveral()
+    {
+        var c = Run().GetProperty("highImpactDatabases");
+        var text = c.GetProperty("text").GetString()!;
+        Assert.Contains("Zeta + 1 more", text);
+        Assert.DoesNotContain("Solo + ", text);
+        Assert.DoesNotContain("Old + ", text);
+        var titles = c.GetProperty("titles").EnumerateArray().Select(t => t.GetString()!).ToList();
+        Assert.Contains(titles, t => t.Contains("summed across 2 databases", StringComparison.Ordinal));
+        Assert.Single(titles, t => t.Contains("summed across", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TheIndexAnalysisCollectedTimeIsSetOnlyForANameOneDatabaseOwns_AndTheCompareIsCaseSensitive()
     {
         var c = Run().GetProperty("indexCollected");

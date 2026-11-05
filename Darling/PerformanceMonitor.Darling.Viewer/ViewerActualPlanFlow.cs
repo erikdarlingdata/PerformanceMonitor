@@ -44,6 +44,7 @@ public static class ViewerActualPlanFlow
     /// read of the monitoring store; nothing runs on the monitored server). The service re-resolves the text by
     /// identifier when it executes. Null, a null result, a failed read or an unparseable plan all make the detector
     /// fail safe to "modifying" (#5639). Ignored for a <paramref name="queryStatsHash"/> request.</param>
+    /// <param name="databaseCount">How many databases the row's figures cover (FinOps High Impact, #7695); above 1, the prompt says the query also ran in the others.</param>
     /// <param name="queryStatsHash">Set for a <c>query_stats</c> request (Top Queries, Query-Stats history, FinOps
     /// High Impact). The flow then reads the text the service will run (the latest stored text for this hash and
     /// <paramref name="databaseName"/>), and the prompt, the modification check and the digest in the request all
@@ -61,7 +62,8 @@ public static class ViewerActualPlanFlow
         Action? onStarted,
         Action? onFinished,
         CancellationToken cancellationToken,
-        string? queryStatsHash = null)
+        string? queryStatsHash = null,
+        int databaseCount = 1)
     {
         /* A read-only seat can't enqueue a command — short-circuit with the explanation (the enqueue's
            ViewerReadOnlyException is the belt-and-braces backstop, handled below too). */
@@ -135,7 +137,7 @@ public static class ViewerActualPlanFlow
             }
 
             var modification = QueryModificationDetector.Detect(estimatedPlanXml, queryText);
-            if (!Confirm(owner, serverDisplayName, databaseName, queryText, modification))
+            if (!Confirm(owner, serverDisplayName, databaseName, queryText, modification, databaseCount))
             {
                 return null;
             }
@@ -226,7 +228,7 @@ public static class ViewerActualPlanFlow
     /// modification detector says it writes data — prepends a PROMINENT, distinct block naming the statement types
     /// and stating plainly that re-executing RE-APPLIES those changes. Returns true only on OK.
     /// </summary>
-    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, string? queryText, QueryModificationInfo modification)
+    private static bool Confirm(Window owner, string serverDisplayName, string databaseName, string? queryText, QueryModificationInfo modification, int databaseCount = 1)
     {
         var prompt = new StringBuilder();
 
@@ -240,6 +242,9 @@ public static class ViewerActualPlanFlow
 
         prompt.AppendLine("The service will EXECUTE this query on " +
             QueryModificationDetector.BuildConsentTarget(serverDisplayName, databaseName) + " to capture its actual plan.");
+        /* #7695: a FinOps High Impact row summed across several databases runs in the one with the most CPU. */
+        var otherDatabases = QueryModificationDetector.BuildOtherDatabasesNote(databaseCount);
+        if (otherDatabases.Length > 0) prompt.AppendLine(otherDatabases);
         prompt.AppendLine();
         prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
         prompt.AppendLine("It runs as the service's stored monitoring login, with SET STATISTICS XML ON. All data results are discarded — only the plan is returned.");
