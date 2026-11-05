@@ -138,7 +138,7 @@ export function pgDatabaseTrendSpecs(ctx) {
       emptyText: empty,
     },
     { ...common, hideWhenNoRows: true, title: "Database Transactions per Second", subtitle: ctx.label, series: [{ key: "transactions_per_second", label: "Xact/sec" }], format: "num2", unit: "xact/s", emptyText: empty },
-    { ...common, hideWhenNoRows: true, title: "Database Temp Bytes", subtitle: ctx.label, series: [{ key: "temp_bytes", label: "Temp Bytes" }], format: "bytes", emptyText: empty },
+    { ...common, hideWhenNoRows: true, title: "Database Temp Bytes", subtitle: ctx.label, series: [{ key: "temp_bytes", label: "Temp Bytes" }], format: "bytes", emptyText: empty, allZeroText: "No temp bytes were written in this window." },
     {
       ...common,
       hideWhenNoRows: true,
@@ -151,6 +151,7 @@ export function pgDatabaseTrendSpecs(ctx) {
       format: "int",
       unit: "count",
       emptyText: empty,
+      allZeroText: "No temp files were created and no deadlocks were recorded in this window.",
     },
   ];
 }
