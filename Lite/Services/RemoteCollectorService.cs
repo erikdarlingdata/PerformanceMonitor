@@ -893,6 +893,8 @@ public partial class RemoteCollectorService
 
             AppLogger.Debug("Collector", $"Running collector '{collectorName}' for server '{server.DisplayName}'");
 
+            XeSessionEnsureException? deadlockEnsureFailure = null;
+
             /* Ensure the backing XE session exists before reading its ring buffer.
                Runs on every cycle (cheap existence check when already present) so a
                failed first attempt self-heals instead of staying broken until a manual
@@ -904,7 +906,18 @@ public partial class RemoteCollectorService
             }
             else if (collectorName == "deadlocks")
             {
-                await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
+                /* #7639: on Azure SQL Database an ensure that failed in every database no longer ends the run before the read. The
+                   read still has the logical server's durable telemetry arm (master, no session needed, #2641) and any session a
+                   database already holds, so the failure is kept and raised after the read (CollectDeadlocksAsync), where the run
+                   records it as before. Any other engine raises it here, as before. */
+                try
+                {
+                    await EnsureDeadlockXeSessionAsync(server, engineEdition, cancellationToken);
+                }
+                catch (XeSessionEnsureException ex) when (engineEdition == 5)
+                {
+                    deadlockEnsureFailure = ex;
+                }
             }
             else if (collectorName == "attention")
             {
@@ -928,7 +941,7 @@ public partial class RemoteCollectorService
                 "query_snapshots" => await CollectQuerySnapshotsAsync(server, cancellationToken),
                 "tempdb_stats" => await CollectTempDbStatsAsync(server, cancellationToken),
                 "perfmon_stats" => await CollectPerfmonStatsAsync(server, cancellationToken),
-                "deadlocks" => await CollectDeadlocksAsync(server, cancellationToken),
+                "deadlocks" => await CollectDeadlocksAsync(server, deadlockEnsureFailure, cancellationToken),
                 "server_config" => await CollectServerConfigAsync(server, cancellationToken),
                 "database_config" => await CollectDatabaseConfigAsync(server, cancellationToken),
                 "database_states" => await CollectDatabaseStatesAsync(server, cancellationToken),

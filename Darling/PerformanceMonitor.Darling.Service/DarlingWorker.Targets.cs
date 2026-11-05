@@ -2955,12 +2955,27 @@ LIMIT 1";
                the read joined an absent session and returned zero rows, and the run recorded SUCCESS. */
             if (CaptureEnsureFaultFor(collectorName, server) is { } captureFault)
             {
-                if (captureFault.IsPermission)
+                Exception captureFailure = captureFault.IsPermission
+                    ? new DarlingXeSessionDeniedException(captureFault.Message)
+                    : new DarlingXeSessionMissingException(captureFault.Message);
+
+                /* #7639: on Azure SQL Database the deadlock read still has the logical server's durable telemetry arm (the master
+                   item, no session needed, #2641), so a create refused in every database does not end the run before the read.
+                   The read goes ahead and stores what it finds, and the run then records the same failure as before. A read
+                   failure of its own is dropped: the ensure's is the cause and the one a person can act on. */
+                if (IsDeadlocksCollector(collectorName) && runtime.Target.IsAzureSqlDb)
                 {
-                    throw new DarlingXeSessionDeniedException(captureFault.Message);
+                    try
+                    {
+                        await run(runner, runtime, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug("[{Server}] Deadlock read after a failed ensure: {Message}", server.Config.DisplayName, ex.Message);
+                    }
                 }
 
-                throw new DarlingXeSessionMissingException(captureFault.Message);
+                throw captureFailure;
             }
 
             var result = await run(runner, runtime, cancellationToken);

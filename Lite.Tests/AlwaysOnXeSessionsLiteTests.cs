@@ -428,6 +428,30 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         Assert.DoesNotContain(rig.Alpha.Statements, s => s.Contains("CREATE EVENT SESSION", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// #7639: a database past the Azure session limits refuses the create on every cycle. The first cycle sends it, and the
+    /// cycles after it hold the database for the retry interval and send nothing there, while the other database is still ensured.
+    /// </summary>
+    [Fact]
+    public async Task ACreateRefusedAtTheAzureLimits_IsNotSentAgainOnTheNextCycle_AndTheOtherDatabaseIsStillEnsured()
+    {
+        var rig = await BuildRigAsync();
+        var shared = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        rig.Alpha.CreateFailure = SqlExceptionFactory.Create(1105, errorClass: 17, message: "The create was refused.");
+
+        await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
+        var sentOnFirstCycle = rig.Alpha.Statements.Count;
+        Assert.True(sentOnFirstCycle > 0);
+        Assert.True(rig.Beta.Started[shared]);
+
+        rig.Beta.Statements.Clear();
+        rig.Beta.Started[shared] = false;
+        await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
+
+        Assert.Equal(sentOnFirstCycle, rig.Alpha.Statements.Count);
+        Assert.True(rig.Beta.Started[shared]);
+    }
+
     [Fact]
     public async Task TheEnsureThatFailsToCreateInEveryDatabase_RaisesAnErrorThatCarriesTheCapsSentence()
     {

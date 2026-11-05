@@ -132,8 +132,44 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
     /// <see cref="ReadXeSessionAsync"/>), so the run records PERMISSIONS or ERROR with the XE session
     /// flagged unavailable, and never a SUCCESS over a source it could not read.
     /// </summary>
-    private Task<int> CollectDeadlocksAsync(ServerConnection server, CancellationToken cancellationToken)
-        => ReadXeSessionAsync(
-            "deadlock",
-            () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+    private async Task<int> CollectDeadlocksAsync(ServerConnection server, XeSessionEnsureException? ensureFailure, CancellationToken cancellationToken)
+    {
+        if (ensureFailure is null)
+        {
+            var rows = await ReadXeSessionAsync(
+                "deadlock",
+                () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+
+            /* #7639: some databases were refused their session while others were ensured. The run still succeeded, and its note says
+               which databases are not in it and why, so a short or empty grid is not read as a quiet server. */
+            if (_xeEnsurePartialNotes.TryGetValue(XeSessionEnsureWarnedKey(server, DeadlockXeSessionName), out var partialNote)
+                && partialNote.Length > 0)
+            {
+                var telemetry = TelemetryFor(GetServerId(server));
+                telemetry.HostNote = PerformanceMonitor.Collectors.EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, partialNote);
+            }
+
+            return rows;
+        }
+
+        /* #7639: the Azure SQL Database ensure failed in every database, so no database-scoped session was made. The read goes
+           ahead anyway: the master item's durable telemetry arm needs no session (#2641), and a database that already holds the
+           shared session is still read. The Azure loop skips each database it cannot read on its own, and whatever the read
+           stored stays stored. The run then records the ensure's failure, the same PERMISSIONS or ERROR with the same message
+           as before, so the grant that fixes it reaches the collection log. A read failure of its own is dropped: the ensure's
+           is the cause, and the one a person can act on. */
+        try
+        {
+            await ReadXeSessionAsync(
+                "deadlock",
+                () => RunCollectorDefinitionAsync(DeadlocksCollector.Instance, server, cancellationToken));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppLogger.Debug("XeSession", $"[{server.DisplayName}] Deadlock read after a failed ensure: {ex.Message}");
+        }
+
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();
+        return 0;
+    }
 }

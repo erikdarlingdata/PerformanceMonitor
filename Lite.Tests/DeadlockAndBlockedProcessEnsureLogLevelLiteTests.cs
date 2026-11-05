@@ -94,6 +94,10 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         public HashSet<string> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Exception? ListFailure { get; set; }
 
+        /* #7639: the databases the deadlock READ can open, each with the reader it returns. Any other database fails the read,
+           as a database with no session or a refused connection does. */
+        public Dictionary<string, Func<System.Data.Common.DbDataReader>> Readable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         /* The SQL error number a refusing database says. 262 is a permission refusal, which the collector's run records as
            PERMISSIONS and then skips for the rest of the session; any other number is recorded as ERROR on every cycle. */
         public int RefusalNumber { get; set; } = 262;
@@ -156,6 +160,13 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
                 ? Task.FromException(SqlExceptionFactory.Create(rig.RefusalNumber, errorClass: 14, message: $"The create was refused in {database}."))
                 : Task.CompletedTask;
         };
+
+        /* The deadlock read follows the ensure in a collector run, so it reads the same databases through fake readers. */
+        rig.Service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(rig.Listed.ToList());
+        rig.Service.AzureDatabaseReaderOverrideForTests = (database, _) =>
+            rig.Readable.TryGetValue(database, out var open)
+                ? open()
+                : throw SqlExceptionFactory.Create(4060, errorClass: 11, message: $"Cannot open database \"{database}\".");
 
         rig.Service.XeSessionServerEnsureOverrideForTests = (_, session, _) =>
         {
@@ -694,5 +705,113 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
             Assert.Equal(2, runs.Count);
             Assert.All(runs, run => Assert.Equal("PERMISSIONS", run.Status));
         });
+    }
+
+    private static System.Data.Common.DbDataReader DeadlockReader(DateTime time, string? sourceDatabase, string graph) =>
+        new FakeDeadlockReader(
+            new[] { new object[] { time, "process1", graph, (object?)sourceDatabase ?? DBNull.Value } },
+            new[] { new object[] { 100L, false } });
+
+    private static async Task<List<string>> ReadStoredDeadlockGraphsAsync(Rig rig)
+    {
+        using var connection = rig.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT deadlock_graph_xml FROM deadlocks WHERE server_id = {rig.ServerId} ORDER BY deadlock_graph_xml";
+        using var reader = await command.ExecuteReaderAsync();
+        var graphs = new List<string>();
+        while (await reader.ReadAsync())
+        {
+            graphs.Add(reader.GetString(0));
+        }
+
+        return graphs;
+    }
+
+    /// <summary>
+    /// #7639: the deadlock session could not be created in any database of an Azure SQL Database server (a login without
+    /// ALTER ANY DATABASE EVENT SESSION). The run used to end at the ensure, so the master item's telemetry arm, which needs no
+    /// session, never ran and the grid stayed empty. The read now goes ahead and stores what it finds, and the run still records
+    /// the ensure's PERMISSIONS and its message.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureRefusedInEveryDatabase_StillStoresTheTelemetryDeadlocks_AndRecordsThePermissionRun()
+    {
+        var rig = await BuildRigAsync();
+        rig.RefuseEveryDatabase();
+        rig.Readable["master"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), "alpha", "<deadlock id=\"telemetry\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"telemetry\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("PERMISSIONS", run.Status);
+        Assert.Contains("Failed to ensure deadlock XE session", run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7639: the session was refused in one database and made in the others. The others are read and stored, and the run's
+    /// note names the database that is missing, with the server's reason and the grant that fixes it, so a short grid is not
+    /// read as a quiet server.
+    /// </summary>
+    [Fact]
+    public async Task AnEnsureRefusedInOneDatabase_StoresTheOthers_AndTheNoteNamesTheRefusedOne()
+    {
+        var rig = await BuildRigAsync();
+        rig.Refuse.Add("beta");
+        rig.Readable["master"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), new[] { new object[] { 100L, false } });
+        rig.Readable["alpha"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-2), null, "<deadlock id=\"alpha\"/>");
+        rig.Readable["gamma"] = () => DeadlockReader(DateTime.UtcNow.AddMinutes(-1), null, "<deadlock id=\"gamma\"/>");
+
+        await RunCollectorAsync(rig, Deadlock);
+
+        Assert.Equal(new[] { "<deadlock id=\"alpha\"/>", "<deadlock id=\"gamma\"/>" }, await ReadStoredDeadlockGraphsAsync(rig));
+
+        var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
+        Assert.Equal("SUCCESS", run.Status);
+        Assert.Contains("beta", run.Error, StringComparison.Ordinal);
+        Assert.Contains("The create was refused in beta.", run.Error, StringComparison.Ordinal);
+        Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeDeadlockReader(object[][] rows, object[][] gate) : System.Data.Common.DbDataReader
+    {
+        private readonly object[][][] _sets = { rows, gate };
+        private int _set;
+        private int _row = -1;
+        private object[] Cur => _sets[_set][_row];
+
+        public override bool Read() => ++_row < _sets[_set].Length;
+        public override bool NextResult() { if (_set + 1 >= _sets.Length) { return false; } _set++; _row = -1; return true; }
+        public override string GetString(int o) => (string)Cur[o];
+        public override long GetInt64(int o) => (long)Cur[o];
+        public override DateTime GetDateTime(int o) => (DateTime)Cur[o];
+        public override bool GetBoolean(int o) => (bool)Cur[o];
+        public override bool IsDBNull(int o) => Cur[o] is DBNull;
+        public override object GetValue(int o) => Cur[o];
+        public override int FieldCount => _sets[_set].Length == 0 ? 0 : _sets[_set][0].Length;
+        public override bool HasRows => _sets[_set].Length > 0;
+        public override bool IsClosed => false;
+        public override int Depth => 0;
+        public override int RecordsAffected => -1;
+        public override object this[int o] => Cur[o];
+        public override object this[string n] => throw new NotSupportedException();
+        public override byte GetByte(int o) => throw new NotSupportedException();
+        public override long GetBytes(int o, long d, byte[]? b, int bo, int l) => throw new NotSupportedException();
+        public override char GetChar(int o) => throw new NotSupportedException();
+        public override long GetChars(int o, long d, char[]? b, int bo, int l) => throw new NotSupportedException();
+        public override string GetDataTypeName(int o) => throw new NotSupportedException();
+        public override decimal GetDecimal(int o) => throw new NotSupportedException();
+        public override double GetDouble(int o) => throw new NotSupportedException();
+        public override System.Collections.IEnumerator GetEnumerator() => throw new NotSupportedException();
+        public override Type GetFieldType(int o) => throw new NotSupportedException();
+        public override float GetFloat(int o) => throw new NotSupportedException();
+        public override Guid GetGuid(int o) => throw new NotSupportedException();
+        public override short GetInt16(int o) => throw new NotSupportedException();
+        public override int GetInt32(int o) => throw new NotSupportedException();
+        public override string GetName(int o) => throw new NotSupportedException();
+        public override int GetOrdinal(string n) => throw new NotSupportedException();
+        public override int GetValues(object[] v) => throw new NotSupportedException();
     }
 }

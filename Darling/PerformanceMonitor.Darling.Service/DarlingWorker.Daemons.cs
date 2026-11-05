@@ -796,6 +796,9 @@ public sealed partial class DarlingWorker
         : string.Equals(collectorName, BlockedProcessReportCollector.Instance.Name, StringComparison.OrdinalIgnoreCase) ? server.CaptureEnsure.BlockedProcessPartialNote
         : null;
 
+    internal static bool IsDeadlocksCollector(string collectorName) =>
+        string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
+
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 

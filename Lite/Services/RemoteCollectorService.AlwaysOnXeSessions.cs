@@ -59,6 +59,15 @@ public partial class RemoteCollectorService
        In memory, so a restart tries again. Keyed like the choices: the server id, then the database in upper case. */
     private readonly ConcurrentDictionary<string, DateTime> _alwaysOnReadOnlyRefusedAt = new(StringComparer.Ordinal);
 
+    /* #7639: when a create or start was last refused for a reason that will refuse it again on the next cycle (an Azure SQL Database at its
+       session count or memory limit, which gives no error number of its own), in each database of each registration, per capture, with the
+       refusal itself. A server past the limits refused the same create in the same databases on every cycle, one connection and one
+       statement each, and told it at Warning each time. The ensure holds such a database for LongQueryTraceDatabases.RetryInterval and
+       raises the held refusal in its place, so the database still counts as refused (the run's note names it) without a connection.
+       A permission refusal is not held, so a grant takes effect on the next cycle, and neither is a transient fault. In memory, so a
+       restart tries again. Keyed like _alwaysOnReadOnlyRefusedAt. */
+    private readonly ConcurrentDictionary<string, (DateTime At, SqlException Failure)> _alwaysOnCreateRefused = new(StringComparer.Ordinal);
+
     private static string AlwaysOnReadOnlyRefusalKey(string serverId, string databaseName, AlwaysOnXeSessionKind kind) =>
         serverId + "\u0001" + databaseName.ToUpperInvariant() + "\u0001" + kind.ToString();
 
@@ -71,6 +80,14 @@ public partial class RemoteCollectorService
             if (key.StartsWith(prefix, StringComparison.Ordinal))
             {
                 _alwaysOnReadOnlyRefusedAt.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var key in _alwaysOnCreateRefused.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _alwaysOnCreateRefused.TryRemove(key, out _);
             }
         }
     }
@@ -98,6 +115,11 @@ public partial class RemoteCollectorService
             return;
         }
 
+        if (_alwaysOnCreateRefused.TryGetValue(refusalKey, out var held) && utcNow - held.At < LongQueryTraceDatabases.RetryInterval)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(held.Failure).Throw();
+        }
+
         SqlConnection? connection = null;
         IAlwaysOnXeDatabase? database = null;
         try
@@ -109,6 +131,7 @@ public partial class RemoteCollectorService
                 database, kind, AlwaysOnOwnSessionName(kind), current, cancellationToken, InstallIdFailure());
             _alwaysOnChoices.Set(server.Id, databaseName, kind, result.Choice);
             _alwaysOnReadOnlyRefusedAt.TryRemove(refusalKey, out _);
+            _alwaysOnCreateRefused.TryRemove(refusalKey, out _);
             _alwaysOnChoices.ClearReadOnlyRefusal(server.Id, databaseName, kind);
 
             var label = $"[Azure SQL DB:{databaseName}] {char.ToUpperInvariant(captureName[0])}{captureName[1..]} XE session";
@@ -152,6 +175,14 @@ public partial class RemoteCollectorService
             {
                 AppLogger.Debug("XeSession", refusal);
             }
+        }
+        catch (SqlException ex) when (AlwaysOnXeSessions.CarriesAzureCaps(ex)
+                                      && !RetryHelper.IsTransient(ex)
+                                      && !SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+        {
+            /* #7639: held for the hour (see _alwaysOnCreateRefused), and raised to the shared driver's per-database catch as before. */
+            _alwaysOnCreateRefused[refusalKey] = (utcNow, ex);
+            throw;
         }
         finally
         {
