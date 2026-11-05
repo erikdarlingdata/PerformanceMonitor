@@ -40,6 +40,8 @@ public static class DarlingFinOpsIndexAnalysisReader
     /// <summary>
     /// #7701: the one rule for a left-over database. Its newest index snapshot is older than the server's newest index-stats cycle by more
     /// than this. The collector runs daily, and a day of room keeps a live database that a partial cycle left one day behind in the totals.
+    /// The rule assumes that daily cadence: on a server whose index_object_stats schedule is overridden to run less often than every two days, a
+    /// database a partial cycle skipped would read as left over until the next full cycle.
     /// </summary>
     public static readonly TimeSpan LeftOverAfter = TimeSpan.FromDays(2);
 
