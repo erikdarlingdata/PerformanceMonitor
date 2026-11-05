@@ -2598,6 +2598,14 @@ ALTER TABLE config.config_alert_settings
     ADD COLUMN IF NOT EXISTS checkdb_overdue_threshold_hours integer NOT NULL DEFAULT 336;";
 
     /// <summary>
+    /// V246 (#7609): <c>(query_hash, bucket DESC)</c> on <c>query_store_stats_corrected_hourly</c>'s materialization, for the Query Store source of
+    /// <c>get_query_fleet_summary</c>, which filters on the hash alone across the fleet. See <see cref="TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql"/>.
+    /// A plain non-concurrent build (the rung runs in one transaction). It is a no-op on a store without TimescaleDB or without the view, and a fresh store
+    /// gets the same index when the view is created. An older build never reads the index and is unaffected.
+    /// </summary>
+    private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
+
+    /// <summary>
     /// V247 (#7639): <c>config.config_monitored_servers.xe_session_databases</c>, the per-server list of databases that get Extended Events
     /// sessions on Azure SQL Database, <c>excluded_databases</c>'s shape (<c>text[] NOT NULL DEFAULT '{}'</c>). Empty means every database, so
     /// an existing store keeps its behavior. Catalog-only add, idempotent, no backfill. The column is the probe's sentinel. An older build never
@@ -3110,6 +3118,7 @@ $rung$;";
         new Migration(243, "waiting-tasks-program-name", V243Sql),
         new Migration(244, "server-connect-down-state", V244Sql),
         new Migration(245, "database-protection-thresholds", V245Sql),
+        new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
         new Migration(247, "xe-session-databases", V247Sql),
     };
 
@@ -9998,7 +10007,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// V104 are cancelled at 300.05 s. A rung that instrumented its own progress, the natural way to write
     /// a long data move, would not be cancelled at all.</para>
     /// </summary>
-    private const int MigrationCommandTimeoutSeconds = 300;
+    internal const int MigrationCommandTimeoutSeconds = 300;
 
     /// <summary>
     /// Lock-wait budget (seconds) for acquiring <see cref="MigrationLockKey"/>. A different quantity from

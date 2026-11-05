@@ -695,6 +695,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
         new(245, "hasProtectionThresholds",
             @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
+        // V246 (#7609): the (query_hash, bucket DESC) index on the corrected hourly Query Store rollup's materialization. The rewind drops it by name,
+        // found by catalog (it lives in the materialization's schema), and a no-op without it; the re-run of V246 builds it again.
+        new(246, "hasQueryStoreHashIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
         // V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. The column is the probe's newest
         // sentinel, so the rewind drops it and the re-run of V247 adds it back empty. Safe on a store that never had it.
         new(247, "hasXeSessionDatabases",
