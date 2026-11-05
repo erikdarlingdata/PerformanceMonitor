@@ -367,6 +367,12 @@ a:hover { text-decoration: underline; }
   gap: 0.5rem;
 }
 .panel .panel-sub { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+/* #7543: panels in one row are as tall as the tallest, and a panel that holds a chart is a column whose chart sits at the bottom, so the plots
+   of a row start at the same y whatever sits above them: a heading that wraps (a source label beside the window label) or a note, strip or
+   floor line that only one panel has. No offset to tune. A panel with no chart is left as it was. */
+.panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) { display: flex; flex-direction: column; }
+.panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) > .panel-body { flex: 1; display: flex; flex-direction: column; }
+.panel-body > :is(.chart, .zoomable-chart) { margin-top: auto; }
 /* #7534: span-solo is set by panel-layout.js on a span-1 panel with no span-1 partner on its row. */
 .panel.span-2, .panel.span-solo { grid-column: 1 / -1; }
 /* #6439: a sentence over a group of cards (the System Events counter charts) spans the full row; the slot stays empty (and takes no room) until a chart is drawn. */
@@ -1617,8 +1623,9 @@ table.data td.rec-text { min-width: 16rem; }
    for each other. Cells carry no text; the values are in the tooltip, the detail line and the table view. */
 .qh-bar { display: flex; justify-content: flex-end; margin-bottom: 0.4rem; }
 .qh-wrap { overflow-x: auto; max-width: 100%; }
-.qh-grid { border-collapse: separate; border-spacing: 1px; }
-.qh-grid .qh-cell { min-width: 6px; width: 6px; height: 22px; padding: 0; }
+.qh-grid { --qh-head: 5rem; border-collapse: separate; border-spacing: 1px; width: 100%; table-layout: fixed; } /* #7542: the columns share the panel; the table's min-width (set in query-heatmap.js from --qh-head) keeps each at 6 px and lets .qh-wrap scroll */
+.qh-grid .qh-cell { height: 22px; padding: 0; }
+.qh-grid .qh-corner, .qh-grid .qh-rowhead { width: var(--qh-head); box-sizing: border-box; } /* #7542: the one row-head width, also read by the table's min-width in query-heatmap.js */
 .qh-grid .qh-rowhead { position: sticky; left: 0; z-index: 1; background: var(--card); padding: 0 0.5rem 0 0; font-weight: normal; font-size: 0.7rem; color: var(--muted); text-align: right; white-space: nowrap; }
 .qh-grid .qh-tick { font-size: 0.65rem; color: var(--muted); font-weight: normal; text-align: left; white-space: nowrap; overflow: visible; }
 .qh-empty { background: transparent; box-shadow: inset 0 0 0 1px rgba(168, 174, 186, 0.28); }
