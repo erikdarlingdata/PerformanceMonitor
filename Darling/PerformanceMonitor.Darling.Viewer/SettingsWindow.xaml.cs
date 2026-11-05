@@ -48,7 +48,7 @@ public partial class SettingsWindow : Window
     /// <summary>#6875: the Identity Capacity bars as loaded. The window shows only the switch, and a Save writes these back.</summary>
     private int _identityCapacityWarningPercent = 70;
     private int _identityCapacityCriticalPercent = 90;
-    /* #7611 (V245): the Database Protection ages. Carried from the loaded row so a save never resets them; the editor for them is added in a later change. */
+    /* #7611 (V245): the Database Protection ages. Held from the loaded row as the fallback for a save; the three boxes beside the overdue alerts edit them. */
     private int _backupOverdueThresholdHours = 168;
     private int _logBackupOverdueThresholdMinutes = 60;
     private int _checkDbOverdueThresholdHours = 336;
@@ -956,6 +956,9 @@ public partial class SettingsWindow : Window
         _backupOverdueThresholdHours = r.BackupOverdueThresholdHours;
         _logBackupOverdueThresholdMinutes = r.LogBackupOverdueThresholdMinutes;
         _checkDbOverdueThresholdHours = r.CheckDbOverdueThresholdHours;
+        AlertBackupOverdueHoursBox.Text = r.BackupOverdueThresholdHours.ToString(CultureInfo.InvariantCulture);
+        AlertLogBackupOverdueMinutesBox.Text = r.LogBackupOverdueThresholdMinutes.ToString(CultureInfo.InvariantCulture);
+        AlertCheckDbOverdueHoursBox.Text = r.CheckDbOverdueThresholdHours.ToString(CultureInfo.InvariantCulture);
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -1281,6 +1284,20 @@ public partial class SettingsWindow : Window
             row.LongRunningJobMultiplier = jobMult;
         if (int.TryParse(AlertFailedJobLookbackBox.Text, out var failedJobLookback) && failedJobLookback is >= 1 and <= 1440)
             row.FailedJobLookbackMinutes = failedJobLookback;
+        /* #7611: the three overdue ages, refused outside the registry's bounds (ViewerDatabaseProtectionRules). A refused box leaves the
+           loaded value in the row and the save stops on the error list. */
+        if (ViewerDatabaseProtectionRules.TryParse(AlertBackupOverdueHoursBox.Text, ViewerDatabaseProtectionRules.BackupHoursKey, out var backupHours))
+            row.BackupOverdueThresholdHours = backupHours;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("Full backup overdue age", ViewerDatabaseProtectionRules.BackupHoursKey, "hours"), AlertBackupOverdueHoursBox);
+        if (ViewerDatabaseProtectionRules.TryParse(AlertLogBackupOverdueMinutesBox.Text, ViewerDatabaseProtectionRules.LogBackupMinutesKey, out var logBackupMinutes))
+            row.LogBackupOverdueThresholdMinutes = logBackupMinutes;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("Log backup overdue age", ViewerDatabaseProtectionRules.LogBackupMinutesKey, "minutes"), AlertLogBackupOverdueMinutesBox);
+        if (ViewerDatabaseProtectionRules.TryParse(AlertCheckDbOverdueHoursBox.Text, ViewerDatabaseProtectionRules.CheckDbHoursKey, out var checkDbHours))
+            row.CheckDbOverdueThresholdHours = checkDbHours;
+        else
+            errors.Add(ViewerDatabaseProtectionRules.Refusal("CHECKDB overdue age", ViewerDatabaseProtectionRules.CheckDbHoursKey, "hours"), AlertCheckDbOverdueHoursBox);
 
         if (int.TryParse(AlertCooldownBox.Text, out var alertCooldown) && alertCooldown is >= 1 and <= 120)
             row.CooldownMinutes = alertCooldown;
@@ -1436,6 +1453,9 @@ public partial class SettingsWindow : Window
         AlertFileGrowthLookbackMinutesBox.Text = "60";
         AlertLongRunningJobMultiplierBox.Text = "3";
         AlertFailedJobLookbackBox.Text = "60";
+        AlertBackupOverdueHoursBox.Text = "168";
+        AlertLogBackupOverdueMinutesBox.Text = "60";
+        AlertCheckDbOverdueHoursBox.Text = "336";
         AlertCooldownBox.Text = "5";
         EmailCooldownBox.Text = "15";
         AlertDeliveryModeBox.SelectedIndex = 0;
@@ -1673,6 +1693,9 @@ public partial class SettingsWindow : Window
         AlertBackupOverdueCheckBox.IsEnabled = enabled;
         AlertLogBackupOverdueCheckBox.IsEnabled = enabled;
         AlertCheckDbOverdueCheckBox.IsEnabled = enabled;
+        AlertBackupOverdueHoursBox.IsEnabled = enabled;
+        AlertLogBackupOverdueMinutesBox.IsEnabled = enabled;
+        AlertCheckDbOverdueHoursBox.IsEnabled = enabled;
         AlertPvsThresholdPercentBox.IsEnabled = enabled;
         AlertPvsFloorGbBox.IsEnabled = enabled;
         AlertLowDiskThresholdGbBox.IsEnabled = enabled;
