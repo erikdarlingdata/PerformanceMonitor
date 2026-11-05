@@ -30,6 +30,18 @@ public sealed class FinOpsVerdictSamplesTests
         Assert.Equal(ProvisioningVerdict.OverProvisioned, LocalDataService.FleetProvisioningStatusFor(enough));
     }
 
+    /// <summary>#7705: an Availability Group secondary's own load does not size it, so the idle secondary is not OVER_PROVISIONED; the primary with the same figures is judged as before.</summary>
+    [Fact]
+    public void FleetProvisioningStatusFor_SecondaryReplica_IsNotJudgedFromItsOwnLoad()
+    {
+        using var secondary = (DbDataReader)AzureSqlDatabaseMasterPinsTests.FleetRow(0, "Enterprise Edition", agReplicaRole: "Secondary");
+        using var primary = (DbDataReader)AzureSqlDatabaseMasterPinsTests.FleetRow(0, "Enterprise Edition", agReplicaRole: "Primary");
+
+        Assert.Equal(ProvisioningVerdict.NotJudgedSecondary, LocalDataService.FleetProvisioningStatusFor(secondary));
+        Assert.Equal(ProvisioningVerdict.OverProvisioned, LocalDataService.FleetProvisioningStatusFor(primary));
+        Assert.Equal("Not judged (secondary replica)", ProvisioningVerdict.StatusLabel(ProvisioningVerdict.NotJudgedSecondary));
+    }
+
     [Fact]
     public void FleetProvisioningStatusFor_HighStolenMemory_IsUnderProvisionedNotOver()
     {
