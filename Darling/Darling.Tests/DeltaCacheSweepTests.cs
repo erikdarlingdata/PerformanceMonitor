@@ -17,7 +17,9 @@ namespace Darling.Tests;
 /// #7649: the delta calculator's baseline cache used to keep every key it ever saw, so a query_stats group that gets
 /// new plan handles on every pass (2,000 candidate rows a run, eight groups per key) grew until the service ran out
 /// of memory. A group is now swept once per pass of entries older than its longest gap, measured from the pass's
-/// collection time. These pin the two halves of that: the cache stays bounded, and no delta changes.
+/// collection time. These pin the halves of that: the cache stays bounded, every delta through
+/// <c>CalculateDeltaWithInterval</c> is unchanged, and a series-age call that finds its stale baseline swept gets the
+/// first-sighting rescue (current, pass gap) where the discarded baseline would have given (0, 0).
 /// </summary>
 public sealed class DeltaCacheSweepTests
 {
@@ -124,6 +126,60 @@ public sealed class DeltaCacheSweepTests
         var held = calc.PeekBaselines(ServerId, Group).Count;
         Assert.Equal(model.KeysWithin(last, Gap), held);
         Assert.True(held < hot + churnPerPass * 8, $"{held} entries held after {passes} passes");
+    }
+
+    /// <summary>Runs one churn key per pass at 600 s steps from <see cref="T0"/> up to and including pass
+    /// <paramref name="lastPass"/>, each through <c>CalculateDeltaWithSeriesAge</c>, so the group grows every pass and a
+    /// sweep is due on each.</summary>
+    private static void RunChurnPasses(CollectorDeltaCalculator calc, int firstPass, int lastPass)
+    {
+        for (var pass = firstPass; pass <= lastPass; pass++)
+        {
+            calc.CalculateDeltaWithSeriesAge(ServerId, Group, $"churn-{pass}", 10, seriesAgeSeconds: null, out _,
+                collectionTime: T0.AddSeconds(pass * 600), maxGapSeconds: Gap);
+        }
+    }
+
+    [Fact]
+    public void ABaselineOlderThanTheGap_ThatComesBackWithAYoungSeriesAge_IsCreditedItsWholeCountAfterASweep()
+    {
+        var calc = new CollectorDeltaCalculator();
+
+        /* A statement-level recompile keeps the plan handle, so the key is the same. Its baseline (1) was written at
+           T0 and the key then fell out of the candidate list for an hour and more. */
+        calc.CalculateDeltaWithSeriesAge(ServerId, Group, "stale", 1, seriesAgeSeconds: null, out _,
+            collectionTime: T0, maxGapSeconds: Gap);
+        RunChurnPasses(calc, 1, 7);
+
+        /* Pass 7 is T0 + 4,200 s: past the 3,600 s gap from the baseline, and 600 s after the previous pass. The
+           statement recompiled 300 s ago and has run 5 times since, so its counter did not go down. The first call of
+           the pass sweeps the stale baseline, so this call takes the first-sighting rescue and credits what ran since
+           the compile. Without the sweep the stale arm of the update branch reports (0, 0). */
+        var delta = calc.CalculateDeltaWithSeriesAge(ServerId, Group, "stale", 5, seriesAgeSeconds: 300,
+            out var interval, collectionTime: T0.AddSeconds(7 * 600), maxGapSeconds: Gap);
+
+        Assert.Equal((5L, 600), (delta, interval));
+    }
+
+    [Fact]
+    public void ABaselineInsideTheGap_IsLeftAloneByTheSweep_AndGetsItsOrdinaryDeltaWithASeriesAge()
+    {
+        var calc = new CollectorDeltaCalculator();
+
+        calc.CalculateDeltaWithSeriesAge(ServerId, Group, "fresh", 10, seriesAgeSeconds: null, out _,
+            collectionTime: T0, maxGapSeconds: Gap);
+        RunChurnPasses(calc, 1, 5);
+        /* Seen again at T0 + 3,000 s, inside the gap: this baseline must survive every later sweep. */
+        calc.CalculateDeltaWithSeriesAge(ServerId, Group, "fresh", 12, seriesAgeSeconds: null, out _,
+            collectionTime: T0.AddSeconds(5 * 600), maxGapSeconds: Gap);
+        RunChurnPasses(calc, 6, 7);
+
+        /* T0 + 4,200 s: the sweep ran first and dropped the churn keys older than the gap, but "fresh" is 1,200 s old.
+           The series age (50,000 s) is older than the pass gap, so only a surviving baseline can give a delta here. */
+        var delta = calc.CalculateDeltaWithSeriesAge(ServerId, Group, "fresh", 17, seriesAgeSeconds: 50_000,
+            out var interval, collectionTime: T0.AddSeconds(7 * 600), maxGapSeconds: Gap);
+
+        Assert.Equal((5L, 1200), (delta, interval));
     }
 
     [Fact]

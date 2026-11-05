@@ -227,10 +227,15 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     ///
     /// <para><b>Dead means:</b> the entry has a timestamp, and that timestamp is more than the group's longest gap
     /// before this pass's collection time. The update branch of <see cref="Core"/> then discards it as too stale for
-    /// every call at or after this pass, and a call that finds no entry takes the first-sighting branch, which
-    /// reports the same (0, 0). An entry with no timestamp is never swept: the update branch skips its gap check, so a
-    /// caller can still subtract from it (<see cref="RebaseFamiliesToZero"/> and a seed without a time write them).
-    /// A group that any caller has called with no limit is never swept by age.</para>
+    /// every call at or after this pass. A call with no series age that finds no entry takes the first-sighting
+    /// branch, which reports the same (0, 0). A call WITH a series age does not: when the series age is no older than
+    /// the gap since the previous pass and the counter has not gone down, the first-sighting branch reports
+    /// (current, pass gap), where the discarded entry would have given (0, 0). That is the only delta the sweep
+    /// changes, and it is intended. A statement-level recompile keeps the plan handle and restarts the counters, so
+    /// current is what ran since the compile, the same answer a brand new key gets. An entry with no timestamp is never
+    /// swept: the update branch skips its gap check, so a caller can still subtract from it
+    /// (<see cref="RebaseFamiliesToZero"/> and a seed without a time write them). A group that any caller has called
+    /// with no limit is never swept by age.</para>
     ///
     /// <para>Measured from the pass's collection time, not the wall clock, so a slow or replayed run sweeps what the
     /// delta policy would have discarded. The removal compares the value it saw, so an entry a concurrent call just
