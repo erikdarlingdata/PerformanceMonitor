@@ -2096,9 +2096,11 @@ public sealed class McpQueryTools
 
     /// <summary>
     /// #7608: folds the history rows to one point per <c>collection_time</c>, the rule Darling's raw tier applies in SQL.
-    /// Deltas are summed, <c>MinDop</c> is the lowest and <c>MaxDop</c> the highest across the rows, and
-    /// <c>QueryPlanHash</c> is the hash when every row at that time carries the same one and empty (null in the payload)
-    /// when more than one plan ran. The points come back oldest first.
+    /// Deltas are summed over every row. <c>MinDop</c>, <c>MaxDop</c>, <c>QueryPlanHash</c> and <c>PlanCount</c> come only
+    /// from the rows that ran in the interval (<c>DeltaExecutions &gt; 0</c>), or from all of them when none did, so a
+    /// stale plan's lifetime DOP does not ride along. <c>QueryPlanHash</c> is the hash when every such row carries the
+    /// same one and empty (null in the payload) otherwise. <c>PlanCount</c> is the number of distinct non-empty hashes.
+    /// The points come back oldest first.
     /// </summary>
     internal static List<QueryStatsHistoryRow> OnePointPerCollection(List<QueryStatsHistoryRow> rows)
     {
@@ -2106,13 +2108,17 @@ public sealed class McpQueryTools
         foreach (var group in rows.GroupBy(r => r.CollectionTime))
         {
             var members = group.ToList();
+            var ran = members.Where(m => m.DeltaExecutions > 0).ToList();
+            if (ran.Count == 0) ran = members;
+            var hashes = ran.Select(m => m.QueryPlanHash).Distinct(StringComparer.Ordinal).ToList();
+            var planCount = ran.Select(m => m.QueryPlanHash).Where(h => !string.IsNullOrEmpty(h)).Distinct(StringComparer.Ordinal).Count();
             if (members.Count == 1)
             {
+                members[0].PlanCount = planCount;
                 points.Add(members[0]);
                 continue;
             }
 
-            var hashes = members.Select(m => m.QueryPlanHash).Distinct(StringComparer.Ordinal).ToList();
             points.Add(new QueryStatsHistoryRow
             {
                 CollectionTime = group.Key,
@@ -2124,16 +2130,17 @@ public sealed class McpQueryTools
                 DeltaPhysicalReads = members.Sum(m => m.DeltaPhysicalReads),
                 DeltaRows = members.Sum(m => m.DeltaRows),
                 DeltaSpills = members.Sum(m => m.DeltaSpills),
-                MinDop = members.Min(m => m.MinDop),
-                MaxDop = members.Max(m => m.MaxDop),
+                MinDop = ran.Min(m => m.MinDop),
+                MaxDop = ran.Max(m => m.MaxDop),
                 QueryPlanHash = hashes.Count == 1 ? hashes[0] : "",
+                PlanCount = planCount,
             });
         }
 
         return points.OrderBy(p => p.CollectionTime).ToList();
     }
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. A raw point is one collection time, summed across the query's plans and handles. min_dop and max_dop are each plan's cached extremes across the plans that ran at that time (a time where nothing ran uses all its rows), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -2178,7 +2185,8 @@ public sealed class McpQueryTools
                 spills = r.DeltaSpills,
                 min_dop = r.MinDop,
                 max_dop = r.MaxDop,
-                query_plan_hash = string.IsNullOrEmpty(r.QueryPlanHash) ? null : r.QueryPlanHash
+                query_plan_hash = string.IsNullOrEmpty(r.QueryPlanHash) ? null : r.QueryPlanHash,
+                plan_count = r.PlanCount
             });
 
             /* The same disclosure block Darling's get_query_trend has carried since #2353 and the

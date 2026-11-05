@@ -103,7 +103,7 @@ internal static class DarlingTrendReader
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int MinDop, int MaxDop, string? QueryPlanHash);
+        long DeltaSpills, int MinDop, int MaxDop, string? QueryPlanHash, int? PlanCount = null);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -124,8 +124,8 @@ internal static class DarlingTrendReader
     /// <summary>
     /// The aggregate twin of <see cref="QueryHistorySql"/>, reading the hourly continuous aggregate (#2353).
     ///
-    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The eight columns
-    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair and the plan hash —
+    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The nine columns
+    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair, the plan hash and the plan count —
     /// are selected as typed NULLs and surface as NULL in the payload. That is the honest answer: an hour bucket
     /// has no single plan hash and no single DOP, and inventing a zero would read as "none observed".</para>
     ///
@@ -166,7 +166,8 @@ internal static class DarlingTrendReader
             CAST(NULL AS bigint) AS delta_spills,
             CAST(NULL AS int) AS min_dop,
             CAST(NULL AS int) AS max_dop,
-            CAST(NULL AS text) AS query_plan_hash
+            CAST(NULL AS text) AS query_plan_hash,
+            CAST(NULL AS int) AS plan_count
         FROM {hourlyRelation}
         WHERE server_id = $1
         AND   database_name = $2
@@ -1514,9 +1515,11 @@ internal static class DarlingTrendReader
     ///
     /// <para><b>One point per collection (#7608).</b> One <c>query_hash</c> can run under several
     /// <c>sql_handle</c>s or plans, and the collector writes one row per handle per collection, so the rows are
-    /// grouped by <c>collection_time</c>: the deltas are summed, the DOP pair spans the rows (<c>MIN</c> of
-    /// the minimums, <c>MAX</c> of the maximums), and <c>query_plan_hash</c> is the hash when every row at that
-    /// time carries the same one and NULL when more than one plan ran.</para>
+    /// grouped by <c>collection_time</c>: the deltas are summed. The DOP pair (<c>MIN</c> of the minimums,
+    /// <c>MAX</c> of the maximums), <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from
+    /// the rows that ran in the interval (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP
+    /// does not ride along; when no row at that time ran, all its rows count and the point still shows its plan.
+    /// The hash is the one every such row carries, and NULL when they differ or one has none.</para>
     /// </summary>
     public const string QueryHistorySql = """
         SELECT
@@ -1529,16 +1532,25 @@ internal static class DarlingTrendReader
             CAST(SUM(delta_physical_reads) AS bigint) AS delta_physical_reads,
             CAST(SUM(delta_rows) AS bigint) AS delta_rows,
             CAST(SUM(delta_spills) AS bigint) AS delta_spills,
-            MIN(min_dop) AS min_dop,
-            MAX(max_dop) AS max_dop,
-            CASE WHEN MIN(query_plan_hash) = MAX(query_plan_hash) AND COUNT(query_plan_hash) = COUNT(*)
-                 THEN MIN(query_plan_hash) END AS query_plan_hash
-        FROM query_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   collection_time >= $4
-        AND   collection_time <= $5
+            MIN(min_dop) FILTER (WHERE ran) AS min_dop,
+            MAX(max_dop) FILTER (WHERE ran) AS max_dop,
+            CASE WHEN MIN(query_plan_hash) FILTER (WHERE ran) = MAX(query_plan_hash) FILTER (WHERE ran)
+                  AND COUNT(query_plan_hash) FILTER (WHERE ran) = COUNT(*) FILTER (WHERE ran)
+                 THEN MIN(query_plan_hash) FILTER (WHERE ran) END AS query_plan_hash,
+            CAST(COUNT(DISTINCT query_plan_hash) FILTER (WHERE ran) AS int) AS plan_count
+        FROM
+        (
+            SELECT
+                qs.*,
+                COALESCE(qs.delta_execution_count, 0) > 0
+                OR NOT bool_or(COALESCE(qs.delta_execution_count, 0) > 0) OVER (PARTITION BY qs.collection_time) AS ran
+            FROM query_stats AS qs
+            WHERE qs.server_id = $1
+            AND   qs.database_name = $2
+            AND   qs.query_hash = $3
+            AND   qs.collection_time >= $4
+            AND   qs.collection_time <= $5
+        ) AS q
         GROUP BY collection_time
         ORDER BY collection_time
         """;
@@ -1677,7 +1689,8 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
                 reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
-                reader.IsDBNull(11) ? null : reader.GetString(11)));
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))));
         }
 
         return items;

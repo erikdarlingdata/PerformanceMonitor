@@ -45,6 +45,7 @@ public sealed class QueryTrendOnePointTests
         Assert.Equal(1, point.MinDop);
         Assert.Equal(8, point.MaxDop);
         Assert.Equal("", point.QueryPlanHash);
+        Assert.Equal(3, point.PlanCount);
     }
 
     [Fact]
@@ -64,5 +65,32 @@ public sealed class QueryTrendOnePointTests
         Assert.Equal("0xSAME", points[0].QueryPlanHash);
         Assert.Equal(4, points[1].DeltaExecutions);
         Assert.Equal("0xONLY", points[1].QueryPlanHash);
+        Assert.Equal(1, points[0].PlanCount);
+        Assert.Equal(1, points[1].PlanCount);
+    }
+
+    [Fact]
+    public void AStalePlanWithNoExecutions_DoesNotLendItsLifetimeDopToThePoint()
+    {
+        var rows = new List<QueryStatsHistoryRow>
+        {
+            Row(T1, 0, 0, 1, 8, "0xSTALE"),
+            Row(T1, 6, 600, 1, 2, "0xLIVE"),
+            Row(T1.AddMinutes(5), 0, 0, 1, 8, "0xSTALE"),
+            Row(T1.AddMinutes(5), 0, 0, 1, 2, "0xLIVE"),
+        };
+
+        var points = McpQueryTools.OnePointPerCollection(rows);
+
+        Assert.Equal(2, points.Count);
+        Assert.Equal(6, points[0].DeltaExecutions);
+        Assert.Equal(2, points[0].MaxDop);
+        Assert.Equal("0xLIVE", points[0].QueryPlanHash);
+        Assert.Equal(1, points[0].PlanCount);
+
+        /* Nothing ran: every row counts, so the point shows both plans. */
+        Assert.Equal(8, points[1].MaxDop);
+        Assert.Equal("", points[1].QueryPlanHash);
+        Assert.Equal(2, points[1].PlanCount);
     }
 }
