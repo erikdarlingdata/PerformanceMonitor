@@ -31,6 +31,7 @@ import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { holdsPage, refreshGridInPlace, showAround, showPage, showRefreshError } from "../refresh-in-place.js";
 import { orderServers } from "../server-order.js";
 import { renderComposedPanelCard } from "../compose.js";
+import { keepLonePanelsWide } from "../panel-layout.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
@@ -636,6 +637,7 @@ export async function renderView(main, id, opts) {
      keep drawing into it. */
   const liveGrid = hold ? Array.from(main.children).find((n) => n.className === "panel-grid") : null;
   const gridBox = liveGrid || el("div", { class: "panel-grid" });
+  if (!liveGrid) keepLonePanelsWide(gridBox); /* #7534: a half-width panel with no partner on its row takes the whole row. */
   /* #7257: the panels of a render start their reads two at a time. A new render ends the one before it. */
   let panelRender = null;
   function buildGrid() {
