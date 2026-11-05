@@ -110,7 +110,8 @@ export const AUDIT_COLUMNS = [
   { key: "status", label: "Status", statusSev: true },
   { key: "current_value", label: "Current" },
   { key: "suggested_value", label: "Suggested" },
-  { key: "recommendation", label: "Why", wrap: true },
+  /* #7557: the sentence is worded for an MCP client and names the reads that carry the number. plain says the tab that shows each. */
+  { key: "recommendation", label: "Why", wrap: true, plain: true },
 ];
 
 /* #6875: the identity column capacity panels on the Configuration tab. The band, the percent, the values left and the days to
