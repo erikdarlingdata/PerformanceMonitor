@@ -22,6 +22,7 @@
 import { el, readTool } from "../util.js";
 import { copyText, downloadText } from "../grid-tools.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { isWithheldMarker, WITHHELD_PLAN_WORDS } from "../mute-context.js";
 
 const NO_PLAN = "No stored plan was found for this query.";
 const TRUNCATED_NOTE =
@@ -264,6 +265,8 @@ export function classifyPlanRead(res) {
   if (!res || res.kind === "aborted" || res.kind === "auth") return null;
   const text = typeof res.message === "string" ? res.message : "";
   if (res.kind === "data" && res.data && typeof res.data.plan_xml === "string") {
+    /* #7548: a plan the statement filter withheld whole is stored as the marker, which is not a plan. The page says so in words. */
+    if (isWithheldMarker(res.data.plan_xml)) return { kind: "none", message: WITHHELD_PLAN_WORDS };
     return { kind: "plan", xml: res.data.plan_xml, truncated: res.data.truncated === true };
   }
   if (res.kind === "error") return { kind: "error", message: text || "The plan could not be read." };
