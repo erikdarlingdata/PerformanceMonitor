@@ -123,14 +123,17 @@ public sealed class StaTestThreadTests
     }
 
     /// <summary>
-    /// #6632: a body the guard gave up on may still return later (a cold first WPF start under a loaded runner), or never. The later
-    /// tests' refusals say which, and when, so the next CI report tells a slow start from a body blocked for good.
+    /// #6632, #7600: a body the guard gave up on may still return later (the two 11-04 hangs returned after 68 s and 126 s), or never.
+    /// While it is inside the body a later test is refused at once and told so. Once it has returned and its drain is done the thread
+    /// is free, so the next test runs: only the slow body's own test fails, not every WPF test after it in the process. A second
+    /// body that then hangs is caught the same way.
     /// </summary>
     [Fact]
-    public void ALaterRefusal_SaysWhetherTheStrandedBodyReturned_AndHowLongAfterItStarted()
+    public void AfterTheStrandedBodyReturns_TheNextBodyRuns_AndASecondHangIsStillCaught()
     {
         var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
         using var release = new ManualResetEventSlim();
+        using var releaseSecond = new ManualResetEventSlim();
         using var returned = new ManualResetEventSlim();
         try
         {
@@ -145,19 +148,37 @@ public sealed class StaTestThreadTests
 
             release.Set();
             Assert.True(returned.Wait(TimeSpan.FromSeconds(10)), "the released body did not return");
-            /* The record is written when the host's job finishes, just after its drain; poll the refusal until it shows. */
-            Assert.True(SpinWait.SpinUntil(() => Refusal(host).Contains("did return", StringComparison.Ordinal), TimeSpan.FromSeconds(10)),
-                "a refusal after the stranded body returned must say that it did, and when: " + Refusal(host));
-            Assert.Matches(@"That body did return, \d+ ms after it started", Refusal(host));
+            /* The job finishes just after the body, when the drain is done; a call in that gap is still refused, so poll. */
+            var ran = false;
+            Assert.True(SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => ran = true), TimeSpan.FromSeconds(10)),
+                "once the stranded body has returned, the next body must run instead of being refused for the rest of the process");
+            Assert.True(ran);
+            Assert.Null(host.StuckTest);
+
+            Assert.Throws<TimeoutException>(() => host.Run(() => releaseSecond.Wait()));
+            Assert.Contains("has not returned yet (#6632)", Assert.Throws<InvalidOperationException>(() => host.Run(() => { })).Message, StringComparison.Ordinal);
         }
         finally
         {
             release.Set();
+            releaseSecond.Set();
             host.Shutdown();
         }
     }
 
-    private static string Refusal(StaHost host) => Assert.Throws<InvalidOperationException>(() => host.Run(() => { })).Message;
+    /// <summary>Tries one body: true when it ran, false when the host refused it because the stranded body was still inside.</summary>
+    private static bool RunsAfterRefusals(StaHost host, Action body)
+    {
+        try
+        {
+            host.Run(body);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>#6216: a stuck body leaves no stack to read, so the guard's message names the last step the body reached and what the thread and dispatcher were doing.</summary>
     [Fact]
