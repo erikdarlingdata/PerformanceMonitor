@@ -2376,9 +2376,16 @@ public static class FactAdvice
 
         var count = (long)f.Value;
         var wantRecording = (long)f.Metadata.GetValueOrDefault("read_write_count");
+        /* Three names and "and N more", as the row note does: many databases erroring together (a storage event) must not
+           make the headline a paragraph. The names are split back out of the comma-joined ObjectName; when a database name
+           itself holds ", " the split does not match the count, and the whole list is shown rather than a wrong cut. */
+        var names = f.ObjectName.Split(", ");
+        var shown = names.Length > 3 && names.Length == count
+            ? string.Join(", ", names.Take(3)) + $" and {names.Length - 3:N0} more"
+            : f.ObjectName;
         var headline = count == 1
             ? $"Query Store stopped on an internal error in {f.ObjectName}"
-            : $"Query Store stopped on an internal error in {count:N0} databases ({f.ObjectName})";
+            : $"Query Store stopped on an internal error in {count:N0} databases ({shown})";
         var inv = fallback.Investigation + (wantRecording > 0
             ? $" {wantRecording:N0} of them {(wantRecording == 1 ? "is" : "are")} set to READ_WRITE, so Query Store should be recording there and is not."
             : " Each is set to OFF, so this is a store that was turned off and then stopped on an error: its old rows are still there, and nothing new is being recorded.");

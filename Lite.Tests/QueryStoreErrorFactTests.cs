@@ -99,6 +99,29 @@ public sealed class QueryStoreErrorFactTests : IClassFixture<SharedDuckDbFixture
         Assert.DoesNotContain(await ScoredFactsAsync(end), f => f.Key == "QUERY_STORE_ERROR");
     }
 
+    /// <summary>The advice headline names at most three databases and counts the rest, as the row note does.</summary>
+    [Fact]
+    public void TheAdviceHeadline_CapsTheNamedDatabases_AtThree()
+    {
+        static Fact Of(int count) => new()
+        {
+            Source = "database_config",
+            Key = "QUERY_STORE_ERROR",
+            Value = count,
+            ServerId = ServerId,
+            ObjectName = string.Join(", ", Enumerable.Range(1, count).Select(i => "Db" + i)),
+            Metadata = new Dictionary<string, double> { ["error_count"] = count, ["read_write_count"] = 0 }
+        };
+
+        var many = Of(5);
+        var headline = FactAdvice.Compose(many.Key, new Dictionary<string, Fact> { [many.Key] = many })!.Headline;
+        Assert.Contains("(Db1, Db2, Db3 and 2 more)", headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("Db4", headline, StringComparison.Ordinal);
+
+        var three = Of(3);
+        Assert.Contains("(Db1, Db2, Db3)", FactAdvice.Compose(three.Key, new Dictionary<string, Fact> { [three.Key] = three })!.Headline, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ARowsAnswer_FromAnErrorStore_CarriesTheNote_AndAHealthyDatabaseDoesNot()
     {
