@@ -426,6 +426,7 @@ const QS_REASON_TEXT = {
   storage_near_cap: "Storage near the cap",
   qs_read_only: "Query Store read-only",
   qs_off: "Query Store off",
+  qs_error: "Query Store stopped on an error",
   qs_read_only_state: "Query Store read-only (database state)",
   qs_read_only_operator: "Query Store read-only (set by an operator)",
   qs_read_only_replica: "Query Store read-only (replica)",
