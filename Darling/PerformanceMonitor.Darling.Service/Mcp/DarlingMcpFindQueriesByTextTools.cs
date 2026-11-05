@@ -170,10 +170,8 @@ LIMIT $5";
             return McpHelpers.Refusal("server_name", "server_name is required: the search is scoped to one server. Use list_servers for the names.");
         }
 
-        if (limit <= 0 || limit > MaxLimit)
-        {
-            return McpHelpers.Refusal("limit", $"limit must be between 1 and {MaxLimit} (default {DefaultLimit}).");
-        }
+        var limitError = McpHelpers.ValidateTop(limit, MaxLimit);
+        if (limitError != null) return limitError;
 
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -238,14 +236,16 @@ LIMIT $5";
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            await using (var set = new NpgsqlCommand($"SET LOCAL statement_timeout = {budget.Milliseconds.ToString(CultureInfo.InvariantCulture)}", connection, transaction))
+            var setSql = $"SET LOCAL statement_timeout = {budget.Milliseconds.ToString(CultureInfo.InvariantCulture)}";
+            await using (var set = new NpgsqlCommand(setSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 await set.ExecuteNonQueryAsync(cancellationToken);
             }
 
             if (budget.TestDelaySeconds > 0)
             {
-                await using var delay = new NpgsqlCommand("SELECT pg_sleep(" + budget.TestDelaySeconds.ToString(CultureInfo.InvariantCulture) + ")", connection, transaction);
+                var delaySql = "SELECT pg_sleep(" + budget.TestDelaySeconds.ToString(CultureInfo.InvariantCulture) + ")";
+                await using var delay = new NpgsqlCommand(delaySql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
                 await delay.ExecuteNonQueryAsync(cancellationToken);
             }
 

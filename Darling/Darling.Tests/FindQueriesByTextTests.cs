@@ -70,8 +70,28 @@ public sealed class FindQueriesByTextTests
     {
         foreach (var limit in new[] { 0, 51 })
         {
-            var reply = JsonDocument.Parse(await Run(null, "dbo.Orders", "srv", limit: limit)).RootElement;
+            var raw = await Run(null, "dbo.Orders", "srv", limit: limit);
+            var reply = JsonDocument.Parse(raw).RootElement;
             Assert.Equal("limit", reply.GetProperty("hints").GetProperty("parameter").GetString());
+            /* The shared validator's own sentence with this tool's ceiling, so the refusal is not a clamp and not a private wording. */
+            Assert.Equal(McpHelpers.ErrorMessageOf(McpHelpers.ValidateTop(limit, DarlingMcpFindQueriesByTextTools.MaxLimit)!), reply.GetProperty("message").GetString());
+            Assert.Contains("1-50", reply.GetProperty("message").GetString() ?? "", StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task LimitAtEachEndOfTheRange_IsAccepted()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _d = source;
+
+        foreach (var limit in new[] { 1, DarlingMcpFindQueriesByTextTools.MaxLimit })
+        {
+            var reply = Parse(await Run(source, "dbo.Orders", "fq-a", limit: limit));
+            Assert.Equal(limit, reply.GetProperty("limit").GetInt32());
+            Assert.False(reply.TryGetProperty("hints", out _));
         }
     }
 
