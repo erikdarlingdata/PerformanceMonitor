@@ -163,6 +163,23 @@ public sealed class WebOverviewStripsBehaviourTests
     }
 
     /// <summary>
+    /// #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so other_process_cpu is null on every sample. The CPU strip draws the SQL
+    /// line alone and says so in its header; a Total line over a null Other would sit on the SQL line and claim the host was measured. A server
+    /// that does report host CPU keeps the Total line and has no note.
+    /// </summary>
+    [Fact]
+    public void TheCpuStrip_WithNoHostFigure_DrawsTheSqlLineAlone_AndSaysWhy()
+    {
+        var r = Run("linuxcpu");
+
+        Assert.Equal(new[] { "SQL" }, r.GetProperty("series").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.Equal(1, r.GetProperty("lines").GetInt32());
+        Assert.Equal(new[] { "This server cannot report host CPU" }, r.GetProperty("notes").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.Equal(new[] { "SQL", "Total" }, r.GetProperty("measuredSeries").EnumerateArray().Select(s => s.GetString()).ToArray());
+        Assert.Equal(0, r.GetProperty("measuredNotes").GetInt32());
+    }
+
+    /// <summary>
     /// A strip whose read answered nothing or failed draws its reason, not a zero line: no polyline, no bar, and the read's own words (or
     /// the blocking strip's "nothing happened" sentence) where the line would be. A strip with samples is unaffected.
     /// </summary>

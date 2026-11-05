@@ -50,6 +50,38 @@ export function previewNodes(res) {
   return nodes;
 }
 
+/** The Preview button and the box it draws into. A read (get_daily_health_report), so it works with or without the right to save.
+    `getBusy`/`setBusy` let the editor's Save and Preview share one in-flight flag. */
+function previewControls(getBusy, setBusy) {
+  const previewBox = el("div", { "data-field": "daily-report-preview-box" });
+  const preview = el("button", {
+    class: "btn", type: "button", text: "Preview", "data-action": "preview-daily-report",
+    onClick: async () => {
+      if (getBusy()) return;
+      setBusy(true);
+      previewBox.replaceChildren(el("div", { class: "strip empty", text: "Building the preview..." }));
+      try {
+        previewBox.replaceChildren(...previewNodes(await readTool("get_daily_health_report", {})));
+      } catch (e) {
+        previewBox.replaceChildren(statusLine({ message: "Could not build the preview: " + (e && e.message ? e.message : String(e)), isError: true }));
+      }
+      setBusy(false);
+    },
+  });
+  return { preview, previewBox };
+}
+
+/** #7700: the preview alone, for a can-edit seat whose service refuses writes (web.allowAdminWrites off). Preview only reads, so it
+    stays. Save and the inputs that only feed Save are not drawn. */
+export function dailyReportPreviewOnly() {
+  let busy = false;
+  const { preview, previewBox } = previewControls(() => busy, (v) => { busy = v; });
+  return el("div", { class: "tag-form", "data-daily-report-preview-only": "1" }, [
+    el("div", { class: "tag-field" }, [preview]),
+    previewBox,
+  ]);
+}
+
 /** The editor, for a signed-in admin. `group` is the read's daily_report group (or undefined on a service that predates it);
     `repaint` redraws the Settings tab after a save so the saved values show. */
 export function dailyReportEditor(group, repaint) {
@@ -72,7 +104,6 @@ export function dailyReportEditor(group, repaint) {
   title.value = typeof g.title === "string" ? g.title : "";
 
   const result = el("div", { "data-field": "daily-report-result" });
-  const previewBox = el("div", { "data-field": "daily-report-preview-box" });
   let busy = false;
 
   const save = el("button", {
@@ -94,20 +125,7 @@ export function dailyReportEditor(group, repaint) {
     },
   });
 
-  const preview = el("button", {
-    class: "btn", type: "button", text: "Preview", "data-action": "preview-daily-report",
-    onClick: async () => {
-      if (busy) return;
-      busy = true;
-      previewBox.replaceChildren(el("div", { class: "strip empty", text: "Building the preview..." }));
-      try {
-        previewBox.replaceChildren(...previewNodes(await readTool("get_daily_health_report", {})));
-      } catch (e) {
-        previewBox.replaceChildren(statusLine({ message: "Could not build the preview: " + (e && e.message ? e.message : String(e)), isError: true }));
-      }
-      busy = false;
-    },
-  });
+  const { preview, previewBox } = previewControls(() => busy, (v) => { busy = v; });
 
   return el("div", { class: "tag-form", "data-daily-report-form": "1" }, [
     el("label", { class: "tag-field" }, [enabled, el("span", { text: " Send a daily health report" })]),
