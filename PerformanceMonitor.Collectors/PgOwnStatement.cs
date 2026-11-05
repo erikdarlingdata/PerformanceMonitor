@@ -40,16 +40,19 @@ namespace PerformanceMonitor.Collectors;
 /// therefore also reads each unmarked entry of the fetching login and counts it as the service's when its text has the same
 /// shape (<see cref="PgStatementShape"/>: comments, case and literals ignored) as a statement this process has sent through
 /// <see cref="Mark"/> or <see cref="MarkBatch"/>. Every PostgreSQL statement the service sends goes through those two, so the
-/// set fills as collectors run.</para>
+/// set fills as collectors run. A string with several statements (the Aurora probe sends two) is registered one statement at a
+/// time, because that is how <c>pg_stat_statements</c> stores it. <see cref="Mark"/> tokenizes the text once per distinct text
+/// (the registered texts are cached), not on every call.</para>
 ///
 /// <para><b>What it still gets wrong.</b> Three limits, all measured. First, a SHARED login: when the service and the
 /// application connect as the same role (<c>postgres</c>) and the service ran a statement first since the last
 /// <c>pg_stat_statements_reset()</c>, the one shared entry carries the marker and ALL its calls, the application's
-/// included, are left out of Analysis; the shape match has the same limit, since an application statement with the service's
-/// exact shape under the service's login is one entry. Second, the store learns own entries hourly, so a statement is shown
-/// until its text is read. Third, the shape set starts empty with the process: a statement of a collector that has not run
-/// yet since the service started (a daily one, say) is learned at the first hourly fetch after it runs. Everything not known
-/// to be the service's is shown.</para>
+/// included, are left out of Analysis; the shape match has the same limit, since an application statement with exactly a
+/// service statement's shape, its number of literals included, under the service's own login is one entry, and so is hidden.
+/// Below PostgreSQL 18 an <c>IN</c> list of a different length is a different entry but the same shape, so there it is matched
+/// too. Second, the store learns own entries hourly, so a statement is shown until its text is read. Third, the shape set starts
+/// empty with the process: a statement of a collector that has not run yet since the service started (a daily one, say) is
+/// learned at the first hourly fetch after it runs. Everything not known to be the service's is shown.</para>
 /// </summary>
 public static class PgOwnStatement
 {
@@ -65,12 +68,38 @@ public static class PgOwnStatement
 
     private const int MaxServiceShapes = 4096;
 
+    /// <summary>
+    /// The texts already registered, so a statement the service sends again on every collector pass is tokenized once, not on
+    /// every <see cref="Mark"/> (#7681). The same cap pattern as the shapes: a statement built with a different literal each call
+    /// stops being cached at the cap and is tokenized each time, as it would be without the cache.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, byte> RegisteredTexts = new(StringComparer.Ordinal);
+
+    private const int MaxRegisteredTexts = 1024;
+
+    /// <summary>
+    /// Registers the shape of each statement in <paramref name="statementWithoutMarker"/>, split at its semicolons:
+    /// <c>pg_stat_statements</c> stores every statement of a multi-statement string on its own (the Aurora probe sends two), so a
+    /// shape of the whole string would match no stored text.
+    /// </summary>
     private static void Register(string statementWithoutMarker)
     {
-        var key = PgStatementShape.Key(statementWithoutMarker);
-        if (!ServiceShapes.ContainsKey(key) && ServiceShapes.Count < MaxServiceShapes)
+        if (RegisteredTexts.ContainsKey(statementWithoutMarker))
         {
-            ServiceShapes.TryAdd(key, 0);
+            return;
+        }
+
+        foreach (var key in PgStatementShape.Keys(statementWithoutMarker))
+        {
+            if (!ServiceShapes.ContainsKey(key) && ServiceShapes.Count < MaxServiceShapes)
+            {
+                ServiceShapes.TryAdd(key, 0);
+            }
+        }
+
+        if (RegisteredTexts.Count < MaxRegisteredTexts)
+        {
+            RegisteredTexts.TryAdd(statementWithoutMarker, 0);
         }
     }
 

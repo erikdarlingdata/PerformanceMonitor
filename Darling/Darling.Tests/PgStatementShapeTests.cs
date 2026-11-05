@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -53,6 +54,20 @@ public sealed class PgStatementShapeTests
         { "SELECT 1 FROM t WHERE a = $1\n" + PgOwnStatement.Marker + ";", "SELECT 1 FROM t WHERE a = $1" },
         /* A nested block comment, and a comment line between two tokens. */
         { "SELECT /* a /* b */ c */ x -- note\nFROM t", "select x from t" },
+        /* Measured on 18.6 (#7697): the server writes a select list, a function's arguments and a VALUES row list out in full,
+           so the commas stay in the shape. */
+        { "select 1, 2", "select $1, $2" },
+        { "select coalesce(1, 2, 3), greatest(4, 5)", "select coalesce($1, $2, $3), greatest($4, $5)" },
+        { "insert into t values (1,2,3),(4,5,6)", "insert into t values ($1,$2,$3),($4,$5,$6)" },
+        /* An IN list with a column in it is not squashed. */
+        { "select * from t where a in (1, b, 3)", "select * from t where a in ($1, b, $2)" },
+        /* A squashed IN list and a squashed ANY (ARRAY[...]) beside literals that stay separate. */
+        {
+            "SELECT 1, 2 FROM t WHERE a IN (1, 2, 3) AND b = ANY (ARRAY[4, 5]) AND c NOT IN (-6, -7)",
+            "SELECT $1, $2 FROM t WHERE a IN ($3 /*, ... */) AND b = ANY (ARRAY[$4 /*, ... */]) AND c NOT IN ($5 /*, ... */)"
+        },
+        /* A DO block is stored as written, without its semicolon. */
+        { "DO $x$ BEGIN PERFORM 1; END $x$;", "DO $x$ BEGIN PERFORM 1; END $x$" },
     };
 
     [Theory]
@@ -72,6 +87,17 @@ public sealed class PgStatementShapeTests
         { "SELECT a FROM t WHERE b = 1", "SELECT a FROM t WHERE b <> 1" },
         { "SELECT a FROM t WHERE b = 1", "SELECT a FROM t WHERE 1 = b" },
         { "SELECT lower(a) FROM t", "SELECT upper(a) FROM t" },
+        /* Statements that differ only in how many literals they carry are different entries in pg_stat_statements (#7697). */
+        { "SELECT 1", "SELECT $1, $2" },
+        { "SELECT 1, 2", "SELECT 1, 2, 3" },
+        { "SELECT f($1)", "SELECT f($1, $2)" },
+        { "SELECT pg_catalog.current_setting('a')", "SELECT pg_catalog.current_setting($1, $2)" },
+        { "INSERT INTO t VALUES (1)", "INSERT INTO t VALUES ($1, $2)" },
+        /* A squashed IN list is one placeholder, but the commas outside it still count, and so does a column inside it. */
+        { "SELECT 1 FROM t WHERE a IN (1, 2, 3)", "SELECT 1, 2 FROM t WHERE a IN ($1 /*, ... */)" },
+        { "SELECT 1 FROM t WHERE a IN (1, 2)", "SELECT 1 FROM t WHERE a IN ($1, b)" },
+        /* A DO block is not normalized, so a different body is a different statement. */
+        { "DO $a$ BEGIN PERFORM 1; END $a$", "DO $a$ BEGIN PERFORM 2; END $a$" },
     };
 
     [Theory]
@@ -110,6 +136,69 @@ public sealed class PgStatementShapeTests
 
         PgOwnStatement.Mark("SELECT pm7681_premarked FROM t3\n" + PgOwnStatement.Marker + ";");
         Assert.True(PgOwnStatement.IsServiceStatementText("SELECT pm7681_premarked FROM t3"));
+    }
+
+    [Fact]
+    public void ASemicolon_InALiteralOrADollarQuotedBody_IsNotAStatementBoundary()
+    {
+        Assert.Single(PgStatementShape.Keys("SELECT 'a;b' AS x, 1"));
+        Assert.Single(PgStatementShape.Keys("SELECT $$a;b$$, 1"));
+        Assert.Single(PgStatementShape.Keys("SELECT \"a;b\" FROM t"));
+        Assert.Equal(PgStatementShape.Key("SELECT x FROM t"), Assert.Single(PgStatementShape.Keys("SELECT x FROM t;")));
+
+        /* Three statements, an empty one between the last two. */
+        var keys = PgStatementShape.Keys("SELECT 'a;b' FROM t; DO $q$ BEGIN PERFORM 1; PERFORM 2; END $q$;; SELECT 3;");
+        Assert.Equal(new[] { PgStatementShape.Key("SELECT $1 FROM t"), PgStatementShape.Key("DO $q$ BEGIN PERFORM 1; PERFORM 2; END $q$"), PgStatementShape.Key("SELECT $1") }, keys);
+    }
+
+    [Fact]
+    public void AStringWithSeveralStatements_IsRegisteredOneStatementAtATime()
+    {
+        /* pg_stat_statements stores each statement of the string on its own, so each one's stored text must be recognized. */
+        PgOwnStatement.Mark("SELECT pm7697_ms_a FROM t1 WHERE id = 7; SELECT pm7697_ms_b, 2 FROM t2");
+        Assert.True(PgOwnStatement.IsServiceStatementText("SELECT pm7697_ms_a FROM t1 WHERE id = $1"));
+        Assert.True(PgOwnStatement.IsServiceStatementText("SELECT pm7697_ms_b, $1 FROM t2"));
+
+        /* A semicolon in a string literal or in a dollar-quoted body does not split a statement. */
+        PgOwnStatement.Mark("SELECT 'pm7697;lit' FROM pm7697_lit; SELECT $q$x;y$q$ FROM pm7697_dq");
+        Assert.True(PgOwnStatement.IsServiceStatementText("SELECT $1 FROM pm7697_lit"));
+        Assert.True(PgOwnStatement.IsServiceStatementText("SELECT $1 FROM pm7697_dq"));
+        Assert.False(PgOwnStatement.IsServiceStatementText("SELECT $1"));
+
+        /* The same text again is a no-op: still recognized, nothing else becomes so. */
+        PgOwnStatement.Mark("SELECT pm7697_ms_a FROM t1 WHERE id = 7; SELECT pm7697_ms_b, 2 FROM t2");
+        Assert.True(PgOwnStatement.IsServiceStatementText("SELECT pm7697_ms_a FROM t1 WHERE id = $1"));
+        Assert.False(PgOwnStatement.IsServiceStatementText("SELECT pm7697_ms_b FROM t2"));
+    }
+
+    [Fact]
+    public void TheAuroraProbe_IsLearnedStatementByStatement_ByTheTextStoredBeforeTheMarker()
+    {
+        var unmarked = DarlingServerConnector.PostgresAuroraProbeQueryText.Replace("{0}", "pm7697_aurora", StringComparison.Ordinal);
+        var semicolon = unmarked.IndexOf("$aurora_probe$;", StringComparison.Ordinal);
+        Assert.True(semicolon > 0);
+
+        /* What an older build's probe left in pg_stat_statements: the DO block as written (the server cuts its semicolon), and the
+           SELECT with its constants replaced. */
+        var storedDo = unmarked[..(semicolon + "$aurora_probe$".Length)];
+        const string StoredSelect = "SELECT pg_catalog.current_setting($1, $2)";
+        Assert.False(PgOwnStatement.IsServiceStatementText(storedDo));
+
+        var marked = DarlingServerConnector.MarkAuroraProbe(unmarked);
+        Assert.EndsWith(PgOwnStatement.Marker, marked, StringComparison.Ordinal);
+        Assert.True(PgOwnStatement.IsServiceStatementText(storedDo));
+        Assert.True(PgOwnStatement.IsServiceStatementText(StoredSelect));
+    }
+
+    [Fact]
+    public void ADoBlock_IsRecognizedByItsBody_NotByTheKeyword()
+    {
+        /* The server does not normalize a DO block, and each body is its own entry, so an application's DO block must not match
+           the service's. */
+        PgOwnStatement.Mark("DO $pm7697_do$ BEGIN PERFORM 1; END $pm7697_do$");
+        Assert.True(PgOwnStatement.IsServiceStatementText("DO $pm7697_do$ BEGIN PERFORM 1; END $pm7697_do$"));
+        Assert.False(PgOwnStatement.IsServiceStatementText("DO $pm7697_do$ BEGIN PERFORM 2; END $pm7697_do$"));
+        Assert.False(PgOwnStatement.IsServiceStatementText("DO $$ BEGIN PERFORM 1; END $$"));
     }
 
     [Fact]

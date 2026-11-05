@@ -29,8 +29,17 @@ namespace PerformanceMonitor.Collectors;
 /// turns all three into placeholders too, so they are the wildcard on both sides). A <c>-</c> before a wildcard is dropped: the
 /// server folds a unary minus into its constant (<c>-2</c> is stored as <c>$2</c>) and keeps a binary one (<c>5 - -4</c> is
 /// <c>$6 - $7</c>), and a source text cannot tell the two apart without a keyword list, so neither side keeps a minus there.
-/// Two wildcards in a row, or separated by a comma, are one wildcard, because PostgreSQL 18 squashes a constant list to
-/// <c>($1 /*, ... */)</c> and earlier versions write every element out.</para>
+/// Two wildcards in a row are one wildcard (adjacent string literals are one literal). The one exception is the dollar-quoted
+/// body of a <c>DO</c> statement, which the server does not normalize: each body is its own entry (measured on 18.6), so the
+/// body stays in the shape.</para>
+///
+/// <para><b>What a constant list becomes.</b> PostgreSQL 18 squashes a list of constants to <c>($1 /*, ... */)</c>, and earlier
+/// versions write every element out. Only the two lists it squashes are collapsed here, to one wildcard: the parentheses after
+/// <c>IN</c> and the brackets after <c>ARRAY</c> (<c>= ANY (ARRAY[...])</c> is the same list). Everywhere else a comma stays a
+/// comma, so <c>SELECT 1</c> and <c>SELECT 1, 2</c>, or <c>f($1)</c> and <c>f($1, $2)</c>, are different shapes, as they are
+/// different entries in <c>pg_stat_statements</c> (measured on 18.6: a <c>VALUES</c> row list, a function's arguments and a
+/// select list are all written out). A statement with a <c>;</c> in it is several statements, which the server stores one by one
+/// (<see cref="Keys"/>).</para>
 /// </summary>
 public static class PgStatementShape
 {
@@ -40,11 +49,46 @@ public static class PgStatementShape
     /// <summary>The shape as one string: the tokens joined with NUL, which neither an identifier nor a literal can contain.</summary>
     public static string Key(string sql) => string.Join('\0', Tokenize(sql));
 
+    /// <summary>
+    /// The shape of each statement in <paramref name="sql"/>, split at the <c>;</c> tokens (#7681). <c>pg_stat_statements</c> stores
+    /// a statement of a multi-statement string on its own, so the shape of the whole string matches no stored text. A <c>;</c>
+    /// inside a string literal or a dollar-quoted body is part of that one wildcard token, not a split point. An empty statement
+    /// (a doubled or trailing semicolon) has no shape and is left out.
+    /// </summary>
+    public static List<string> Keys(string sql)
+    {
+        var keys = new List<string>();
+        var statement = new List<string>();
+        foreach (var token in Tokenize(sql))
+        {
+            if (token != ";")
+            {
+                statement.Add(token);
+            }
+            else if (statement.Count > 0)
+            {
+                keys.Add(string.Join('\0', statement));
+                statement.Clear();
+            }
+        }
+
+        if (statement.Count > 0)
+        {
+            keys.Add(string.Join('\0', statement));
+        }
+
+        return keys;
+    }
+
     /// <summary>The statement's tokens, with literals as <see cref="Wildcard"/>.</summary>
     public static List<string> Tokenize(string sql)
     {
         ArgumentNullException.ThrowIfNull(sql);
         var tokens = new List<string>();
+        /* One flag per open ( or [: whether it opens a list PostgreSQL 18 squashes (IN ( or ARRAY[). */
+        var lists = new List<bool>();
+        /* Where the current statement's tokens start, to tell a DO statement. */
+        var statementStart = 0;
         var n = sql.Length;
         var i = 0;
         while (i < n)
@@ -68,7 +112,7 @@ public static class PgStatementShape
             else if (c == '\'')
             {
                 i = SkipString(sql, i, backslashEscapes: false);
-                AddWildcard(tokens);
+                AddWildcard(tokens, lists);
             }
             else if (c == '"')
             {
@@ -106,14 +150,14 @@ public static class PgStatementShape
                 if (i - start == 1 && i < n && sql[i] == '\'' && "eEbBxXnN".Contains(c, StringComparison.Ordinal))
                 {
                     i = SkipString(sql, i, backslashEscapes: c is 'e' or 'E');
-                    AddWildcard(tokens);
+                    AddWildcard(tokens, lists);
                     continue;
                 }
 
                 var word = sql[start..i].ToLowerInvariant();
                 if (word is "true" or "false" or "null")
                 {
-                    AddWildcard(tokens);
+                    AddWildcard(tokens, lists);
                 }
                 else
                 {
@@ -134,7 +178,7 @@ public static class PgStatementShape
                     i++;
                 }
 
-                AddWildcard(tokens);
+                AddWildcard(tokens, lists);
             }
             else if (c == '$')
             {
@@ -146,7 +190,7 @@ public static class PgStatementShape
                         i++;
                     }
 
-                    AddWildcard(tokens);
+                    AddWildcard(tokens, lists);
                     continue;
                 }
 
@@ -163,8 +207,19 @@ public static class PgStatementShape
                 {
                     var tag = sql.Substring(i, tagEnd - i + 1);
                     var close = sql.IndexOf(tag, tagEnd + 1, StringComparison.Ordinal);
-                    i = close < 0 ? n : close + tag.Length;
-                    AddWildcard(tokens);
+                    var bodyEnd = close < 0 ? n : close + tag.Length;
+                    if (tokens.Count > statementStart && tokens[statementStart] == "do")
+                    {
+                        /* The server does not normalize a DO block: it stores the body as written, and each body is its own
+                           entry, so the body is part of the shape. */
+                        tokens.Add(sql[i..bodyEnd]);
+                    }
+                    else
+                    {
+                        AddWildcard(tokens, lists);
+                    }
+
+                    i = bodyEnd;
                 }
                 else
                 {
@@ -212,7 +267,21 @@ public static class PgStatementShape
             }
             else
             {
+                if (c is '(' or '[')
+                {
+                    lists.Add(tokens.Count > 0 && (c == '(' ? tokens[^1] == "in" : tokens[^1] == "array"));
+                }
+                else if ((c is ')' or ']') && lists.Count > 0)
+                {
+                    lists.RemoveAt(lists.Count - 1);
+                }
+
                 tokens.Add(c.ToString());
+                if (c == ';')
+                {
+                    statementStart = tokens.Count;
+                }
+
                 i++;
             }
         }
@@ -225,7 +294,7 @@ public static class PgStatementShape
         return tokens;
     }
 
-    private static void AddWildcard(List<string> tokens)
+    private static void AddWildcard(List<string> tokens, List<bool> lists)
     {
         while (tokens.Count > 0 && tokens[^1] == "-")
         {
@@ -237,7 +306,8 @@ public static class PgStatementShape
             return;
         }
 
-        if (tokens.Count > 1 && tokens[^1] == "," && tokens[^2] == Wildcard)
+        /* A comma between two wildcards is dropped only inside a list PostgreSQL 18 squashes. */
+        if (lists.Count > 0 && lists[^1] && tokens.Count > 1 && tokens[^1] == "," && tokens[^2] == Wildcard)
         {
             tokens.RemoveAt(tokens.Count - 1);
             return;
