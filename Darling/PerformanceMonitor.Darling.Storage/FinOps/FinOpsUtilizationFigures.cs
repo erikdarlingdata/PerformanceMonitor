@@ -94,6 +94,7 @@ public static class FinOpsUtilizationFigures
                     (decimal)StolenMemoryPct(d.TotalMemoryMb, d.BufferPoolMb), d.EngineEdition),
                 ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(d.CpuSamples),
                 ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
+                ProvisioningVerdict.NotJudgedSecondary => ProvisioningVerdict.NotJudgedSecondaryExplanation,
                 _ => ""
             };
         }

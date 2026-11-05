@@ -388,10 +388,25 @@ public static class FinOpsRecommendationFigures
         return null;
     }
 
-    /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.</summary>
-    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
-        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true)
+    /// <summary>#7705: the one informational row an Availability Group secondary gets where the CPU and memory right-sizing rows would be. No savings figure.</summary>
+    public static FinOpsRecommendation SecondaryReplicaSizing() => new()
     {
+        Category = "Hardware",
+        Severity = "Low",
+        Confidence = "High",
+        Finding = ProvisioningVerdict.NotJudgedSecondaryFinding,
+        Detail = ProvisioningVerdict.NotJudgedSecondaryExplanation
+    };
+
+    /// <summary>The VM right-sizing advice: up to two rows, one for the cores and one for the memory, each only when its own prescription qualifies.
+    /// On an Availability Group secondary (<paramref name="isAgSecondary"/>, #7705) neither row is given and one informational row stands in: the
+    /// replica's load is only its work as a secondary, not the load it must carry after a failover.</summary>
+    public static List<FinOpsRecommendation> VmRightSizing(decimal p95Cpu24h, string cpuWindow, int cpuCount, int physMb,
+        int p95MemMb, long memSampleCount, string memWindow, decimal monthlyCost, bool includeCpuRow = true, bool isAgSecondary = false)
+    {
+        if (isAgSecondary)
+            return new List<FinOpsRecommendation> { SecondaryReplicaSizing() };
+
         var recommendations = new List<FinOpsRecommendation>();
         // CPU prescription: only if >= 4 cores. includeCpuRow is false when the compute row (or too short a window) already settled the CPU advice.
         if (includeCpuRow && VmCpuTargetCores(p95Cpu24h, cpuCount) is int targetCores)
