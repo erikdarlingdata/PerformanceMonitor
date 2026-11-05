@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
 
@@ -235,6 +236,40 @@ public sealed class RunnableQueueAlertDetailTests
         Assert.Equal("20% average, 30% peak", Field(item!, "SQL Server CPU"));
         Assert.Equal("30% average, 40% peak", Field(item!, "Total CPU"));
         Assert.Equal("3", Field(item!, "CPU samples"));
+    }
+
+    /* #7682: SQL Server on Linux before 2025 CU1 stores no other-process figure. Darling's alert sample built SQL + 0 and
+       printed an invented "Total CPU" equal to the SQL figure. The total is now null without the figure, as Lite's is, and the
+       card prints the SQL line only. */
+    [Fact]
+    public void CpuItem_ASampleWithNoOtherProcessFigure_HasNoTotal_AndTheCardPrintsNoTotalCpuLine()
+    {
+        var now = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+
+        Assert.Null(DarlingWorker.AlertTotalCpu(40, null));
+        Assert.Null(DarlingWorker.AlertTotalCpu(null, 5));
+        Assert.Equal(45, DarlingWorker.AlertTotalCpu(40, 5));
+        Assert.Equal(40, DarlingWorker.AlertTotalCpu(40, 0)); /* Azure SQL DB stores 0: a measured zero still totals */
+
+        var linux = new List<AlertCpuSample>
+        {
+            new(now.AddMinutes(-2), 40, DarlingWorker.AlertTotalCpu(40, null)),
+            new(now.AddMinutes(-1), 60, DarlingWorker.AlertTotalCpu(60, null)),
+        };
+        var item = AlertContextBuilders.BuildRunnableQueueCpuItem(
+            linux, 60, DarlingWorker.AlertTotalCpu(60, null), now, 5);
+        Assert.NotNull(item);
+        Assert.Equal("50% average, 60% peak", Field(item!, "SQL Server CPU"));
+        Assert.DoesNotContain(item!.Fields, f => f.Label == "Total CPU");
+
+        var newestOnly = AlertContextBuilders.BuildRunnableQueueCpuItem(
+            null, 60, DarlingWorker.AlertTotalCpu(60, null), now, 5);
+        Assert.NotNull(newestOnly);
+        Assert.DoesNotContain(newestOnly!.Fields, f => f.Label == "Total CPU");
+
+        var measured = new List<AlertCpuSample> { new(now.AddMinutes(-1), 60, DarlingWorker.AlertTotalCpu(60, 7)) };
+        var withTotal = AlertContextBuilders.BuildRunnableQueueCpuItem(measured, 60, 67, now, 5);
+        Assert.Equal("67% average, 67% peak", Field(withTotal!, "Total CPU"));
     }
 
     [Fact]

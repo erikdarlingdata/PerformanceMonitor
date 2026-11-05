@@ -140,6 +140,9 @@ public partial class ViewerServerTab : IDisposable
             TempDbFileIoGapState(_server.DisplayName, _server.EngineEdition, fileIo.Count);
     }
 
+    /// <summary>The line under the CPU chart when no sample carries other-process CPU (#7682).</summary>
+    internal const string CpuHostUnknownNote = "This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server CPU is drawn.";
+
     internal void RenderCpuChart(List<CpuUtilizationSample> data, DateTime startUtc, DateTime endUtc)
     {
         ClearChart(CpuChart);
@@ -166,7 +169,10 @@ public partial class ViewerServerTab : IDisposable
            server-local sample_time by its per-server ServerTimeHelper offset.) */
         var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
-        var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
+        var otherCpu = data.Select(d => d.OtherProcessCpu ?? double.NaN).ToArray();
+        /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the store holds NULL for other-process
+           CPU. A flat line at 0 would claim the host is idle; draw the SQL line alone and say why under the chart. */
+        var hostCpuKnown = data.Any(d => d.OtherProcessCpu.HasValue);
 
         var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
@@ -174,16 +180,23 @@ public partial class ViewerServerTab : IDisposable
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
-        otherPlot.LegendText = "Other";
-        otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
-        ChartStyle.StyleScatter(otherPlot);
-        _cpuHover?.Add(otherPlot, "Other");
+        if (hostCpuKnown)
+        {
+            var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
+            otherPlot.LegendText = "Other";
+            otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
+            ChartStyle.StyleScatter(otherPlot);
+            _cpuHover?.Add(otherPlot, "Other");
+        }
 
         CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
+        if (!hostCpuKnown)
+        {
+            CpuChart.Plot.XLabel(CpuHostUnknownNote);
+        }
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         ShowChartLegend(CpuChart);
