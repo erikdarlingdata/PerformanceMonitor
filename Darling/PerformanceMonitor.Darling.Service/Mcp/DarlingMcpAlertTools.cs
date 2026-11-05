@@ -646,9 +646,10 @@ public sealed partial class DarlingMcpAlertTools
         /* #7041: the scheduled Daily Health Report. Off by default. send_at is a local time of day (HH:mm) in time_zone; time_zone null is the service host's zone; title null is "Daily Health Report". */
         daily_report = new { enabled = s.DailyReportEnabled, send_at = s.DailyReportSendAt, time_zone = s.DailyReportTimeZone, title = s.DailyReportTitle },
         /* #6873: the database protection alerts (a full backup, a log backup or a CHECKDB older than its threshold). Off by default. */
-        backup_overdue = new { enabled = s.BackupOverdueEnabled },
-        log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled },
-        checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled },
+        /* #7611: each alert's age. A threshold override (backup_overdue.threshold_hours, log_backup_overdue.threshold_minutes, checkdb_overdue.threshold_hours) replaces it for one server or one database. */
+        backup_overdue = new { enabled = s.BackupOverdueEnabled, threshold_hours = s.BackupOverdueThresholdHours },
+        log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled, threshold_minutes = s.LogBackupOverdueThresholdMinutes },
+        checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled, threshold_hours = s.CheckDbOverdueThresholdHours },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -3462,6 +3463,7 @@ public sealed partial class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("backup_overdue_enabled", n, "backup_overdue.enabled"); break;
+                            case "threshold_hours": AddInt("backup_overdue_threshold_hours", n, "backup_overdue.threshold_hours", 1, 1440); break;
                             default: error = $"Unknown field 'backup_overdue.{k}'."; break;
                         }
                     });
@@ -3473,6 +3475,7 @@ public sealed partial class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("log_backup_overdue_enabled", n, "log_backup_overdue.enabled"); break;
+                            case "threshold_minutes": AddInt("log_backup_overdue_threshold_minutes", n, "log_backup_overdue.threshold_minutes", 1, 86400); break;
                             default: error = $"Unknown field 'log_backup_overdue.{k}'."; break;
                         }
                     });
@@ -3484,6 +3487,7 @@ public sealed partial class DarlingMcpAlertTools
                         switch (k)
                         {
                             case "enabled": AddBool("checkdb_overdue_enabled", n, "checkdb_overdue.enabled"); break;
+                            case "threshold_hours": AddInt("checkdb_overdue_threshold_hours", n, "checkdb_overdue.threshold_hours", 1, 8760); break;
                             default: error = $"Unknown field 'checkdb_overdue.{k}'."; break;
                         }
                     });
