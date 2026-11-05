@@ -36,7 +36,11 @@ const GAP_FLOOR_MS = 5 * 60 * 1000;
    the other side's, so an outage next to it still breaks, and with neither side able to judge the seam adds nothing.
    Without a seam, or with every point on one side of it, this is the plain number it always was. splitAtGaps takes
    either. */
-export function gapThresholdMs(times, seamMs = null) {
+export function gapThresholdMs(times, seamMs = null, bucketMs = null) {
+  /* A trend whose reply states its bucket (#7572) has a known cadence: a step longer than one bucket is a bucket with no reading,
+     whatever the readings left in the series look like. Without this, a series thinned to the buckets that had reads (a quiet
+     file's latency) has uneven steps, reads as events, and never breaks. */
+  if (typeof bucketMs === "number" && Number.isFinite(bucketMs) && bucketMs > 0) return bucketMs;
   if (typeof seamMs === "number" && Number.isFinite(seamMs)) {
     const before = times.filter((t) => t < seamMs);
     const after = times.filter((t) => t >= seamMs);
@@ -63,6 +67,12 @@ export function gapThresholdMs(times, seamMs = null) {
   if (quantile(0.75) > GAP_FACTOR * quantile(0.25)) return Infinity;
   const median = deltas.length % 2 ? deltas[mid] : (deltas[mid - 1] + deltas[mid]) / 2;
   return Math.max(GAP_FACTOR * median, GAP_FLOOR_MS);
+}
+
+/* A reply's `bucket_minutes` as milliseconds, or null when it states none (#7572). */
+export function bucketMsOf(minutes) {
+  const m = Number(minutes);
+  return minutes != null && minutes !== "" && Number.isFinite(m) && m > 0 ? m * 60000 : null;
 }
 
 /* Splits ascending positions (indices into times) into runs of neighbours no further apart than thresholdMs: a number, or

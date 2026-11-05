@@ -63,7 +63,7 @@ import {
   localizeAlertDetail,
   noValuesText,
 } from "./util.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS, bucketMsOf } from "./charts.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
@@ -1570,6 +1570,8 @@ function vizLine(data, desc) {
     series,
     annotations,
     gapSeamMs: seam ? seam.getTime() : null,
+    /* #7572: `bucketKey` names the field of the reply holding the bucket width in minutes (`bucket_minutes`), so a step longer than one bucket breaks the line. */
+    bucketMs: desc.bucketKey ? bucketMsOf(getPath(data, desc.bucketKey)) : null,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the

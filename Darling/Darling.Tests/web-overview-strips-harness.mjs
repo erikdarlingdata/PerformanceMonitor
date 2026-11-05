@@ -160,8 +160,8 @@ if (scenario === "crosshair") {
   out.waitMarkedValues = byKey(a, "waits").markers.map((m) => m.v);
   out.ioMarkerCount = byKey(a, "io").markers.length;
 
-  /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked; a point under the band is marked at any value. */
-  const lone = [{ key: "io", series: [{ points: [{ t: 1, v: 1.5 }, { t: 2, v: 2.5 }, { t: 3, v: 0.1 }] }] }];
+  /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked (each bucket holds 1000 reads, over the 250 read floor); a point under the band is marked at any value. */
+  const lone = [{ key: "io", series: [{ points: [{ t: 1, v: 1.5, reads: 1000 }, { t: 2, v: 2.5, reads: 1000 }, { t: 3, v: 0.1, reads: 1000 }] }] }];
   strips.applyBaselines(lone, baseline(null, null, b(0.5, 0.1), null), window, {});
   out.floorMarkedValues = lone[0].markers.map((m) => m.v);
 
@@ -233,6 +233,32 @@ if (scenario === "crosshair") {
   const labels = (key) => find(find(drawn.node, (n) => n.attrs["data-strip"] === key)[0], (n) => n.tag === "text" && n.parent && n.parent.attrs.class === "axis").map((n) => n.textContent);
   out.waits = labels("waits");
   out.memory = labels("memory");
+} else if (scenario === "iogaps") {
+  /* #7572: 15 minute buckets with reads at minutes 0, 15 and 45 only. The strip must not run a line from minute 15 to minute 45, and the lone
+     bucket at 45 is a dot. The bucket at 45 holds ONE read at 81 ms in the first run (no red dot: under the 250 read floor) and 300 reads in the second. */
+  const ioRows = (reads45) => [
+    { time: iso(0), database_name: "A", file_type: "ROWS", reads: 400, avg_read_latency_ms: 0.5 },
+    { time: iso(15), database_name: "A", file_type: "ROWS", reads: 300, avg_read_latency_ms: 0.6 },
+    { time: iso(30), database_name: "A", file_type: "ROWS", reads: 0, avg_read_latency_ms: null },
+    { time: iso(45), database_name: "A", file_type: "ROWS", reads: reads45, avg_read_latency_ms: 81 },
+  ];
+  const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
+  const baseline = { kind: "data", data: { baselines: { io: { mean: 1, effective_std_dev: 0.5, sample_count: 40, tier: "Full" } } } };
+  const one = (reads45) => {
+    const built = strips.applyBaselines(strips.buildStrips({ ...reads, io: data({ bucket_minutes: 15, trend: ioRows(reads45) }) }), baseline, window, {});
+    const io = built.find((s) => s.key === "io");
+    const drawn = strips.drawStrips(built, domain, 1000, null);
+    const g = find(drawn.node, (n) => n.attrs["data-strip"] === "io")[0];
+    return {
+      markers: io.markers.length,
+      lines: find(g, (n) => n.tag === "polyline").map((n) => n.attrs.points.split(" ").length),
+      dots: find(g, (n) => n.tag === "circle" && n.attrs.class !== "strip-anomaly").length,
+      anomalyDots: find(g, (n) => n.attrs.class === "strip-anomaly").length,
+    };
+  };
+  out.oneRead = one(1);
+  out.manyReads = one(300);
+  out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },

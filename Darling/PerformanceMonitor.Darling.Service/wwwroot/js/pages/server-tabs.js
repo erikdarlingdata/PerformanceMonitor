@@ -578,6 +578,7 @@ export const SERVER_TABS = [
           series: DURATION_SERIES,
           format: "ms",
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -588,6 +589,7 @@ export const SERVER_TABS = [
           xKey: "time",
           series: EXECUTION_RATE_SERIES,
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -602,6 +604,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }

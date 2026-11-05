@@ -257,4 +257,85 @@ public sealed class WebChartGapBehaviourTests
         Assert.Equal(5 * 60000, t.GetProperty("rawSide").GetDouble());
         Assert.Equal(3 * 60 * 60000, t.GetProperty("crossing").GetDouble());
     }
+
+    /// <summary>
+    /// #7572: a quiet file's 15 minute buckets with readings at 5:45 PM, 6:00 PM, 7:30 PM and 11:45 PM. The steps (15, 90 and 255 minutes) show no
+    /// cadence of their own, so the chart drew one line from 7:30 to 11:45. With the bucket the reply states, the line is 5:45 to 6:00 and the
+    /// two later readings are dots, in a line, an area and a stacked chart alike.
+    /// </summary>
+    [Fact]
+    public void ATrendWithAKnownBucket_BreaksAtAnyStepLongerThanOneBucket_AndShowsALoneReadingAsADot()
+    {
+        var r = Run();
+        Assert.Equal(1, N(r, "bucketQuiet", "lines"));
+        Assert.Equal(2, N(r, "bucketQuiet", "dots"));
+        Assert.Equal(1, N(r, "bucketQuietArea", "areas"));
+        Assert.Equal(2, N(r, "bucketQuietArea", "dots"));
+        Assert.Equal(2, N(r, "bucketQuietStacked", "dots"));
+        /* Without the bucket the same rows are one unbroken line. */
+        Assert.Equal(0, N(r, "bucketQuietNoBucket", "dots"));
+    }
+
+    [Fact]
+    public void ATrendWithAKnownBucket_StaysOneLine_WhenEveryBucketIsPresent_AndBreaksAtAFigureLessBucket()
+    {
+        var r = Run();
+        Assert.Equal(1, N(r, "bucketFull", "lines"));
+        Assert.Equal(0, N(r, "bucketFull", "dots"));
+        /* A bucket whose row has no figure is not a point: the line stops before it and starts after it. */
+        Assert.Equal(2, N(r, "bucketNullMiddle", "lines"));
+        var t = r.GetProperty("bucketThreshold");
+        Assert.Equal(15 * 60000, t.GetProperty("stated").GetDouble());
+        Assert.Equal("16200000", t.GetProperty("ignoredWhenAbsent").GetString());
+        Assert.Equal("16200000", t.GetProperty("bad").GetString());
+        var minutes = t.GetProperty("minutes");
+        Assert.Equal(15 * 60000, minutes[0].GetDouble());
+        Assert.Equal("null", minutes[1].GetString());
+        Assert.Equal("null", minutes[2].GetString());
+        Assert.Equal("null", minutes[3].GetString());
+    }
+
+    /// <summary>
+    /// #7544: a range strip joins every sample and closes the area under the line, so a stretch with no data drew a ramp the chart above it did not.
+    /// An hour of 5 minute samples, a 3 hour hole and another hour is two runs, in the line and in the area. A burst and then one mark hours later
+    /// is a run and a stem with a dot. One sample is still the #7416 stem. A rule of "never" joins everything.
+    /// </summary>
+    [Fact]
+    public void ARangeStrip_BreaksItsLineAndAreaAtAStepLargerThanItsNormalStep()
+    {
+        var r = Run();
+        foreach (var scenario in new[] { "stripHole", "stripHoleDerived" })
+        {
+            Assert.Equal(2, N(r, scenario, "lineRuns"));
+            Assert.Equal(2, N(r, scenario, "areaRuns"));
+        }
+
+        Assert.Equal(1, N(r, "stripNoHole", "lineRuns"));
+        Assert.Equal(1, N(r, "stripNoHole", "areaRuns"));
+        Assert.Equal(2, N(r, "stripBurst", "lineRuns"));
+        Assert.Equal(1, N(r, "stripBurst", "areaRuns"));
+        Assert.Equal(1, N(r, "stripBurst", "dots"));
+        Assert.Equal(1, N(r, "stripOne", "lineRuns"));
+        Assert.Equal(0, N(r, "stripOne", "areaRuns"));
+        Assert.Equal(1, N(r, "stripOne", "dots"));
+        Assert.Equal(1, N(r, "stripNever", "lineRuns"));
+        Assert.Equal(1, N(r, "stripSeam", "lineRuns"));
+    }
+
+    /// <summary>
+    /// #7544: <c>Number(null)</c> is 0, which made a row with no figure a sample at zero (one dot, and "Whole range" over grids with no rows).
+    /// A strip row with no figure is no sample. The step a strip is judged by is its own, else the reply's bucket, else the series' own cadence.
+    /// </summary>
+    [Fact]
+    public void ARangeStripRowWithNoFigure_IsNoSample_AndTheStepComesFromTheStripThenTheReply()
+    {
+        var r = Run();
+        var values = r.GetProperty("stripValues").EnumerateArray().Select(e => e.GetString()).ToArray();
+        Assert.Equal(new[] { "NaN", "NaN", "NaN", "0", "3.5", "7" }, values);
+        var g = r.GetProperty("stripGaps");
+        Assert.Equal(60000, g.GetProperty("blocking").GetDouble());
+        Assert.Equal(600000, g.GetProperty("bucket").GetDouble());
+        Assert.Equal("null", g.GetProperty("none").GetString());
+        Assert.Equal(DateTimeOffset.Parse("2026-01-01T04:00:00Z").ToUnixTimeMilliseconds(), g.GetProperty("seam").GetProperty("seamMs").GetInt64());
+    }
 }

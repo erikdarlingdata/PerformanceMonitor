@@ -8,7 +8,7 @@
 
 import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter } from "../../util.js";
 import { getPanelSignal } from "../../panels.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS, bucketMsOf } from "../../charts.js";
 import { READ_FIELDS } from "../../read-fields.js";
 import { panelShell, discontinuityStrip, linePanel } from "./shared.js";
 
@@ -52,7 +52,7 @@ export function fileIoPanel(server, ctx) {
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours), bucketMs: bucketMsOf(res.data.bucket_minutes) }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),

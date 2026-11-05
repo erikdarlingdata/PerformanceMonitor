@@ -303,4 +303,25 @@ public sealed class WebOverviewStripsBehaviourTests
         var memory = r.GetProperty("memory").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal("0", memory[1]);
     }
+
+    /// <summary>
+    /// #7572: the I/O latency strip, on a quiet file. Fifteen minute buckets with reads at minutes 0, 15 and 45 (minute 30 holds none). The line
+    /// stops at minute 15 instead of running to minute 45, and the lone reading at 45 is a dot. It is one read at 81 ms, under the 250 reads
+    /// Analysis needs before it calls read latency high, so it carries no red dot; with 300 reads behind it, it does.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_BreaksAtABucketWithNoReads_AndDotsOnlyABucketWithEnoughReads()
+    {
+        var r = Run("iogaps");
+
+        Assert.Equal(new[] { 400, 300, 1 }, r.GetProperty("points").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        var one = r.GetProperty("oneRead");
+        Assert.Equal(new[] { 2 }, one.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(1, one.GetProperty("dots").GetInt32());
+        Assert.Equal(0, one.GetProperty("markers").GetInt32());
+        Assert.Equal(0, one.GetProperty("anomalyDots").GetInt32());
+        var many = r.GetProperty("manyReads");
+        Assert.Equal(1, many.GetProperty("markers").GetInt32());
+        Assert.Equal(1, many.GetProperty("anomalyDots").GetInt32());
+    }
 }

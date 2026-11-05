@@ -21,7 +21,7 @@
  */
 import { el, mount, parseUtc, axisTime, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
-import { gapThresholdMs, splitAtGaps } from "../chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "../chart-gaps.js";
 
 /* The held zoom, one entry per server, valid for one scope (page address + preset range): the same rule charts.js keeps for its own
    charts, held here because the strips are one chart of five lines and the zoom is a span of time, not of a chart's points. */
@@ -161,7 +161,8 @@ export function buildStrips(reads) {
 
   const io = {
     key: "io", title: "I/O latency", unit: "ms", min: 0,
-    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")) }],
+    /* #7572: `bucketMs` is the reply's bucket width, so a step longer than one bucket breaks the line (a bucket with no reads is not a point). */
+    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: bucketMsOf(reads.io && reads.io.kind === "data" && reads.io.data ? reads.io.data.bucket_minutes : null) }],
     note: note(reads.io, "No file I/O samples in this window."),
   };
 
@@ -170,6 +171,10 @@ export function buildStrips(reads) {
 
 /** Below this a point above the band is not called anomalous (the Viewer's floors: "1% CPU above 0.5% baseline" is not news on an idle server). */
 const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
+/** #7572: the reads a bucket needs behind its latency before it may carry the red dot. An average over a handful of reads is noise (one read at 80 ms
+ *  is a dot for the whole bucket). 250 is IoVolumeFloor.MinimumReads (PerformanceMonitor.Analysis/IoVolumeFloor.cs), the count Analysis needs before it
+ *  calls a read latency high, so the strip and Analysis agree. */
+const ANOMALY_MIN_READS = { io: 250 };
 /** The strips whose baseline is server-wide while the strip's own read can follow the page's database filter. */
 const DATABASE_SCOPED = new Set(["io", "blocking"]);
 
@@ -200,7 +205,8 @@ export function applyBaselines(strips, res, window, opts) {
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
       const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
-      s.markers = line.points.filter((p) => (p.v > upper && p.v >= floor) || p.v < lower).map((p) => ({ t: p.t, v: p.v }));
+      const minReads = ANOMALY_MIN_READS[s.key] || 0;
+      s.markers = line.points.filter((p) => (minReads === 0 || p.reads >= minReads) && ((p.v > upper && p.v >= floor) || p.v < lower)).map((p) => ({ t: p.t, v: p.v }));
     }
   }
   return strips;
@@ -223,7 +229,7 @@ export function weightedReadLatency(rows) {
     acc.reads += r.reads;
     byTime.set(t, acc);
   }
-  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads }));
+  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads, reads: a.reads }));
 }
 
 /** The time axis the strips share: the zoom when one is held, else the read window; widened to the data when no window is known. */
@@ -347,7 +353,7 @@ export function drawStrips(strips, domain, width, onZoom) {
         } else {
           /* A stretch with no samples (the service was off) is a break in the line, not a diagonal across it: charts.js's gap rule, judged over the whole series so a zoom cannot invent a gap. */
           const times = c.shown.map((p) => p.t);
-          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t)));
+          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t), null, c.bucketMs));
           for (const run of runs) {
             if (run.length === 1) {
               g.appendChild(svg("circle", { cx: x(c.shown[run[0]].t), cy: y(c.shown[run[0]].v), r: 2.5, fill: c.color }));
