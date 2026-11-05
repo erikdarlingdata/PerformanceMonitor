@@ -47,7 +47,7 @@ public sealed class DarlingMcpPgServerStateTools
     private const int BuffersBackendRemovedInMajor = 17;
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
-    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly. LATEST IS A TIME: this is the newest buffer pool snapshot in the search span, captured_at is when it was taken and age_seconds is how old it is at the window end. Not a window of snapshots (#7010).")]
+    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly. LATEST IS A TIME: this is the newest buffer pool snapshot in the search span, captured_at is when it was taken and age_seconds is how old it is at the window end. Not a window of snapshots (#7010). Each relation carries buffer_bytes (buffers x 8192, exact) beside the rounded buffer_mb.")]
     public static async Task<string> GetPgBufferUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -97,6 +97,8 @@ public sealed class DarlingMcpPgServerStateTools
                 relation_display = r.RelationName ?? r.NameLabel,
                 relation_kind = r.RelationKind,
                 buffers = r.Buffers,
+                /* #7556: the exact size beside the rounded one, so a page shows 0.2 MB of residency as bytes and not as a digit the rounding made up. */
+                buffer_bytes = r.Buffers * 8192L,
                 buffer_mb = Math.Round(r.Buffers * 8.0 / 1024.0, 1),
                 dirty_buffers = r.DirtyBuffers,
                 pct_dirty = Math.Round(r.PctDirty, 1),

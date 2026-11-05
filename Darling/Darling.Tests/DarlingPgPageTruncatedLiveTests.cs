@@ -87,6 +87,10 @@ public sealed class DarlingPgPageTruncatedLiveTests
 
             var rows = whole.GetProperty("relations").EnumerateArray().ToArray();
 
+            /* #7556: the exact size travels beside the rounded buffer_mb, so a page can show 15 buffers (120 KB) as bytes and not as 0.1 MB. */
+            Assert.All(rows, r => Assert.Equal(r.GetProperty("buffers").GetInt64() * 8192L, r.GetProperty("buffer_bytes").GetInt64()));
+            Assert.Equal(15 * 8192L, rows.Single(r => r.GetProperty("database_name").ValueKind == JsonValueKind.Null).GetProperty("buffer_bytes").GetInt64());
+
             var otherDatabase = rows.Single(r => r.GetProperty("database_name").GetString() == "otherdb");
             Assert.Equal(JsonValueKind.Null, otherDatabase.GetProperty("relation_name").ValueKind);
             Assert.Equal(DarlingPgBufferUsageReader.NotResolvedLabel, otherDatabase.GetProperty("relation_label").GetString());

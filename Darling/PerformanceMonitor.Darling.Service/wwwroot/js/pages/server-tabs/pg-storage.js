@@ -6,7 +6,17 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+import { fmtBytes } from "../../util.js";
 import { detailColumn, bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
+
+/* #7564: a size column reads the reply's exact byte count and prints it with fmtBytes, never a rounded MB turned back into KB (0.45 MB of an index of
+   456 KB read "460.8 KB"). The reads publish -1 for a size they could not measure. The old MB field was null for that row, and a null is what the grid
+   treats as empty: the cell is a dash, the Is empty filter counts it, a sort puts it last, and Copy and CSV leave it blank. So the rows go to the
+   grid with those -1 values turned back into null, and the plain "bytes" format prints the dash. */
+const unmeasuredAsNull = (...keys) => (rows) =>
+  rows.map((r) => (keys.some((k) => r[k] != null && Number(r[k]) < 0) ? { ...r, ...Object.fromEntries(keys.map((k) => [k, r[k] != null && Number(r[k]) < 0 ? null : r[k]])) } : r));
+export const PG_BLOAT_ROWS = unmeasuredAsNull("heap_bytes");
+export const PG_INDEX_USAGE_ROWS = unmeasuredAsNull("index_bytes");
 
 /* The sentence under a panel whose grid was cut at its row limit (#7551). It names the count when the read gave one, and falls back to the plain sentence when it did not. */
 function pageCutLine(noun, shown, total, tilesNote) {
@@ -22,7 +32,7 @@ function pageCutLine(noun, shown, total, tilesNote) {
    `estimated_bloat_*_over_trusted_rows` keeps the read's own name: it is a sum of ESTIMATES over the rows
    whose estimates were fit to publish, and a shorter label would promise reclaimable bytes. */
 export const PG_BLOAT_STATS = [
-  { key: "estimated_bloat_mb_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "mbfit", nullKey: "estimated_bloat_state" },
+  { key: "estimated_bloat_bytes_over_trusted_rows", label: "Est. bloat (trusted rows)", format: "bytes", nullKey: "estimated_bloat_state" },
   { key: "trusted_estimate_count", label: "Estimates published", format: "int" },
   { key: "suppressed_estimate_count", label: "Estimates suppressed", format: "int" },
   { key: "pgstattuple_available_anywhere", label: "pgstattuple installed", format: "bool" },
@@ -34,7 +44,7 @@ export const PG_BLOAT_STATS = [
    reader actually looks. */
 export const PG_INDEX_USAGE_STATS = [
   { key: "unscanned_without_a_structural_blocker", label: "Unscanned, nothing blocking a drop", format: "int" },
-  { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mbfit" },
+  { key: "bytes_held_by_those_indexes", label: "Held by those indexes", format: "bytes" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
   { key: "truncated", pageCut: (d) => pageCutLine("indexes", d.indexes_returned, d.indexes_in_window, "The tiles above count only the indexes listed."), label: "Truncated", format: "bool" },
@@ -44,10 +54,10 @@ export const PG_INDEX_BLOAT_COLUMNS = [
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
-  { key: "index_mb", label: "Size", format: "mbfit" },
+  { key: "index_bytes", label: "Size", format: "bytes" },
   { key: "avg_leaf_density", label: "Leaf Density %", format: "num1" },
   { key: "leaf_fragmentation", label: "Fragmentation %", format: "num1" },
-  { key: "estimated_reclaimable_mb", label: "Reclaimable", format: "mbfit" },
+  { key: "estimated_reclaimable_bytes", label: "Reclaimable", format: "bytes" },
   /* #7551: a reclaimable figure with nothing beside it reads as a measured 0 B. An estimated row has no leaf density to show (nothing walked its pages), so the figure it comes from and its basis sit here. */
   { key: "est_bloat_pct", label: "Est. Bloat %", format: "num1", hint: "The estimated share of the index that is free space. Blank when no estimate could be made." },
   { key: "measurement_kind", label: "Basis", display: (row) => (row.measurement_kind === "estimated" ? "Estimated" : row.measurement_kind === "measured" ? "Measured" : "—"), hint: "Estimated: worked out from catalog statistics, so no leaf density or fragmentation exists. Measured: an older exact reading from pgstatindex." },
@@ -67,8 +77,8 @@ export const PG_BLOAT_COLUMNS = [
      "Unknown" rather than a severity, so it renders neutral - colouring it would assert the very thing the
      suppression denies. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "heap_mb", label: "Heap", format: "mbfit" },
-  { key: "bloat_mb_estimate", label: "Bloat (est.)", format: "mbfit" },
+  { key: "heap_bytes", label: "Heap", format: "bytes" },
+  { key: "bloat_bytes_estimate", label: "Bloat (est.)", format: "bytes" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
   { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
   { key: "estimate_suppression_reason", label: "Why Suppressed", clamp: true },
@@ -104,7 +114,7 @@ export const PG_INDEX_USAGE_COLUMNS = [
      blocker is Warning, and an index we have not watched for two samples is Healthy rather than Warning -
      too-early-to-say must not look like a finding. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "index_mb", label: "Size", format: "mbfit" },
+  { key: "index_bytes", label: "Size", format: "bytes" },
   { key: "scans_in_window", label: "Scans in Window", format: "int" },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
   { key: "last_scan", label: "Last Scan", format: "time" },

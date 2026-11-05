@@ -19,8 +19,8 @@ import { panelShell, renderInto, AZURE_SQL_DATABASE, withPanelSignal } from "./s
 export const MEMORY_STATS = [
   { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mbfit", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mbfit", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
@@ -36,8 +36,8 @@ export const PLAN_CACHE_STATS = [
   { key: "summary.single_use_plans", label: "Single-use", format: "int" },
   { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
   { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
-  { key: "summary.total_size_mb", label: "Cached plans size", format: "mb" },
-  { key: "summary.single_use_size_mb", label: "Single-use size", format: "mb" },
+  { key: "summary.total_size_mb", label: "Cached plans size", format: "mbfit" },
+  { key: "summary.single_use_size_mb", label: "Single-use size", format: "mbfit" },
   { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
   { key: "summary.bloat_recommendation", label: "Recommendation", format: "text", small: true, sentence: true },
 ];
@@ -51,7 +51,7 @@ export const MEMORY_SERIES = [
 
 export const CLERK_COLUMNS = [
   { key: "clerk_type", label: "Clerk" },
-  { key: "memory_mb", label: "Memory", format: "mb" },
+  { key: "memory_mb", label: "Memory", format: "mbfit" },
 ];
 
 /* #3653: the `window[]` half of the two memory-grant reads (#3637) - one row per pool aggregating EVERY
@@ -67,9 +67,9 @@ export const GRANT_WINDOW_COLUMNS = [
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
   { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
-  { key: "peak_granted_memory_mb", label: "Peak granted", format: "mb" },
+  { key: "peak_granted_memory_mb", label: "Peak granted", format: "mbfit" },
   { key: "peak_granted_at", label: "Peak granted at", format: "time" },
-  { key: "min_available_memory_mb", label: "Min available", format: "mb" },
+  { key: "min_available_memory_mb", label: "Min available", format: "mbfit" },
   { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
   { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
   { key: "first_snapshot_at", label: "First", format: "time", small: true },
@@ -86,9 +86,9 @@ export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: 
 export const GRANT_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
   POOL_COLUMN,
-  { key: "granted_memory_mb", label: "Granted", format: "mb" },
-  { key: "used_memory_mb", label: "Used", format: "mb" },
-  { key: "available_memory_mb", label: "Available", format: "mb" },
+  { key: "granted_memory_mb", label: "Granted", format: "mbfit" },
+  { key: "used_memory_mb", label: "Used", format: "mbfit" },
+  { key: "available_memory_mb", label: "Available", format: "mbfit" },
   { key: "grantee_count", label: "Grantees", format: "int" },
   { key: "waiter_count", label: "Waiters", format: "int" },
   { key: "timeout_error_count_delta", label: "Timeouts", format: "int" },
@@ -100,9 +100,9 @@ export const SEMAPHORE_COLUMNS = [
   POOL_COLUMN,
   { key: "target_memory_mb", label: "Target", format: "mb" },
   { key: "total_memory_mb", label: "Total", format: "mb" },
-  { key: "granted_memory_mb", label: "Granted", format: "mb" },
-  { key: "used_memory_mb", label: "Used", format: "mb" },
-  { key: "available_memory_mb", label: "Available", format: "mb" },
+  { key: "granted_memory_mb", label: "Granted", format: "mbfit" },
+  { key: "used_memory_mb", label: "Used", format: "mbfit" },
+  { key: "available_memory_mb", label: "Available", format: "mbfit" },
   { key: "grantee_count", label: "Grantees", format: "int" },
   { key: "waiter_count", label: "Waiters", format: "int" },
   { key: "timeout_error_count_delta", label: "Timeouts", format: "int" },
@@ -332,9 +332,9 @@ export const CACHE_TYPE_COLUMNS = [
   { key: "cache_type", label: "Cache" },
   { key: "object_type", label: "Object type" },
   { key: "total_plans", label: "Plans", format: "int" },
-  { key: "total_size_mb", label: "Size", format: "mb" },
+  { key: "total_size_mb", label: "Size", format: "mbfit" },
   { key: "single_use_plans", label: "Single-use", format: "int" },
-  { key: "single_use_size_mb", label: "Single-use size", format: "mb" },
+  { key: "single_use_size_mb", label: "Single-use size", format: "mbfit" },
   { key: "avg_use_count", label: "Avg uses", format: "num1" },
 ];
 
