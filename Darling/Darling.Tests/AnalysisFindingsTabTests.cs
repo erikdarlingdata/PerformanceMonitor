@@ -128,11 +128,79 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
-    public void OnlyIncidentFindings_LinkToTheServersQueriesTab_NotConfigFixes()
+    public void OnlyIncidentFindings_LinkToTheirFamilysTab_NotConfigFixes()
     {
         var links = Strings(Run("link"));
         Assert.Equal(3, links.Length);
-        Assert.All(links, l => Assert.Equal("#/server/srv-a/queries", l));
+        // The sample cards are CPU cards (#7677): the link goes to the CPU tab, not Queries.
+        Assert.All(links, l => Assert.Equal("#/server/srv-a/cpu", l));
+    }
+
+    /// <summary>#7677: every card used to carry "Open Queries tab" whatever its text said. Each card now opens the tab that holds its evidence,
+    /// the button names that tab, and a card with no tab of its own (or a standing setting, or no window) has no button.</summary>
+    [Fact]
+    public void EachCard_OpensTheTabThatHoldsItsEvidence_AndTheButtonNamesIt()
+    {
+        var r = Run("tabLinks");
+        void Opens(string card, string tab, string label)
+        {
+            var a = Assert.Single(r.GetProperty(card).EnumerateArray());
+            Assert.Equal("#/server/srv-a/" + tab, a.GetProperty("href").GetString());
+            Assert.Equal("Open " + label + " tab", a.GetProperty("text").GetString());
+        }
+        void NoButton(string card) => Assert.Empty(r.GetProperty(card).EnumerateArray());
+
+        Opens("waits", "waits", "Wait Stats");
+        Opens("blocking", "blocking", "Blocking");
+        Opens("deadlock", "blocking", "Blocking");
+        Opens("memory", "memory", "Memory");
+        Opens("io", "io", "File I/O");
+        Opens("queries", "queries", "Queries");
+        Opens("anomalyWait", "waits", "Wait Stats");
+        Opens("anomalyDeadlock", "blocking", "Blocking");
+        Opens("anomalyByRootFact", "blocking", "Blocking");
+        Opens("pgWaits", "waits", "Waits");
+        Opens("pgBlocking", "activity", "Activity");
+        Opens("pgAnomalyDeadlock", "activity", "Activity");
+        Opens("tempdb", "io", "File I/O");
+        Opens("badActor", "queries", "Queries");
+        Opens("config", "config", "Configuration");
+        Opens("databaseConfig", "config", "Configuration");
+        Opens("jobs", "activity", "Activity");
+        Opens("sessions", "activity", "Activity");
+        Opens("pgVacuum", "vacuum", "Vacuum");
+        Opens("pgSessions", "vacuum", "Vacuum");
+        Opens("pgBuffer", "io", "I/O");
+        Opens("pgWrite", "io", "I/O");
+        Opens("pgCpu", "overview", "Overview");
+        Opens("pgDatabase", "activity", "Activity");
+        Opens("pgPlans", "activity", "Activity");
+        Opens("pgTemp", "activity", "Activity");
+        Opens("pgKernel", "waits", "Waits");
+        Opens("pgPosture", "config", "Configuration");
+        NoButton("anomalyUnmapped");
+        NoButton("pgMemory");
+        NoButton("disk");
+        NoButton("coverage");
+        NoButton("absolution");
+        NoButton("configFix");
+        NoButton("standingState");
+        NoButton("noWindow");
+    }
+
+    /// <summary>#7677: the card map copies the tab ids and labels from the registries in server-tabs.js (a lookup back would be a circular
+    /// import). A relabelled or removed tab there must fail here instead of leaving a button that names the old tab.</summary>
+    [Fact]
+    public void EveryMappedTab_ExistsInItsEnginesRegistry_UnderTheSameLabel()
+    {
+        var r = Run("tabLabels");
+        Assert.True(r.GetArrayLength() > 20);
+        foreach (var e in r.EnumerateArray())
+        {
+            Assert.True(e.GetProperty("registryLabel").ValueKind == JsonValueKind.String,
+                e.GetProperty("family").GetString() + " maps to tab '" + e.GetProperty("id").GetString() + "', which its engine's registry does not have");
+            Assert.Equal(e.GetProperty("registryLabel").GetString(), e.GetProperty("label").GetString());
+        }
     }
 
     [Fact]
@@ -148,7 +216,8 @@ public sealed class AnalysisFindingsTabTests
     {
         var groups = Run("standingLink").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => Strings(g.GetProperty("links")));
         Assert.Empty(groups.Single(g => g.Key.StartsWith("VolumeLow", StringComparison.Ordinal)).Value);
-        Assert.Equal(new[] { "Open Queries tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
+        // The WaitSpike sample card is a CPU card (#7677): its button names the CPU tab, not Queries.
+        Assert.Equal(new[] { "Open CPU tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
     }
 
     [Fact]

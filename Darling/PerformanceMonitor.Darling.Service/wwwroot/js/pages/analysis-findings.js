@@ -11,7 +11,7 @@
  * (not the FinOps Recommendations tab). One read, get_analysis_findings, for the server the page is on: the
  * persisted findings grouped by incident (incident_id; a finding with none is its own group), each group headed
  * by its highest-severity finding, each card showing a severity badge, the advice text, the fix script in a
- * <pre> with a Copy button, and, for an incident finding, a link to that server's Queries tab.
+ * <pre> with a Copy button, and, for an incident finding whose fact family has a tab, a link to that tab (#7677).
  *
  * Advise-only: nothing here runs a fix or mutes. Two actions reach the service (#6389), both the desktop's: "Generate now" queues an
  * analyze_now command (POST /api/analyze-now) and re-reads the findings when the service finishes it, and "Ask AI" copies the
@@ -19,9 +19,10 @@
  * cannot drift). Neither holds a key or calls a model.
  *
  * Which findings are "incidents" follows the desktop: a finding that carries a structured_remediation is a
- * standing config fix and gets no Queries link, and neither does a standing state (a setting, a volume's free space: standing_state
- * on the read, #7416). The link opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only
- * and says "Open Queries tab", not a sub-tab it cannot reach.
+ * standing config fix and gets no tab link, and neither does a standing state (a setting, a volume's free space: standing_state
+ * on the read, #7416). Every other finding with a time_range and a tab of its own gets one (#7677: Wait Stats for a wait card, Blocking
+ * for blocking and deadlocks, and so on, from the one FAMILY_TABS map below). The server tabs have no from/to deep link on the web, so the
+ * link carries the server only and names the tab ("Open Wait Stats tab"), not a sub-tab it cannot reach.
  *
  * State: which groups the reader has opened or closed lives in module scope (`openState`, keyed by server then
  * by group key), because the server page rebuilds this tab on every 60 s poll and on every Range change.
@@ -46,12 +47,82 @@ function badgeClass(label) {
 }
 
 /**
- * A finding that running queries can explain (#7416): not a standing config fix (the read's is_config_fix, the desktop's rule;
+ * A finding a server tab can explain (#7416): not a standing config fix (the read's is_config_fix, the desktop's rule;
  * force-plan stays an incident), not a standing state (the read's standing_state: a setting or the free space of a volume, true at
  * every hour whatever is running), and with a time window to point at.
  */
-export function showsActiveQueriesLink(f) {
+export function isIncidentFinding(f) {
   return !f.is_config_fix && !f.standing_state && !!(f.time_range && f.time_range.start && f.time_range.end);
+}
+
+/* #7677: the one map from a card's fact family (the finding's category) to the server tab that holds its evidence, [tab id, tab label].
+   The ids and labels are the ones SERVER_TABS and POSTGRES_TABS register in server-tabs.js. They are copied, not read from the registry,
+   because server-tabs.js imports this module and a lookup back would be a circular import. AnalysisFindingsTabTests compares every
+   label here with the registry's, so a relabel there fails a test until this map follows. A family left out has no tab that shows its
+   evidence, and its card gets no button: absolution (no problem found), coverage (it says data is missing, so no tab has it to show),
+   disk (volume free space is on no tab) and pg_memory (arithmetic over settings against host memory, shown by no panel). */
+export const FAMILY_TABS = {
+  waits: ["waits", "Wait Stats"],
+  blocking: ["blocking", "Blocking"], // deadlocks are facts of the blocking family
+  cpu: ["cpu", "CPU"],
+  memory: ["memory", "Memory"],
+  io: ["io", "File I/O"],
+  tempdb: ["io", "File I/O"], // the tempdb trend chart sits on the File I/O tab
+  queries: ["queries", "Queries"],
+  bad_actor: ["queries", "Queries"],
+  config: ["config", "Configuration"],
+  database_config: ["config", "Configuration"],
+  jobs: ["activity", "Activity"],
+  sessions: ["activity", "Activity"],
+  pg_waits: ["waits", "Waits"],
+  pg_kernel: ["waits", "Waits"],
+  pg_io: ["io", "I/O"],
+  pg_buffer: ["io", "I/O"],
+  pg_write: ["io", "I/O"],
+  pg_blocking: ["activity", "Activity"],
+  pg_queries: ["activity", "Activity"],
+  pg_plans: ["activity", "Activity"],
+  pg_database: ["activity", "Activity"],
+  pg_temp: ["activity", "Activity"], // the database temp bytes and files charts sit on the Activity tab
+  pg_cpu: ["overview", "Overview"],
+  pg_replication: ["replication", "Replication"],
+  pg_bloat: ["storage", "Storage"],
+  pg_growth: ["storage", "Storage"],
+  pg_vacuum: ["vacuum", "Vacuum"],
+  pg_sessions: ["vacuum", "Vacuum"], // the session-state panel is on the Vacuum tab
+  pg_config: ["config", "Configuration"],
+  pg_posture: ["config", "Configuration"],
+};
+
+/* An anomaly finding's category is just "anomaly"; its root fact key (the read's root_fact.key, else the first step of story_path)
+   says which family it belongs to. First match wins, so the PostgreSQL prefixes are tried before the SQL Server ones. */
+const ANOMALY_FAMILIES = [
+  ["ANOMALY_PG_DEADLOCK", "pg_blocking"], ["ANOMALY_PG_BLOCKING", "pg_blocking"],
+  ["ANOMALY_PG_WAIT_PROFILE", "pg_waits"], ["ANOMALY_PG_SAMPLED_WAIT_PROFILE", "pg_waits"],
+  ["ANOMALY_PG_IO_LATENCY", "pg_io"], ["ANOMALY_PG_REPLICATION_LAG", "pg_replication"],
+  ["ANOMALY_PG_DATABASE_GROWTH", "pg_growth"],
+  ["ANOMALY_BLOCKING", "blocking"], ["ANOMALY_DEADLOCK", "blocking"],
+  ["ANOMALY_WAIT", "waits"],
+  ["ANOMALY_CPU", "cpu"],
+  ["ANOMALY_MEMORY", "memory"],
+  ["ANOMALY_READ_LATENCY", "io"], ["ANOMALY_WRITE_LATENCY", "io"],
+  ["ANOMALY_QUERY_DURATION", "queries"],
+];
+
+function familyOf(f) {
+  const category = String(f.category || "").toLowerCase();
+  if (category !== "anomaly") return category;
+  const root = (rootKeyOf(f) || String(f.story_path || "").split("→")[0]).trim().toUpperCase();
+  const match = ANOMALY_FAMILIES.find(([prefix]) => root.startsWith(prefix));
+  return match ? match[1] : "";
+}
+
+/** The tab an incident card opens, as { id, label }, or null when the card has no tab of its own (and so no button). */
+export function findingTab(f) {
+  if (!isIncidentFinding(f)) return null;
+  const family = familyOf(f);
+  const tab = Object.prototype.hasOwnProperty.call(FAMILY_TABS, family) ? FAMILY_TABS[family] : null;
+  return tab ? { id: tab[0], label: tab[1] } : null;
 }
 
 /** The root fact a finding hangs from: two chains that start at the same root are one cause seen two ways. */
@@ -434,8 +505,9 @@ function card(server, f, showTitle) {
   const actions = [];
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
   actions.push(askAiButton(server, f));
-  if (showsActiveQueriesLink(f)) {
-    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open Queries tab" }));
+  const tab = findingTab(f);
+  if (tab) {
+    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/" + tab.id, text: "Open " + tab.label + " tab" }));
   }
   if (actions.length) kids.push(el("div", { class: "reco-actions" }, actions));
   return el("div", { class: "card reco-card" }, kids);

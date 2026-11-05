@@ -120,6 +120,12 @@ function hidesPanel(spec, res, shell, key) {
   return true;
 }
 
+/* #7593: the spec without the named series and columns. */
+function withoutKeys(spec, keys) {
+  const keep = (list) => (Array.isArray(list) ? list.filter((x) => !keys.includes(x.key)) : list);
+  return { ...spec, series: keep(spec.series), columns: keep(spec.columns) };
+}
+
 /* `intro` (#6439): an optional `{ text, when }`. An empty full-width slot is put before the panels and gets the notice only once the
    read's data passes `when(data)`, so a sentence about what the cards below draw is shown only when they draw it. */
 export function fanout(read, params, specs, intro = null) {
@@ -178,7 +184,9 @@ export function fanout(read, params, specs, intro = null) {
         const note = spec.noteKey ? getPath(res.data, spec.noteKey) : null;
         /* A fanout line chart names its chart-menu "at This Time" item with spec.atTimeItem, as linePanel() does with
            opts.atTimeItem; Active Queries when it names none. */
-        const rendered = VIZ[spec.viz](res.data, { ...spec, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
+        /* #7593: `dropWhenNote` names the series and columns the note says are not shown, so the legend and the grid agree with the sentence above them. */
+        const drawn = typeof note === "string" && note.trim() && Array.isArray(spec.dropWhenNote) ? withoutKeys(spec, spec.dropWhenNote) : spec;
+        const rendered = VIZ[spec.viz](res.data, { ...drawn, read, windowHours: res.keptHours || (params && params.hours), atTime: spec.atTime === false || !params || !params.server ? null : { server: params.server, item: spec.atTimeItem || "queries" } });
 
         applyDataSubtitle(shells[i].panel, res.data, spec);
         markPartialSubtitle(shells[i].panel, res.data, spec);
