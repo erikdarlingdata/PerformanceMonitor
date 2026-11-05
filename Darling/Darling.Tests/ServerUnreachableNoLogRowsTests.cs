@@ -16,6 +16,7 @@ namespace Darling.Tests;
 /// retention dropped them) still says so. <c>get_collection_health</c> keeps its <c>unavailable</c> word and carries the
 /// <c>server_connection</c> block and the waiting sentence, and the offline note an empty read opens with names the unreachable server.
 /// </summary>
+[Collection("live-postgres")]
 public class ServerUnreachableNoLogRowsTests
 {
     private const string ConnectError = "A network-related or instance-specific error occurred while establishing a connection to SQL Server.";

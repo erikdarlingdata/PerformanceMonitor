@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// "collection stale" and green tiles for up to 30 minutes. A server with the same age and no failed connect keeps today's rule.
 /// Driven through the fleet reader's own card builder and roll-up, and the JSON get_fleet_overview serves from them.
 /// </summary>
+[Collection("live-postgres")]
 public class ServerUnreachableReadsOfflineTests
 {
     private static readonly DateTime Now = new(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);

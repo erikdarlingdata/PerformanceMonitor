@@ -26,6 +26,7 @@ namespace Darling.Tests;
 /// nothing in the store said it was down and every read answered "no servers are registered yet". The failed first connect now writes the row
 /// from the configuration, with the connect columns, and the reads that assumed a row means "connected once" read it as Offline with its reason.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class ServerNeverConnectedTests
 {
     private const int ServerId = 91;

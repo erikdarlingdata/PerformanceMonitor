@@ -286,7 +286,7 @@ public sealed class FleetPageAttentionFilterTests
         Assert.Contains("const collectorsStale = c.is_online === false;", fleet, StringComparison.Ordinal);
         /* Offline → "Stale" in the neutral tone, not the green OK / N-healthy line. */
         Assert.Contains("? \"Stale\"", fleet, StringComparison.Ordinal);
-        Assert.Contains("collectorsStale ? \"Unknown\" : c.collector_severity", fleet, StringComparison.Ordinal);
+        Assert.Contains("collectorsStale || unreachable ? \"Unknown\" : c.collector_severity", fleet, StringComparison.Ordinal);
 
         /* One shared builder: the detail header RENDERS the same metricBands (the load-bearing call, not just
            the import), so the fix covers both surfaces and they cannot drift. */

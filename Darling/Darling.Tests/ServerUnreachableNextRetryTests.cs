@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// (the <c>get_collection_health</c> reply, the web tab and the Viewer text) says collection is waiting on the connection with that time,
 /// and "Run all collectors now" is off on the web with the offline tip.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class ServerUnreachableNextRetryTests
 {
     private static readonly DateTime Since = new(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
