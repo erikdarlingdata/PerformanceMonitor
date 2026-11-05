@@ -140,13 +140,13 @@ function identityLastScanned(r) {
   const at = r.scanned_at || r.last_scanned_at;
   return at ? localTime(at) : "—";
 }
-const IDENTITY_COLUMNS = [
+export const IDENTITY_COLUMNS = [
   { key: "database", label: "Database", name: true },
   { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
   { key: "column", label: "Column" },
   { key: "data_type", label: "Type", render: (r) => el("span", { text: identityType(r) }), sortValue: identityType },
   { key: "percent_used", label: "Percent used", format: "num1" },
-  { key: "values_remaining", label: "Values remaining", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
+  { key: "values_remaining", label: "Values remaining", align: "right", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
   { key: "rate_per_day", label: "Rate per day", format: "num1" },
   { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
   { key: "band", label: "Band", format: "text", small: true },

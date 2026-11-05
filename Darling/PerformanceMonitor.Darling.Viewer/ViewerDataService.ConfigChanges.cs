@@ -112,7 +112,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   capture_time <= $2
         AND   ($3::text[] IS NULL OR database_name = ANY($3))
-        ORDER BY database_name, capture_time
+        ORDER BY lower(database_name), database_name, capture_time
         """;
 
     /// <summary>Every trace-flag snapshot for a server up to the window end (a row exists only while a flag is

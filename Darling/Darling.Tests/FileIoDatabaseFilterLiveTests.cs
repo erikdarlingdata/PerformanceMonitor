@@ -232,6 +232,17 @@ public sealed class FileIoDatabaseFilterLiveTests
             Assert.Equal(2, perFileLegend[5].GetProperty("files").GetInt64());
             Assert.All(perFile.GetProperty("trend").EnumerateArray(), p => Assert.True(p.GetProperty("database_name").GetString() is DbMany or "(other)"));
 
+            /* #7661: under a plot-sized ask the ladder aims at the total across the drawn lines (the ask is one line's share), so the
+               note names that number and not the one-line share it was built from. */
+            var asked = TrendBudget.ChartFor(557);
+            var aimed = asked.AutoFor(TrendPayloads.LinesFor(perFile.GetProperty("series_active").GetInt32()));
+            Assert.True(aimed > asked.AutoPoints, "six lines aim at more than one line's share");
+            var sized = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(
+                postgres, ServerName, 1, asOf, null, DatabaseFilter.One(DbMany), asked, ct)).RootElement;
+            var sizedNote = sized.GetProperty("aggregate_note").GetString()!;
+            Assert.Contains($"near {aimed} points", sizedNote, StringComparison.Ordinal);
+            Assert.DoesNotContain($"near {asked.AutoPoints} points", sizedNote, StringComparison.Ordinal);
+
             /* Seven chosen databases of a store that holds twelve: per-database lines, the cap applies to the set. A, B, C and
                the many-file database are outside it and appear nowhere. */
             var chosen = Enumerable.Range(1, 7).Select(Crowd).ToArray();

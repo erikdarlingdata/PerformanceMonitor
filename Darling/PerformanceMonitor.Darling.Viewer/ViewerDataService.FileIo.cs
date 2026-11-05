@@ -193,7 +193,7 @@ public sealed partial class ViewerDataService
         FROM rated
         GROUP BY database_name, file_name, 3
         HAVING COUNT(rated_reads) > 0
-        ORDER BY database_name, file_name, 3
+        ORDER BY lower(database_name), database_name, file_name, 3
         """;
 
     /// <summary>
