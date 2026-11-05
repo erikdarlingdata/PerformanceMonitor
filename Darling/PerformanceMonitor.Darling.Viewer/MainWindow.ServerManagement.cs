@@ -250,6 +250,18 @@ public partial class MainWindow
             return;
         }
 
+        /* #7590: the service's own connect answer, read beside the freshness. A read that fails leaves the age rule in charge. */
+        Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)> connectDown;
+        try
+        {
+            connectDown = await _dataService.GetServerConnectDownAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLogger.Warn("ServerStatus", $"connect state read failed: {ex.Message}");
+            connectDown = new Dictionary<int, (DateTime SinceUtc, string? Error, DateTime? NextAttemptUtc)>();
+        }
+
         var nowUtc = DateTime.UtcNow;
         var servers = _fleet.All;
 
@@ -258,6 +270,9 @@ public partial class MainWindow
         foreach (var s in servers)
         {
             DateTime? last = freshness.TryGetValue(s.ServerId, out var t) ? t : null;
+            s.ConnectDownSince = connectDown.TryGetValue(s.ServerId, out var down) ? down.SinceUtc : null;
+            s.LastConnectError = connectDown.TryGetValue(s.ServerId, out var down2) ? down2.Error : null;
+            s.NextConnectAttemptUtc = connectDown.TryGetValue(s.ServerId, out var down3) ? down3.NextAttemptUtc : null;
             s.ApplyFreshness(last, nowUtc);
 
             if (last.HasValue && (newest is null || last.Value > newest.Value))
