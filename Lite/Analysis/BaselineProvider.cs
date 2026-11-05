@@ -102,6 +102,7 @@ public class BaselineProvider
         [MetricNames.SessionCount] = "session_stats",
         [MetricNames.QueryDuration] = "query_stats",
         [MetricNames.IoLatency] = "file_io_stats",
+        [MetricNames.IoLatencyChart] = "file_io_stats",
         [MetricNames.IoWriteLatency] = "file_io_stats",
         [MetricNames.Blocking] = "blocked_process_report",
         [MetricNames.BlockingPerMinute] = "blocked_process_report",
@@ -172,6 +173,54 @@ public class BaselineProvider
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
 
+    /// <summary>#7644: one local hour of a window and the bucket that hour's local hour-of-week key picks. <c>FromUtc</c> is the start of
+    /// the local hour (before the window start for the first step), <c>ToUtc</c> its end. Darling's PgBaselineProvider.BaselineStep, twinned.</summary>
+    public sealed record BaselineStep(DateTime FromUtc, DateTime ToUtc, BaselineBucket Bucket);
+
+    /// <summary>
+    /// #7644: the band the Overview lanes draw, one step per local hour the window crosses, from the same cached entry
+    /// <see cref="GetBaselineAsync"/> reads at <paramref name="computeTime"/>. Steps include hours whose bucket is empty: the caller
+    /// decides which are usable. Darling's PgBaselineProvider.GetBaselineStepsSharedAsync, twinned.
+    /// </summary>
+    public async Task<IReadOnlyList<BaselineStep>> GetBaselineStepsAsync(
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        WarnIfRetentionUndercutsBaselineWindow(metricName);
+        var entry = await GetOrComputeBaselinesAsync(serverId, metricName, computeTime, cancellationToken);
+        return StepsFor(entry, windowStartUtc, windowEndUtc, _localClock);
+    }
+
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsAsync"/>. Hours are the zone's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.
+    /// The clock is re-resolved over the window being drawn from the entry's own zone id and offset, as <see cref="GetBucketMapAsync"/>
+    /// does (#7644), never the entry's <see cref="CachedBaseline.Clock"/>: that one covers the compute window, the 30 days before
+    /// the compute time, so a custom range older than that would walk on a fixed offset and cut every step after a daylight-saving
+    /// change an hour off.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc, BaselineLocalClock localClock)
+    {
+        var steps = new List<BaselineStep>();
+        if (entry.Buckets is null || entry.Buckets.Count == 0 || windowEndUtc <= windowStartUtc)
+            return steps;
+
+        var clock = localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, windowStartUtc, windowEndUtc);
+        var t = windowStartUtc;
+        while (t < windowEndUtc)
+        {
+            var local = clock.ToLocal(t);
+            var intoHour = TimeSpan.FromTicks(local.Ticks % TimeSpan.TicksPerHour);
+            var next = t + (TimeSpan.FromHours(1) - intoHour);
+            var transition = DateTime.SpecifyKind(clock.TransitionAtUtc, t.Kind);
+            if (clock.HasTransition && t < transition && transition < next)
+                next = transition;
+            var from = steps.Count == 0 ? t - intoHour : t;
+            var (hourOfDay, dayOfWeek) = clock.LocalKey(t);
+            steps.Add(new BaselineStep(from, next, BaselineMath.SelectBucket(entry.Buckets, hourOfDay, dayOfWeek)));
+            t = next;
+        }
+
+        return steps;
+    }
+
     /// <summary>
     /// #3653 A8 option B (lane L1b): the per-hour bucket map for a tiled window
     /// <c>[<paramref name="windowStart"/>, <paramref name="windowEnd"/>]</c>, plus a clock re-resolved over that
@@ -229,14 +278,14 @@ public class BaselineProvider
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248, widened by #4731: the five arms that read a RAW table at full grain over the 30-day window —
-    /// the <c>clean</c> CTE of Cpu, IoLatency and IoWriteLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c> twice, #6696) and the
+    /// <summary>#4248, widened by #4731: the six arms that read a RAW table at full grain over the 30-day window —
+    /// the <c>clean</c> CTE of Cpu, IoLatency, IoLatencyChart and IoWriteLatency (<c>v_cpu_utilization_stats</c>, <c>v_file_io_stats</c> three times, #6696, #7644) and the
     /// <c>logged</c> CTE of Blocking and Deadlock (<see cref="EventBaselineSql"/>, over <c>v_collection_log</c>) —
     /// rather than an already-aggregated one. Darling's PgBaselineProvider.IsDailyCacheMetric, twinned, so the two
     /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
     /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoLatencyChart or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -711,6 +760,19 @@ WITH clean AS (
     FROM v_file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   (delta_reads > 0 OR delta_writes > 0)
+)," + RobustTierScaffold,
+
+            /* #7644: the Overview strip's unit, Darling's PgBaselineProvider IoLatencyChart arm twinned. The arm above judges each FILE ROW, so a
+               file with ten slow reads weighs as much as the busy file with ten thousand fast ones, and the band sat far from the line the
+               lane draws (reads-weighted per collection: the files' stall summed over their reads summed). Same source, and rows with reads
+               only, so v is never null and sample_count is the number of collections that read. */
+            MetricNames.IoLatencyChart => @"
+WITH clean AS (
+    SELECT collection_time, SUM(delta_stall_read_ms) * 1.0 / SUM(delta_reads) AS v
+    FROM v_file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_reads > 0
+    GROUP BY collection_time
 )," + RobustTierScaffold,
 
             /* #6696: the write-latency twin of the arm above (Darling's PgBaselineProvider has the long note), for the

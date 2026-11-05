@@ -131,7 +131,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
             .Select(m => (Metric: m, Sql: BaselineProvider.GetBaselineQuery(m)))
             .Where(t => t.Sql is not null)
             .ToList();
-        Assert.Equal(13, statements.Count); // Lite's thirteen arms (IoWriteLatency since #6696, BlockingSnapshot since #7588) — a fourteenth arrives censused
+        Assert.Equal(14, statements.Count); // Lite's fourteen arms (IoWriteLatency since #6696, BlockingSnapshot since #7588, IoLatencyChart since #7644) — a fifteenth arrives censused
 
         var bareKey = new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase);
         var bareDate = new Regex(@"(?<![\w.])collection_time::DATE", RegexOptions.IgnoreCase);
