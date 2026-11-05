@@ -22,13 +22,23 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class McpToolAudit5633L3Tests
 {
+    /* The call site: audit_config passes the stored properties row (or null) and the fact, and no SERVER_EDITION fact is involved, so a
+       properties row for an Azure SQL Database keeps its own memory figure even when that fact is missing (#7552 item 7). */
     [Theory]
     [InlineData(1023, 1022, 3, 1022)]
-    [InlineData(1023, -1, 3, 1023)]
+    [InlineData(1023, 1022, 2, 1022)]
     [InlineData(1023, 0, 3, 1023)]
     [InlineData(1023, 1022, 5, 1023)]
     public void AuditPhysicalMemoryMb_QuotesTheServerProperty_SoTheConfigurationTabPrintsOneNumber(double fact, long property, int engineEdition, double expected)
-        => Assert.Equal(expected, DarlingMcpTools.AuditPhysicalMemoryMb(fact, property < 0 ? null : property, engineEdition));
+        => Assert.Equal(expected, DarlingMcpTools.AuditPhysicalMemoryMb(fact, PropertiesRow(engineEdition, property)));
+
+    [Fact]
+    public void AuditPhysicalMemoryMb_KeepsTheFact_WhenTheStoreHoldsNoPropertiesRow()
+        => Assert.Equal(1023, DarlingMcpTools.AuditPhysicalMemoryMb(1023, null));
+
+    private static DarlingDataReader.ServerPropertiesReadRow PropertiesRow(int engineEdition, long physicalMemoryMb)
+        => new(DateTime.UtcNow, "Developer Edition (64-bit)", "16.0.1000.6", "RTM", null, engineEdition, 8, 1, physicalMemoryMb, 1, 8,
+            false, false, null, null);
 
     [Theory]
     [InlineData("Developer Edition (64-bit)", 3)]

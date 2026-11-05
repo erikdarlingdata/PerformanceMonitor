@@ -850,7 +850,7 @@ public sealed class DarlingMcpTools
                for a store with no properties snapshot, and then edition_note says so. */
             var propertiesRow = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             var (editionName, editionNote) = AuditEditionLabel(propertiesRow?.Edition, edition);
-            totalMemoryMb = AuditPhysicalMemoryMb(totalMemoryMb, propertiesRow?.PhysicalMemoryMb, edition);
+            totalMemoryMb = AuditPhysicalMemoryMb(totalMemoryMb, propertiesRow);
             /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
                cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
             var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
@@ -1006,13 +1006,12 @@ public sealed class DarlingMcpTools
             : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
 
     /// <summary>
-    /// The physical memory the max server memory audit quotes (#7552 item 7). The Configuration tab prints Server Properties' physical memory
-    /// beside this audit, and the memory facts read the same RAM a moment apart (1,022 MB against 1,023 MB), so the audit quotes the stored
-    /// server property whenever the store holds one. On an Azure SQL Database (engine edition 5) the fact is the database's own memory limit,
-    /// which the property is not, so the fact stays.
+    /// The physical memory the max server memory audit quotes (#7552 item 7): the stored server property when the store holds one, the
+    /// fact otherwise. The selection and its Azure SQL Database exception live in <see cref="ServerHardwareScope.AuditPhysicalMemoryMb"/>,
+    /// which Lite's <c>audit_config</c> calls too.
     /// </summary>
-    internal static double AuditPhysicalMemoryMb(double factMb, long? propertyMb, int engineEdition)
-        => engineEdition != 5 && propertyMb is > 0 ? propertyMb.Value : factMb;
+    internal static double AuditPhysicalMemoryMb(double factMb, DarlingDataReader.ServerPropertiesReadRow? propertiesRow)
+        => ServerHardwareScope.AuditPhysicalMemoryMb(factMb, propertiesRow?.EngineEdition, propertiesRow?.PhysicalMemoryMb);
 
     /// <summary>
     /// The <c>edition</c> and <c>edition_note</c> audit_config echoes (#5633 item 10). The stored <c>Edition</c> property

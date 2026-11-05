@@ -158,7 +158,7 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryAboveRam_SuggestsHalfOfRam_NotANegativeNumber()
     {
-        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4, physicalMemoryMb: 1023);
         await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: 92160);
         await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
 
@@ -176,7 +176,7 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryAtTheDefault_StatesTheReserveItUsed()
     {
-        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4, physicalMemoryMb: 1023);
         await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: int.MaxValue);
         await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
 
@@ -191,7 +191,7 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
     [Fact]
     public async Task AuditConfig_OnA1023MbServer_WithMaxMemoryUnderTheSuggestion_IsOk()
     {
-        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4);
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4, physicalMemoryMb: 1023);
         await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: 400);
         await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
 
@@ -232,6 +232,35 @@ public sealed class AuditConfigEditionTests : IClassFixture<SharedDuckDbFixture>
 
         Assert.Contains("above the topology-based guidance of 4 (this database's vCores, capped at 8)",
             MaxdopRecommendation(json).GetProperty("recommendation").GetString(), StringComparison.Ordinal);
+    }
+
+    /// <summary>#7552 item 7: the audit quotes the stored server property (Server Properties' 1,022 MB), not the memory fact read a
+    /// moment apart (1,023 MB).</summary>
+    [Fact]
+    public async Task AuditConfig_QuotesTheStoredPhysicalMemory_NotTheMemoryFact()
+    {
+        await SeedServerPropertiesAsync(_boxServerId, BoxServerName, engineEdition: 3, coresPerSocket: 4, physicalMemoryMb: 1022);
+        await SeedServerConfigAsync(_boxServerId, BoxServerName, maxMemoryMb: int.MaxValue);
+        await SeedPhysicalMemoryAsync(_boxServerId, BoxServerName, 1023);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, BoxServerName);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(1022, doc.RootElement.GetProperty("total_physical_memory_mb").GetDouble());
+    }
+
+    /// <summary>The stored property on an Azure SQL Database is the host's, so the database's own memory limit (the fact) stays.</summary>
+    [Fact]
+    public async Task AuditConfig_OnAzureSqlDatabase_KeepsTheMemoryFact_NotTheHostsStoredProperty()
+    {
+        await SeedServerPropertiesAsync(_azureServerId, AzureServerName, CollectorEngineCapability.AzureSqlDatabaseEngineEdition, vcoreCount: 4, coresPerSocket: 32, physicalMemoryMb: 262144);
+        await SeedServerConfigAsync(_azureServerId, AzureServerName);
+        await SeedPhysicalMemoryAsync(_azureServerId, AzureServerName, 20480);
+
+        var json = await McpAnalysisTools.AuditConfig(new AnalysisService(_duckDb), new LocalDataService(_duckDb), _serverManager, AzureServerName);
+
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(20480, doc.RootElement.GetProperty("total_physical_memory_mb").GetDouble());
     }
 
     private static JsonElement MaxdopRecommendation(string json) => Recommendation(json, "max degree of parallelism");
@@ -285,7 +314,7 @@ VALUES ($1, $2, $3, $4, $5, 100, 500, 500, 400)";
 
     /// <summary>One collected <c>server_properties</c> row: the NOT NULL edition and hardware columns are
     /// filled with values nothing here reads, plus the one column these tests vary.</summary>
-    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int engineEdition, int? vcoreCount = null, int? coresPerSocket = null)
+    private async Task SeedServerPropertiesAsync(int serverId, string serverName, int engineEdition, int? vcoreCount = null, int? coresPerSocket = null, long physicalMemoryMb = 16384)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -296,7 +325,7 @@ INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name,
      edition, product_version, product_level, engine_edition,
      cpu_count, hyperthread_ratio, physical_memory_mb, cores_per_socket, vcore_count)
-VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384, $6, $7)";
+VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, $8, $6, $7)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -304,6 +333,7 @@ VALUES ($1, $2, $3, $4, 'Test Edition', '16.0.4150.1', 'RTM', $5, 8, 1, 16384, $
         cmd.Parameters.Add(new DuckDBParameter { Value = engineEdition });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)coresPerSocket ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)vcoreCount ?? DBNull.Value });
+        cmd.Parameters.Add(new DuckDBParameter { Value = physicalMemoryMb });
         await cmd.ExecuteNonQueryAsync();
     }
 
