@@ -351,11 +351,15 @@ ORDER BY event_time DESC";
         using var _q = TimeQuery("GetSchedulerIssuesAsync", "v_system_health_events scheduler_monitor shred");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SchedulerMonitorEvent);
+        /* #7688: SQL Server on Linux reports idle as 0, so Other-Process CPU (100 - SQL - idle) would read 100 minus the SQL figure
+           on every minute and pass the significance test. Both figures are cleared before the test and the grid shows a blank. */
+        var hostOs = await GetHostOsVersionAsync(serverId);
 
         var rows = new List<SchedulerIssueRow>();
         foreach (var xml in xmls)
         {
-            var record = SystemHealthParser.ParseSchedulerIssue(xml);
+            var parsed = SystemHealthParser.ParseSchedulerIssue(xml);
+            var record = parsed is null ? null : SystemHealthHostCpu.Apply(parsed, hostOs);
             if (record != null && SystemHealthSignificance.IsSignificant(record))
                 rows.Add(new SchedulerIssueRow(record));
         }
