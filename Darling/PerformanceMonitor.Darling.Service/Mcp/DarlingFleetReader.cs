@@ -1255,6 +1255,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             CpuSource = cpuSource,
             HasMemoryPressure = memoryPressureForBand,
             BlockingCount = blockingForBand,
+            BlockingCapturesTaken = isPostgres ? pgBlocking?.CapturesTotal ?? 0 : null,
             MaxBlockedSeconds = maxBlockedSeconds,
             /* #3539 A3: the blocking count's own denominator — the same card window the deadlock count was
                read over, because one pair of bounds windowed both reads. */
@@ -1353,12 +1354,14 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                DeadlockRatePerHour gives: a PostgreSQL target's raw count is a structural zero, and a rate derived
                from it would publish 0.0/hr against a severity that reads Unknown (#3539 A3). */
             MaxSnapshotWaitMs = blocking.PeakSnapshotWaitMs,
-            BlockingRatePerHour = blockingForBand.HasValue
+            BlockingRatePerHour = isPostgres
+                ? ServerHealthClassifier.PostgresBlockingRatePerHour(blockingForBand, pgBlocking?.CapturesTotal ?? 0)
+                : blockingForBand.HasValue
                 ? ServerHealthClassifier.BlockingRatePerHour(blockingForBand.Value, deadlockWindow)
                 : null,
             BlockingWindow = deadlockWindow,
             BlockingSeverity = isPostgres
-                ? ServerHealthClassifier.PostgresBlockingSeverity(blockingForBand, deadlockWindow, blockingTiers)
+                ? ServerHealthClassifier.PostgresBlockingSeverity(blockingForBand, pgBlocking?.CapturesTotal ?? 0, blockingTiers)
                 : ServerHealthClassifier.BlockingSeverity(
                     blockingForBand, maxBlockedSeconds, deadlockWindow, blockingTiers,
                     blocking.PeakSnapshotWaitMs.HasValue ? blocking.PeakSnapshotWaitMs.Value / 1000.0 : null),
@@ -1520,6 +1523,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             OfflineCount = offline,
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totalBlocking,
+            TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(cards.Any(c => !c.IsPostgres), cards.Any(c => c.IsPostgres)),
             TotalDeadlocks = totalDeadlocks,
             TotalBlockingSeverity = blockingTileSeverity,
             TotalDeadlockSeverity = deadlockTileSeverity,
@@ -1609,10 +1613,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             /* #7444: the count, then the arm that fired the band (the longest block, the peak snapshot or the rate),
                from the classifier's own arms so the text cannot drift from the band. #3539 A3: an unrateable window
                with no wait fired prints the count alone. */
-            /* #7616: a PostgreSQL count is captures that saw blocking, so the reason names that unit and the per-hour rate it banded on. */
-            parts.Add(c.IsPostgres
-                ? $"Blocking {c.BlockingCount} captures" + (c.BlockingRatePerHour.HasValue ? $" ({c.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)" : "")
-                : ServerHealthClassifier.BlockingReason(c.ToHealthMetrics()));
+            /* #7616: the classifier names the unit and the per-hour rate a PostgreSQL card banded on. */
+            parts.Add(ServerHealthClassifier.BlockingReason(c.ToHealthMetrics()));
         }
 
         if (c.DeadlockSeverity >= HealthSeverity.Warning && c.DeadlockCount > 0)
@@ -3159,6 +3161,13 @@ public sealed class FleetServerCard
     /// <summary>What <see cref="BlockingCount"/> counts: <c>waits</c> on SQL Server, <c>captures</c> on PostgreSQL.</summary>
     [JsonPropertyName("blocking_unit")] public string BlockingUnit => IsPostgres ? "captures" : "waits";
 
+    /// <summary>#7616: why a PostgreSQL target that has some captures still bands Unknown, the one sentence every surface shows
+    /// (the web chip reads this field). Null when the band is measured, and on SQL Server.</summary>
+    [JsonPropertyName("blocking_detail")]
+    public string? BlockingDetail => IsPostgres && BlockingCaptures > 0 && BlockingCaptures < ServerHealthClassifier.PostgresBlockingMinimumCaptures
+        ? ServerHealthClassifier.PostgresBlockingTooFewCapturesDetail
+        : null;
+
     /// <summary>The window <c>blocking_count</c> covers (#3539 A3) — carried, not serialized, for the reason
     /// <see cref="DeadlockWindow"/> is; the roll-up already publishes the bounds once.</summary>
     [JsonIgnore]
@@ -3337,10 +3346,11 @@ public sealed class FleetServerCard
         /* Re-derived from IsPostgres rather than read back off the published fields. On PostgreSQL the four
            memory fields are published as null (#7560) and HasMemoryPressure is already null on the card, so this
            guard is a safety net: the ranking must never get a memory measurement the card says it does not have.
-           The blocking count below is still a structural zero on PostgreSQL (#3017), hence DmvSourced. */
+           The blocking count below is a PostgreSQL target's captures that saw blocking (#7616), null when none ran. */
         HasMemoryPressure = IsPostgres ? null : HasMemoryPressure,
         /* The wait count the card shows and banded on (#7028). */
         BlockingCount = BlockingMeasured ? BlockingCount : null,
+        BlockingCapturesTaken = IsPostgres ? BlockingCaptures ?? 0 : null,
         PeakSnapshotWaitSeconds = MaxSnapshotWaitMs.HasValue ? MaxSnapshotWaitMs.Value / 1000.0 : null,
         MaxBlockedSeconds = MaxBlockingWaitMs / 1000.0,
         /* #3539 A3: the count's denominator, for the same reason the deadlock window travels below. */
@@ -3445,6 +3455,10 @@ public sealed class FleetOverviewResult
     [JsonPropertyName("offline_count")] public int OfflineCount { get; init; }
     [JsonPropertyName("servers_with_collection_failures")] public int ServersWithCollectionFailures { get; init; }
     [JsonPropertyName("total_blocking_events")] public long TotalBlockingEvents { get; init; }
+
+    /// <summary>#7616 / #3631: the unit(s) <see cref="TotalBlockingEvents"/> adds up. It sums SQL Server blocked waits and PostgreSQL blocking
+    /// captures, so with both engines in the fleet this names both. Null when the fleet has no server.</summary>
+    [JsonPropertyName("total_blocking_detail")] public string? TotalBlockingDetail { get; init; }
     [JsonPropertyName("total_deadlocks")] public long TotalDeadlocks { get; init; }
 
     /// <summary>The Blocking totals tile's band (#6927): the fleet's blocking waits per hour and longest block against the

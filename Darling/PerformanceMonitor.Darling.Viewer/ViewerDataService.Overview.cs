@@ -1136,8 +1136,8 @@ public sealed class ServerSummaryItem
         }
     }
 
-    /* #7560: PostgreSQL has no blocked-process reports or blocking DMV snapshots behind this count, so its 0 is structural
-       (the band reads Unknown through BlockingCountForBand). "--" is the word the tile uses for a reading it does not have. */
+    /* #7616: a PostgreSQL card shows how many of its blocking captures saw blocking. "--" is the word the tile uses for a reading it does
+       not have: a target with no capture in the window (#7654), and an offline server. */
     public string BlockingDisplay => IsOffline ? "--"
         : IsPostgres ? (PgBlockingMeasured ? PgBlockingCapturesWithBlocking + (PgBlockingCapturesWithBlocking == 1 ? " capture" : " captures") : "--")
         : BlockingCount > 0 ? BlockingCount.ToString() : "0";
@@ -1158,6 +1158,11 @@ public sealed class ServerSummaryItem
             if (IsPostgres)
             {
                 if (!PgBlockingMeasured) return "no capture in the hour";
+                if (PgBlockingCapturesTotal < ServerHealthClassifier.PostgresBlockingMinimumCaptures)
+                {
+                    return ServerHealthClassifier.PostgresBlockingTooFewCapturesDetail;
+                }
+
                 var of = $"of {PgBlockingCapturesTotal} sampled";
                 return BlockingRatePerHour.HasValue
                     ? $"{BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr, {of}"
@@ -1412,7 +1417,9 @@ public sealed class ServerSummaryItem
     /// the raw count, for <see cref="DeadlockRatePerHour"/>'s reason: a PostgreSQL target's raw zero would
     /// render 0.0/hr on a card whose severity says Unknown.</summary>
     public double? BlockingRatePerHour =>
-        BlockingCountForBand.HasValue
+        IsPostgres
+            ? ServerHealthClassifier.PostgresBlockingRatePerHour(BlockingCountForBand, PgBlockingCapturesTotal)
+            : BlockingCountForBand.HasValue
             ? ServerHealthClassifier.BlockingRatePerHour(BlockingCountForBand.Value, BlockingWindow)
             : null;
 
@@ -1420,7 +1427,9 @@ public sealed class ServerSummaryItem
     /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
     /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds, PeakSnapshotWaitSecondsForBand);
+        IsPostgres
+            ? ServerHealthClassifier.PostgresBlockingSeverity(BlockingCountForBand, PgBlockingCapturesTotal, BlockingBandThresholds)
+            : ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds, PeakSnapshotWaitSecondsForBand);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1508,6 +1517,7 @@ public sealed class ServerSummaryItem
         CpuSource = CpuSource,
         HasMemoryPressure = MemoryPressureForBand,
         BlockingCount = BlockingCountForBand,
+        BlockingCapturesTaken = IsPostgres ? PgBlockingCapturesTotal : null,
         MaxBlockedSeconds = MaxBlockedSeconds,
         /* #3539 A3: the count's denominator, for the reason the deadlock trio below travels together. */
         BlockingWindow = BlockingWindow,

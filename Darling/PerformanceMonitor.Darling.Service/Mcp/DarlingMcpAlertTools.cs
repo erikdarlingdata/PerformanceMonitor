@@ -1394,6 +1394,7 @@ public sealed partial class DarlingMcpAlertTools
         "banded rate is Critical. " +
         "health_bands.blocking_warn_per_hour and health_bands.blocking_critical_per_hour are the blocking band's tiers in blocked WAITS per HOUR, " +
         "the same unit as blocking.count_threshold (accepting 1 to 10000; one wait is one or more blocked-process report rows, so a count that was read as reports now reads as waits). " +
+        "On a PostgreSQL target the same two tiers band blocked CAPTURES per hour at the default 1-minute cadence (the share of its pg_blocking captures that saw blocking, times 60), because a capture is a sample, not a wait. " +
         "health_bands.blocking_warn_wait_seconds and health_bands.blocking_critical_wait_seconds are its bars on the longest " +
         "single block in seconds (accepting 1 to 86400). They default to 5 and 20 waits per hour and 10 and 60 seconds. " +
         "health_bands.blocking_warn_snapshot_wait_seconds and health_bands.blocking_critical_snapshot_wait_seconds are a third arm: the longest total " +

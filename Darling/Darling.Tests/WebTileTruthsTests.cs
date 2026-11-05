@@ -200,6 +200,22 @@ public sealed class WebTileTruthsTests
         var none = engines.GetProperty("postgresNoCapture").GetProperty("Blocking").GetString();
         Assert.StartsWith("Blockingn/a", none, StringComparison.Ordinal);
         Assert.Contains("no blocking capture ran", none, StringComparison.Ordinal);
+
+        /* Two captures is too few to band: the count shows, and the chip carries the service's reason. */
+        var young = engines.GetProperty("postgresYoung").GetProperty("Blocking").GetString();
+        Assert.StartsWith("Blocking2 captures", young, StringComparison.Ordinal);
+        Assert.Contains("fewer than 3 captures in this window", young, StringComparison.Ordinal);
+    }
+
+    // #7616 / #3631: the fleet's Blocking (recent) total adds SQL Server waits and PostgreSQL captures, so the tile names the units the service sent.
+    [Fact]
+    public void TheBlockingTotalTile_NamesBothUnits_WhenTheServiceSendsThem()
+    {
+        var tile = Run().GetProperty("blockingTile");
+        var both = tile.GetProperty("both").GetString();
+        Assert.Contains("SQL Server blocked waits", both, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL blocking captures", both, StringComparison.Ordinal);
+        Assert.Equal(JsonValueKind.Null, tile.GetProperty("none").ValueKind);
     }
 
     [Fact]

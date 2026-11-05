@@ -37,8 +37,10 @@ public sealed class FleetCardPostgresBlockingLiveTests
     private const int QuietServerId = -993_76163;
     private const int NoCaptureServerId = -993_76164;
     private const int SqlServerId = -993_76165;
+    private const int YoungServerId = -993_76166;
+    private const int SlowCadenceServerId = -993_76167;
 
-    private static readonly int[] SentinelIds = [CriticalServerId, WarningServerId, QuietServerId, NoCaptureServerId, SqlServerId];
+    private static readonly int[] SentinelIds = [CriticalServerId, WarningServerId, QuietServerId, NoCaptureServerId, SqlServerId, YoungServerId, SlowCadenceServerId];
 
     [Fact]
     public async Task ThePostgresCard_ReadsItsBlockingFromTheCaptures_AndNameTheTargetWithNoCaptureAsNotMeasured()
@@ -66,6 +68,8 @@ public sealed class FleetCardPostgresBlockingLiveTests
                 (QuietServerId, "pgblk-quiet", "postgres"),
                 (NoCaptureServerId, "pgblk-nocapture", "postgres"),
                 (SqlServerId, "sqlblk", "sqlserver"),
+                (YoungServerId, "pgblk-young", "postgres"),
+                (SlowCadenceServerId, "pgblk-slow", "postgres"),
             })
             {
                 await InsertServerAsync(connection, id, name, kind, ct);
@@ -94,6 +98,17 @@ public sealed class FleetCardPostgresBlockingLiveTests
             /* No pg_blocking capture at all: other collectors ran, and the only blocking capture is outside the window. */
             await InsertCaptureAsync(connection, NoCaptureServerId, "pgblk-nocapture", now.AddHours(-5), 4, ct: ct);
             await InsertCaptureAsync(connection, NoCaptureServerId, "pgblk-nocapture", now.AddMinutes(-3), 0, collector: "pg_cpu_utilization", ct: ct);
+
+            /* A target registered a minute ago: 2 captures, both blocked. 2 of 2 would scale to 60 an hour, so fewer than 3 captures is Unknown (the count still shows). */
+            await InsertCaptureAsync(connection, YoungServerId, "pgblk-young", now.AddMinutes(-1), 2, ct: ct);
+            await InsertCaptureAsync(connection, YoungServerId, "pgblk-young", now.AddMinutes(-2), 3, ct: ct);
+
+            /* A 5-minute cadence, blocked in every capture: 12 captures in the hour, 12 of 12 is 60 an hour, Critical. A nominal-hour division
+               would read 12 an hour, Warning, and never reach Critical. */
+            for (var i = 0; i < 12; i++)
+            {
+                await InsertCaptureAsync(connection, SlowCadenceServerId, "pgblk-slow", now.AddMinutes(-2 - (5 * i)), 1, ct: ct);
+            }
 
             var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
             var cards = result.Cards.Where(c => SentinelIds.Contains(c.ServerId)).ToDictionary(c => c.ServerId);
@@ -125,6 +140,21 @@ public sealed class FleetCardPostgresBlockingLiveTests
             Assert.Null(none.BlockingRatePerHour);
             Assert.Null(none.ToHealthMetrics().BlockingCount);
 
+            var young = cards[YoungServerId];
+            Assert.True(young.BlockingMeasured);
+            Assert.Equal(2, young.BlockingCount);
+            Assert.Equal(HealthSeverity.Unknown, young.BlockingSeverity);
+            Assert.Null(young.BlockingRatePerHour);
+            Assert.Equal("fewer than 3 captures in this window", young.BlockingDetail);
+            Assert.Equal(HealthSeverity.Unknown, ServerHealthClassifier.MetricSeverities(young.ToHealthMetrics()).ElementAt(3));
+
+            var slow = cards[SlowCadenceServerId];
+            Assert.Equal(12, slow.BlockingCount);
+            Assert.Equal(12L, slow.BlockingCaptures);
+            Assert.Equal(60.0, slow.BlockingRatePerHour);
+            Assert.Equal(HealthSeverity.Critical, slow.BlockingSeverity);
+            Assert.Null(slow.BlockingDetail);
+
             var sql = cards[SqlServerId];
             Assert.True(sql.BlockingMeasured);
             Assert.Equal("waits", sql.BlockingUnit);
@@ -132,16 +162,18 @@ public sealed class FleetCardPostgresBlockingLiveTests
 
             /* The fleet total adds the measured servers and leaves the unmeasured one out (#7654). */
             var rollup = DarlingFleetReader.BuildRollup(cards.Values.ToList(), now, now.AddHours(-1), now);
-            Assert.Equal(31, rollup.TotalBlockingEvents);
+            Assert.Equal(45, rollup.TotalBlockingEvents);
             Assert.Equal(HealthSeverity.Critical, rollup.TotalBlockingSeverity);
+            Assert.Contains("SQL Server blocked waits", rollup.TotalBlockingDetail, StringComparison.Ordinal);
+            Assert.Contains("PostgreSQL blocking captures", rollup.TotalBlockingDetail, StringComparison.Ordinal);
 
-            /* The Viewer's fleet total is the same number: the captures that saw blocking, 25 + 6 (the quiet target adds 0, the target
+            /* The Viewer's fleet total is the same number: the captures that saw blocking, 25 + 6 + 2 + 12 (the quiet target adds 0, the target
                with no capture in the window adds nothing). It used to count SQL Server sources only, so it read 0 here. */
             using var totals = new NpgsqlCommand("SELECT total_blocking_events FROM (" + ViewerDataService.FleetTotalsSql + ") AS t", connection);
             totals.Parameters.AddWithValue(DateTime.SpecifyKind(now.AddHours(-1), DateTimeKind.Unspecified));
             totals.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
             totals.Parameters.AddWithValue(EventWindowFloor.For(now.AddHours(-1)));
-            Assert.Equal(31L, Convert.ToInt64(await totals.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+            Assert.Equal(45L, Convert.ToInt64(await totals.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
 
             bodySucceeded = true;
         }

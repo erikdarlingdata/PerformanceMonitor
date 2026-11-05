@@ -619,6 +619,12 @@ namespace PerformanceMonitor.Common
         /// measured quiet window.</summary>
         public int? BlockingCount { get; init; }
 
+        /// <summary>#7616: on a PostgreSQL target, how many blocking captures ran in the window (the denominator of
+        /// <see cref="BlockingCount"/>, which is how many of them saw any blocking). <c>null</c> on SQL Server, whose
+        /// count is blocked waits. When it is set, the blocking band is
+        /// <see cref="ServerHealthClassifier.PostgresBlockingSeverity"/>, a share of the captures actually taken.</summary>
+        public long? BlockingCapturesTaken { get; init; }
+
         /// <summary>The worst blocking wait in the window, in seconds.</summary>
         public double MaxBlockedSeconds { get; init; }
 
@@ -1119,20 +1125,73 @@ namespace PerformanceMonitor.Common
             return arms.Rate;
         }
 
+        /// <summary>#7616: a PostgreSQL blocking band needs at least this many captures in the window. One blocked capture of one
+        /// taken is 100% of the share and would scale to 60 an hour, Critical, for a target registered a minute ago.</summary>
+        public const int PostgresBlockingMinimumCaptures = 3;
+
+        /// <summary>#7616: the PostgreSQL blocking captures per hour the tiers are written for, one a minute (the default
+        /// <c>pg_blocking</c> cadence). The band scales its share to this, so an operator-tuned cadence does not move it.</summary>
+        public const double PostgresBlockingNominalCapturesPerHour = 60.0;
+
+        /// <summary>#7616: why a PostgreSQL blocking card with some captures but fewer than
+        /// <see cref="PostgresBlockingMinimumCaptures"/> reads Unknown. One string for every surface that shows it.</summary>
+        public const string PostgresBlockingTooFewCapturesDetail = "fewer than 3 captures in this window";
+
         /// <summary>
-        /// #7616: the PostgreSQL blocking band. The count is the number of per-minute captures in the window that saw any
-        /// blocking (the capture <c>get_pg_blocking</c> reads), or <c>null</c> when no capture ran in the window (Unknown,
-        /// never a Healthy zero). It bands exactly as the SQL Server count arm of <see cref="BlockingSeverity"/> does:
-        /// captures per hour against the same per-hour tiers (<see cref="BlockingBandThresholds"/>, the store's #6927 bars,
-        /// 5 and 20 by default). With one capture a minute that is 5 and 20 minutes an hour with a blocked session
-        /// in view. There is no longest-wait arm: a capture records who waits behind whom at one instant, not how long
-        /// the wait has run, so the wait arms read zero rather than an invented duration.
+        /// #7616: PostgreSQL blocking captures per hour at the default one-a-minute cadence:
+        /// <c>capturesWithBlocking / capturesTaken * 60</c>. A capture is a snapshot, so the share of the captures that saw
+        /// blocking estimates the share of time blocked, whatever the cadence and however much of the window the collector
+        /// covered (a rate over the NOMINAL hour reads quieter when the collector ran part of it, or ran every five minutes: #3695).
+        /// <c>null</c> below <see cref="PostgresBlockingMinimumCaptures"/> captures, and when there is no count.
+        /// </summary>
+        public static double? PostgresBlockingRatePerHour(long? capturesWithBlocking, long capturesTaken) =>
+            capturesWithBlocking.HasValue && capturesTaken >= PostgresBlockingMinimumCaptures
+                ? (double)capturesWithBlocking.Value / capturesTaken * PostgresBlockingNominalCapturesPerHour
+                : null;
+
+        /// <summary>
+        /// #7616: the PostgreSQL blocking band. The count is how many of the window's per-minute captures saw any blocking
+        /// (the capture <c>get_pg_blocking</c> reads), over <paramref name="capturesTaken"/> captures. It bands
+        /// <see cref="PostgresBlockingRatePerHour"/> against the store's per-hour tiers (<see cref="BlockingBandThresholds"/>,
+        /// the #6927 bars, 5 and 20 by default), so at the default cadence that is 5 and 20 minutes an hour with a blocked session
+        /// in view. No count, no capture, or fewer than <see cref="PostgresBlockingMinimumCaptures"/> captures is Unknown, never a Healthy
+        /// zero. There is no longest-wait arm: a capture records who waits behind whom at one instant, not how long the wait has run.
         /// </summary>
         public static HealthSeverity PostgresBlockingSeverity(
             long? capturesWithBlockingOrNullWhenNoCapture,
-            TimeSpan window,
-            BlockingBandThresholds? thresholds = null) =>
-            BlockingSeverity(capturesWithBlockingOrNullWhenNoCapture, 0, window, thresholds);
+            long capturesTaken,
+            BlockingBandThresholds? thresholds = null)
+        {
+            var rate = PostgresBlockingRatePerHour(capturesWithBlockingOrNullWhenNoCapture, capturesTaken);
+            if (!rate.HasValue)
+            {
+                return HealthSeverity.Unknown;
+            }
+
+            var tiers = thresholds ?? BlockingBandThresholds.Default;
+            return rate.Value >= tiers.CriticalPerHour ? HealthSeverity.Critical
+                : rate.Value >= tiers.WarnPerHour ? HealthSeverity.Warning
+                : HealthSeverity.Healthy;
+        }
+
+        /// <summary>#7616 / #3631: what the fleet's blocking total adds up, for the tile that shows it. SQL Server counts blocked
+        /// waits and PostgreSQL counts the captures that saw blocking, and the total sums whichever the fleet has into one number, so
+        /// the tile names both units when it has both engines. <c>null</c> for a fleet with neither.</summary>
+        public static string? BlockingTotalUnitsDetail(bool hasSqlServer, bool hasPostgres) =>
+            hasSqlServer && hasPostgres ? "SQL Server blocked waits plus PostgreSQL blocking captures, in one number"
+            : hasSqlServer ? "blocked waits"
+            : hasPostgres ? "blocking captures"
+            : null;
+
+        /// <summary>#7616: the reason text for a PostgreSQL blocking band, <c>Blocking 5 captures (25.0/hr)</c>. The rate is left off
+        /// when there are too few captures to rate.</summary>
+        public static string PostgresBlockingReason(long capturesWithBlocking, long capturesTaken)
+        {
+            var rate = PostgresBlockingRatePerHour(capturesWithBlocking, capturesTaken);
+            return "Blocking " + capturesWithBlocking.ToString(CultureInfo.InvariantCulture)
+                + (capturesWithBlocking == 1 ? " capture" : " captures")
+                + (rate.HasValue ? " (" + rate.Value.ToString("0.0", CultureInfo.InvariantCulture) + "/hr)" : "");
+        }
 
         /// <summary>#7444: what each of the band's three arms read, so the band and the reason text that names
         /// the arm that fired it come from ONE evaluation and cannot disagree about which arm crossed. Wait and
@@ -1231,7 +1290,9 @@ namespace PerformanceMonitor.Common
         /// card's metrics, the same values <see cref="MetricSeverities"/> bands. A count the card did not measure reads
         /// as a bare "Blocking" because no arm ran.</summary>
         public static string BlockingReason(ServerHealthMetrics m) =>
-            m.BlockingCount.HasValue
+            m.BlockingCapturesTaken.HasValue
+                ? (m.BlockingCount.HasValue ? PostgresBlockingReason(m.BlockingCount.Value, m.BlockingCapturesTaken.Value) : "Blocking")
+                : m.BlockingCount.HasValue
                 ? BlockingReason(m.BlockingCount.Value, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds)
                 : "Blocking";
 
@@ -1453,7 +1514,9 @@ namespace PerformanceMonitor.Common
             yield return CpuSeverity(m.CpuPercentForAlert, m.CapacityUtilizationPercent, m.CpuSource);
             yield return ThreadsSeverity(m.TotalThreads, m.AvailableThreads, m.ThreadsWaitingForCpu, m.RequestsWaitingForThreads);
             yield return MemorySeverity(m.HasMemoryPressure);
-            yield return BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds);
+            yield return m.BlockingCapturesTaken.HasValue
+                ? PostgresBlockingSeverity(m.BlockingCount, m.BlockingCapturesTaken.Value, m.BlockingBandThresholds)
+                : BlockingSeverity(m.BlockingCount, m.MaxBlockedSeconds, m.BlockingWindow, m.BlockingBandThresholds, m.PeakSnapshotWaitSeconds);
             yield return DeadlockSeverity(
                 m.DeadlockCount,
                 m.DeadlockWindow,

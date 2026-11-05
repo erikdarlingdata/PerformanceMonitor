@@ -731,7 +731,8 @@ export function rollup(d) {
     ]),
     el("div", { class: "rollup-divider" }),
     el("div", { class: "rollup-group" }, [
-      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity)),
+      /* #7616 / #3631: the total adds SQL Server blocked waits and PostgreSQL blocking captures, so the hover names the unit(s) the fleet has. */
+      tile(d.total_blocking_events, "Blocking (recent)", totalClass(d.total_blocking_severity), null, d.total_blocking_detail ? plainText(d.total_blocking_detail) : null),
       /* The API's own note rides along as the tile's title — the causes and the two windows, in the words the
          service already renders for get_fleet_overview, so the hover is DETAIL on a signal that is already
          visible rather than the only place the signal exists. */
@@ -870,6 +871,8 @@ export function metricBands(c, store) {
     : fmtInt(c.blocking_count);
   const blockingChipDetail = blockingUnmeasured
     ? "no blocking capture ran" + (windowWords ? " " + windowWords : "")
+    : c.is_postgres === true && c.blocking_detail
+    ? c.blocking_detail
     : c.is_postgres === true && c.blocking_captures != null
     ? [windowWords, "of " + fmtInt(c.blocking_captures) + " sampled"].filter(Boolean).join(" · ")
     : blockingDetail;

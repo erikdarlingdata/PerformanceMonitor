@@ -659,11 +659,14 @@ public static class DarlingPgBlockingReader
         "SELECT count(*) FILTER (WHERE l.rows_collected > 0), count(*), min(l.collection_time), max(l.collection_time) " +
         PgBlockingCaptureLogWhere + " AND l.server_id = $1";
 
-    /// <summary>The captures' rows in <c>collection_log</c> and the window, written once for the one-server read above and the
-    /// fleet read below (#7616), so the fleet card counts exactly what the Blocking tab's denominator counts.
-    /// $2/$3 are the window (naive UTC).</summary>
+    /// <summary>What counts as a capture in <c>collection_log</c>: a successful <c>pg_blocking</c> pass, which records a SUCCESS with zero rows
+    /// when it found no blocking and an ERROR when it failed. The one definition behind the one-server read above, the fleet read below and
+    /// the Viewer's fleet total (#7616), so every surface counts exactly what the Blocking tab's denominator counts. The table alias is <c>l</c>.</summary>
+    public const string PgBlockingCaptureFilter = "l.collector_name = 'pg_blocking' AND l.status = 'SUCCESS'";
+
+    /// <summary>The captures' rows in <c>collection_log</c> and the window. $2/$3 are the window (naive UTC).</summary>
     private const string PgBlockingCaptureLogWhere =
-        "FROM collection_log AS l WHERE l.collector_name = 'pg_blocking' AND l.status = 'SUCCESS' " +
+        "FROM collection_log AS l WHERE " + PgBlockingCaptureFilter + " " +
         "AND l.collection_time >= $2 AND l.collection_time <= $3";
 
     /// <summary>#7616: the same counts for many servers at once, one row per server that has any capture in the window. $1 is the

@@ -919,7 +919,8 @@
                                     <TextBlock Text="Last hour:" FontSize="11" FontWeight="SemiBold"
                                                Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
-                                               Text="{Binding TotalBlockingEvents, StringFormat='Blocking events: {0}'}"/>
+                                               Text="{Binding TotalBlockingEvents, StringFormat='Blocking events: {0}'}"
+                                               ToolTip="{Binding TotalBlockingDetail}"/>
                                     <TextBlock FontSize="11" Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,16,0" VerticalAlignment="Center"
                                                Text="{Binding TotalDeadlocks, StringFormat='Deadlocks: {0}'}"
                                                ToolTip="{Binding DeadlockCoverageTooltip}"/>
