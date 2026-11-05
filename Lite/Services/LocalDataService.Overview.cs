@@ -551,7 +551,7 @@ public class ServerSummaryItem
             if (CpuIsStale || !CpuPercent.HasValue) return "--";
             /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
                figure is the SQL Server's own, and says so. */
-            if (!OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}% (SQL CPU)";
+            if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
@@ -804,7 +804,8 @@ public class ServerSummaryItem
 
             if (CpuIsElevated)
             {
-                parts.Add("CPU " + CpuDisplay);
+                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. */
+                parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
             }
 
             if (BlockingIsElevated)

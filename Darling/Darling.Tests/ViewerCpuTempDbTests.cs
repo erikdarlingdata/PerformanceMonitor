@@ -539,7 +539,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
 
             Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
             Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
-            Assert.Equal(new[] { 5.0, 6.0, 7.0 }, samples.Select(s => s.OtherProcessCpu));
+            Assert.Equal(new double?[] { 5.0, 6.0, 7.0 }, samples.Select(s => s.OtherProcessCpu));
 
             bodySucceeded = true;
         }

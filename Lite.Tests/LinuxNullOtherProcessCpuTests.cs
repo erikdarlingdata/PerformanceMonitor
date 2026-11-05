@@ -119,11 +119,20 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
         var card = new ServerSummaryItem { CpuPercent = 12 };
 
         Assert.Null(card.TotalCpuPercent);
-        Assert.Equal("12% (SQL CPU)", card.CpuDisplay);
+        Assert.Equal("SQL CPU 12%", card.CpuDisplay);
 
         card.OtherProcessCpuPercent = 8;
         Assert.Equal(20, card.TotalCpuPercent);
         Assert.Equal("20% (SQL 12%)", card.CpuDisplay);
+    }
+
+    [Fact]
+    public void StatusReason_WithoutOtherProcessCpu_SaysSqlCpuOnce()
+    {
+        var card = new ServerSummaryItem { CpuPercent = 85 };
+
+        Assert.Contains("SQL CPU 85%", card.StatusReason, StringComparison.Ordinal);
+        Assert.DoesNotContain("CPU SQL CPU", card.StatusReason, StringComparison.Ordinal);
     }
 
     private async Task SeedCpuAsync(DateTime sampleTime, int sqlCpu, int? otherCpu)
