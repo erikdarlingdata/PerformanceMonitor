@@ -244,6 +244,76 @@ if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off") {
   for (const f of layout.exempted || []) console.log(`LAYOUT-EXEMPT ${f.page} @${f.width} ${f.check}: ${f.detail} (exempt: ${f.reason})`);
   console.log(`layout: ${layout.rows.length} page/width loads in ${layout.seconds}s, ${layout.failures.length} failures`);
 }
+/* Trend plot alignment (#7543): the two Blocking trend plots sit side by side and must start at the same y, as they are, when the
+   source label beside the window label wraps, and when the other heading wraps. The layout pass above has no such check, and a stand-in
+   page would not show it: this measures the real tab at 1280 and 2560 px. The long labels are set in the page (the seed cannot make a
+   source tag longer). It fails when the two tops differ by more than ALIGN_TOLERANCE px. UI_SMOKE_LAYOUT=off skips it with the pass. */
+const ALIGN_TOLERANCE = 1;
+const ALIGN_PAGE = "ui-sql-blocking";
+const ALIGN_TITLES = ["Blocked process report trend", "Deadlock trend"];
+const LONG_SOURCE = " Source: blocked-process-report collected from the extended events session and the DMV snapshot together";
+const LONG_OTHER = " compared with the same window a week earlier on every monitored server in the fleet";
+if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off" && (!only.length || only.includes(ALIGN_PAGE))) {
+  const spec = config.pages.find((p) => p.name === ALIGN_PAGE);
+  const alignFailures = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  if (process.env.UI_SMOKE_SESSION_COOKIE) await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  const page = await context.newPage();
+  const frames = () => page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
+  const tops = (titles) =>
+    page.evaluate((ts) => {
+      return ts.map((t) => {
+        const panel = [...document.querySelectorAll("#main [data-panel]")].find((p) => p.getAttribute("data-title") === t);
+        if (!panel) return null;
+        const plot = panel.querySelector(".chart-plot") || panel.querySelector(".chart svg");
+        const head = panel.querySelector("h3").getBoundingClientRect().height;
+        return plot ? { top: plot.getBoundingClientRect().top, head } : null;
+      });
+    }, titles);
+  try {
+    for (const width of [1280, 2560]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto(baseUrl + "/" + spec.hash, { waitUntil: "domcontentloaded" });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await settle(page);
+      await frames();
+      const variants = ["as drawn", "long source label", "long label on the other heading"];
+      for (const name of variants) {
+        if (name === "long source label") {
+          await page.evaluate((text) => {
+            const panel = document.querySelector('#main [data-title="Blocked process report trend"]');
+            let sp = panel.querySelector(".panel-source");
+            if (!sp) { sp = document.createElement("span"); sp.className = "panel-sub panel-source"; panel.querySelector("h3").appendChild(sp); }
+            sp.hidden = false;
+            sp.textContent = " Source: blocked-process-report" + text;
+          }, LONG_SOURCE);
+        } else if (name === "long label on the other heading") {
+          await page.evaluate((text) => {
+            const panel = document.querySelector('#main [data-title="Deadlock trend"]');
+            const sub = panel.querySelector(".panel-sub");
+            sub.textContent = sub.textContent + text;
+          }, LONG_OTHER);
+        }
+        await frames();
+        const t = await tops(ALIGN_TITLES);
+        if (t.some((x) => x === null)) {
+          alignFailures.push({ page: ALIGN_PAGE, width, check: "trend-plot-alignment", selector: "", detail: `${name}: a trend plot was not found (${JSON.stringify(t)})` });
+          continue;
+        }
+        const diff = Math.abs(t[0].top - t[1].top);
+        console.log(`align @${width} ${name}: plot tops ${t[0].top.toFixed(1)} vs ${t[1].top.toFixed(1)} (heading heights ${t[0].head.toFixed(1)} / ${t[1].head.toFixed(1)})`);
+        if (diff > ALIGN_TOLERANCE) {
+          alignFailures.push({ page: ALIGN_PAGE, width, check: "trend-plot-alignment", selector: "[data-title=Blocked process report trend] vs [data-title=Deadlock trend]", detail: `${name}: plot tops ${t[0].top.toFixed(1)} and ${t[1].top.toFixed(1)}, ${diff.toFixed(1)} px apart (allowed ${ALIGN_TOLERANCE})` });
+        }
+      }
+    }
+  } catch (e) {
+    alignFailures.push({ page: ALIGN_PAGE, width: 0, check: "trend-plot-alignment-threw", selector: "", detail: e && e.message ? e.message.split("\n")[0] : String(e) });
+  }
+  await context.close();
+  for (const f of alignFailures) console.log(`LAYOUT ${f.page} @${f.width} ${f.check} ${f.selector} : ${f.detail}`);
+  layout.failures.push(...alignFailures);
+}
 await browser.close();
 
 /* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the

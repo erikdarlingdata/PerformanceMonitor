@@ -473,16 +473,37 @@ export function localizeAlertDetail(text, sample) {
 export const BLOCKING_SOURCES = ["blocked-process-report", "DMV snapshot"];
 
 /**
- * Which collector answered a blocking read, as a line above the chart (#5244). A filter of [A] can draw A's DMV-only event that
- * [A, B] drops, and nothing on the chart said which collector it was reading. `desc.sourceKey` names the answer's field (`source`
- * on get_blocking_trend and get_blocking_stats). Null when the descriptor names no field, when the answer carries no source (no
- * rows: the empty answer and the zero-row answer both leave it null), or when the value is not one of the two tags. The tag is
- * text, never markup (R4).
+ * Which collector answered a blocking read, as text in the panel's subtitle (#5244, moved from a row above the chart by #7543 so it
+ * takes no height from the plot). A filter of [A] can draw A's DMV-only event that [A, B] drops, and nothing on the chart said which
+ * collector it was reading. `desc.sourceKey` names the answer's field (`source` on get_blocking_trend and get_blocking_stats). Null
+ * when the descriptor names no field, when the answer carries no source (no rows: the empty answer and the zero-row answer both
+ * leave it null), or when the value is not one of the two tags. The tag is text, never markup (R4).
  */
-export function sourceStrip(data, desc) {
+export function sourceText(data, desc) {
   if (!desc || !desc.sourceKey) return null;
   const tag = getPath(data, desc.sourceKey);
-  return BLOCKING_SOURCES.includes(tag) ? el("div", { class: "strip source", role: "status" }, ["Source: " + tag]) : null;
+  return BLOCKING_SOURCES.includes(tag) ? "Source: " + tag : null;
+}
+
+/** The empty `.panel-source` span renderPanel puts after the subtitle of a panel that names a `sourceKey` (#7543). */
+export function sourceSpan(desc) {
+  if (!desc || !desc.sourceKey) return null;
+  const span = el("span", { class: "panel-sub panel-source" });
+  span.hidden = true; // an empty flex item would still take the heading's gap
+  return span;
+}
+
+/**
+ * Fills that span with the source text (#7543). It is the span's own text, set again on every answer, so a rerun cannot double it and
+ * a later subtitle rewrite (applyDataSubtitle, markPartialSubtitle) leaves it alone. An answer with no recognised source leaves it empty.
+ */
+export function applySourceSubtitle(panel, data, desc) {
+  const head = panel ? Array.from(panel.children || [])[0] : null;
+  const span = head ? Array.from(head.children || []).find((c) => String(c.className).split(" ").includes("panel-source")) : null;
+  if (!span) return;
+  const text = sourceText(data, desc);
+  span.textContent = text ? " " + text : "";
+  span.hidden = !text;
 }
 /**
  * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
