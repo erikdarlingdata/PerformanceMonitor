@@ -187,18 +187,22 @@ public class BaselineProvider
     {
         WarnIfRetentionUndercutsBaselineWindow(metricName);
         var entry = await GetOrComputeBaselinesAsync(serverId, metricName, computeTime, cancellationToken);
-        return StepsFor(entry, windowStartUtc, windowEndUtc);
+        return StepsFor(entry, windowStartUtc, windowEndUtc, _localClock);
     }
 
-    /// <summary>The local-hour walk of <see cref="GetBaselineStepsAsync"/>. Hours are the entry's own clock's: the walk goes through
-    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.</summary>
-    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc)
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsAsync"/>. Hours are the zone's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.
+    /// The clock is re-resolved over the window being drawn from the entry's own zone id and offset, as <see cref="GetBucketMapAsync"/>
+    /// does (#7644), never the entry's <see cref="CachedBaseline.Clock"/>: that one covers the compute window, the 30 days before
+    /// the compute time, so a custom range older than that would walk on a fixed offset and cut every step after a daylight-saving
+    /// change an hour off.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc, BaselineLocalClock localClock)
     {
         var steps = new List<BaselineStep>();
-        if (entry.Buckets is null || entry.Buckets.Count == 0)
+        if (entry.Buckets is null || entry.Buckets.Count == 0 || windowEndUtc <= windowStartUtc)
             return steps;
 
-        var clock = entry.Clock;
+        var clock = localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, windowStartUtc, windowEndUtc);
         var t = windowStartUtc;
         while (t < windowEndUtc)
         {

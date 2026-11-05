@@ -42,9 +42,23 @@ public sealed class OverviewBaselineStepsDstTests
         return buckets;
     }
 
-    private static List<(DateTime From, DateTime To, double Mean)> Steps(LocalClockWindow clock, DateTime start, DateTime end)
-        => BaselineProvider.StepsFor(new BaselineProvider.CachedBaseline { Buckets = EveryHourOfWeek(), Clock = clock }, start, end)
+    /// <summary>The entry the way a compute builds it: the zone id and offset the server read, and a clock resolved over the COMPUTE
+    /// window, which is not the window the page draws.</summary>
+    private static BaselineProvider.CachedBaseline Entry(DateTime computeStart, DateTime computeEnd)
+        => new()
+        {
+            Buckets = EveryHourOfWeek(),
+            TimeZoneId = Zone,
+            UtcOffsetMinutes = -300,
+            Clock = new BaselineLocalClock().Resolve(Zone, -300, computeStart, computeEnd),
+        };
+
+    private static List<(DateTime From, DateTime To, double Mean)> Steps(BaselineProvider.CachedBaseline entry, DateTime start, DateTime end)
+        => BaselineProvider.StepsFor(entry, start, end, new BaselineLocalClock())
             .Select(s => (s.FromUtc, s.ToUtc, s.Bucket.Mean)).ToList();
+
+    private static DateTime Utc(string text)
+        => DateTime.SpecifyKind(DateTime.Parse(text, CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
 
     /* Saturday 23:00 local is bucket 167, Sunday 00:00 is bucket 0, and so on. */
     public static TheoryData<string, string, string, string> Windows => new()
@@ -63,10 +77,11 @@ public sealed class OverviewBaselineStepsDstTests
     {
         var start = DateTime.SpecifyKind(DateTime.Parse(startText, CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
         var end = DateTime.SpecifyKind(DateTime.Parse(endText, CultureInfo.InvariantCulture), DateTimeKind.Unspecified);
-        var clock = new BaselineLocalClock().Resolve(Zone, -300, start.AddDays(-30), end);
+        var entry = Entry(start.AddDays(-30), end);
+        var clock = entry.Clock;
         Assert.True(clock.HasTransition, name);
 
-        var steps = Steps(clock, start, end);
+        var steps = Steps(entry, start, end);
 
         // One step per local hour, each on the bucket its own local hour and day name.
         Assert.Equal(expectedMeans, string.Join(",", steps.Select(s => s.Mean.ToString(CultureInfo.InvariantCulture))));
@@ -85,5 +100,46 @@ public sealed class OverviewBaselineStepsDstTests
         Assert.All(steps, step => Assert.Equal(TimeSpan.FromHours(1), step.To - step.From));
         // The offset change lands on a step boundary in UTC.
         Assert.Contains(steps, step => step.From == clock.TransitionAtUtc);
+    }
+
+    private const string FallBackMeans = "167,0,1,1,2,3,4,5,6";
+
+    /// <summary>
+    /// A daily-cache arm computes up to today's UTC midnight, so a 24 hour window drawn at 12:00 UTC runs 12 hours past the compute window's end.
+    /// New York falls back at 06:00 UTC on 2026-11-01, after that end: the compute clock is a fixed EDT offset with no transition. The walk
+    /// has to follow the zone over the drawn window, or every step after 06:00 UTC lands on the hour before the one it shows.
+    /// </summary>
+    [Fact]
+    public void ADailyArmWindowThatRunsPastTheComputeEnd_StillCutsAtTheChangeAfterIt()
+    {
+        var computeEnd = Utc("2026-11-01T00:00:00");
+        var entry = Entry(computeEnd.AddDays(-30), computeEnd);
+        Assert.False(entry.Clock.HasTransition);
+
+        var steps = Steps(entry, Utc("2026-10-31T12:00:00"), Utc("2026-11-01T12:00:00"));
+
+        // Saturday 08:00 local is bucket 152; the walk reaches Sunday 00:00 at 04:00 UTC, and local 01:00 happens twice, EDT then EST.
+        Assert.Equal("152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,0,1,1,2,3,4,5,6",
+            string.Join(",", steps.Select(s => s.Mean.ToString(CultureInfo.InvariantCulture))));
+        Assert.Contains(steps, step => step.From == Utc("2026-11-01T06:00:00"));
+        Assert.All(steps, step => Assert.Equal(TimeSpan.FromHours(1), step.To - step.From));
+    }
+
+    /// <summary>
+    /// A custom range older than 30 days is drawn before the compute window starts (now minus 30 days to now). The daylight-saving change
+    /// falls in the range and not in the compute window, so the compute clock is a fixed EST offset. The walk has to resolve the range's own clock.
+    /// </summary>
+    [Fact]
+    public void ACustomRangeOlderThanTheComputeWindow_StillCutsAtItsOwnChange()
+    {
+        var now = Utc("2026-12-15T09:00:00");
+        var entry = Entry(now.AddDays(-30), now);
+        Assert.False(entry.Clock.HasTransition);
+
+        var steps = Steps(entry, Utc("2026-11-01T03:00:00"), Utc("2026-11-01T12:00:00"));
+
+        Assert.Equal(FallBackMeans, string.Join(",", steps.Select(s => s.Mean.ToString(CultureInfo.InvariantCulture))));
+        Assert.Contains(steps, step => step.From == Utc("2026-11-01T06:00:00"));
+        Assert.All(steps, step => Assert.Equal(TimeSpan.FromHours(1), step.To - step.From));
     }
 }

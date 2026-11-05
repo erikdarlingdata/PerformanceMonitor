@@ -467,18 +467,24 @@ public class PgBaselineProvider
         int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime computeTime, CancellationToken cancellationToken = default)
     {
         var entry = await GetSharedEntryAsync(serverId, metricName, computeTime, cancellationToken);
-        return entry is null ? [] : StepsFor(entry, windowStartUtc, windowEndUtc);
+        return entry is null ? [] : StepsFor(entry, windowStartUtc, windowEndUtc, _localClock);
     }
 
-    /// <summary>The local-hour walk of <see cref="GetBaselineStepsSharedAsync"/>. Hours are the entry's own clock's: the walk goes through
-    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.</summary>
-    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc)
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsSharedAsync"/>. Hours are the zone's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.
+    /// The clock is re-resolved over the window being drawn from the entry's own zone id and offset, as <see cref="GetBucketMapAsync"/>
+    /// does (#7644), never the entry's <see cref="CachedBaseline.Clock"/>: that one covers the compute window, which ends at the
+    /// rounded key time (today's UTC midnight on a daily arm) and starts 30 days before, so a window drawn past its end or before its
+    /// start would walk on a fixed offset and cut every step after a daylight-saving change an hour off.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc, BaselineLocalClock localClock)
     {
         var steps = new List<BaselineStep>();
-        if (entry.Buckets is null || entry.Buckets.Count == 0)
+        if (entry.Buckets is null || entry.Buckets.Count == 0 || windowEndUtc <= windowStartUtc)
             return steps;
 
-        var clock = entry.Clock;
+        var clock = localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, AsNaive(windowStartUtc), AsNaive(windowEndUtc));
+        // The lookups key on the same re-resolved clock as the cuts, through an entry that carries it.
+        var walked = new CachedBaseline { Buckets = entry.Buckets, Clock = clock };
         var t = windowStartUtc;
         while (t < windowEndUtc)
         {
@@ -489,7 +495,7 @@ public class PgBaselineProvider
             if (clock.HasTransition && t < transition && transition < next)
                 next = transition;
             var from = steps.Count == 0 ? t - intoHour : t;
-            steps.Add(new BaselineStep(from, next, LookUp(entry, t)));
+            steps.Add(new BaselineStep(from, next, LookUp(walked, t)));
             t = next;
         }
 

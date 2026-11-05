@@ -141,7 +141,8 @@ CROSS JOIN range(0, 30) AS ii(i)";
         return new BaselineProvider.CachedBaseline
         {
             Buckets = buckets,
-            Clock = LocalClockWindow.FixedOffset(windowEndUtc, 330)
+            Clock = LocalClockWindow.FixedOffset(windowEndUtc, 330),
+            UtcOffsetMinutes = 330
         };
     }
 
@@ -151,7 +152,7 @@ CROSS JOIN range(0, 30) AS ii(i)";
         var start = new DateTime(2026, 1, 7, 10, 0, 0, DateTimeKind.Unspecified);   // 15:30 local
         var end = start.AddHours(3);
 
-        var steps = BaselineProvider.StepsFor(EntryAtFiveThirty(end), start, end);
+        var steps = BaselineProvider.StepsFor(EntryAtFiveThirty(end), start, end, new BaselineLocalClock());
 
         // Local hours 15, 16, 17 and 18 (the last runs past the window's end, as the web read's does): they step at :30 UTC.
         Assert.Equal(4, steps.Count);
