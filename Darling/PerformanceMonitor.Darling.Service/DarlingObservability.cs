@@ -81,12 +81,17 @@ ON CONFLICT (server_id) DO UPDATE SET
        host name or a bad password on the day it is added. The insert arm gives it one from the configuration (id, storage name, display name, enabled,
        the engine the config names, the cost) with the three connect columns, and leaves every fact only a connect learns (version, edition, machine
        identity, the RDS probes) NULL, which every reader already treats as "no claim". The good connect's upsert then fills those and clears the
-       connect columns. is_enabled is TRUE for the same reason as in UpsertServerSql: only enabled servers are in the connect loop. */
+       connect columns. is_enabled is TRUE for the same reason as in UpsertServerSql: only enabled servers are in the connect loop.
+       A stored time older than the newest collection is a stale flag (its clearing write was lost; EffectiveConnectDownSince makes every reader
+       ignore it), so a NEW outage replaces it instead of keeping it: keeping it would hide the whole next outage behind the self-heal rule. The
+       newer-collection test is the reader's own (v_collection_log, NotCycleRowSql, strictly later). */
     internal const string MarkConnectFailedSql = @"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, engine_kind, created_date, modified_date, monthly_cost_usd, connect_down_since, last_connect_error, next_connect_attempt)
 VALUES ($1, $5, $6, TRUE, $7, $2, $2, $8, $2, $3, $4)
 ON CONFLICT (server_id) DO UPDATE SET
-    connect_down_since = COALESCE(servers.connect_down_since, EXCLUDED.connect_down_since),
+    connect_down_since = CASE WHEN servers.connect_down_since IS NULL
+                                OR EXISTS (SELECT 1 FROM v_collection_log cl WHERE cl.server_id = servers.server_id AND cl.collection_time > servers.connect_down_since AND cl." + CollectionCycleRow.NotCycleRowSql + @")
+                              THEN EXCLUDED.connect_down_since ELSE servers.connect_down_since END,
     last_connect_error = EXCLUDED.last_connect_error,
     next_connect_attempt = EXCLUDED.next_connect_attempt;";
 

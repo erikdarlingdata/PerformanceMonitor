@@ -183,6 +183,31 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal("Threadsn/a", Texts(r.GetProperty("box"))[1]);
     }
 
+    /// <summary>#7590: a server whose connect failed shows its last values as "last known" in the Unknown tone and a Collectors chip that says collection is waiting on the connection with the error, not "Stale" and not the stale-server n/a tiles.</summary>
+    [Fact]
+    public void AnUnreachableServer_ShowsLastKnownValuesAndCollectorsWaitingOnTheConnection()
+    {
+        var r = Run("unreachable");
+        var down = r.GetProperty("down");
+        var texts = Texts(down);
+
+        foreach (var i in new[] { 0, 1, 2 })
+        {
+            Assert.Contains("last known, 2h ago", texts[i], StringComparison.Ordinal);
+            Assert.Contains("sev-Unknown", down[i].GetProperty("cls").GetString(), StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("last collected", string.Concat(texts), StringComparison.Ordinal);
+        Assert.Equal("CollectorsWaitingwaiting on the connection · Login failed for user 'pm'.", texts[5]);
+        Assert.Contains("sev-Unknown", down[5].GetProperty("cls").GetString(), StringComparison.Ordinal);
+
+        Assert.Equal("CollectorsWaitingwaiting on the connection · server unreachable", Texts(r.GetProperty("downNeverCollected"))[5]);
+        Assert.Contains("last known, no value", Texts(r.GetProperty("downNeverCollected"))[0], StringComparison.Ordinal);
+
+        /* Only a stale server (no failed connect) keeps the n/a tiles. */
+        Assert.StartsWith("CollectorsStale", Texts(r.GetProperty("stale"))[5], StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnOnlineServer_KeepsItsLiveValues()
     {

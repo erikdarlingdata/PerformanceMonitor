@@ -327,4 +327,85 @@ public class ServerUnreachableReadsOfflineTests
         Assert.Contains("Login failed for user 'x'. Values shown are", down, StringComparison.Ordinal);
         Assert.DoesNotContain("..", down, StringComparison.Ordinal);
     }
+
+    /* #1776 own-store: this fact mints its own scratch database through ScratchPostgres. */
+    [Fact]
+    public async Task A_new_outage_replaces_a_flag_older_than_the_newest_collection_and_one_outage_keeps_its_first_time()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live connect-state test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var config = new NpgsqlCommand(
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled) VALUES (78, 'sql-outage', 'sql-outage', TRUE)", connection);
+            await config.ExecuteNonQueryAsync(ct);
+        }
+
+        static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
+
+        /* The failed-connect write at a chosen time, without the clearing write a good connect would have made in between. */
+        async Task FailAtAsync(DateTime at, string error)
+        {
+            await using var command = postgres.CreateCommand(DarlingObservability.MarkConnectFailedSql);
+            command.Parameters.AddWithValue(78);
+            command.Parameters.AddWithValue(Unspecified(at));
+            command.Parameters.AddWithValue(error);
+            command.Parameters.Add(new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+            command.Parameters.AddWithValue("sql-outage");
+            command.Parameters.AddWithValue("sql-outage");
+            command.Parameters.AddWithValue("sqlserver");
+            command.Parameters.AddWithValue(0m);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        async Task<DateTime?> StoredSinceAsync()
+        {
+            await using var command = postgres.CreateCommand("SELECT connect_down_since FROM servers WHERE server_id = 78");
+            var value = await command.ExecuteScalarAsync(ct);
+            return value as DateTime?;
+        }
+
+        /* Whole seconds: the store keeps microseconds, a .NET tick is finer. */
+        var t0 = DateTime.UtcNow.AddHours(-3);
+        t0 = new DateTime(t0.Ticks - (t0.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+        var t1 = t0.AddMinutes(10);
+        var t2 = t0.AddHours(1);
+        var t3 = t0.AddHours(2);
+
+        /* One outage: the second failure keeps the first time. */
+        await FailAtAsync(t0, "first outage");
+        await FailAtAsync(t1, "first outage, retried");
+        Assert.Equal(Unspecified(t0), await StoredSinceAsync());
+
+        /* The reconnect worked and collection resumed at t2, but the clearing write was lost: the flag still reads t0. A cycle row after t0 is
+           not a collection and does not count. */
+        await using (var seed = postgres.CreateCommand(
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) VALUES ($1, 78, 'sql-outage', $3, $2, 'SUCCESS'), ($4, 78, 'sql-outage', 'wait_stats', $5, 'SUCCESS')"))
+        {
+            seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+            seed.Parameters.AddWithValue(Unspecified(t1.AddMinutes(1)));
+            seed.Parameters.AddWithValue(CollectionCycleRow.CollectorName);
+            seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
+            seed.Parameters.AddWithValue(Unspecified(t2));
+            await seed.ExecuteNonQueryAsync(ct);
+        }
+
+        /* A new outage starts at t3: its first failure replaces the stale flag, and a second failure keeps t3. */
+        await FailAtAsync(t3, "second outage");
+        Assert.Equal(Unspecified(t3), await StoredSinceAsync());
+        await FailAtAsync(t3.AddMinutes(5), "second outage, retried");
+        Assert.Equal(Unspecified(t3), await StoredSinceAsync());
+
+        /* The reads now say why: Offline with the unreachable reason, though the newest collection is over an hour old. */
+        using var list = JsonDocument.Parse(await DarlingMcpDataTools.ListServers(postgres, ct));
+        var server = list.RootElement.GetProperty("servers")[0];
+        Assert.Equal("Offline", server.GetProperty("status").GetString());
+        Assert.Contains("Server unreachable since", server.GetProperty("reason").GetString(), StringComparison.Ordinal);
+    }
 }
