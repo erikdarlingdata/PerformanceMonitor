@@ -54,7 +54,7 @@ WITH windowed AS (
     SELECT
         database_name, file_name, physical_name, file_type_desc, collection_time,
         total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
-        volume_mount_point, volume_total_mb, volume_free_mb,
+        " + VolumeKey.Sql + @" AS volume_mount_point, volume_total_mb, volume_free_mb,
         ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn_new,
         ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time ASC)  AS rn_old
     FROM v_database_size_stats
