@@ -217,12 +217,12 @@ def script_is_signed(blob: bytes) -> bool:
 def is_darling_zip(name: str) -> bool:
     """True for the Darling service zip (PerformanceMonitorDarling-<version>.zip).
 
-    "darling" anywhere in a .zip name, except the Darling Viewer's: the Viewer's Velopack
-    Portable.zip (PerformanceMonitorDarlingViewer-*) sits in the same release directory and
-    carries no scripts, so a plain "contains Darling" rule would fail every release.
+    "darling" anywhere in a .zip name, except the Darling Viewer's and the export tool's: the Viewer's Velopack
+    Portable.zip (PerformanceMonitorDarlingViewer-*) and the export tool's zip (PerformanceMonitorDarlingExport-*)
+    sit in the same release directory and carry no scripts, so a plain "contains Darling" rule would fail every release.
     """
     base = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return base.endswith(".zip") and "darling" in base and "darlingviewer" not in base
+    return base.endswith(".zip") and "darling" in base and "darlingviewer" not in base and "darlingexport" not in base
 
 
 def darling_census(archive: str, members: list[str]) -> str | None:
@@ -1141,6 +1141,10 @@ def self_test() -> int:
     expect(
         "the Darling Viewer's Portable.zip was taken for the Darling zip",
         not is_darling_zip("PerformanceMonitorDarlingViewer-darlingviewer-Portable.zip"),
+    )
+    expect(
+        "the export tool's zip was taken for the Darling zip",
+        not is_darling_zip("PerformanceMonitorDarlingExport-1.0.0.zip"),
     )
     expect("Darling-test.zip was not taken for a Darling zip", is_darling_zip("Darling-test.zip"))
     expect(
