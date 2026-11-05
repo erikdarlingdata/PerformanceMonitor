@@ -45,7 +45,11 @@ public sealed record FileIoLatencyPoint(
 /// One point of the Overview timeline's I/O Latency row (#6970): the read latency across the ranked files at one
 /// time, as the row draws it. See <see cref="ViewerDataService.GetFileIoOverviewLatencyTrendAsync"/>.
 /// </summary>
-public sealed record FileIoOverviewLatencyPoint(DateTime CollectionTime, double ReadLatencyMs);
+/// <remarks>
+/// #7624: <c>Reads</c> is the reads the point's latency averages over, summed across the ranked files, and <c>BucketMinutes</c> is
+/// the bucket width the read used. The lane needs both to apply the web strip's read floor before it marks an anomaly.
+/// </remarks>
+public sealed record FileIoOverviewLatencyPoint(DateTime CollectionTime, double ReadLatencyMs, long Reads = 0, int BucketMinutes = 0);
 
 /// <summary>
 /// One file's throughput point (MB/s) for the File I/O tab's Throughput sub-tab — a mirror of Lite's
@@ -429,7 +433,9 @@ public sealed partial class ViewerDataService
             .OrderBy(g => g.Key)
             .Select(g => new FileIoOverviewLatencyPoint(
                 g.Key,
-                PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads)))))
+                PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads))),
+                g.Sum(r => r.Reads),
+                bucketMinutes))
             .ToList();
     }
 
