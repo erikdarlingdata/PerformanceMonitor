@@ -33,8 +33,10 @@ using Xunit;
 /// </para>
 /// <para>
 /// <b>Hang guard.</b> A body that does not return within <see cref="HangGuard"/> fails the calling test, naming it. The shared
-/// thread is then stuck inside that body and cannot be freed, so every later WPF test in the process fails at once with a
-/// message naming the stuck test, instead of each waiting out its own 60 s.
+/// thread is then stuck inside that body and cannot be freed, so every later WPF test that asks while the body is still inside
+/// it fails at once with a message naming the stuck test, instead of each waiting out its own 60 s. A body that does return
+/// (it was slow, not blocked for good: #6632, and the two 11-04 hangs of #7600 returned after 68 s and 126 s) frees the thread
+/// again once its drain is done, and the tests after that run; only the slow body's own test fails (#7600).
 /// </para>
 /// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
@@ -172,9 +174,10 @@ internal sealed class StaHost
     private Dispatcher? _dispatcher;
     private volatile string? _stuckTest;
 
-    /* #6632: how long after it started the body the guard gave up on did return, or 0 while it has not. A body that returns late was
-       slow (a cold first WPF start under load); one that never returns is blocked for good. The later tests' refusals say which. */
-    private long _stuckReturnedAfterMs;
+    /* #7600: the job the guard gave up on. It completes when the body AND the host's drain have returned, which is when the thread is
+       free again, so FailIfStuck lifts the refusal then. Read and written under _stuckLock together with _stuckTest. */
+    private Task? _stuckJob;
+    private readonly object _stuckLock = new();
 
     /* #6216: what the hang guard reports about a body that did not return. The host thread writes the dispatcher counters (the hooks run
        on it); the body writes the step; the caller reads them all once the guard expires. */
@@ -261,10 +264,12 @@ internal sealed class StaHost
             if (!finished.Wait(HangGuard))
             {
                 var name = CurrentTestName();
-                _stuckTest = name;
-                _ = finished.ContinueWith(
-                    _ => Interlocked.Exchange(ref _stuckReturnedAfterMs, Math.Max(1, Environment.TickCount64 - began)),
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                lock (_stuckLock)
+                {
+                    _stuckJob = finished;
+                    _stuckTest = name;
+                }
+
                 throw new TimeoutException(
                     $"WPF test body did not return within {(HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s")}: {name}. The shared STA test thread is stuck inside it, "
                     + "so every later WPF test in this process fails at once naming this test (#5602). "
@@ -331,12 +336,23 @@ internal sealed class StaHost
         var stuck = _stuckTest;
         if (stuck is not null)
         {
-            var returnedAfter = Interlocked.Read(ref _stuckReturnedAfterMs);
-            var since = returnedAfter > 0
-                ? $" That body did return, {returnedAfter} ms after it started, so it was slow, not blocked for good (#6632)."
-                : " That body has not returned yet (#6632).";
+            /* #7600: a body that returns late (two PR runs on 11-04: 68 s and 126 s, in bodies that normally take well under a second)
+               leaves the thread free again, its dispatcher drained. Refusing every later test for the rest of the process turned one slow
+               body into a whole leg of failures. The slow body's own test still fails at the guard, naming itself, and a test that asks
+               while the body is still inside it is still refused at once. */
+            lock (_stuckLock)
+            {
+                if (_stuckJob is { IsCompleted: true })
+                {
+                    _stuckJob = null;
+                    _stuckTest = null;
+                    return;
+                }
+            }
+
             throw new InvalidOperationException(
-                $"The shared WPF STA test thread was stranded by a body that did not return within its hang guard: {stuck}. This test did not run (#5602)." + since);
+                $"The shared WPF STA test thread was stranded by a body that did not return within its hang guard: {stuck}. This test did not run (#5602). "
+                + "That body has not returned yet (#6632), and a later test runs once it does (#7600).");
         }
     }
 
