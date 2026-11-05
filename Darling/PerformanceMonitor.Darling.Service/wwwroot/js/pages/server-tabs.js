@@ -1017,7 +1017,10 @@ export const SERVER_TABS = [
         "issues",
         SCHEDULER_ISSUE_COLUMNS,
         ctx.label,
-        "No scheduler issues in this window, which is the healthy state."
+        "No scheduler issues in this window, which is the healthy state.",
+        2,
+        /* #7688: on SQL Server on Linux the read leaves Other-Process CPU and Idle out (idle reads 0 there) and says why here. */
+        "system_cpu_note"
       ),
       tablePanel(
         "I/O Issues",

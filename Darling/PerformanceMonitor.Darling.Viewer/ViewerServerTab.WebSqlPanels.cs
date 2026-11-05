@@ -14,6 +14,18 @@ using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
+/// <summary>The names of <c>sys.dm_exec_query_resource_semaphores.resource_semaphore_id</c> (#7676).</summary>
+public static class ResourceSemaphoreNames
+{
+    public static string Name(short? id) => id switch
+    {
+        0 => "Regular",
+        1 => "Small query",
+        null => "-",
+        _ => id.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
+}
+
 /// <summary>One Resource Semaphore Pressure grid row (#6388): a <see cref="MemoryGrantWindowRow"/> with its instants
 /// shown in the display zone. The raw instants stay as the sort keys.</summary>
 public sealed record ResourceSemaphorePressureGridRow(
@@ -23,6 +35,10 @@ public sealed record ResourceSemaphorePressureGridRow(
 {
     /// <summary>The pool as the web names it (#7416): the internal and default pools by name, any other as "Pool N".</summary>
     public string PoolName => ResourceGovernorPools.Name(PoolId);
+
+    /// <summary>The semaphore's name, not its id (#7676): 0 is the regular semaphore, 1 the small-query semaphore
+    /// (RESOURCE_SEMAPHORE_SMALL_QUERY). A pool lens row carries no id and shows a dash.</summary>
+    public string SemaphoreName => ResourceSemaphoreNames.Name(ResourceSemaphoreId);
 
     /// <summary>Null on a peak of 0: the shared read's DISTINCT ON picks the newest snapshot when nothing waited, an arbitrary row
     /// and not an event, so the web nulls it too (<c>peak_waiters_at</c>, <c>peak_granted_at</c>). The grid shows a dash.</summary>
@@ -53,9 +69,14 @@ public sealed record ResourceSemaphoreSnapshotGridRow(ResourceSemaphoreRow Row)
 
     public short ResourceSemaphoreId => Row.ResourceSemaphoreId;
 
+    /// <summary>The semaphore's name, not its id (#7676).</summary>
+    public string SemaphoreName => ResourceSemaphoreNames.Name(Row.ResourceSemaphoreId);
+
     public double TargetMemoryMb => Row.TargetMemoryMb;
 
-    public double MaxTargetMemoryMb => Row.MaxTargetMemoryMb;
+    /// <summary>Null for the small-query semaphore: the DMV has no max target for it and the store keeps that NULL, so the grid
+    /// shows a dash, not a zero ceiling (#7676).</summary>
+    public double? MaxTargetMemoryMb => Row.MaxTargetMemoryMb;
 
     public double TotalMemoryMb => Row.TotalMemoryMb;
 
