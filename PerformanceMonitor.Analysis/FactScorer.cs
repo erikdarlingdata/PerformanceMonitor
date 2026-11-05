@@ -630,6 +630,12 @@ public class FactScorer
     /// </summary>
     private static double ScoreDatabaseConfigFact(Fact fact)
     {
+        /* #7675: a Query Store stopped on an internal error. One that is meant to record (desired READ_WRITE) is a Warning: the monitored
+           database has no new Query Store rows at all. One that was turned OFF and then errored is an advisory, below the display bar of an
+           incident but rooted as a standing config advisory. */
+        if (fact.Key == "QUERY_STORE_ERROR")
+            return fact.Metadata.GetValueOrDefault("read_write_count") > 0 ? 0.9 : 0.4;
+
         if (fact.Key != "DB_CONFIG") return 0.0;
 
         var autoShrink = fact.Metadata.GetValueOrDefault("auto_shrink_on_count");

@@ -127,7 +127,7 @@ export const DAILY_STATS = [
      health_band carries — so an "overall_health" card duplicated this one AND, formatted as num1, rendered
      the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
   { key: "health_band", label: "Band", format: "text", small: true },
-  { key: "top_wait_type", label: "Top wait", format: "text", small: true },
+  { key: "top_wait_type", label: "Top wait", format: "text", small: true, breakAfterUnderscore: true },
   { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
   { key: "unique_queries", label: "Queries stored", format: "int" },
   { key: "blocking_events", label: "Blocking", format: "int" },

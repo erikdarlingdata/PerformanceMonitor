@@ -38,7 +38,7 @@ public sealed class WebFileIoAndPvsWindowPageTests
     {
         var panel = FileIoPanel;
         Assert.Single(Regex.Matches(panel, "readToolWithinKeptHistory\\("));
-        Assert.Contains("readToolWithinKeptHistory(\"get_file_io_trend\", { server, hours: ctx.hours }, signal)", panel);
+        Assert.Contains("readToolWithinKeptHistory(\"get_file_io_trend\", { server, hours: ctx.hours }, signal, { plotPx: estimatedPlotPx() })", panel);
         Assert.Contains("valueKey: \"avg_read_latency_ms\"", panel);
         Assert.Contains("valueKey: \"avg_write_latency_ms\"", panel);
         Assert.Contains("\"file-io-latency\"", panel);

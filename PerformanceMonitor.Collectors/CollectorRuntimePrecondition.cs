@@ -1016,6 +1016,35 @@ public static class CollectorRuntimePrecondition
     }
 
     /// <summary>
+    /// The note a Query Store read that RETURNED rows carries when a database those rows come from is in the ERROR state (#7675), or
+    /// <c>null</c> when none is. <see cref="QueryStoreNotWritingHint"/> speaks only on an empty read; an ERROR store still has its old
+    /// rows, so a read of them answers with data and nothing says the data has stopped changing. Only a database that
+    /// <paramref name="rowDatabases"/> names counts (null means every database in <paramref name="states"/>), so a healthy
+    /// database's rows carry no note because a sibling is in error.
+    /// </summary>
+    public static string? QueryStoreErrorNote(IReadOnlyList<QueryStoreDatabaseState> states, DateTime? observedUtc, IEnumerable<string>? rowDatabases)
+    {
+        if (states is null || states.Count == 0)
+        {
+            return null;
+        }
+
+        HashSet<string>? wanted = rowDatabases is null ? null : new HashSet<string>(rowDatabases, StringComparer.OrdinalIgnoreCase);
+        var errored = states.Where(s => IsErrored(s.ActualState) && (wanted is null || wanted.Contains(s.DatabaseName))).ToList();
+        if (errored.Count == 0)
+        {
+            return null;
+        }
+
+        var named = string.Join(", ", errored.Take(3).Select(s => s.DatabaseName));
+        var more = errored.Count > 3 ? $" and {errored.Count - 3} more" : string.Empty;
+        var noun = errored.Count == 1 ? "database" : "databases";
+        return $"These rows come from a Query Store in the ERROR state on the {noun} {named}{more}{DescribeObserved(observedUtc)}. " +
+               "It stopped on an internal error, so its newest rows are old and nothing new is being recorded there. " +
+               "Turn Query Store off and on again, or run sp_query_store_consistency_check. get_query_store_health shows the state.";
+    }
+
+    /// <summary>
     /// READ_WRITE is the only <c>actual_state_desc</c> that records new runtime statistics. The other three
     /// the catalog view can report — OFF, READ_ONLY and ERROR — each get their own sentence above, because
     /// each has its own remedy. ALL_TRANSACTIONS and friends are capture MODES rather than states and never
