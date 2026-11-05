@@ -115,6 +115,7 @@ internal sealed class SessionStatsChartRenderer
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.YLabel("Session Count");
+        ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
         ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, globalMax > 0 ? globalMax : 10);
         _chartHelper.ShowChartLegend(chart);
         chart.Refresh();

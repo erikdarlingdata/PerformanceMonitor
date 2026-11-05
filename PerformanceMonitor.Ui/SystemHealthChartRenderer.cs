@@ -87,6 +87,7 @@ internal sealed class SystemHealthChartRenderer
         /* The tiles are borderless (no in-panel title), so the descriptive Y-axis label is the chart's
            identifier — the same convention the File I/O charts use ("Read Latency (ms)"). */
         chart.Plot.YLabel(label);
+        ChartStyle.UseCountAxis(chart); // #7606: every counter chart counts events
         chart.Plot.Axes.SetLimitsY(0, max > 0 ? max * 1.15 : 1);
         chart.Refresh();
     }
@@ -145,6 +146,7 @@ internal sealed class SystemHealthChartRenderer
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         chart.Plot.YLabel("Sick Spinlocks (backoffs)");
+        ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
         ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, max);
         chart.Refresh();
     }
