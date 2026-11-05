@@ -1084,7 +1084,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
-        var counts = new Dictionary<int, (int Columns, bool Critical, IdentityColumnFact? Worst, double WorstPercent)>();
+        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent)>();
         var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
         await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
@@ -1119,13 +1119,13 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             counts.TryGetValue(serverId, out var seen);
             /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
             var isWorst = seen.Worst is null || percent > seen.WorstPercent;
-            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical,
+            counts[serverId] = (seen.Columns + 1, seen.CriticalColumns + (band == IdentityCapacityMath.BandCritical ? 1 : 0),
                 isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent);
         }
 
         return counts.ToDictionary(
             c => c.Key,
-            c => FleetIdentityCapacity.Of(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.Worst));
+            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst));
     }
 
     private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
@@ -1256,6 +1256,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             FailedCollectorCount = collectors.Failing,
             /* #3539 A8d: the denominator that grades the failing count into a share. */
             CollectorCount = collectors.Total,
+            /* #7561: a column at its critical bar is a failing insert, so it bands the server Critical (the same rule ToHealthMetrics hands the re-band). */
+            IdentityCapacityCritical = FleetServerCard.IsIdentityCritical(identityCapacity),
         };
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
@@ -1313,10 +1315,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             MemoryMb = memory.MemoryMb,
             BufferPoolMb = memory.BufferPoolMb,
             GrantedMemoryMb = pressure.GrantedMemoryMb,
-            MemoryWaiterCount = pressure.WaiterCount,
-            MemoryTimeoutCount = pressure.TimeoutCount,
-            MemoryForcedCount = pressure.ForcedCount,
-            HasMemoryPressure = hasMemoryPressure,
+            MemoryWaiterCount = ServerMetricSources.DmvSourced(pressure.WaiterCount, isPostgres),
+            MemoryTimeoutCount = ServerMetricSources.DmvSourced(pressure.TimeoutCount, isPostgres),
+            MemoryForcedCount = ServerMetricSources.DmvSourced(pressure.ForcedCount, isPostgres),
+            HasMemoryPressure = memoryPressureForBand,
             MemorySeverity = ServerHealthClassifier.MemorySeverity(memoryPressureForBand),
             BlockingCount = blockingCount,
             MaxBlockingWaitMs = maxBlockingWaitMs,
@@ -1345,8 +1347,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             DeadlockWindow = deadlockWindow,
             DeadlockRateThresholds = deadlockTiers,
             BlockingBandThresholds = blockingTiers,
-            /* #6875: set only when a column is at the warning bar or past it. The Band below is not read from it. */
+            /* #6875: set only when a column is at the warning bar or past it. #7561: a CRITICAL column raises the Band (OverallMetricSeverity reads it
+               through the metrics above); a WARN one stays a tile and is listed in Needs attention through HasAdvisoryTile. */
             IdentityCapacity = identityCapacity,
+            AdvisoryTiles = ServerHealthClassifier.AdvisoryTiles(
+                agentAlertGaps?.Count ?? 0, databaseProtectionOverdue?.Count ?? 0,
+                identityCapacity?.ColumnsAtBar ?? 0, FleetServerCard.IsIdentityCritical(identityCapacity)),
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -1453,7 +1459,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         }
 
         var problems = cards
-            .Where(c => c.Band != FleetHealthBand.Healthy)
+            .Where(c => c.Band != FleetHealthBand.Healthy || c.HasAdvisoryTile)
             .OrderByDescending(c => ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()))
             .ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -1467,6 +1473,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 Band = c.Band,
                 Score = ServerHealthClassifier.FleetHealthScore(c.Band, c.ToHealthMetrics()),
                 Reason = BuildReason(c),
+                AdvisoryTiles = c.AdvisoryTiles,
             })
             .ToList();
 
@@ -1510,7 +1517,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     /// <para>Internal so the prose can be asserted against the card it describes. The clause a flag produces
     /// is the plainest statement of what that flag means, and #3098 is a field whose name and whose clause
     /// said different things for long enough that four readings of the name were wrong.</para></summary>
-    internal static string BuildReason(FleetServerCard c)
+    internal static string BuildReason(FleetServerCard c, bool includeProtection = true)
     {
         if (c.IsOnline == false)
         {
@@ -1552,7 +1559,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                 : "Threads low");
         }
 
-        if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure)
+        if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure == true)
         {
             parts.Add($"Memory {c.MemoryWaiterCount} grant waiter{(c.MemoryWaiterCount == 1 ? "" : "s")}");
         }
@@ -1589,6 +1596,26 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         if (c.CollectionStale)
         {
             parts.Add("collection stale");
+        }
+
+        /* #7561: the identity tile's own words. A critical column bands the server; a warning one and the two setup tiles only list it. */
+        if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
+        {
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+        }
+
+        if (c.AgentAlertGaps is { Count: > 0 } gaps)
+        {
+            parts.Add($"Agent alerts {gaps.Count} gap{(gaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (c.DatabaseProtectionOverdue is { Count: > 0 } overdue)
+        {
+            /* #7561: the daily email prints the same items in its own Protection section, so it leaves this clause out of its reason line. */
+            if (includeProtection)
+            {
+                parts.Add(ServerHealthClassifier.ProtectionReason(overdue.Count));
+            }
         }
 
         if (c.MetricCount > 0 && c.MeasuredMetricCount == 0)
@@ -3023,10 +3050,13 @@ public sealed class FleetServerCard
     [JsonPropertyName("memory_mb")] public double? MemoryMb { get; init; }
     [JsonPropertyName("buffer_pool_mb")] public double? BufferPoolMb { get; init; }
     [JsonPropertyName("granted_memory_mb")] public double? GrantedMemoryMb { get; init; }
-    [JsonPropertyName("memory_waiter_count")] public long MemoryWaiterCount { get; init; }
-    [JsonPropertyName("memory_timeout_count")] public long MemoryTimeoutCount { get; init; }
-    [JsonPropertyName("memory_forced_count")] public long MemoryForcedCount { get; init; }
-    [JsonPropertyName("has_memory_pressure")] public bool HasMemoryPressure { get; init; }
+    /* #7560: the four memory-grant readings below are null on a PostgreSQL target, as cpu_percent is when nothing measured
+       it. PostgreSQL has no resource-semaphore view, so the old false and zeros read as "no memory pressure" when nothing
+       was looked at. memory_severity already read Unknown there. */
+    [JsonPropertyName("memory_waiter_count")] public long? MemoryWaiterCount { get; init; }
+    [JsonPropertyName("memory_timeout_count")] public long? MemoryTimeoutCount { get; init; }
+    [JsonPropertyName("memory_forced_count")] public long? MemoryForcedCount { get; init; }
+    [JsonPropertyName("has_memory_pressure")] public bool? HasMemoryPressure { get; init; }
     [JsonPropertyName("memory_severity")] public HealthSeverity MemorySeverity { get; init; }
 
     /// <summary>Blocking WAITS in the window (#5644 W1: a blocked session, its blocker and the wait's start): what the
@@ -3183,6 +3213,13 @@ public sealed class FleetServerCard
     /// <c>get_database_protection</c> agree). Null when nothing is overdue, when no capture is that fresh, and on a platform-managed server (Azure SQL Database,
     /// Managed Instance, Amazon RDS), where the age is shown and never judged. A chip on the card and nothing more: no band reads it.</summary>
     [JsonPropertyName("database_protection_overdue")] public IReadOnlyList<FleetDatabaseProtectionOverdue>? DatabaseProtectionOverdue { get; init; }
+    /// <summary>#7561: true when the card carries a tile that no band reads and that still wants a person: a Warning identity capacity tile, an Agent alert
+    /// setup gap or an overdue backup or CHECKDB. The band, the dot and the strip counts ignore it. <c>worst_servers</c> and <c>additional_problem_count</c> count
+    /// such a server (its <c>band</c> stays Healthy) and the web page sorts it above a server without one. A CRITICAL identity tile is not here: it bands the server Critical.</summary>
+    [JsonPropertyName("has_advisory_tile")] public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
+    /// <summary>#7561: the names of those tiles ("Identity capacity", "Agent alerts", "Protection"), from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one
+    /// rule the Viewer's Needs attention list reads too. Empty when the server has none.</summary>
+    [JsonPropertyName("advisory_tiles")] public IReadOnlyList<string> AdvisoryTiles { get; init; } = Array.Empty<string>();
     [JsonPropertyName("collector_severity")] public HealthSeverity CollectorSeverity { get; init; }
 
     /// <summary>The worst per-metric band, or Unknown when NOT ONE metric on the card was measured (#3539
@@ -3217,10 +3254,11 @@ public sealed class FleetServerCard
            percent-of-allocated — a card contradicting itself, and a routine scale-up ranked as maxed out. */
         CapacityUtilizationPercent = AcuUtilizationPercent,
         CpuSource = CpuSource,
-        /* Re-derived from IsPostgres rather than read back off the published counts, because those are
-           deliberately left as zeros (#3017) — reading them here would hand the ranking a measurement the
-           card's own severity says it does not have. */
-        HasMemoryPressure = ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres),
+        /* Re-derived from IsPostgres rather than read back off the published fields. On PostgreSQL the four
+           memory fields are published as null (#7560) and HasMemoryPressure is already null on the card, so this
+           guard is a safety net: the ranking must never get a memory measurement the card says it does not have.
+           The blocking count below is still a structural zero on PostgreSQL (#3017), hence DmvSourced. */
+        HasMemoryPressure = IsPostgres ? null : HasMemoryPressure,
         /* The wait count the card shows and banded on (#7028). */
         BlockingCount = ServerMetricSources.DmvSourced(BlockingCount, IsPostgres),
         PeakSnapshotWaitSeconds = MaxSnapshotWaitMs.HasValue ? MaxSnapshotWaitMs.Value / 1000.0 : null,
@@ -3245,13 +3283,19 @@ public sealed class FleetServerCard
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        IdentityCapacityCritical = IsIdentityCritical(IdentityCapacity),
     };
+
+    internal static bool IsIdentityCritical(FleetIdentityCapacity? identityCapacity) =>
+        identityCapacity is { ColumnsAtBar: > 0 } && string.Equals(identityCapacity.WorstBand, IdentityCapacityMath.BandCritical, StringComparison.Ordinal);
 }
 
 /// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>
 public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_band")] string WorstBand,
     [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
+    /* #7561: how many of those are at the critical bar, so the reason can say "1 at its limit, 4 near it" rather than call all five critical. */
+    [property: JsonPropertyName("critical_columns")] int CriticalColumns,
     /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
        does not fit a JSON number) and null when the collector did not store the value. */
     [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
@@ -3260,11 +3304,11 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_percent_used")] double? WorstPercentUsed = null,
     [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null)
 {
-    internal static FleetIdentityCapacity Of(string band, int columns, IdentityColumnFact? worst) =>
+    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst) =>
         worst is null
-            ? new FleetIdentityCapacity(band, columns)
+            ? new FleetIdentityCapacity(band, columns, criticalColumns)
             : new FleetIdentityCapacity(
-                band, columns, worst.DatabaseName,
+                band, columns, criticalColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
                 worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture));
@@ -3301,6 +3345,9 @@ public sealed class FleetRankedServer
     [JsonPropertyName("band_label")] public string BandLabel => ServerHealthClassifier.BandLabel(Band);
     [JsonPropertyName("score")] public long Score { get; init; }
     [JsonPropertyName("reason")] public string Reason { get; init; } = "";
+    /// <summary>#7561: the tiles that put this server in the list when its band alone would not. A <c>band</c> of Healthy with names here is a server listed for
+    /// an Identity capacity warning, an Agent alerts gap or an overdue backup or CHECKDB. Empty when the server has none, whatever its band.</summary>
+    [JsonPropertyName("advisory_tiles")] public IReadOnlyList<string> AdvisoryTiles { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>The full fleet roll-up payload — the pre-banded per-server cards, the band counts, the cross-server

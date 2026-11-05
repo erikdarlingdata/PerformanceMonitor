@@ -64,6 +64,8 @@ Lite/collection_schedule.json
 
 # Plans directory
 plans/
+# The export tool's showplan test fixtures (plans/ matches Plans/ on a case-insensitive file system)
+!Exporter/PerformanceMonitor.Exporter.Tests/Fixtures/Plans/
 
 # AG test fixture local passwords (copy tools/ag-fixture/.env.example to .env)
 tools/ag-fixture/.env

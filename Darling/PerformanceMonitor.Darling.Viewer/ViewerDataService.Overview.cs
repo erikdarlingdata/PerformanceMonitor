@@ -283,7 +283,7 @@ LIMIT 1";
             .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, worst);
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
     }
 
     /// <summary>
@@ -619,6 +619,7 @@ LIMIT 1";
             LastCollectionTime = lastCollection,
             AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
             DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionOverdueCount = protectionChip.Count,
             DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
@@ -993,11 +994,25 @@ public sealed class ServerSummaryItem
     /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
     public string? DatabaseProtectionChipValue { get; set; }
 
+    /// <summary>#7561: how many facts are overdue, for the Needs attention reason ("Protection 3 overdue items"). 0 with <see cref="DatabaseProtectionChipValue"/> null.</summary>
+    public int DatabaseProtectionOverdueCount { get; set; }
+
     /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
     public string? DatabaseProtectionChipDetail { get; set; }
 
     /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
     public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
+
+    /// <summary>#7561: the tiles no band reads and that still want a person (a warning Identity capacity column, an Agent alerts gap, an overdue backup or CHECKDB), by name,
+    /// from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one rule the web fleet card and <c>get_fleet_overview</c> read too. Empty when there are none.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AdvisoryTiles => ServerHealthClassifier.AdvisoryTiles(
+        AgentAlertGaps.Count,
+        HasDatabaseProtectionOverdue ? 1 : 0,
+        IdentityCapacity?.ColumnsAtBar ?? 0,
+        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical);
+
+    /// <summary>#7561: true when <see cref="AdvisoryTiles"/> names any. The band stays what the metrics say; the fleet's Needs attention list and ranking count the server.</summary>
+    public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
 
     /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
     public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
@@ -1094,7 +1109,9 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    /* #7560: PostgreSQL has no blocked-process reports or blocking DMV snapshots behind this count, so its 0 is structural
+       (the band reads Unknown through BlockingCountForBand). "--" is the word the tile uses for a reading it does not have. */
+    public string BlockingDisplay => IsOffline || IsPostgres ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -1468,6 +1485,8 @@ public sealed class ServerSummaryItem
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the overall band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        /* #7561: a column at its critical bar is a failing insert, so the card bands Critical, as the service's fleet card does. */
+        IdentityCapacityCritical = IdentityCapacity is { ColumnsAtBar: > 0 } && IdentityCapacity.WorstBand == IdentityCapacityMath.BandCritical,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────
@@ -1598,7 +1617,7 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, IdentityColumnFact? Worst = null)
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, IdentityColumnFact? Worst = null)
 {
     /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
     /// sentence when no column is known.</summary>

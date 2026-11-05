@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>PerformanceMonitor.Exporter</RootNamespace>
+    <AssemblyName>darling-export</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The release zips are published for win-x64 and linux-x64 self-contained, so both restore graphs are part of the committed lock file.
+         That keeps the RID-less locked-mode restore and the RID publish on one lock file (as in Lite). RuntimeIdentifiers (plural)
+         only widens what restore resolves and sets no RID on a plain build. -->
+    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" />
+    <!-- Not in Directory.Packages.props on purpose: Microsoft.Data.SqlClient.Extensions.Azure brings Azure.Identity in as a transitive
+         package in Lite and Darling, and a central entry for it would turn that into a centrally managed transitive entry and
+         invalidate their lock files. This is the one place the exporter picks its version. -->
+    <PackageReference Include="Azure.Identity" VersionOverride="1.21.0" />
+    <PackageReference Include="Azure.Storage.Blobs" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="DuckDB.NET.Data" />
+    <PackageReference Include="DuckDB.NET.Bindings.Full" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- PlanFeatureExtractor and PlanShapeHasher parse showplan XML into plan-feature rows. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.PlanAnalysis\PerformanceMonitor.PlanAnalysis.csproj" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

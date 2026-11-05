@@ -177,6 +177,16 @@ try {
     ok: tiles(panels.VIZ.stat({ instance_status: "ok", gaps: [] }, agentSpec))["Alert setup"],
   };
   const quietCard = fleet.metricBands({ server_name: "srv-q", display_name: "srv-q", is_online: true, has_memory_pressure: false, available_threads: null }, null);
+  /* #7560: a PostgreSQL card (has_memory_pressure null, blocking_count a structural 0, Unknown severities) prints n/a on Memory and
+     Blocking, and a SQL Server card with the same zero keeps printing it. */
+  const unmeasuredChips = (card) => Object.fromEntries(
+    findAll(fleet.metricBands(card, null), (n) => hasClass(n, "metric-chip"))
+      .filter((x) => /^(Memory|Blocking)/.test(x.textContent))
+      .map((x) => [x.textContent.replace(/(Memory|Blocking).*$/, "$1"), x.textContent]));
+  const engineChips = {
+    postgres: unmeasuredChips({ server_name: "pg", display_name: "pg", is_online: true, is_postgres: true, has_memory_pressure: null, memory_severity: "Unknown", blocking_count: 0, blocking_severity: "Unknown" }),
+    sqlServer: unmeasuredChips({ server_name: "sq", display_name: "sq", is_online: true, is_postgres: false, has_memory_pressure: false, memory_severity: "Healthy", blocking_count: 0, blocking_severity: "Healthy" }),
+  };
   const quietChips = Object.fromEntries(findAll(quietCard, (n) => hasClass(n, "metric-chip")).map((n) => [n.textContent, true]));
   /* #7507: the Blocking and Deadlocks tiles name the window the reply covered. The reply is read through the shipped apiGetFleet, so the
      window each tile names is the one the server sent, and a quiet card (no events) still names it. */
@@ -238,7 +248,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, windowChips, sweepTiles, recommendations, pools, platform, unrateable,
+    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,

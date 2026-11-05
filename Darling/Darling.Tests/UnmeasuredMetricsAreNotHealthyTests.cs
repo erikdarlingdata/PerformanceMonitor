@@ -215,7 +215,11 @@ public sealed class UnmeasuredMetricsAreNotHealthyTests
 
         Assert.Equal(0, card.BlockingCount);
         Assert.Equal(0, card.DeadlockCount);
-        Assert.False(card.HasMemoryPressure);
+        // #7560: the memory-grant readings say not measured (null), as cpu_percent does; false and zeros read as no pressure.
+        Assert.Null(card.HasMemoryPressure);
+        Assert.Null(card.MemoryWaiterCount);
+        Assert.Null(card.MemoryTimeoutCount);
+        Assert.Null(card.MemoryForcedCount);
         Assert.Equal(FleetDeadlockSource.CollectorSilent, card.DeadlockSource);
 
         var counted = Card(MonitoredEngineKind.AuroraPostgres, pgDeadlockBand: CollectorHealthClassifier.Healthy);
