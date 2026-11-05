@@ -129,6 +129,19 @@ public sealed class WebRefreshInPlaceTests
     }
 
     [Fact]
+    public void ServerPoll_OfAGridWithALoneHalfWidthPanel_RefreshesPanelsInPlace_AndKeepsTheSoloMark()
+    {
+        // #7534: span-solo sits on the live panel only, so it must not make the poll fall back to a whole-grid swap or be dropped by it.
+        if (!TryRun("soloPanelPoll", out var r)) return;
+        Assert.True(r.GetProperty("markedBefore").GetBoolean());
+        Assert.True(r.GetProperty("sameWide").GetBoolean());
+        Assert.True(r.GetProperty("sameLone").GetBoolean());
+        Assert.Contains("new", r.GetProperty("loneText").GetString());
+        Assert.Equal("panel card span-solo", r.GetProperty("loneClass").GetString());
+        Assert.Equal("panel card span-2", r.GetProperty("wideClass").GetString());
+    }
+
+    [Fact]
     public void ServerNavigation_StillDrawsAFreshGrid_WithLoadingStrips()
     {
         if (!TryRun("serverNavigation", out var r)) return;

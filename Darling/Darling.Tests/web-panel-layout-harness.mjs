@@ -97,6 +97,16 @@ intro.add(new FakeNode("text", ""));
 soloPanels(g);
 out.intro = { empty: emptyIntro, filled: solo(g) };
 
+/* #7534: an item that takes the whole row with an inline grid-column ends a run too, like a span-2 panel. */
+const inlineRow = (name, gc) => {
+  const n = new FakeNode(name, "");
+  n.style.gridColumn = gc;
+  return n;
+};
+g = grid(panel("a"), inlineRow("bar", "1 / -1"), panel("b"), panel("c"), inlineRow("holder", "1 / span 2"), panel("d"));
+soloPanels(g);
+out.inlineRow = solo(g);
+
 /* The observer runs the same walk when a panel is added. */
 let callback = null;
 globalThis.MutationObserver = class {

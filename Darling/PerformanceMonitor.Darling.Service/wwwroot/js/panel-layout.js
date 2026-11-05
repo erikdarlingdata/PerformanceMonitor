@@ -13,7 +13,7 @@
    this server) changes who is alone. soloPanels() walks the visible items in order, closes a run of span-1 items at each full-row
    item, and marks the last panel of an odd run `span-solo`, which app.css lays out as a full row. */
 
-const SOLO = "span-solo";
+export const SOLO = "span-solo";
 
 function classes(node) {
   return " " + String(node.className || "") + " ";
@@ -37,8 +37,15 @@ function isEmptyIntro(node) {
   return hasClass(node, "panel-intro") && (!node.children || node.children.length === 0) && !node.textContent;
 }
 
+/* An item can also take the whole row with an inline `grid-column` (the Active Queries live bar, the Compare holder, the Collection Log
+   status bar), so the walk reads `style.gridColumn` too: "1 / -1", "1 / span 2" or "1 / 3". */
+function spansWholeRow(node) {
+  const gc = node.style && typeof node.style.gridColumn === "string" ? node.style.gridColumn : "";
+  return /^\s*1\s*\/\s*(-1|3|span\s+2)\s*$/.test(gc);
+}
+
 function wholeRow(node) {
-  return hasClass(node, "span-2") || hasClass(node, "panel-intro");
+  return hasClass(node, "span-2") || hasClass(node, "panel-intro") || spansWholeRow(node);
 }
 
 function collect(node, items) {

@@ -57,6 +57,14 @@ public sealed class WebPanelLayoutBehaviourTests
     private static string[] Names(JsonElement e) => e.EnumerateArray().Select(x => x.GetString()!).ToArray();
 
     [Fact]
+    public void ASpanOnePanelBeforeAnInlineFullRowItem_IsAlone()
+    {
+        // #7534: the Active Queries live bar, the Compare holder and the Collection Log bar take the row with an inline
+        // grid-column. a and d each sit next to one, b and c are a pair.
+        Assert.Equal(new[] { "a", "d" }, Names(Run().GetProperty("inlineRow")));
+    }
+
+    [Fact]
     public void ALoneHalfWidthPanel_TakesTheWholeRow()
     {
         var r = Run();
