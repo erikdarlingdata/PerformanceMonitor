@@ -23,6 +23,9 @@ namespace Darling.Tests;
 /// #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the collector stores NULL for other-process CPU.
 /// The reads used to turn that NULL into 0, so the reply said the host was 100% idle. A NULL is unknown, not 0.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Only CpuBuckets_AverageOnlyTheRowsThatHaveAHostFigure reaches
+   DARLING_TEST_PG, and only to CREATE and DROP its own database through ScratchPostgres, then works entirely inside it. The
+   other tests are pure. */
 public sealed class HostCpuUnknownTests
 {
     [Fact]

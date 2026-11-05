@@ -49,14 +49,18 @@ public sealed class ViewerCpuTempDbSqlTests
     }
 
     [Fact]
-    public void CpuUtilizationSql_IsBucketedWithGaugeAveragesAndNullAsZero()
+    public void CpuUtilizationSql_IsBucketedWithGaugeAveragesAndNullOtherProcessStaysNull()
     {
-        /* #4234: both CPU columns are gauges (ruling item 2), averaged per bucket. A NULL
-           other_process_cpu_utilization (SQL on Linux, #1048) is COALESCEd to 0 BEFORE the AVG, matching
-           the pre-bucketing reader's per-row "NULL reads as 0" rule exactly rather than letting
-           Postgres's NULL-skipping AVG silently change a mixed-OS bucket's value. */
-        Assert.Contains("AVG(COALESCE(sqlserver_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.Contains("AVG(COALESCE(other_process_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* #4234: both CPU columns are gauges (ruling item 2), averaged per bucket. #7682: a NULL
+           other_process_cpu_utilization (SQL on Linux before 2025 CU1, #1048) is no longer COALESCEd to 0, which
+           drew an unknown host share as 0%. AVG skips NULLs, so a bucket whose rows all lack it is NULL and a
+           mixed bucket averages only the rows that have a real value. The SQL Server column keeps COALESCE(..., 0). */
+        var sql = ViewerDataService.CpuUtilizationSql;
+        Assert.Contains("AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sqlserver_cpu_utilization", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(other_process_cpu_utilization) AS other_process_cpu_utilization", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(other_process_cpu_utilization", sql, StringComparison.Ordinal);
+        /* The total is known only for rows that have the other-process figure. */
+        Assert.Contains("AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS total_cpu", sql, StringComparison.Ordinal);
     }
 
     /// <summary>#4234: the source check ruling item 6 asks for — every bucketed WPF trend statement carries

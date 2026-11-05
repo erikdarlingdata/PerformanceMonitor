@@ -215,7 +215,9 @@ public sealed class TimeHonestyRungTests
         /* The default frame is the statement the property has always spelled, on one arm. */
         Assert.Equal(serverLocal, Flat(LocalDataService.CpuUtilizationTrendSql));
         Assert.Contains($"GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {origin}), $4) AS bucket_start", serverLocal, StringComparison.Ordinal);
-        Assert.DoesNotContain("CASE", serverLocal, StringComparison.Ordinal);
+        /* No frame-choice arm. (#7682 put CASE WHEN other_process_cpu_utilization IS NOT NULL around the total, so the
+           rule is about the instant arm, not about CASE as a word.) */
+        Assert.DoesNotContain("CASE WHEN sample_time_utc", serverLocal, StringComparison.Ordinal);
         Assert.Contains("MIN(sample_time) AS first_sample_time", serverLocal, StringComparison.Ordinal);
         Assert.EndsWith("FROM raw GROUP BY 1 ORDER BY 1", serverLocal, StringComparison.Ordinal);
 
