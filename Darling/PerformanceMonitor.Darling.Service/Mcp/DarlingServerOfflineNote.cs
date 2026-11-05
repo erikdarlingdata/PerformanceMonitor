@@ -186,7 +186,7 @@ internal static class DarlingServerOfflineNote
     /// the SUCCESS-run rule, as an <c>unavailable</c> answer that opens with <see cref="LeadAsync"/>'s sentence. An offline server's
     /// empty read is not a true negative: nothing has been arriving, so "no dead tuples", "no replication slots" or "nothing held the
     /// xmin horizon" would be a healthy all-clear built from missing data. The original answer's own wording is dropped with its word.
-    /// With <paramref name="windowStartUtc"/> and a collection inside the window (#7724) the <c>unavailable</c> answer is <see cref="McpHelpers.CollectedThroughStatus"/> instead.
+    /// With <paramref name="windowStartUtc"/> and a collection inside the window (#7724) the <c>unavailable</c> answer is <see cref="McpHelpers.CollectedThroughStatus"/> instead (the offline lead, then the collected-through sentence).
     /// Any other answer, any answer for a server that is not offline, and any answer whose window ends at or before the server's newest
     /// collection (it is inside collected history, so its emptiness is a real finding), comes back unchanged.
     /// </summary>
@@ -209,9 +209,7 @@ internal static class DarlingServerOfflineNote
 
         /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, not that nothing is known.
            A caller that does not pass its window start keeps the offline sentence. */
-        return windowStartUtc is { } windowStart && newest is { } through && through >= windowStart
-            ? McpHelpers.CollectedThroughStatus(through)
-            : OfflineInsteadOfEmpty(lead);
+        return McpHelpers.OfflineEmptyAnswer(lead, newest, windowEndUtc, windowStartUtc, OfflineInsteadOfEmpty(lead)) ?? answer;
     }
 
     /// <summary>

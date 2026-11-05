@@ -118,7 +118,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
         _ => throw new ArgumentOutOfRangeException(nameof(family), family, null),
     };
 
-    /// <summary>Last collected five days ago: the default window holds nothing and the server is Offline by list_servers' rule.</summary>
+    /// <summary>Last collected twelve days ago, older than the widest window any family reads (ten days: the 168-hour reads, the config changes at 168): the window holds nothing collected and the server is Offline by list_servers' rule (#7724 keeps a window that holds a collection for the collected-through answer).</summary>
     [Theory]
     [MemberData(nameof(Families))]
     public async Task AnEmptyRead_FromAnOfflineServer_IsUnavailable_WithTheOfflineLeadFirst_AgainstDevPostgres(string family)
@@ -126,7 +126,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
         var name = "sql7167-off-" + family.Replace('_', '-');
         await WindowFloorLiveHarness.RunAsync(ConnectionString, [], [name], NoTables, async (c, ds, now) =>
         {
-            var lastCollection = now.AddDays(-5);
+            var lastCollection = now.AddDays(-12);
             await WindowFloorLiveHarness.SeedServerAsync(
                 c, name, now.AddDays(-40), "wait_stats", lastCollection.AddHours(-3), 30, lastCollection, NoTables, TestContext.Current.CancellationToken);
             await SeedHistoryAsync(c, name, lastCollection);

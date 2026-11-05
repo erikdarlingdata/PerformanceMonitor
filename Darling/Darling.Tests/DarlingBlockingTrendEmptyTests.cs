@@ -88,9 +88,12 @@ public sealed class DarlingBlockingTrendEmptyTests
             {
                 var root = JsonDocument.Parse(answer).RootElement;
                 Assert.Equal("unavailable", root.GetProperty("status").GetString());
-                Assert.Equal(
-                    "Nothing was recorded through the last collection at " + expected + ". Nothing after that is known.",
-                    root.GetProperty("message").GetString());
+                var sentence = "Nothing was recorded through the last collection at " + expected + ". Nothing after that is known.";
+                /* The message keeps the offline lead an MCP caller needs, then the sentence; the note is the sentence alone, which the web page prints. */
+                var message = root.GetProperty("message").GetString()!;
+                Assert.StartsWith(ServerName + " is offline: ", message, StringComparison.Ordinal);
+                Assert.EndsWith(" " + sentence, message, StringComparison.Ordinal);
+                Assert.Equal(sentence, root.GetProperty("collected_through_note").GetString());
                 Assert.StartsWith(expected[..19], root.GetProperty("collected_through").GetString(), StringComparison.Ordinal);
                 Assert.DoesNotContain("genuine all-clear", answer, StringComparison.Ordinal);
             }

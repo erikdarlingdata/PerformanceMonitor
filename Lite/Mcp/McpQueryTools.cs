@@ -1816,17 +1816,12 @@ public sealed class McpQueryTools
             return null;
         }
 
-        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does.
-           A caller that does not pass its window start keeps the offline sentence. */
-        if (windowStart is { } start && newest >= start)
-        {
-            return McpHelpers.CollectedThroughStatus(newest);
-        }
+        var lead = $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
+            + "so nothing is arriving to read, whatever the collectors would otherwise report.";
 
-        return McpHelpers.Status(
-            "unavailable",
-            $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
-            + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
+        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does,
+           after the offline lead. A caller that does not pass its window start keeps the offline sentence. */
+        return McpHelpers.OfflineEmptyAnswer(lead, newest, windowEnd, windowStart, McpHelpers.Status("unavailable", lead + " " + OfflineAnswerEnd));
     }
 
     private const string OfflineAnswerEnd = "An empty result here is missing data, not a finding.";
@@ -1845,7 +1840,7 @@ public sealed class McpQueryTools
         /// <summary>The answer <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> builds.</summary>
         public bool IsOffline => Word == "unavailable" && Message is { } text
             && ((text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal))
-                || text.StartsWith(McpHelpers.CollectedThroughOpening, StringComparison.Ordinal));
+                || (text.Contains(" is offline: ", StringComparison.Ordinal) && text.Contains(McpHelpers.CollectedThroughOpening, StringComparison.Ordinal)));
     }
 
     private static AnswerStatus ReadStatus(string answer)

@@ -129,8 +129,11 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         var root = JsonDocument.Parse(answer).RootElement;
         Assert.Equal("unavailable", root.GetProperty("status").GetString());
         var message = root.GetProperty("message").GetString()!;
-        Assert.StartsWith("Nothing was recorded through the last collection at ", message, StringComparison.Ordinal);
+        /* The offline lead first (an MCP caller still learns the server is offline), then the sentence; the note is the sentence alone. */
+        Assert.Contains(" is offline: ", message, StringComparison.Ordinal);
+        Assert.Contains(". Nothing was recorded through the last collection at ", message, StringComparison.Ordinal);
         Assert.EndsWith(". Nothing after that is known.", message, StringComparison.Ordinal);
+        Assert.StartsWith("Nothing was recorded through the last collection at ", root.GetProperty("collected_through_note").GetString(), StringComparison.Ordinal);
         var through = DateTime.Parse(root.GetProperty("collected_through").GetString()!, System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
         Assert.InRange((through - last).TotalSeconds, -2, 2);
