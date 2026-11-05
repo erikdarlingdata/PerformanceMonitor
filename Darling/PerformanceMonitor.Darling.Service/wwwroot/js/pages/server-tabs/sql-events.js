@@ -33,7 +33,7 @@ export const SEVERE_ERROR_COLUMNS = [
   { key: "error_number", label: "Error #", format: "int" },
   { key: "severity", label: "Severity", format: "int" },
   { key: "state", label: "State", format: "int" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "database_id", label: "DB ID", format: "int" },
   { key: "message", label: "Message", wrap: true },
 ];
@@ -55,7 +55,7 @@ export const IO_ISSUE_COLUMNS = [
   { key: "interval_long_ios", label: "Interval Long IOs", format: "int" },
   { key: "total_long_ios", label: "Total Long IOs", format: "int" },
   { key: "longest_pending_requests_duration_ms", label: "Pending Duration ms", format: "ms" },
-  { key: "longest_pending_requests_file_path", label: "File Path", wrap: true },
+  { key: "longest_pending_requests_file_path", label: "File Path", name: true, path: true },
 ];
 
 export const CPU_TASK_COLUMNS = [
@@ -181,7 +181,7 @@ export const DEFAULT_TRACE_COLUMNS = [
   { key: "event_time", label: "Event Time", format: "time" },
   { key: "category", label: "Category" },
   { key: "event_name", label: "Event" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "object_name", label: "Object" },
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },

@@ -321,12 +321,12 @@ function reproPanel(key, stem) {
     return el("div", { class: "repro-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
-  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  const copy = el("button", { type: "button", class: "btn grid-tool", text: "Copy" });
   copy.addEventListener("click", async () => {
     const out = await copyText(r.script);
     status.textContent = out.message;
   });
-  const download = el("button", { type: "button", class: "grid-tool", text: "Download .sql" });
+  const download = el("button", { type: "button", class: "btn grid-tool", text: "Download .sql" });
   download.addEventListener("click", () => {
     try {
       downloadText(reproFileName(stem), [r.script], "application/sql");
@@ -380,7 +380,7 @@ function reproButton(key, server, source) {
   const reproOpen = openRepros.has(key);
   const repro = el("button", {
     type: "button",
-    class: "grid-tool",
+    class: "btn grid-tool",
     text: reproOpen ? "Hide repro" : "Repro script",
     "aria-expanded": reproOpen ? "true" : "false",
     title: "Build a T-SQL repro script from the stored query text and plan",
@@ -405,13 +405,13 @@ function panelFor(key, stem, server, source) {
   if (r.kind !== "plan") {
     return el("div", { class: "plan-panel" }, [el("div", { class: r.kind === "error" ? "strip error" : "strip empty", text: r.message })]);
   }
-  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  const copy = el("button", { type: "button", class: "btn grid-tool", text: "Copy" });
   const pretty = prettyPrintXml(r.xml);
   copy.addEventListener("click", async () => {
     const out = await copyText(pretty);
     status.textContent = out.message;
   });
-  const download = el("button", { type: "button", class: "grid-tool", text: "Download .sqlplan" });
+  const download = el("button", { type: "button", class: "btn grid-tool", text: "Download .sqlplan" });
   if (r.truncated) {
     download.disabled = true;
     download.setAttribute("disabled", "");
@@ -452,7 +452,7 @@ export function planSourceCell(server, source, label, title) {
     const isOpen = openPlans.has(key);
     const button = el("button", {
       type: "button",
-      class: "grid-tool",
+      class: "btn grid-tool",
       text: isOpen ? "Hide plan" : text,
       "aria-expanded": isOpen ? "true" : "false",
       title: title || "Show the stored plan for this row",

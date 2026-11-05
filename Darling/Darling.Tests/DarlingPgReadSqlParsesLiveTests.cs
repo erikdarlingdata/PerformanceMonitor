@@ -91,6 +91,7 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
            where it is spliced. */
         "DarlingPgStatementReader.WalBytesWindowSql",
+        "DarlingPgStatementReader.IsServiceStatementSql",
         /* #3278's twin of the line above, and the same reasoning: an IN-list fragment built from
            EnumeratedCollectorDriver.FreshnessSuccessStatuses, so it is 'SUCCESS', 'SKIPPED' and not a
            statement. The query it is spliced into - CoverageEvidenceSql - IS in the parse-checked

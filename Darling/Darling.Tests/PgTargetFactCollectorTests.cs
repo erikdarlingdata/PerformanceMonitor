@@ -212,6 +212,10 @@ public sealed class PgTargetFactCollectorTests
            because "how many minutes of the window did the collector actually observe" is a question only the log
            answers. Not a v_ view, not a SQL Server table by another name; nothing else is admitted. */
         tables.Add("collection_log");
+        /* #7567: the top-statements read leaves out the service's own statements, which only pg_statement_text can
+           name (the marker comment is in the stored text, and pg_statement_stats keeps none). A real store table, read
+           only for that anti-join and never for display: the text itself stays the drill-down's. */
+        tables.Add("pg_statement_text");
 
         /* #3691 v2 plumbing: the tables the v2 lanes read are collector tables already — the catalog admits them
            with no edit here — but a lane building on that must not discover otherwise at CI, so each is pinned
