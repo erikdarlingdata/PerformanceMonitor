@@ -850,6 +850,7 @@ public sealed class DarlingMcpTools
                for a store with no properties snapshot, and then edition_note says so. */
             var propertiesRow = await DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             var (editionName, editionNote) = AuditEditionLabel(propertiesRow?.Edition, edition);
+            totalMemoryMb = AuditPhysicalMemoryMb(totalMemoryMb, propertiesRow?.PhysicalMemoryMb, edition);
             /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
                cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
             var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
@@ -1003,6 +1004,15 @@ public sealed class DarlingMcpTools
         engineEdition == CollectorEngineCapability.UnknownEngineEdition
             ? "Unknown"
             : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
+
+    /// <summary>
+    /// The physical memory the max server memory audit quotes (#7552 item 7). The Configuration tab prints Server Properties' physical memory
+    /// beside this audit, and the memory facts read the same RAM a moment apart (1,022 MB against 1,023 MB), so the audit quotes the stored
+    /// server property whenever the store holds one. On an Azure SQL Database (engine edition 5) the fact is the database's own memory limit,
+    /// which the property is not, so the fact stays.
+    /// </summary>
+    internal static double AuditPhysicalMemoryMb(double factMb, long? propertyMb, int engineEdition)
+        => engineEdition != 5 && propertyMb is > 0 ? propertyMb.Value : factMb;
 
     /// <summary>
     /// The <c>edition</c> and <c>edition_note</c> audit_config echoes (#5633 item 10). The stored <c>Edition</c> property

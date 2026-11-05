@@ -33,7 +33,7 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.document = { createElement: (t) => new FakeNode(t), createElementNS: (_ns, t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
 globalThis.location = { hash: "#/server/a/config" };
 
 const root = process.argv[2];
@@ -63,4 +63,56 @@ out.bloatReclaimable = cellOf(PG_INDEX_BLOAT_COLUMNS, [{ schema_name: "s", table
 out.pid = cellOf(PG_SESSION_STATE_COLUMNS, [{ pid: 5828 }], "PID");
 out.queryId = cellOf(QUERY_STORE_COLUMNS, [{ query_id: 5568, plan_id: 7712 }], "Query ID");
 out.planId = cellOf(QUERY_STORE_COLUMNS, [{ query_id: 5568, plan_id: 7712 }], "Plan ID");
+
+/* #7552 item 4: an axis tick keeps only the decimals its step needs; a tooltip (no step) keeps its two. */
+{
+  const { FORMATTERS } = await import(pathToFileURL(root + "/util.js").href);
+  const { axisTickLabels } = await import(pathToFileURL(root + "/charts.js").href);
+  const { formatComposedValue } = await import(pathToFileURL(root + "/compose.js").href);
+  out.ticksRound = axisTickLabels([0, 100, 200, 300, 400], 100, FORMATTERS.num2).join(" | ");
+  out.ticksSmall = axisTickLabels([0, 0.005, 0.01, 0.015], 0.005, FORMATTERS.num2).join(" | ");
+  out.tooltip = FORMATTERS.num2(1234.5);
+  out.composedTicks = [0, 200, 400, 800].map((v) => formatComposedValue(v, "s", { step: 200 })).join(" | ");
+  out.composedTooltip = formatComposedValue(800, "s");
+}
+
+/* #7552 item 6: the Daily Summary Top wait tile may break after each underscore, and still reads as the one name. */
+{
+  const { DAILY_STATS } = await import(pathToFileURL(root + "/pages/server-tabs/sql-overview.js").href);
+  const tile = VIZ.stat({ top_wait_type: "SOS_SCHEDULER_YIELD" }, { stats: DAILY_STATS.filter((st) => st.key === "top_wait_type") });
+  out.topWait = { text: tile.textContent.replace("Top wait", ""), breaks: tile.findAll((n) => n.tag === "wbr").length };
+}
+
+/* #7552 item 10: an hour of memory pressure events is stamped at its middle, because the chart centres a bar on its stamp. */
+{
+  const { pressureEventBuckets } = await import(pathToFileURL(root + "/pages/server-tabs/sql-memory.js").href);
+  out.pressureStamp = pressureEventBuckets([{ sample_time: "2026-11-05T17:48:00", memory_indicators_process: 2, memory_indicators_system: 0 }], null).points[0].time;
+}
+
+/* #7552 items 8 and 9 on the real Queries tab: Automatic Tuning names Plan Corrections as the panel that says why, and Top Queries with
+   snapshots and no measured change says the short sentence. Only fetch is a stand-in. */
+{
+  const { SERVER_TABS } = await import(pathToFileURL(root + "/pages/server-tabs.js").href);
+  const tool = "stored 8 query_stats snapshot(s) in the last 24 hours, but none carries a measured delta. Use as_of and hours_back to reach one.";
+  const none = "No tuning recommendations for this server in the window.";
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const body = u.includes("get_top_queries_by_cpu")
+      ? { status: "empty", message: tool, hints: { snapshots_in_window: 8, snapshots_with_measured_delta: 0, suggested_hours_back: 111 } }
+      : u.includes("get_plan_corrections") ? { status: "empty", message: none, hints: null } : { status: "unavailable", message: "n/a" };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+  };
+  const tab = SERVER_TABS.find((t) => t.id === "queries");
+  const panels = tab.build("example-sql-01", { hours: 6, label: "last 6 hours", server: "example-sql-01" });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const flat = [];
+  const walk = (n) => { if (!n) return; if (Array.isArray(n)) return n.forEach(walk); flat.push(n); };
+  walk(panels);
+  const bodyOf = (match) => {
+    const p = flat.flatMap((n) => n.findAll((x) => x.attrs && typeof x.attrs["data-title"] === "string" && match(x.attrs["data-title"])))[0];
+    return p ? p.findAll((x) => String(x.className).includes("panel-body"))[0].textContent : null;
+  };
+  out.autoTuning = bodyOf((t) => t === "Automatic Tuning");
+  out.topQueriesEmpty = bodyOf((t) => t.startsWith("Top Queries by"));
+}
 console.log(JSON.stringify(out));

@@ -142,14 +142,17 @@ export function fanout(read, params, specs, intro = null) {
        first one may be to the left rather than above. A panel that shows its own emptyWins sentence does not say the message, so it neither
        claims it nor gets the pointer. */
     let saidEmpty = false;
+    let saidBy = "";
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") {
         const repeats = saidEmpty && emptyHeadline(spec, res) === res.message;
+        if (!saidEmpty && emptyHeadline(spec, res) === res.message) saidBy = spec.title;
         saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
-        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as the panel that says why.") : panelEmptyStrip(spec, res)]);
+        /* #7552: the pointer names the panel that says why. */
+        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as " + (saidBy || "the panel that says why") + ".") : panelEmptyStrip(spec, res)]);
       }
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so

@@ -1455,8 +1455,11 @@ function vizStat(data, desc) {
     /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
     const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
     const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    const valueText = why != null && why !== "" ? String(why) : shownValue;
+    /* #7552: a wait name (SOS_SCHEDULER_YIELD) may break after an underscore, so a narrow tile wraps between words and not at its last letter. */
+    const valueKids = s.breakAfterUnderscore ? valueText.split(/(?<=_)/).flatMap((part, i) => (i ? [el("wbr"), part] : [part])) : null;
     return el("div", { class: "stat" }, [
-      el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
+      valueKids ? el("div", { class: valueClass }, valueKids) : el("div", { class: valueClass, text: valueText }),
       el("div", { class: "label", text: s.label }),
     ]);
   };

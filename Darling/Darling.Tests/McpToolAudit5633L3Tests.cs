@@ -23,6 +23,14 @@ namespace Darling.Tests;
 public sealed class McpToolAudit5633L3Tests
 {
     [Theory]
+    [InlineData(1023, 1022, 3, 1022)]
+    [InlineData(1023, null, 3, 1023)]
+    [InlineData(1023, 0, 3, 1023)]
+    [InlineData(1023, 1022, 5, 1023)]
+    public void AuditPhysicalMemoryMb_QuotesTheServerProperty_SoTheConfigurationTabPrintsOneNumber(double fact, long? property, int engineEdition, double expected)
+        => Assert.Equal(expected, DarlingMcpTools.AuditPhysicalMemoryMb(fact, property, engineEdition));
+
+    [Theory]
     [InlineData("Developer Edition (64-bit)", 3)]
     [InlineData("Enterprise Evaluation Edition (64-bit)", 3)]
     [InlineData("Standard Edition (64-bit)", 2)]

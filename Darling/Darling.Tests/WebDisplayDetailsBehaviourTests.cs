@@ -81,4 +81,43 @@ public sealed class WebDisplayDetailsBehaviourTests
         Assert.Equal(expected, Text(cell));
         Assert.Contains("num", Cls(cell).Split(' '));
     }
+
+    private static string Str(string name) => Run().GetProperty(name).GetString()!;
+
+    [Fact]
+    public void ARoundTickStep_PrintsNoDecimals_AndASmallStepPrintsExactlyWhatItNeeds()
+    {
+        Assert.Equal("0 | 100 | 200 | 300 | 400", Str("ticksRound"));
+        Assert.Equal("0.000 | 0.005 | 0.010 | 0.015", Str("ticksSmall"));
+        // A tooltip has no step and keeps its two places, so only the axis changed.
+        Assert.Equal("1,234.50", Str("tooltip"));
+    }
+
+    [Fact]
+    public void ACustomViewAxisInASecondsUnit_PrintsNoDecimalsForAWholeStep()
+    {
+        Assert.Equal("0 s | 200 s | 400 s | 800 s", Str("composedTicks"));
+        Assert.Equal("800.0 s", Str("composedTooltip"));
+    }
+
+    [Fact]
+    public void ATopWaitName_MayBreakAfterEachUnderscore_AndStillReadsAsTheOneName()
+    {
+        var tile = Run().GetProperty("topWait");
+        Assert.Equal("SOS_SCHEDULER_YIELD", tile.GetProperty("text").GetString());
+        Assert.Equal(2, tile.GetProperty("breaks").GetInt32());
+    }
+
+    [Fact]
+    public void AnHourOfMemoryPressure_IsStampedAtItsMiddle() => Assert.Equal("2026-11-05T17:30:00", Str("pressureStamp"));
+
+    [Fact]
+    public void TheAutomaticTuningNote_NamesPlanCorrections() => Assert.Equal("Empty for the same reason as Plan Corrections.", Str("autoTuning"));
+
+    [Fact]
+    public void TopQueriesWithSnapshotsAndNoMeasuredChange_SaysTheShortSentence_OnTheQueriesTabToo()
+    {
+        var text = Str("topQueriesEmpty");
+        Assert.Contains("No query in this range changed enough between snapshots to attribute CPU to it. A range of the last 111 hours or more reaches one that did.", text, System.StringComparison.Ordinal);
+    }
 }
