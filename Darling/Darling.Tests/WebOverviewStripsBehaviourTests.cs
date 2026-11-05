@@ -276,6 +276,31 @@ public sealed class WebOverviewStripsBehaviourTests
     /// (#6360). They used to read UTC, so a reader in New York saw 20:28 on the axis under a chip that said 4:28:55 PM. The window here is
     /// 12:00-13:00 UTC, which is 07:00-08:00 in the zone the harness pins.
     /// </summary>
+    /// <summary>
+    /// #7644: the band is one step per hour the window crosses, and a point is judged against its own hour's step only. Hour A's band is
+    /// 8 to 12 and hour B's is 48 to 52; a third hour has no step. 49 in hour A is above its band and 11 in hour B is under its band, so
+    /// both are marked. 11 in hour A and 49 in hour B sit inside their own hour's band (a flat band over the window would mark them), and
+    /// 100 in the hour with no step is marked by nothing. An hour whose step has no samples draws no band and marks nothing.
+    /// </summary>
+    [Fact]
+    public void TheBand_StepsByHour_AndEachPointIsJudgedAgainstItsOwnHour()
+    {
+        var r = Run("steps");
+
+        var steps = r.GetProperty("steps").EnumerateArray().ToArray();
+        Assert.Equal(2, steps.Length);
+        Assert.Equal(-30, steps[0].GetProperty("from").GetDouble());
+        Assert.Equal(30, steps[0].GetProperty("to").GetDouble());
+        Assert.Equal(8, steps[0].GetProperty("lower").GetDouble());
+        Assert.Equal(12, steps[0].GetProperty("upper").GetDouble());
+        Assert.Equal(48, steps[1].GetProperty("lower").GetDouble());
+        Assert.Equal(52, steps[1].GetProperty("upper").GetDouble());
+        Assert.Equal(new[] { 10d, 40d }, r.GetProperty("markedTimes").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+
+        Assert.Equal(1, r.GetProperty("droppedStepBands").GetInt32());
+        Assert.Equal(new[] { 10d }, r.GetProperty("droppedStepMarked").EnumerateArray().Select(e => e.GetDouble()).ToArray());
+    }
+
     [Fact]
     public void TheAxisAndTheReadout_ReadInLocalTime_NotUtc()
     {
@@ -303,6 +328,27 @@ public sealed class WebOverviewStripsBehaviourTests
         var after = r.GetProperty("afterObserver").EnumerateArray().Single();
         Assert.Equal("328", after.GetProperty("width").GetString());
         Assert.StartsWith("0 0 328 ", after.GetProperty("viewBox").GetString());
+    }
+
+    /// <summary>
+    /// #7644: the baseline read took up to 23 s on a busy server and the strips waited for it. They draw when their own reads return, with
+    /// no band, and the band appears when the baseline read does. A baseline read that fails leaves the lines and says so in a note.
+    /// </summary>
+    [Fact]
+    public void TheStrips_DrawWhileTheBaselineIsPending_AndTheBandArrivesWhenItResolves()
+    {
+        var r = Run("latebaseline");
+
+        var pending = r.GetProperty("whilePending");
+        Assert.True(pending.GetProperty("lines").GetInt32() > 0, "no strip line was drawn while the baseline read was still pending");
+        Assert.Equal(0, pending.GetProperty("bands").GetInt32());
+        var after = r.GetProperty("afterBaseline");
+        Assert.True(after.GetProperty("lines").GetInt32() > 0);
+        Assert.True(after.GetProperty("bands").GetInt32() > 0, "the band did not appear once the baseline resolved");
+        var failed = r.GetProperty("afterFailure");
+        Assert.True(failed.GetProperty("lines").GetInt32() > 0);
+        Assert.Equal(0, failed.GetProperty("bands").GetInt32());
+        Assert.True(failed.GetProperty("notes").GetInt32() > 0);
     }
 
     /// <summary>

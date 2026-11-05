@@ -30,7 +30,9 @@ public sealed class OverviewIoReadFloorTests
 
     private static readonly DateTime T0 = new(2026, 11, 3, 0, 0, 0, DateTimeKind.Unspecified);
 
-    private static BaselineBucket Band() => new() { Mean = 1, StdDev = 0.5, SampleCount = 500 }; // band 0..2 ms
+    /// <summary>One band 0..2 ms over the whole day the points sit in.</summary>
+    private static IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep> Band() =>
+        [new(T0.ToOADate(), T0.AddDays(1).ToOADate(), 1, 0, 2)];
 
     private static List<(double Time, double Value)> Slow(int count, double ms = 5) =>
         Enumerable.Range(0, count).Select(i => (T0.AddMinutes(i).ToOADate(), ms)).ToList();
@@ -46,7 +48,7 @@ public sealed class OverviewIoReadFloorTests
         {
             var control = new CorrelatedTimelineLanesControl();
             control.Initialize(null!, 1, () => TimeZoneInfo.Utc);
-            control.UpdateLane(control.FileIoChart, "I/O ms", data, "#81C784", baseline: Band(),
+            control.UpdateLane(control.FileIoChart, "I/O ms", data, "#81C784", bands: Band(),
                 minAnomalyValue: minAnomalyValue, pointReads: reads, minPointReads: minReads);
             dots = RedDots(control.FileIoChart);
         });

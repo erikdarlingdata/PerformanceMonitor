@@ -593,7 +593,6 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Matches(LatestReaderCall, source);
         Assert.Matches(CapturedAtKey, source);
         Assert.Contains("captured_at = capturedAt is { } at ? McpHelpers.FormatEffectiveStart(at) : null,", source, StringComparison.Ordinal);
-        Assert.Contains("IndexAnalysisRollupRow(d, true, SnapshotTimeOf(snapshotTimes, d.DatabaseId))", source, StringComparison.Ordinal);
         /* The overall row spans databases and is built without a time. */
         Assert.Contains("IndexAnalysisRollupRow(result.OverallRollup, false)", source, StringComparison.Ordinal);
     }

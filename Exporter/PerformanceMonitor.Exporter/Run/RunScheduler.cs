@@ -220,7 +220,7 @@ public sealed class RunScheduler(
             var childCall = new ChildCall(settings.ResolvedChildExe, Planner.BuildExportArgs(settings, call), log, log + ".err");
             var result = await childRunner.RunAsync(childCall, ct).ConfigureAwait(false);
             if (result.NotStarted is { } why) return (result, why);
-            // The child's own output goes to the run's stdout, then the summary line .
+            // The child's own output goes to the run's stdout, then the summary line.
             var summary = $"exit code: {result.ExitCode}; elapsed: {result.ElapsedSeconds.ToString("N0", CultureInfo.InvariantCulture)} s; exporter peak private memory: {result.PeakPrivateMb.ToString("N0", CultureInfo.InvariantCulture)} MB; host free memory lowest {result.MinFreeMb?.ToString("N0", CultureInfo.InvariantCulture) ?? "unknown"} MB; log: {log}";
             output.WriteLine(summary);
             return (result, null);

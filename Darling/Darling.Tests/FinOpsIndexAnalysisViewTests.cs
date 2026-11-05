@@ -126,14 +126,14 @@ public sealed class FinOpsIndexAnalysisViewTests
     }
 
     [Fact]
-    public void Gb_RoundsAwayFromZero_ToThreeDecimals()
+    public void Gb_RoundsAwayFromZero_ToSixDecimals()
     {
         var root = Build(new IndexCleanupAnalysisResult
         {
             DatabaseRollups = [Roll("d")],
-            Recommendations = [Rec("a", 0.0005m)],
+            Recommendations = [Rec("a", 0.0000005m)],
         });
-        Assert.Equal(0.001m, root.GetProperty("recommendations")[0].GetProperty("index_size_gb").GetDecimal());
+        Assert.Equal(0.000001m, root.GetProperty("recommendations")[0].GetProperty("index_size_gb").GetDecimal());
     }
 
     [Fact]
