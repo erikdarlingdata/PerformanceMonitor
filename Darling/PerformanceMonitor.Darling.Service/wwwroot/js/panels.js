@@ -52,7 +52,8 @@ import {
   windowFromHours,
   dbScopeChip,
   dbFilteredEmptyText,
-  sourceStrip,
+  sourceSpan,
+  applySourceSubtitle,
   clampText,
   plainEmptyStrip,
   noteStrip,
@@ -160,7 +161,7 @@ export function renderPanel(desc, onSettled, gate = null) {
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : ""), "data-panel": desc.read || desc.title, "data-title": desc.title }, [
     /* The database-scope chip (#5245): while the page's database filter is active it says whether this panel's read took it
        (dbScopeChip in util.js; `desc.dbScope` overrides the read's own class for a panel fed by a shared read). */
-    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, dbScopeChip(desc.read, desc.dbScope)]),
+    el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null, sourceSpan(desc), dbScopeChip(desc.read, desc.dbScope)]),
     /* #5226: an optional control node under the title (the Top Queries / Top Procedures ranking selector), drawn before the body so a
        load that replaces the body never replaces it. Absent on every other panel. */
     desc.control || null,
@@ -276,13 +277,14 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        A copy, so the caller's descriptor keeps the window it asked for. */
     if (res.keptHours) desc = { ...desc, windowHours: res.keptHours };
     desc = applySourceWording(desc, res.data, body.parentNode);
+    /* #5244, #7543: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`), goes in the heading
+       beside the window label, so no row above the chart takes height from the plot. Nothing for every other panel. */
+    applySourceSubtitle(body.parentNode, res.data, desc);
     const rendered = render(res.data, desc);
 
     mount(body, [
       kept,
       floor,
-      /* #5244: which collector answered a blocking read, for a descriptor that names its field (`sourceKey`); null for every other panel. */
-      sourceStrip(res.data, desc),
       typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
       ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
       rendered,
