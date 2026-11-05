@@ -20,6 +20,7 @@
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
 import { plainText, shortEmptyLine } from "./plain-text.js";
+import { withPlotPoints } from "./trend-points.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -569,8 +570,8 @@ export async function readWithinKeptHistory(fetchWith, params) {
 }
 
 /** readWithinKeptHistory over a read-only tool by its MCP name. `signal`: see apiGet (#4191). */
-export function readToolWithinKeptHistory(tool, params, signal) {
-  return readWithinKeptHistory((p) => readTool(tool, p, signal), params);
+export function readToolWithinKeptHistory(tool, params, signal, options) {
+  return readWithinKeptHistory((p) => readTool(tool, p, signal, options), params);
 }
 
 /** The notice for a read readWithinKeptHistory narrowed to the widest window it takes, or null for any other result. */
@@ -1848,7 +1849,12 @@ export function alertDeliveryState(a) {
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   const selection = params ? params[TRIM_TO] : undefined;
-  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, plan.params)), signal)
+  /* #7661: a line chart over a rate read asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute
+     buckets the plot cannot show. Only a caller that draws that line says so, with `options.plotPx` (the measured or estimated plot of the panel);
+     a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
+  const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
+  const sized = withPlotPoints(tool, plan.params, plotPx);
+  return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
     .then(localizeWindowNote)
     .then((res) => finishCustomRange(res, plan))
     .then((res) => (selection && res && res.kind === "data" ? { ...res, data: trimToRange(res.data, selection.startMs, selection.endMs, 0) } : res));

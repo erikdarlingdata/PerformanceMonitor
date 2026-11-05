@@ -7,6 +7,7 @@
  */
 
 import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, fmtPlain, windowFromHours } from "../../util.js";
+import { estimatedPlotPx } from "../../trend-points.js";
 import { getPanelSignal, setPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -81,7 +82,7 @@ export async function drawWaitTrends(slot, server, ctx, checked, metric) {
   }
   mount(slot, loadingStrip());
   const results = await Promise.all(
-    waitTypes.map((waitType) => readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours }, mine.signal))
+    waitTypes.map((waitType) => readToolWithinKeptHistory("get_wait_trend", { server, wait_type: waitType, hours: ctx.hours }, mine.signal, { plotPx: estimatedPlotPx() }))
   );
   if (waitDraws.get(server) !== mine || mine.signal.aborted) return;
 
@@ -310,7 +311,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
   }
   mount(slot, loadingStrip());
   const signal = ctx && ctx.signal && typeof AbortSignal !== "undefined" && AbortSignal.any ? AbortSignal.any([mine.signal, ctx.signal]) : mine.signal;
-  const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal);
+  const trend = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours, names: names.join(",") }, signal, { plotPx: estimatedPlotPx() });
   if (namedDraws.get(drawKey) !== mine || mine.signal.aborted || trend.kind === "aborted") return;
 
   if (trend.kind === "error") return mount(slot, readErrorStrip(trend.message));
