@@ -873,4 +873,41 @@ stored AS
     /// <see cref="TimescaleSupport.ProcedureStatsHourlyView"/>.</summary>
     public static string ProcedureDurationTrendHourlySql(bool withDatabaseFilter)
         => BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter, coverIdleHours: true);
+
+    /// <summary>
+    /// #7608: the query-history trend read over an hourly rollup relation (<paramref name="hourlyRelation"/>: the legacy
+    /// <c>query_stats_hourly</c>, its interval-honest successor, or a stitched relation). The rollup keeps one row per
+    /// <c>sql_handle</c> per hour, so the three measures are summed per <c>bucket</c>: a window of N hours gives at most N points.
+    /// The columns the rollup does not carry are typed NULLs in the raw query's ordinals. $1 server_id, $2 database_name,
+    /// $3 query_hash, $4/$5 window (naive UTC, end exclusive).
+    /// </summary>
+    public static string BuildQueryHistoryHourlySql(string hourlyRelation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
+        return $"""
+        SELECT
+            bucket AS collection_time,
+            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
+            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
+            CAST(NULL AS bigint) AS delta_logical_reads,
+            CAST(NULL AS bigint) AS delta_logical_writes,
+            CAST(NULL AS bigint) AS delta_physical_reads,
+            CAST(NULL AS bigint) AS delta_rows,
+            CAST(NULL AS bigint) AS delta_spills,
+            CAST(NULL AS int) AS min_dop,
+            CAST(NULL AS int) AS max_dop,
+            CAST(NULL AS text) AS query_plan_hash,
+            CAST(NULL AS int) AS plan_count
+        FROM {hourlyRelation}
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_hash = $3
+        AND   bucket >= $4
+        AND   bucket < $5
+        GROUP BY bucket
+        ORDER BY bucket
+        """;
+    }
 }

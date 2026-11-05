@@ -149,35 +149,8 @@ internal static class DarlingTrendReader
     /// caller resolves which through <see cref="RollupCoverage.HourlyRelationFor"/>; the constant above is this
     /// builder over the legacy name, which is what every pre-#3653 pin reads.
     /// </summary>
-    public static string QueryHistoryHourlySqlFor(string hourlyRelation)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
-
-        return $"""
-        SELECT
-            bucket AS collection_time,
-            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
-            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
-            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
-            CAST(NULL AS bigint) AS delta_logical_reads,
-            CAST(NULL AS bigint) AS delta_logical_writes,
-            CAST(NULL AS bigint) AS delta_physical_reads,
-            CAST(NULL AS bigint) AS delta_rows,
-            CAST(NULL AS bigint) AS delta_spills,
-            CAST(NULL AS int) AS min_dop,
-            CAST(NULL AS int) AS max_dop,
-            CAST(NULL AS text) AS query_plan_hash,
-            CAST(NULL AS int) AS plan_count
-        FROM {hourlyRelation}
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   bucket >= $4
-        AND   bucket < $5
-        GROUP BY bucket
-        ORDER BY bucket
-        """;
-    }
+    public static string QueryHistoryHourlySqlFor(string hourlyRelation) =>
+        DurationTrendRouting.BuildQueryHistoryHourlySql(hourlyRelation);
 
     /* ─────────────────────────── memory trend ─────────────────────────── */
 
