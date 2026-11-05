@@ -344,7 +344,9 @@ ORDER BY bucket_start, first_collection_time";
             .Select(g => new FileIoOverviewPoint
             {
                 CollectionTime = g.Key,
-                ReadLatencyMs = PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads)))
+                ReadLatencyMs = PerformanceMonitor.Ui.IoLatencyWeighting.Weighted(g.Select(r => (r.Reads > 0 ? r.Stall / r.Reads : 0.0, r.Reads))),
+                Reads = g.Sum(r => r.Reads),
+                BucketMinutes = bucketMinutes
             })
             .ToList();
     }
@@ -601,6 +603,10 @@ public class FileIoOverviewPoint
 {
     public DateTime CollectionTime { get; set; }
     public double ReadLatencyMs { get; set; }
+    /// <summary>#7624: the reads this point's latency averages over, summed across the ranked files.</summary>
+    public long Reads { get; set; }
+    /// <summary>#7624: the bucket width the read used, in minutes.</summary>
+    public int BucketMinutes { get; set; }
 }
 
 public class FileIoTrendPoint

@@ -32,7 +32,7 @@ SELECT configuration_name, value_configured, value_in_use, is_dynamic, is_advanc
 FROM v_server_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
-ORDER BY configuration_name";
+ORDER BY lower(configuration_name), configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
@@ -75,7 +75,7 @@ SELECT database_name, state_desc, compatibility_level, collation_name, recovery_
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
@@ -146,7 +146,7 @@ SELECT database_name, actual_state, desired_state, readonly_reason, current_stor
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
@@ -192,7 +192,7 @@ SELECT database_name, configuration_name, value, value_for_secondary, capture_ti
 FROM v_database_scoped_config
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name, configuration_name";
+ORDER BY lower(database_name), database_name, lower(configuration_name), configuration_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
