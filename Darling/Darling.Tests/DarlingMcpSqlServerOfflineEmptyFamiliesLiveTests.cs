@@ -34,7 +34,14 @@ public sealed class DarlingMcpSqlServerOfflineEmptyFamiliesLiveTests
     /// One old row in each collector table the routed reads probe, so the read finds the collector HAS stored data (the empty answer,
     /// not the never-collected one). Every row sits inside a 7-day window and before the default 24-hour windows.
     /// </summary>
-    private static async Task SeedHistoryAsync(NpgsqlConnection c, string name, DateTime at)
+    private static async Task SeedHistoryAsync(NpgsqlConnection c, string name, DateTime at) => await SeedHistoryAsync(c, name, at, at);
+
+    /// <summary>
+    /// <see cref="SeedHistoryAsync(NpgsqlConnection, string, DateTime)"/> with the successful runs at their own instant (#7724). The stored rows sit at
+    /// <paramref name="at"/>, inside the 168-hour reads' windows, so those reads find the collector HAS data and answer empty; the runs sit at
+    /// <paramref name="runsAt"/>, older than every window, so the newest success is not inside any window and the offline lead still leads.
+    /// </summary>
+    private static async Task SeedHistoryAsync(NpgsqlConnection c, string name, DateTime at, DateTime runsAt)
     {
         var serverId = ServerIdHelper.GetDeterministicHashCode(name);
         var ct = TestContext.Current.CancellationToken;
@@ -62,7 +69,7 @@ VALUES ($1, $2, $3, $4, 'nosuchdb', 42, 7, 'Regular', '0xE2EDATAHASH', '0xPLANHA
                 @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
 SELECT (SELECT COALESCE(MAX(log_id), 0) FROM collection_log) + row_number() OVER (), $1, $2, $3, t, 12, 'SUCCESS', 0
 FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interval '1 hour', interval '1 hour') AS t",
-                serverId, name, collector, DarlingMcpTestData.Naive(at));
+                serverId, name, collector, DarlingMcpTestData.Naive(runsAt));
         }
 
         await DarlingMcpTestData.ExecAsync(c, ct,
@@ -118,7 +125,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
         _ => throw new ArgumentOutOfRangeException(nameof(family), family, null),
     };
 
-    /// <summary>Last collected twelve days ago, older than the widest window any family reads (ten days: the 168-hour reads, the config changes at 168): the window holds nothing collected and the server is Offline by list_servers' rule (#7724 keeps a window that holds a collection for the collected-through answer).</summary>
+    /// <summary>The newest successful run is twelve days old, older than the widest window any family reads (168 hours), so no window holds a collection and the server is Offline by list_servers' rule (#7724 gives a window that holds a collection the collected-through answer). The stored rows stay five days old, inside the 168-hour windows, so those reads still find data and answer empty rather than never-collected.</summary>
     [Theory]
     [MemberData(nameof(Families))]
     public async Task AnEmptyRead_FromAnOfflineServer_IsUnavailable_WithTheOfflineLeadFirst_AgainstDevPostgres(string family)
@@ -129,7 +136,7 @@ FROM generate_series($4::timestamp - interval '3 hours', $4::timestamp - interva
             var lastCollection = now.AddDays(-12);
             await WindowFloorLiveHarness.SeedServerAsync(
                 c, name, now.AddDays(-40), "wait_stats", lastCollection.AddHours(-3), 30, lastCollection, NoTables, TestContext.Current.CancellationToken);
-            await SeedHistoryAsync(c, name, lastCollection);
+            await SeedHistoryAsync(c, name, now.AddDays(-5), lastCollection);
 
             var root = WindowFloorLiveHarness.Parse(await ReadAsync(family, ds, name));
 
