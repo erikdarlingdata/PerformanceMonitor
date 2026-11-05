@@ -104,7 +104,7 @@ SELECT
 FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = $2{dbClause}
-ORDER BY database_name, file_type_desc, file_name";
+ORDER BY lower(database_name), database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = snapshot.CollectionTime });

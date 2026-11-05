@@ -78,6 +78,7 @@ public sealed partial class ViewerDataService
     /// DISTINCTs it back to one row per database. $1 server_id, $2 db filter.
     /// </summary>
     public const string AutomaticTuningSql = """
+        SELECT * FROM (
         SELECT DISTINCT
             database_name,
             force_last_good_plan_desired_state,
@@ -90,7 +91,8 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY database_name
+        ) AS d
+        ORDER BY lower(database_name), database_name
         """;
 
     /// <summary>The grid's row cap: the newest 200 recommendations by collection time. <see cref="PlanCorrectionsSql"/>'s LIMIT is the same number.</summary>
