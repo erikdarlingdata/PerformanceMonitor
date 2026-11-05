@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -75,6 +76,15 @@ public sealed class WebStatusTextsTests
         Assert.Contains("postgres.webConnectionString", notice, StringComparison.Ordinal);
         Assert.Contains("provision-roles.sql", notice, StringComparison.Ordinal);
         Assert.Contains("GitHub repository", notice, StringComparison.Ordinal);
+    }
+
+    /* #7573: the live read runs the collector's own query, which no longer drops the monitor's other sessions, so the rows follow the page's switch. */
+    [Fact]
+    public void TheLiveRead_LeavesTheMonitorsSessionsOut_UnlessTheSwitchAsks()
+    {
+        var r = Run();
+        Assert.Equal(new[] { 62, 63, 64 }, r.GetProperty("liveRowsDefault").EnumerateArray().Select(x => x.GetInt32()).ToArray());
+        Assert.Equal(new[] { 61, 62, 63, 64 }, r.GetProperty("liveRowsIncluded").EnumerateArray().Select(x => x.GetInt32()).ToArray());
     }
 
     [Fact]

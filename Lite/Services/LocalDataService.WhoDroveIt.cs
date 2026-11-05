@@ -184,7 +184,7 @@ ORDER BY p.rk";
     /// figures can add up to more than the caller's. WAITFOR shells are dropped, as get_active_queries drops them. The totals are window
     /// functions over every group BEFORE the cap, so a share is a share of the window.
     /// </summary>
-    internal const string LoadByCallerSql = @"
+    internal const string LoadByCallerSql = $@"
 WITH snap AS (
     SELECT COALESCE(host_name, '') AS host_name,
            COALESCE(program_name, '') AS program_name,
@@ -200,6 +200,7 @@ WITH snap AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
     AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
 ),
 req AS (
@@ -338,7 +339,7 @@ ORDER BY p.rk, t.hr";
     /// among equals, $5 of them. $1 server_id, $2/$3 window. The waits of each pile-up come from the same rows, so the counts add up to
     /// its sessions (a session with no wait has a NULL wait_type row).
     /// </summary>
-    internal const string PileupsSql = @"
+    internal const string PileupsSql = $@"
 WITH snap AS (
     SELECT collection_time, query_hash, session_id, NULLIF(trim(wait_type), '') AS wait_type,
            COALESCE(wait_time_ms, 0) AS wait_time_ms, COALESCE(blocking_session_id, 0) AS blocking_session_id, query_text
@@ -346,6 +347,7 @@ WITH snap AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
     AND   query_hash IS NOT NULL
     AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
 ),

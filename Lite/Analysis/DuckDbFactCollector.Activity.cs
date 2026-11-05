@@ -147,7 +147,7 @@ LIMIT 5";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 SELECT
     COUNT(*) AS total_snapshots,
     COUNT(CASE WHEN total_elapsed_time_ms > 30000 THEN 1 END) AS long_running_count,
@@ -159,7 +159,8 @@ SELECT
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}";
             cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

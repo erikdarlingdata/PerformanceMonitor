@@ -268,7 +268,7 @@ internal static class DarlingWhoDroveItReader
     /// group BEFORE the cap, so a share is a share of the window. Statement text is fetched in the same pass, for the top statements only.
     /// Reads query_snapshots by (server_id, collection_time) range; no index is added.
     /// </summary>
-    internal const string LoadByCallerSql = """
+    internal const string LoadByCallerSql = $"""
         WITH snap AS MATERIALIZED (
             SELECT COALESCE(host_name, '') AS host_name,
                    COALESCE(program_name, '') AS program_name,
@@ -285,6 +285,7 @@ internal static class DarlingWhoDroveItReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
+            AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         ),
         req AS (
             SELECT host_name, program_name, login_name, session_id, request_start,
@@ -410,7 +411,7 @@ internal static class DarlingWhoDroveItReader
     /// equals, $5 of them. $1 server_id, $2/$3 window. The waits of each pile-up come from the same rows, so the counts add up to its sessions
     /// (a session with no wait has a NULL wait_type row). Reads query_snapshots by (server_id, collection_time) range; no index is added.
     /// </summary>
-    internal const string PileupsSql = """
+    internal const string PileupsSql = $"""
         WITH snap AS MATERIALIZED (
             SELECT collection_time, query_hash, session_id, NULLIF(btrim(wait_type), '') AS wait_type,
                    COALESCE(wait_time_ms, 0) AS wait_time_ms, COALESCE(blocking_session_id, 0) AS blocking_session_id, query_text
@@ -420,6 +421,7 @@ internal static class DarlingWhoDroveItReader
             AND   collection_time <= $3
             AND   query_hash IS NOT NULL
             AND   (query_text IS NULL OR query_text NOT LIKE 'WAITFOR%')
+            AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
         ),
         piles AS (
             SELECT collection_time, query_hash,
