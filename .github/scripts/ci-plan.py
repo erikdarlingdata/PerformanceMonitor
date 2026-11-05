@@ -189,16 +189,18 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
 
 
 def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, lite_scope: str,
-                named: "dict[str, list[str]] | None" = None) -> "tuple[dict[str, list[str]] | None, str]":
-    """(picks, why) for a draft that changed product files (#7727): the test classes of the changed test files, plus the
+                named: "dict[str, list[str]] | None" = None) -> "tuple[dict[str, list[str]] | None, str, int]":
+    """(picks, why, added) for a draft that changed product files (#7727): the test classes of the changed test files, plus the
     Darling Stage=Guard classes, plus (#7734) `named`: the classes whose source names a changed product file by path or file
     name (ci-select.py classes_naming_files). A named class runs whatever the suite's scope is: a pin that reads the file
     as text is what the rule is for. picks is None when a changed test file is not safe in the file table (its suite then
-    runs as today, and so does the whole pull request: areas classes cannot mix a narrowed suite with a full one)."""
+    runs as today, and so does the whole pull request: areas classes cannot mix a narrowed suite with a full one). A named
+    class passes the same `listed` check as a changed one (#7744: DarlingWorker.cs names the private fixtures FixtureCensus
+    and FixtureOtherClass, which the host does not list). added counts the named classes the plan adds to the rest."""
     table = (catalog or {}).get("files") or {}
     classes = (catalog or {}).get("classes") or {}
     if not table or not classes.get("darling"):
-        return None, "the test map is missing"
+        return None, "the test map is missing", 0
     changed: "dict[str, list[str]]" = {"darling": [], "lite": []}
     for f in files:
         for suite, tree in TEST_TREES.items():
@@ -206,15 +208,19 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
                 continue
             row = table.get(f) if f.endswith(".cs") else None
             if not row or row["suite"] != suite or not row["safe"]:
-                return None, f"{f} is not a plain test class file, so its suite runs in full"
+                return None, f"{f} is not a plain test class file, so its suite runs in full", 0
             changed[suite] += [c for c in _real(catalog, suite, row["tests"]) if c not in changed[suite]]
     guard = [c for c, t in classes["darling"].items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t]
     picks = {"darling": (changed["darling"] + [c for c in guard if c not in changed["darling"]]) if darling_scope != "none" else [],
              "lite": changed["lite"] if lite_scope != "none" else []}
+    added = 0
     for suite in ("darling", "lite"):
         runs = {c for c, t in classes.get(suite, {}).items() if _CS.NO_TESTS_TRAIT not in t}
-        picks[suite] += [c for c in dict.fromkeys((named or {}).get(suite, [])) if c in runs and c not in picks[suite]]
-    return (picks, "") if any(picks.values()) else (None, "no class is selected")
+        more = [c for c in _real(catalog, suite, [c for c in dict.fromkeys((named or {}).get(suite, [])) if c in runs])
+                if c not in picks[suite]]
+        picks[suite] += more
+        added += len(more)
+    return (picks, "", added) if any(picks.values()) else (None, "no class is selected", 0)
 
 
 def _map_age(selection: dict) -> str:
@@ -318,10 +324,9 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         areas = "none" if darling_scope == "none" and lite_mode == "none" else "darling"
     reason = f"Darling scope {darling_scope}, Lite scope {lite_mode}."
     if draft and areas != "none":
-        picks, why = ((None, named_error) if named_error else
-                      draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode, named))
+        picks, why, extra = ((None, named_error, 0) if named_error else
+                             draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode, named))
         if picks:
-            extra = sum(len(v) for v in (named or {}).values())
             return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
                     "lite_scope": "classes" if picks["lite"] else "none",
                     "darling_classes": picks["darling"], "lite_classes": picks["lite"],

@@ -484,7 +484,12 @@ check("class lists: nothing selected says false", cp.write_class_lists(os.path.j
 r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named={"darling": ["D3", "Gone"], "lite": ["L2"]})
 check("draft named: the named class joins the Guard class, a class the tree lacks is dropped", r.get("darling_classes"), "D1,D3")
 check("draft named: a named Lite class runs although no Lite file changed", (r.get("lite_scope"), r.get("lite_classes")), ("classes", "L2"))
-check("draft named: the why line counts them", "3 classes whose source names a changed file" in r.get("why", ""), True)
+check("draft named: the why line counts the classes that run, not the ones dropped", "2 classes whose source names a changed file" in r.get("why", ""), True)
+# #7744: a named class the test host does not list (a private nested fixture) never reaches a plan, whatever the scope.
+listed_cat = {**cc_cat, "listed": lambda suite, name: name != "D3"}
+r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, listed_cat, draft=True, named={"darling": ["D3", "D2"], "lite": ["L2"]})
+check("draft named: a class in the tree that the host does not list is dropped", r.get("darling_classes"), "D1,D2")
+check("draft named: the why line counts only the listed ones", "2 classes whose source names a changed file" in r.get("why", ""), True)
 r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named=None)
 check("draft named: no named classes is the #7727 rule", (r.get("darling_classes"), "names a changed file" in r.get("why", "")), ("D1", False))
 r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named_error="the scan failed")
