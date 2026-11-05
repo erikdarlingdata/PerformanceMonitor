@@ -1062,7 +1062,10 @@ public sealed class ServerSummaryItem
                 return $"{TotalCpuPercent:F0}% (ACU {AcuUtilizationPercent:F0}%)";
             }
 
-            if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
+            /* #7682: a ring-buffer reading with no other-process share (SQL Server on Linux before 2025 CU1 cannot report
+               host CPU) has no known total, so the figure is the SQL Server's own and the headline says so. */
+            if (CpuPercent.HasValue && !OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}% (SQL CPU)";
+            if (!CpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }

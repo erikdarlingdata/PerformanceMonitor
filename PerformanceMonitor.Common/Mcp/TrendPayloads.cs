@@ -43,8 +43,8 @@ internal sealed record WaitBucketPoint(DateTime BucketStart, double WaitTimeMsPe
 /// <summary>One bucket of CPU samples (#3960): each percentage averaged over the samples in the bucket, the busiest
 /// single sample's SQL and total CPU, and how many samples the bucket held.</summary>
 internal sealed record CpuBucketPoint(
-    DateTime BucketStart, double SqlServerCpu, double OtherProcessCpu, double TotalCpu, double IdleCpu,
-    int PeakSqlServerCpu, int PeakTotalCpu, long Samples);
+    DateTime BucketStart, double SqlServerCpu, double? OtherProcessCpu, double? TotalCpu, double? IdleCpu,
+    int PeakSqlServerCpu, int? PeakTotalCpu, long Samples);
 
 /// <summary>One bucket of tempdb samples (#3960): each space figure averaged, the fullest collection's reserved and
 /// version-store space, and the most sessions and the single largest consumer any collection in it saw.</summary>
@@ -355,6 +355,10 @@ internal static class TrendPayloads
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
+    /// <summary>What a null host-CPU figure in <c>get_cpu_utilization</c> means (#7682): the server cannot report it.</summary>
+    public const string CpuHostUnknownNote =
+        "A bucket with null other_process_cpu, total_cpu, idle_cpu and peak_total_cpu has no host CPU: the server cannot report it (SQL Server on Linux before 2025 CU1), so only sql_server_cpu is measured there. Null is not 0, and idle is not 100. A bucket that mixes both kinds of sample averages only the samples that report host CPU.";
+
     /// <summary>The source-cadence sentence <c>get_cpu_utilization</c> has carried since #3653 A15/A16, now beside
     /// the bucket disclosure: the one place both SKUs spell it.</summary>
     public const string CpuCadenceNote =
@@ -375,14 +379,14 @@ internal static class TrendPayloads
             ["bucket"] = TrendBuckets.Word(bucketMinutes),
             ["bucket_minutes"] = bucketMinutes,
             ["aggregate_note"] = TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget, firstAtWindowStart: false),
-            ["note"] = CpuCadenceNote,
+            ["note"] = points.Any(p => !p.OtherProcessCpu.HasValue) ? CpuCadenceNote + " " + CpuHostUnknownNote : CpuCadenceNote,
             ["samples"] = points.Select(p => new
             {
                 sample_time = Stamp(p.BucketStart),
                 sql_server_cpu = (int)Math.Round(p.SqlServerCpu),
-                other_process_cpu = (int)Math.Round(p.OtherProcessCpu),
-                total_cpu = (int)Math.Round(p.TotalCpu),
-                idle_cpu = (int)Math.Round(p.IdleCpu),
+                other_process_cpu = p.OtherProcessCpu.HasValue ? (int?)Math.Round(p.OtherProcessCpu.Value) : null,
+                total_cpu = p.TotalCpu.HasValue ? (int?)Math.Round(p.TotalCpu.Value) : null,
+                idle_cpu = p.IdleCpu.HasValue ? (int?)Math.Round(p.IdleCpu.Value) : null,
                 peak_sql_server_cpu = p.PeakSqlServerCpu,
                 peak_total_cpu = p.PeakTotalCpu,
                 samples_in_bucket = p.Samples,

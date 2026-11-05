@@ -240,6 +240,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
     private const string CpuServerName = "viewer-cpu-tab-e2e";
 
     private const int SkewServerId = -979797;
+    private const int NullOtherServerId = -7682001;
     private const string SkewServerName = "viewer-cpu-skew-e2e";
 
     private const int BudgetServerId = -989898;
@@ -254,7 +255,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
     private const int FileIoBudgetServerId = -969697;
 
     [Fact]
-    public async Task Cpu_ReadsRawSamplesInOrder_NullOtherAsZero_AgainstDevPostgres()
+    public async Task Cpu_ReadsRawSamplesInOrder_NullOtherStaysNull_AgainstDevPostgres()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -289,8 +290,10 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             /* Raw (not averaged), ordered by sample_time. */
             Assert.Equal(new[] { s1.Ticks, s2.Ticks, s3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
             Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
-            /* Middle sample's NULL other-process CPU reads as 0. */
-            Assert.Equal(new[] { 5.0, 0.0, 15.0 }, samples.Select(s => s.OtherProcessCpu));
+            /* Middle sample's NULL other-process CPU (SQL on Linux) stays null, with no total (#7682): 0 would say the
+               host is idle when nothing measured it. */
+            Assert.Equal(new double?[] { 5.0, null, 15.0 }, samples.Select(s => s.OtherProcessCpu));
+            Assert.Equal(new double?[] { 15.0, null, 45.0 }, samples.Select(s => s.TotalCpu));
 
             bodySucceeded = true;
         }
@@ -298,6 +301,55 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "cpu_utilization_stats", CpuServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#7682: a bucket whose rows all lack other-process CPU is null for other and total, and a bucket that
+    /// mixes both kinds averages only the rows that have the figure (SQL still averages every row).</summary>
+    [Fact]
+    public async Task Cpu_BucketedNullOther_AllNullBucketIsNull_MixedBucketAveragesMeasuredRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU null-other test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", NullOtherServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Two days back, on a day boundary, so both clusters of rows land in a bucket of their own whatever width
+               the 3 day window picks (the buckets are far narrower than the 12 hours between the clusters). */
+            var day = TruncateToSeconds(DateTime.UtcNow.Date.AddDays(-2));
+            var linux = day.AddHours(1);
+            var mixed = day.AddHours(13);
+            await InsertCpuAsync(connection, NullOtherServerId, "null-other", linux, linux, sqlCpu: 30, otherCpu: null);
+            await InsertCpuAsync(connection, NullOtherServerId, "null-other", linux, linux, sqlCpu: 50, otherCpu: null);
+            await InsertCpuAsync(connection, NullOtherServerId, "null-other", mixed, mixed, sqlCpu: 20, otherCpu: null);
+            await InsertCpuAsync(connection, NullOtherServerId, "null-other", mixed, mixed, sqlCpu: 40, otherCpu: 10);
+            await InsertCpuAsync(connection, NullOtherServerId, "null-other", mixed, mixed, sqlCpu: 60, otherCpu: 20);
+
+            var samples = await viewer.GetCpuUtilizationAsync(NullOtherServerId, day, day.AddDays(3));
+
+            Assert.Equal(2, samples.Count);
+            Assert.Equal(40.0, samples[0].SqlServerCpu);
+            Assert.Null(samples[0].OtherProcessCpu);
+            Assert.Null(samples[0].TotalCpu);
+            Assert.Equal(40.0, samples[1].SqlServerCpu);
+            Assert.Equal(15.0, samples[1].OtherProcessCpu);
+            Assert.Equal(65.0, samples[1].TotalCpu);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", NullOtherServerId, cleanupCt));
         }
     }
 
