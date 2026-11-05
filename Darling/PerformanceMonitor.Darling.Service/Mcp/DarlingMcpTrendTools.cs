@@ -422,7 +422,7 @@ public sealed class DarlingMcpTrendTools
         $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. One point per collection (raw) or per hour (hourly), summed across the query's plans and handles; a null query_plan_hash on a raw point means more than one plan ran at that time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
@@ -435,7 +435,7 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -535,7 +535,7 @@ public sealed class DarlingMcpTrendTools
                 bucket_minutes = history.Source == "raw" ? (int?)null : 60,
                 aggregate_note = aggregated
                     ? "Served from the hourly rollup because the requested window reaches past the raw tier's "
-                      + "4-day retention. Executions, CPU and elapsed time are summed per hour; logical_reads, "
+                      + "4-day retention. Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; logical_reads, "
                       + "logical_writes, physical_reads, rows, spills, min_dop, max_dop and query_plan_hash are "
                       + "null because the rollup does not carry them - null means not measured, not zero."
                     : null,

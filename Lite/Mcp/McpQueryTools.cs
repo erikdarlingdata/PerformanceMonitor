@@ -2094,6 +2094,45 @@ public sealed class McpQueryTools
                 startUtc, windowEndUtc, grain, database);
     }
 
+    /// <summary>
+    /// #7608: folds the history rows to one point per <c>collection_time</c>, the rule Darling's raw tier applies in SQL.
+    /// Deltas are summed, <c>MinDop</c> is the lowest and <c>MaxDop</c> the highest across the rows, and
+    /// <c>QueryPlanHash</c> is the hash when every row at that time carries the same one and empty (null in the payload)
+    /// when more than one plan ran. The points come back oldest first.
+    /// </summary>
+    internal static List<QueryStatsHistoryRow> OnePointPerCollection(List<QueryStatsHistoryRow> rows)
+    {
+        var points = new List<QueryStatsHistoryRow>();
+        foreach (var group in rows.GroupBy(r => r.CollectionTime))
+        {
+            var members = group.ToList();
+            if (members.Count == 1)
+            {
+                points.Add(members[0]);
+                continue;
+            }
+
+            var hashes = members.Select(m => m.QueryPlanHash).Distinct(StringComparer.Ordinal).ToList();
+            points.Add(new QueryStatsHistoryRow
+            {
+                CollectionTime = group.Key,
+                DeltaExecutions = members.Sum(m => m.DeltaExecutions),
+                DeltaCpuUs = members.Sum(m => m.DeltaCpuUs),
+                DeltaElapsedUs = members.Sum(m => m.DeltaElapsedUs),
+                DeltaLogicalReads = members.Sum(m => m.DeltaLogicalReads),
+                DeltaLogicalWrites = members.Sum(m => m.DeltaLogicalWrites),
+                DeltaPhysicalReads = members.Sum(m => m.DeltaPhysicalReads),
+                DeltaRows = members.Sum(m => m.DeltaRows),
+                DeltaSpills = members.Sum(m => m.DeltaSpills),
+                MinDop = members.Min(m => m.MinDop),
+                MaxDop = members.Max(m => m.MaxDop),
+                QueryPlanHash = hashes.Count == 1 ? hashes[0] : "",
+            });
+        }
+
+        return points.OrderBy(p => p.CollectionTime).ToList();
+    }
+
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         LocalDataService dataService,
@@ -2112,7 +2151,9 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var rows = await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd);
+            /* #7608: one query_hash runs under several sql_handles and plans, and the store keeps a row per handle per
+               collection, so the rows are folded to one point per collection_time. */
+            var rows = OnePointPerCollection(await dataService.GetQueryStatsHistoryAsync(resolved.ServerId, database_name, query_hash, hours_back, asOfUtc: windowEnd));
             if (rows.Count == 0)
             {
                 /* #7005: the empty answer says whether the store holds the window. */
@@ -2137,7 +2178,7 @@ public sealed class McpQueryTools
                 spills = r.DeltaSpills,
                 min_dop = r.MinDop,
                 max_dop = r.MaxDop,
-                query_plan_hash = r.QueryPlanHash
+                query_plan_hash = string.IsNullOrEmpty(r.QueryPlanHash) ? null : r.QueryPlanHash
             });
 
             /* The same disclosure block Darling's get_query_trend has carried since #2353 and the

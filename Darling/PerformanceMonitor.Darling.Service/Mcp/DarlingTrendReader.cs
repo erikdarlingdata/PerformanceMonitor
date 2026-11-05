@@ -103,7 +103,7 @@ internal static class DarlingTrendReader
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int MinDop, int MaxDop, string QueryPlanHash);
+        long DeltaSpills, int MinDop, int MaxDop, string? QueryPlanHash);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -132,6 +132,13 @@ internal static class DarlingTrendReader
     /// <para>What survives the rollup is exactly what a trend is usually asked for: executions, CPU and elapsed
     /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
     /// underneath a caller that got a raw answer last time.</para>
+    ///
+    /// <para><b>One point per hour (#7608).</b> The rollup keeps one row per <c>sql_handle</c> per hour, so a
+    /// statement with many handles gave many rows under one <c>collection_time</c>, with nothing to tell them
+    /// apart. The three measures are summed per <c>bucket</c>, so a window of N hours gives at most N points.
+    /// A stitched relation (<see cref="RollupCoverage.StitchedRelationSql"/>) splits at one bucket boundary
+    /// (<c>bucket &lt; F</c> / <c>bucket &gt;= F</c>), so each hour comes from one relation and the sum never
+    /// counts an hour twice.</para>
     /// </summary>
     public static readonly string QueryHistoryHourlySql = QueryHistoryHourlySqlFor(TimescaleSupport.QueryStatsHourlyView);
 
@@ -149,9 +156,9 @@ internal static class DarlingTrendReader
         return $"""
         SELECT
             bucket AS collection_time,
-            execution_count_sum AS delta_execution_count,
-            worker_time_sum AS delta_worker_time,
-            elapsed_time_sum AS delta_elapsed_time,
+            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
+            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
             CAST(NULL AS bigint) AS delta_logical_reads,
             CAST(NULL AS bigint) AS delta_logical_writes,
             CAST(NULL AS bigint) AS delta_physical_reads,
@@ -166,6 +173,7 @@ internal static class DarlingTrendReader
         AND   query_hash = $3
         AND   bucket >= $4
         AND   bucket < $5
+        GROUP BY bucket
         ORDER BY bucket
         """;
     }
@@ -1503,27 +1511,35 @@ internal static class DarlingTrendReader
     /// it projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
     /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. $1 server_id, $2 database_name,
     /// $3 query_hash, $4/$5 window (naive UTC).
+    ///
+    /// <para><b>One point per collection (#7608).</b> One <c>query_hash</c> can run under several
+    /// <c>sql_handle</c>s or plans, and the collector writes one row per handle per collection, so the rows are
+    /// grouped by <c>collection_time</c>: the deltas are summed, the DOP pair spans the rows (<c>MIN</c> of
+    /// the minimums, <c>MAX</c> of the maximums), and <c>query_plan_hash</c> is the hash when every row at that
+    /// time carries the same one and NULL when more than one plan ran.</para>
     /// </summary>
     public const string QueryHistorySql = """
         SELECT
             collection_time,
-            delta_execution_count,
-            delta_worker_time,
-            delta_elapsed_time,
-            delta_logical_reads,
-            delta_logical_writes,
-            delta_physical_reads,
-            delta_rows,
-            delta_spills,
-            min_dop,
-            max_dop,
-            query_plan_hash
+            CAST(SUM(delta_execution_count) AS bigint) AS delta_execution_count,
+            CAST(SUM(delta_worker_time) AS bigint) AS delta_worker_time,
+            CAST(SUM(delta_elapsed_time) AS bigint) AS delta_elapsed_time,
+            CAST(SUM(delta_logical_reads) AS bigint) AS delta_logical_reads,
+            CAST(SUM(delta_logical_writes) AS bigint) AS delta_logical_writes,
+            CAST(SUM(delta_physical_reads) AS bigint) AS delta_physical_reads,
+            CAST(SUM(delta_rows) AS bigint) AS delta_rows,
+            CAST(SUM(delta_spills) AS bigint) AS delta_spills,
+            MIN(min_dop) AS min_dop,
+            MAX(max_dop) AS max_dop,
+            CASE WHEN MIN(query_plan_hash) = MAX(query_plan_hash) AND COUNT(query_plan_hash) = COUNT(*)
+                 THEN MIN(query_plan_hash) END AS query_plan_hash
         FROM query_stats
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
         AND   collection_time >= $4
         AND   collection_time <= $5
+        GROUP BY collection_time
         ORDER BY collection_time
         """;
 
@@ -1661,7 +1677,7 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
                 reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
-                reader.IsDBNull(11) ? "" : reader.GetString(11)));
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
 
         return items;
