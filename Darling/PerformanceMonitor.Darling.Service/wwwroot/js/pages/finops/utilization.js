@@ -112,6 +112,7 @@ const TOP_AVG_COLUMNS = [
 function verdictLabel(v, samples) {
   if (v == null) return "No Data";
   if (v === "NOT_APPLICABLE") return "N/A";
+  if (v === "NOT_JUDGED_SECONDARY") return "Not judged (secondary replica)";
   if (v === "NOT_ENOUGH_DATA") return samples == null ? "not enough data yet" : "not enough data yet (" + fmtInt(samples) + (samples === 1 ? " sample)" : " samples)");
   return String(v).replace(/_/g, " ");
 }

@@ -113,6 +113,55 @@ try {
     };
     out.day = draw(10, "2026-10-21T00:00", "2026-10-21T23:50");
     out.week = draw(70, "2026-10-15T00:00", "2026-10-21T22:50");
+  } else if (scenario === "window") {
+    /* #7683: the columns run across the reply's window, not from the first bin to the last. A day of 10 minute bins (the window starts at
+       23:05 and ends at 23:05, so the first and last bins are partial and the day is 145 columns): one bin, and bins only in the last hour. */
+    const win = { window_start: "2026-11-04T23:05:00.0000000Z", window_end: "2026-11-05T23:05:00.0000000Z" };
+    const draw = (cells, truncated) => {
+      const d = { metric: "duration", bucket_minutes: 10, ...win, magnitude_buckets: labels, cell_count: cells.length, truncated, cells };
+      const g = model.buildHeatmap(d);
+      const filledColumns = [];
+      for (let c = 0; c < g.columns; c++) if (g.rows.some((r) => r[c])) filledColumns.push(c);
+      const body = page.renderHeatmapBody(d, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
+      const table = body.every((n) => n.tag === "table")[0];
+      const ticks = table.children[0].children.filter((c) => c.className === "qh-tick");
+      return { columns: g.columns, filledColumns, startMs: g.startMs, cellsInRow: table.children[1].children.filter((c) => c.tag === "td").length,
+        minWidth: table.style.minWidth || "", lastTickSpan: Number(ticks[ticks.length - 1].getAttribute("colspan")),
+        lastTickText: ticks[ticks.length - 1].textContent, tickBeforeLastText: ticks[ticks.length - 2].textContent };
+    };
+    out.one = draw([cell("2026-11-05T11:00", 1, 4)], false);
+    out.lastHour = draw([cell("2026-11-05T22:10", 1, 4), cell("2026-11-05T22:40", 3, 9), cell("2026-11-05T23:00", 2, 2)], false);
+    /* A cut read (the oldest bins dropped) starts at the first bin it returned. */
+    out.cut = draw([cell("2026-11-05T20:00", 1, 4), cell("2026-11-05T23:00", 2, 2)], true);
+    out.windowStartMs = Date.parse("2026-11-04T23:00:00Z");
+    out.cutStartMs = Date.parse("2026-11-05T20:00:00Z");
+  } else if (scenario === "retention") {
+    /* #7683: a 7 day window (70 minute bins) whose oldest 4 days the store no longer holds: window_truncated is true and effective_start is 4
+       days into the window. The grid starts at effective_start's bin, so no column before the data is drawn as "no query". The same reply
+       without window_truncated still starts at window_start. */
+    const binMs = 70 * 60000;
+    const binStart = (ms) => Math.floor(ms / binMs) * binMs;
+    const iso = (ms) => new Date(ms).toISOString().slice(0, 16);
+    const winStart = Date.parse("2026-10-29T23:05:00Z");
+    const winEnd = Date.parse("2026-11-05T23:05:00Z");
+    const effStart = Date.parse("2026-11-02T23:05:00Z");
+    const first = binStart(effStart);
+    const cells = [cell(iso(first), 1, 4), cell(iso(first + 10 * binMs), 3, 9), cell(iso(binStart(winEnd)), 2, 2)];
+    const draw = (extra) => {
+      const d = { metric: "duration", bucket_minutes: 70, window_start: "2026-10-29T23:05:00.0000000Z", window_end: "2026-11-05T23:05:00.0000000Z",
+        magnitude_buckets: labels, cell_count: cells.length, truncated: false, cells, ...extra };
+      const g = model.buildHeatmap(d);
+      const filledColumns = [];
+      for (let c = 0; c < g.columns; c++) if (g.rows.some((r) => r[c])) filledColumns.push(c);
+      const body = page.renderHeatmapBody(d, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
+      const table = body.every((n) => n.tag === "table")[0];
+      return { columns: g.columns, filledColumns, startMs: g.startMs, cellsInRow: table.children[1].children.filter((c) => c.tag === "td").length };
+    };
+    out.retentionCut = draw({ window_truncated: true, effective_start: "2026-11-02T23:05:00.0000000Z" });
+    out.notTruncated = draw({ window_truncated: false, effective_start: "2026-11-02T23:05:00.0000000Z" });
+    out.noFlag = draw({});
+    out.effectiveStartBinMs = first;
+    out.windowStartBinMs = binStart(winStart);
   } else if (scenario === "renderEmpty") {
     const body = page.renderHeatmapBody({ metric: "duration", bucket_minutes: 5, cells: [] }, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
     out.tds = body.every((n) => n.tag === "td").length;

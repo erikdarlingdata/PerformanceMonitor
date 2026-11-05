@@ -344,7 +344,7 @@ END;", sqlConn);
             var util = await GetUtilizationEfficiencyAsync(serverId);
             /* A window with no CPU sample reads a P95 of 0, which is "idle" only because nothing was measured.
                The utilization row gives that window no verdict (HasCpuSample is false); the advice follows it. */
-            if (cpuWindowCoversDay && util != null && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
+            if (cpuWindowCoversDay && util != null && !util.IsAgSecondary && util.HasCpuSample && util.P95CpuPct < 30 && util.CpuCount > 4
                 && util.ProvisioningStatus == ProvisioningVerdict.OverProvisioned)
             {
                 var targetCores = Math.Max(4, (int)(util.CpuCount * (util.P95CpuPct / 70m)));
@@ -383,7 +383,7 @@ END;", sqlConn);
                and cannot be resized on its own. util.PhysicalMemoryMb is the database's own memory limit there
                (memory_stats, filled from committed_target_kb), not the host's, so the skip is not about a wrong
                denominator: there is nothing to resize. Managed Instance (8) and SQL Server are unchanged. */
-            if (util != null && util.PhysicalMemoryMb > 8192
+            if (util != null && !util.IsAgSecondary && util.PhysicalMemoryMb > 8192
                 && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 int p95Mb = 0;
@@ -676,9 +676,22 @@ LIMIT 10";
         try
         {
             var vmUtil = await GetUtilizationEfficiencyAsync(serverId);
+            /* #7705: an Availability Group secondary's load is only its work as a secondary, not the load it must carry after a
+               failover, so it gets one informational row in place of the CPU and memory rows below. */
+            if (vmUtil != null && vmUtil.IsAgSecondary)
+            {
+                recommendations.Add(new RecommendationRow
+                {
+                    Category = "Hardware",
+                    Severity = "Low",
+                    Confidence = "High",
+                    Finding = ProvisioningVerdict.NotJudgedSecondaryFinding,
+                    Detail = ProvisioningVerdict.NotJudgedSecondaryExplanation
+                });
+            }
             /* No VM to resize on Azure SQL Database (its cores and memory come with its service objective),
                and no advice from a window with no CPU sample (its P95 of 0 is not a measurement). */
-            if (vmUtil != null && vmUtil.HasCpuSample
+            else if (vmUtil != null && vmUtil.HasCpuSample
                 && await GetSqlEngineEditionAsync(serverId) != CollectorEngineCapability.AzureSqlDatabaseEngineEdition)
             {
                 /* Memory side previously read util.BufferPoolMb (a single snapshot
