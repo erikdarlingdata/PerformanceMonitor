@@ -2559,6 +2559,18 @@ CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_proces
     private const string V242Sql = PgStatementText.AddOwnEntriesColumnSql;
 
     /// <summary>
+    /// V243 (#7573): <c>collect.waiting_tasks.program_name</c>, the program name of the waiting task's session, read from
+    /// <c>sys.dm_exec_sessions</c> on session_id so a reader can leave the monitor's own waits out. One nullable <c>text</c>, no DEFAULT, no
+    /// backfill (V241's shape): a row stored before this rung never read it, so NULL is the honest value, and a reader never hides a NULL.
+    /// Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after <c>database_name</c>, because the writer is a positional binary
+    /// COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload, and this ALTER
+    /// no-ops there) and an upgraded one share one physical column order. There is no <c>v_waiting_tasks</c> view on this store, so no view is
+    /// re-expanded. An older build writes its own column list, so the column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V243Sql = @"
+ALTER TABLE collect.waiting_tasks ADD COLUMN IF NOT EXISTS program_name text;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3058,6 +3070,7 @@ $rung$;";
         new Migration(240, "query-store-top-daily-weighted", V240Sql),
         new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
         new Migration(242, "pg-statement-text-own-entries", V242Sql),
+        new Migration(243, "waiting-tasks-program-name", V243Sql),
     };
 
     /// <summary>

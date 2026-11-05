@@ -599,7 +599,7 @@ ORDER BY accumulated_wait_ms DESC";
         using var command = connection.CreateCommand();
 
 
-        command.CommandText = @"
+        command.CommandText = $@"
 WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
@@ -607,6 +607,7 @@ WITH blocked_counts AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
+    {MonitorSnapshotClause("program_name", false)}
     GROUP BY collection_time, blocking_session_id
 )
 SELECT
@@ -654,6 +655,7 @@ WHERE q.server_id = $1
 AND   q.collection_time >= $2
 AND   q.collection_time <= $3
 AND   rtrim(q.wait_type) = rtrim($4)
+{MonitorSnapshotClause("q.program_name", false)}
 ORDER BY q.wait_time_ms DESC
 LIMIT 500";
         command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
@@ -715,10 +717,12 @@ LIMIT 500";
     /// <summary>
     /// Gets ALL query snapshots in a time range (for chain walking).
     /// Used when a chain wait type (LCK_M_*, LATCH_EX/UP) needs blocking chain traversal.
+    /// #7573: a grid leaves the monitor's own sessions out, but the chain walk passes <paramref name="includeMonitor"/> so a chain
+    /// headed by a monitor session can still be walked to its head.
     /// </summary>
     public async Task<List<QuerySnapshotRow>> GetAllQuerySnapshotsInRangeAsync(
         int serverId, int hoursBack = 24,
-        DateTime? fromDate = null, DateTime? toDate = null)
+        DateTime? fromDate = null, DateTime? toDate = null, bool includeMonitor = false)
     {
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
@@ -731,7 +735,7 @@ LIMIT 500";
         using var command = connection.CreateCommand();
 
 
-        command.CommandText = @"
+        command.CommandText = $@"
 WITH blocked_counts AS (
     SELECT collection_time, blocking_session_id AS blocker_session_id, COUNT(*) AS blocked_session_count
     FROM v_query_snapshots
@@ -739,6 +743,7 @@ WITH blocked_counts AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
+    {MonitorSnapshotClause("program_name", false)}
     GROUP BY collection_time, blocking_session_id
 )
 SELECT
@@ -785,6 +790,7 @@ LEFT JOIN blocked_counts bc
 WHERE q.server_id = $1
 AND   q.collection_time >= $2
 AND   q.collection_time <= $3
+{MonitorSnapshotClause("q.program_name", includeMonitor)}
 ORDER BY q.collection_time DESC
 LIMIT 2000";
         command.CommandText = command.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
@@ -957,6 +963,7 @@ LIMIT 2000";
                         AND r.collection_time = (SELECT MAX(vqs.collection_time) FROM v_query_snapshots AS vqs WHERE vqs.server_id = $1)
                         AND r.collection_time >= $4
                         AND r.session_id > 50
+                        {MonitorSnapshotClause("r.program_name", false)}
                         {spServerDiagnosticsFilter}
                         {waitForFilter}
                         {backupsFilter}

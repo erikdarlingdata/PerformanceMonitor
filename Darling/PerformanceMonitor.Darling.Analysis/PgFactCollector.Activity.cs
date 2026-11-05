@@ -112,7 +112,7 @@ LIMIT 5";
         }
     }
 
-    public const string ActiveQuerySql = @"
+    public const string ActiveQuerySql = $@"
 SELECT
     COUNT(*) AS total_snapshots,
     COUNT(CASE WHEN total_elapsed_time_ms > 30000 THEN 1 END) AS long_running_count,
@@ -124,7 +124,8 @@ SELECT
 FROM query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}";
 
     /// <summary>
     /// Collects active query snapshot facts: long-running queries, blocked sessions, high DOP.

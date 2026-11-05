@@ -35,7 +35,7 @@ public partial class LocalDataService
     /// window materialised every waiting-task row to return thirty, and the envelope stated no bound at all.
     /// The tool now passes <c>limit + 1</c> and reads the extra row as truncation.</para>
     /// </summary>
-    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? limit = null)
+    public async Task<List<WaitingTaskRow>> GetWaitingTasksAsync(int serverId, int hoursBack = 1, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? limit = null, bool includeMonitor = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -74,7 +74,7 @@ FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3{dbClause}
-{exclude}
+{exclude}{MonitorSnapshotClause("program_name", includeMonitor)}
 GROUP BY collection_time, session_id, rtrim(wait_type), database_name
 ORDER BY collection_time DESC, MAX(wait_duration_ms) DESC{limitClause}";
 

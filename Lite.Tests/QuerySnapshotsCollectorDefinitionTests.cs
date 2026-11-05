@@ -64,17 +64,12 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
     }
 
-    /* #7416 item 11: Active Queries on an idle server showed only the monitor's own plan read. Both reads (the standard one and
-       Azure SQL Database's staged one) leave out a session whose program name starts with the monitor's prefix, keep a NULL program
-       name, and share the pattern with SessionStatsCollector. The old text had no program_name predicate at all. */
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void BuildSnapshotQuery_LeavesOutTheMonitorsOwnSessions_ByTheSharedPrefix(bool azure)
+    /* #7573: Active Queries STORES the monitor's own sessions now (the Monitor statements switch hides them at read time, so a monitor
+       query that blocks or is blocked can still be found); the collector read no longer filters on program_name. The session counts
+       still leave the monitor's own sessions out by the shared prefix. */
+    [Fact]
+    public void SessionStatsQuery_LeavesOutTheMonitorsOwnSessions_ByTheSharedPrefix()
     {
-        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: false, isAzureSqlDatabase: azure);
-
-        Assert.Contains("(des.program_name IS NULL OR des.program_name NOT LIKE N'PerformanceMonitor%')", sql, StringComparison.Ordinal);
         Assert.Contains("NOT LIKE N'PerformanceMonitor%'", PerformanceMonitor.Collectors.SessionStatsCollector.Instance.BuildQuery(new CollectorContext
         {
             ServerId = 1,

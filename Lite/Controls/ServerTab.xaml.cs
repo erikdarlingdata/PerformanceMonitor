@@ -587,7 +587,7 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow, ActiveQueriesIncludeMonitor);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
             /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
@@ -614,15 +614,24 @@ public partial class ServerTab : UserControl
     /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
     /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
     /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// <paramref name="includeMonitor"/> false (#7573) leaves out the monitor's own sessions.
     /// </summary>
-    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime, bool includeMonitor = false)
         => Task.Run(async () =>
         {
             var results = new List<QuerySnapshotRow>();
             var scrub = new SensitiveStatements.Session();
             while (await reader.ReadAsync().ConfigureAwait(false))
             {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+                var row = ReadLiveSnapshotRow(reader, snapshotTime, scrub);
+                /* #7573: the collector's query no longer drops the monitor's other sessions, so the live bar follows the Active Queries
+                   page's Monitor statements switch (left out by default, by the same program-name prefix rule). */
+                if (!includeMonitor && PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(row.ProgramName))
+                {
+                    continue;
+                }
+
+                results.Add(row);
             }
 
             return results;

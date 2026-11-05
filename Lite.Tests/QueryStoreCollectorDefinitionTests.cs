@@ -1156,13 +1156,21 @@ public sealed class QueryStoreCollectorDefinitionTests
                 + QueryStoreCollector.SelfQueryMarker + " where actual_state in ( @0 , @1 , @2 ) and readonly_reason & @3 = @4 )"),
             MakeRow(5, "(@1 int,@0 int)select top ( @1 ) plan_id = " + QueryStoreCollector.SelfQueryMarker + " . plan_id from sys . query_store_plan as "
                 + QueryStoreCollector.SelfQueryMarker + " where " + QueryStoreCollector.SelfQueryMarker + " . is_forced_plan = @0"),
-            MakeRow(6, "(@0 int)select top ( @0 ) plan_id = qsp . plan_id from sys . query_store_plan as qsp where qsp . is_forced_plan = @0"));
+            MakeRow(6, "(@0 int)select top ( @0 ) plan_id = qsp . plan_id from sys . query_store_plan as qsp where qsp . is_forced_plan = @0"),
+            /* #7573: the text SQL Server 2025 keeps (read back from sys.query_store_query_text) for the plan-correction readable-secondary
+               gate, in a database that is not forced-parameterized: the batch comment is cut and the alias carries the marker. */
+            MakeRow(7, "IF EXISTS\r\n(\r\n    SELECT\r\n        1\r\n    FROM sys.database_query_store_options AS " + QueryStoreCollector.SelfQueryMarker
+                + "\r\n    WHERE readonly_reason & 8 = 8\r\n)"),
+            /* The forced-plans object lookup, stored on its own: Query Store keeps each statement of a batch separately. */
+            MakeRow(8, "UPDATE f\r\nSET f.object_id = CONVERT(bigint, " + QueryStoreCollector.SelfQueryMarker + ".object_id)\r\nFROM #pm_forced_plans AS f\r\nJOIN sys.query_store_query AS "
+                + QueryStoreCollector.SelfQueryMarker + "\r\n    ON " + QueryStoreCollector.SelfQueryMarker + ".query_id = f.query_id\r\nOPTION(RECOMPILE)"),
+            MakeRow(9, "IF EXISTS\r\n(\r\n    SELECT\r\n        1\r\n    FROM sys.database_query_store_options AS qso\r\n    WHERE readonly_reason & 8 = 8\r\n)"));
         var rows = new System.Collections.Generic.List<QueryStoreCollector.Row>();
         await QueryStoreCollector.Instance.ReadItemAsync("SO", reader, rows, context, CancellationToken.None);
 
-        Assert.Equal(3, rows.Count);
+        Assert.Equal(4, rows.Count);
         Assert.DoesNotContain(rows, r => r.QueryText!.Contains(QueryStoreCollector.SelfQueryMarker, StringComparison.Ordinal));
-        Assert.Equal(new[] { 1L, 3L, 6L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
+        Assert.Equal(new[] { 1L, 3L, 6L, 9L }, System.Linq.Enumerable.Select(rows, r => r.QueryId));
     }
 
     [Fact]

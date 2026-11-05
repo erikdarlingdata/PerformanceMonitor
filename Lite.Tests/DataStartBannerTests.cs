@@ -346,7 +346,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         Assert.True(end > start, $"the end of '{signature}' was not found.");
         var body = code[start..end];
 
-        var read = Regex.Match(body, @"GetLatestQuerySnapshotsAsync\(_serverId,\s*0,\s*(?<from>\w+),\s*(?<to>\w+)\)");
+        var read = Regex.Match(body, @"GetLatestQuerySnapshotsAsync\(_serverId,\s*0,\s*(?<from>\w+),\s*(?<to>\w+)(,\s*includeMonitor:\s*\w+)?\)");
         Assert.True(read.Success, $"'{signature}' no longer reads the grid through GetLatestQuerySnapshotsAsync(_serverId, 0, from, to); update this pin.");
         var bound = body.IndexOf("_querySnapshotsFilterMgr!.UpdateData(snapshots);", StringComparison.Ordinal);
         Assert.True(bound > read.Index, $"'{signature}' no longer binds the rows it read; update this pin.");

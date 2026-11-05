@@ -162,7 +162,8 @@ public partial class ServerTab : UserControl
         SetDrillDownTimeRange(fromDate, toDate);
 
         SelectActiveQueriesForDrillDown();
-        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
+        var includeMonitor = ActiveQueriesIncludeMonitor;
+        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate, includeMonitor: includeMonitor));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
         LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
@@ -210,7 +211,8 @@ public partial class ServerTab : UserControl
         SelectActiveQueriesForDrillDown();
 
         AppLogger.Info("DrillDown", $"Calling GetLatestQuerySnapshotsAsync with fromDate={fromDate:O}, toDate={toDate:O}");
-        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
+        var includeMonitor = ActiveQueriesIncludeMonitor;
+        var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate, includeMonitor: includeMonitor));
         AppLogger.Info("DrillDown", $"Got {snapshots.Count} snapshots");
 
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
