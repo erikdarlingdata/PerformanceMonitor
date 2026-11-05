@@ -13,7 +13,7 @@ export const SCHEDULER_STATS = [
   { key: "schedulers", label: "Schedulers", format: "int" },
   { key: "runnable_tasks", label: "Runnable tasks", format: "int" },
   { key: "avg_runnable_per_scheduler", label: "Runnable/sched", format: "num2" },
-  { key: "runnable_percent", label: "Runnable %", format: "num1" },
+  { key: "runnable_percent", label: "Runnable %", format: "num1", nullAs: 0, hint: "The share of the other requests running at that moment that were waiting for a CPU. 0.0 means no other request was running." },
   { key: "workers", label: "Workers", format: "int" },
   { key: "max_workers", label: "Max workers", format: "int" },
   { key: "worker_utilization_percent", label: "Worker use %", format: "num1" },

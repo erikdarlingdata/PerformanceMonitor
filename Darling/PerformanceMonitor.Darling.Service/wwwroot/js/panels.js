@@ -1113,7 +1113,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") || null, title: c.hint || null });
+  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "") || null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1211,7 +1211,7 @@ function makeGridSort(desc, cols, rows) {
       const th = ths[i];
       if (!th) return;
       const live = sortable[i];
-      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "");
+      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "");
       th.setAttribute("tabindex", live ? "0" : "-1");
       /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
       th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
@@ -1247,7 +1247,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;
@@ -1353,7 +1353,9 @@ function cell(row, c) {
     if (typeof c.cellClass === "function") { const k = c.cellClass(row); if (k) rcls.push(k); }
     return el("td", { class: rcls.join(" ") || null }, [c.render(row)]);
   }
-  const raw = getPath(row, c.key);
+  const found = getPath(row, c.key);
+  /* #7578: `nullAs` is the value a missing figure means (see the stat tile). */
+  const raw = found == null && c.nullAs != null ? c.nullAs : found;
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
   if (c.name) cls.push(c.path ? "name-cell path-cell" : "name-cell");
@@ -1453,7 +1455,9 @@ function vizStat(data, desc) {
     const sev = s.sev || s.severity;
     /* `display(data)` is a tile whose text is made from more than one field of the answer (the Alert setup tile says how many gaps there are). */
     const made = typeof s.display === "function" ? s.display(data) : null;
-    const raw = made != null ? made : getPath(data, s.key);
+    const found = made != null ? made : getPath(data, s.key);
+    /* #7578: `nullAs` is the value a missing figure means when the read answered at all (Runnable %: no other request was running, so the share is 0). */
+    const raw = found == null && s.nullAs != null ? s.nullAs : found;
     const why = raw == null && s.nullKey ? getPath(data, s.nullKey) : null;
     /* `small` shrinks a long text value (a state name, a database name). A dash is not text, and at 1rem it drew
        smaller than the dashes of the tiles beside it (#7409), so a missing value keeps the full tile size. */
@@ -1465,7 +1469,7 @@ function vizStat(data, desc) {
     const valueText = why != null && why !== "" ? String(why) : shownValue;
     /* #7552: a wait name (SOS_SCHEDULER_YIELD) may break after an underscore, so a narrow tile wraps between words and not at its last letter. */
     const valueKids = s.breakAfterUnderscore ? valueText.split(/(?<=_)/).flatMap((part, i) => (i ? [el("wbr"), part] : [part])) : null;
-    return el("div", { class: "stat" }, [
+    return el("div", { class: "stat", title: s.hint || null }, [
       valueKids ? el("div", { class: valueClass }, valueKids) : el("div", { class: valueClass, text: valueText }),
       el("div", { class: "label", text: s.label }),
     ]);

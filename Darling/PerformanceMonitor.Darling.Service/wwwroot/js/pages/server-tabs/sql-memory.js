@@ -62,23 +62,27 @@ export const CLERK_COLUMNS = [
 /* #7416: 1 and 2 are the internal and default pools, named as the grant charts name them. Any other pool keeps its number. */
 const POOL_COLUMN = { key: "pool_id", label: "Pool", display: (r) => (r.pool_id == null ? "" : poolName(r.pool_id)) };
 
+
+/* #7578: the four date-time columns of the window grid wrap at their space ("11/5/2026," over "3:16:21 PM") with a floor that holds a date over its time (flow-tight), and every header wraps at its spaces (wrapHead), so the grid fits the panel at 1280 px with no sideways scroll and no width is set for one screen. */
+const WRAPPING_TIME = { wrap: true, cellClass: () => "flow-cell flow-tight" };
+
 export const GRANT_WINDOW_COLUMNS = [
   POOL_COLUMN,
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
-  { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
+  { key: "peak_waiters_at", label: "Peak waiters at", format: "time", ...WRAPPING_TIME },
   { key: "peak_granted_memory_mb", label: "Peak granted", format: "mbfit" },
-  { key: "peak_granted_at", label: "Peak granted at", format: "time" },
+  { key: "peak_granted_at", label: "Peak granted at", format: "time", ...WRAPPING_TIME },
   { key: "min_available_memory_mb", label: "Min available", format: "mbfit" },
   { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
   { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
-  { key: "first_snapshot_at", label: "First", format: "time", small: true },
-  { key: "last_snapshot_at", label: "Last", format: "time", small: true },
-];
+  { key: "first_snapshot_at", label: "First", format: "time", small: true, ...WRAPPING_TIME },
+  { key: "last_snapshot_at", label: "Last", format: "time", small: true, ...WRAPPING_TIME },
+].map((c) => ({ ...c, wrapHead: true }));
 
 /* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
    semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
-export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" }, ...GRANT_WINDOW_COLUMNS];
+export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "semaphore", wrapHead: true }, ...GRANT_WINDOW_COLUMNS];
 
 /* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
    Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
@@ -325,7 +329,9 @@ export function memoryPressurePanels(server, ctx) {
     renderInto(grid.body, () => [
       keptWindowStrip(res),
       windowFloorStrip(res.data, { viz: "table" }),
-      VIZ.table(res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
+      /* #7578: the read sends oldest first (the chart and the MCP tool keep that order), but the rows someone opens this grid for are
+         the newest, so the grid shows them first. */
+      VIZ.table(Array.isArray(res.data.events) ? { ...res.data, events: [...res.data.events].reverse() } : res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
     ]);
   })();
   return [chart.panel, grid.panel];
