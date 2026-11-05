@@ -513,7 +513,7 @@ public partial class FinOpsTab : UserControl
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
         var stolenPct = (double)ProvisioningVerdict.StolenMemoryPercent(data.TotalMemoryMb, data.BufferPoolMb);
-        MemoryUtilText.Text = $"{stolenPct:N0}%";
+        MemoryUtilText.Text = $"{stolenPct:N1}%"; /* one decimal, as the tooltip and the web tile say it (#7562) */
         SetBar(MemoryUtilBar, MemUtilFilled, MemUtilEmpty, stolenPct);
         /* A figure that reads amber or red says why (#6139); below amber there is nothing to say. */
         var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct);

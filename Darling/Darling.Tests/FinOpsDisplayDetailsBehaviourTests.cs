@@ -74,6 +74,9 @@ public sealed class FinOpsDisplayDetailsBehaviourTests
         Assert.Contains("sev-Warning", run.GetProperty("stolenJustUnderRed")[0].GetString());
         Assert.DoesNotContain("sev-Critical", run.GetProperty("stolenJustUnderRed")[0].GetString());
         Assert.Contains("sev-Critical", run.GetProperty("stolenRed")[0].GetString());
+        // Exactly 85 is amber: both desktop bars go red only above 85, so the web tile agrees with them.
+        Assert.Contains("sev-Warning", run.GetProperty("stolenOnTheLine")[0].GetString());
+        Assert.DoesNotContain("sev-Critical", run.GetProperty("stolenOnTheLine")[0].GetString());
     }
 
     [Fact]

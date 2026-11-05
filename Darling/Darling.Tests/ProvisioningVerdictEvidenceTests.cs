@@ -67,4 +67,21 @@ public sealed class ProvisioningVerdictEvidenceTests
         Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
         Assert.Contains("red from 85%", note, System.StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void StolenMemoryNote_UsesTheInvariantDecimalPoint_OnAHostWithACommaDecimalCulture()
+    {
+        // The MCP tool promises invariant-culture text numbers: a comma-decimal host must still send "84.8%" (#7562).
+        var before = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            var note = ProvisioningVerdict.StolenMemoryNote(84.8);
+            Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = before;
+        }
+    }
 }

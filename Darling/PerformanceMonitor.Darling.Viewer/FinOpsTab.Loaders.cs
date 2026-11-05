@@ -315,7 +315,7 @@ public partial class FinOpsTab
 
         /* Stolen Memory % = (Total Server Memory - Buffer Pool) / Total Server Memory */
         var stolenPct = FinOpsUtilizationFigures.StolenMemoryPct(data.TotalMemoryMb, data.BufferPoolMb);
-        FinOpsMemoryUtilText.Text = $"{stolenPct:N0}%";
+        FinOpsMemoryUtilText.Text = $"{stolenPct:N1}%"; /* one decimal, as the tooltip and the web tile say it (#7562) */
         SetBar(FinOpsMemoryUtilBar, FinOpsMemUtilFilled, FinOpsMemUtilEmpty, stolenPct);
         /* A figure that reads amber or red says why (#6139); below amber there is nothing to say. */
         var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct);

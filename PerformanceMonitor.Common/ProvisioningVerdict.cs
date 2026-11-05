@@ -115,7 +115,7 @@ public static class ProvisioningVerdict
     public static string StolenMemoryNote(double stolenPercent) =>
         stolenPercent < (double)HighStolenMemoryPercent
             ? ""
-            : string.Create(System.Globalization.CultureInfo.CurrentCulture,
+            : string.Create(System.Globalization.CultureInfo.InvariantCulture,
                 $"{stolenPercent:0.#}% of the memory SQL Server holds is outside the buffer pool (plans, grants, other caches). Amber from {HighStolenMemoryPercent:N0}%, red from 85%.");
 
     /// <summary>Over-provisioned: a downsizing candidate.</summary>

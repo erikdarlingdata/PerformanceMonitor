@@ -31,11 +31,11 @@ const VERDICT_SEV = { RIGHT_SIZED: "Healthy", OVER_PROVISIONED: "Warning", UNDER
 const BAND_SEV = { good: "Healthy", fair: "Warning", poor: "Critical" };
 
 /* #7562: the sentence under the tiles names two colors, amber from 60% and red from 85%. The service sends that sentence only from 60%, so the tile is
-   colored when the sentence is there: amber, and red from 85%. */
+   colored when the sentence is there: amber, and red above 85%, the same line both desktop bars use. */
 const STOLEN_RED_PCT = 85;
 function stolenSev(memory) {
   if (!memory || memory.stolen_memory_pct == null || !memory.stolen_memory_note) return undefined;
-  return memory.stolen_memory_pct >= STOLEN_RED_PCT ? "Critical" : "Warning";
+  return memory.stolen_memory_pct > STOLEN_RED_PCT ? "Critical" : "Warning";
 }
 
 /* Both come from the shared catalog, so a label or format changed there changes here (the Server page does the same). */

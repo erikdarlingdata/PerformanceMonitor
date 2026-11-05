@@ -117,6 +117,7 @@ try {
   out.stolenAmber = tile(await build(utilization, "get_finops", util("RIGHT_SIZED", 72.5, "73% of the memory SQL Server holds is outside the buffer pool.")), "Stolen memory %");
   out.stolenJustUnderRed = tile(await build(utilization, "get_finops", util("RIGHT_SIZED", 84.8, "84.8% of the memory SQL Server holds is outside the buffer pool.")), "Stolen memory %");
   out.stolenRed = tile(await build(utilization, "get_finops", util("RIGHT_SIZED", 88, "88% of the memory SQL Server holds is outside the buffer pool.")), "Stolen memory %");
+  out.stolenOnTheLine = tile(await build(utilization, "get_finops", util("RIGHT_SIZED", 85, "85% of the memory SQL Server holds is outside the buffer pool.")), "Stolen memory %");
 
   const files = [
     { database_name: "Sales", file_name: "Sales.mdf", file_type: "ROWS", total_size_mb: 4096, used_size_mb: 3280, free_space_mb: 816, used_pct: 80, max_size_mb: 2097152, auto_growth_mb: 64, is_percent_growth: false },
