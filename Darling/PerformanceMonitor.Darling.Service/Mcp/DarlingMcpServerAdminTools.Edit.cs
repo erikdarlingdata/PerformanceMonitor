@@ -75,7 +75,7 @@ public sealed partial class DarlingMcpServerAdminTools
     /// is a rule and not a typo.</summary>
     private static readonly string[] EditRefusedKeys =
     [
-        "server_id", "engine", "is_enabled", "excluded_databases", "capture_plans", "alert_delivery_mode_override",
+        "server_id", "engine", "is_enabled", "excluded_databases", "xe_session_databases", "capture_plans", "alert_delivery_mode_override",
         "plan_force_bot_enabled",
     ];
 
@@ -157,7 +157,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
         "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +
         "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
-        "enabled state and excluded databases cannot change here (use disable_server / enable_server and set_server_excluded_databases). Returns updated, unchanged, or " +
+        "enabled state and excluded databases cannot change here (use disable_server / enable_server and set_server_excluded_databases; the Extended Events session databases list with set_server_xe_session_databases). Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
         "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
@@ -814,6 +814,7 @@ LIMIT 1";
             {
                 "is_enabled" => " To take a server out of collection or bring it back, call disable_server or enable_server.",
                 "excluded_databases" => " To change a server's excluded databases, call set_server_excluded_databases.",
+                "xe_session_databases" => " To change the list of databases that get Extended Events sessions, call set_server_xe_session_databases.",
                 _ => string.Empty,
             };
             return (null, $"'{refusedName}' cannot be changed here: it is the server's identity or a setting kept in the desktop app.{elsewhere} Nothing was changed.");

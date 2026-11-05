@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>
 /// The collection-state tools (#6230 part A): <c>pause_collection</c> / <c>resume_collection</c> (all collection),
-/// <c>disable_server</c> / <c>enable_server</c> (one server), <c>set_server_excluded_databases</c> (one server's excluded
+/// <c>disable_server</c> / <c>enable_server</c> (one server), <c>set_server_excluded_databases</c> and <c>set_server_xe_session_databases</c> (one server's excluded and Extended Events session
 /// databases) and <c>reload_config</c>, with <c>get_collection_state</c> to read the state before and after. The writes are served
 /// under <c>mcp.allowWrites</c> and are never offered to an investigation agent (<see cref="DarlingMcpWritePolicy.NeverAgentTools"/>).
 ///
@@ -127,6 +127,66 @@ public sealed class DarlingMcpCollectionStateTools
                 ["current"] = new JsonObject { ["excluded_databases"] = Strings(after) },
                 ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(server.Excluded) }),
                 ["check"] = "get_collection_state",
+                ["takes_effect"] = TakesEffect,
+            }.ToJsonString();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    [McpServerTool(Name = "set_server_xe_session_databases"), Description(
+        "Replaces ONE server's list of databases that get Extended Events sessions: only the listed databases get the deadlock, blocked process, client timeout and long query sessions, an empty list clears it and means every database, and the excluded-databases list still wins. It matters on Azure SQL Database, where each session is database-scoped and Azure caps them per pool; a box SQL Server covers every database and ignores it. The list you send is the whole new list. At most 256 names of at most 128 characters each, no control characters; repeats (any casing) are kept once. A session already in a database left off the list is left in place, never dropped. The service applies it on its next config poll. Served only with mcp.allowWrites. The answer gives the previous list and the exact call that undoes it.")]
+    public static async Task<string> SetServerXeSessionDatabases(
+        NpgsqlDataSource postgres,
+        [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
+        [Description("The complete new list of database names that get Extended Events sessions. Empty clears the list (every database).")] string[] databases,
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
+    {
+        const string tool = "set_server_xe_session_databases";
+        try
+        {
+            if (databases is null)
+            {
+                return Refuse(tool, "invalid", "databases is required: send the whole list of database names that get Extended Events sessions, or an empty list to clear it (every database). Nothing was changed.");
+            }
+
+            if (MonitoredServerXeSessionDatabases.Refusal(databases) is string refusal)
+            {
+                return Refuse(tool, "invalid", refusal + " Nothing was changed.");
+            }
+
+            var (server, error) = await ResolveAsync(postgres, tool, server_name, cancellationToken);
+            if (server is null)
+            {
+                return error!;
+            }
+
+            var before = await MonitoredServerXeSessionDatabases.ReadAsync(postgres, server.ServerId, cancellationToken) ?? Array.Empty<string>();
+            var wanted = MonitoredServerExclusions.Prepare(databases);
+            await using (var command = MonitoredServerXeSessionDatabases.CreateSetCommand(postgres, server.ServerId, wanted, McpCommandDeadlines.ReadSeconds))
+            {
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var after = await MonitoredServerXeSessionDatabases.ReadAsync(postgres, server.ServerId, cancellationToken) ?? wanted;
+            LogWrite(logger, tool, server);
+            var changed = !before.SequenceEqual(after, StringComparer.Ordinal);
+            return new JsonObject
+            {
+                ["status"] = changed ? "changed" : "unchanged",
+                ["tool"] = tool,
+                ["server"] = server.Name,
+                ["storage_name"] = server.StorageName,
+                ["what_changed"] = after.Count == 0
+                    ? $"{server.Name} has no Extended Events session database list now; every database gets sessions (the excluded databases still do not)."
+                    : $"{server.Name} now puts Extended Events sessions only in {after.Count} database(s): {string.Join(", ", after)}.",
+                ["previous"] = new JsonObject { ["xe_session_databases"] = Strings(before) },
+                ["current"] = new JsonObject { ["xe_session_databases"] = Strings(after) },
+                ["undo"] = Undo(tool, new JsonObject { ["server_name"] = server.StorageName, ["databases"] = Strings(before) }),
+                ["check"] = "Calling this tool again with the same list answers unchanged; the current list is in this answer.",
                 ["takes_effect"] = TakesEffect,
             }.ToJsonString();
         }
