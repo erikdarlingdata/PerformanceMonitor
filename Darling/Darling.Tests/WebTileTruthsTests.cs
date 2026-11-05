@@ -242,6 +242,13 @@ public sealed class WebTileTruthsTests
 
         Assert.Equal("scheduled analysis", r.GetProperty("analysis").GetProperty("tiles").GetProperty("Cause").GetString());
         Assert.Equal("none measured", r.GetProperty("unmeasured").GetProperty("tiles").GetProperty("Cause").GetString());
+        foreach (var site in new[] { "measured", "measuredPg" })
+        {
+            var measured = r.GetProperty(site).GetProperty("tiles");
+            Assert.Equal("collectors", measured.GetProperty("Cause").GetString());
+            Assert.Equal("15.0 s", measured.GetProperty("Cause ran for").GetString());
+        }
+
         Assert.Equal("waiting for a fleet collection slot", r.GetProperty("gate").GetProperty("tiles").GetProperty("Cause").GetString());
         Assert.Equal("memory launch guard", r.GetProperty("guard").GetProperty("tiles").GetProperty("Cause").GetString());
     }

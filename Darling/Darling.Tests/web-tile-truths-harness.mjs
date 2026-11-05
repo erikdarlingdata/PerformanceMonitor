@@ -238,6 +238,9 @@ try {
     healthyPg: await drawSkipped(tabs.POSTGRES_TABS, healthyBlock, "overview"),
     analysis: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "analysis_pass" })),
     unmeasured: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 0 })),
+    /* #7660 review: the other side of the `collectors` branch, a measured time above 0 reads the step's own name, never "none measured". */
+    measured: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 15000 })),
+    measuredPg: await drawSkipped(tabs.POSTGRES_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 15000 }), "overview"),
     gate: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "gate_wait", last_slowest_step_ms: 40000 })),
     guard: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "launch_guard_hold", last_slowest_step_ms: 40000 })),
   };
