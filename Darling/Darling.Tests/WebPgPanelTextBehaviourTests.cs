@@ -176,6 +176,55 @@ public sealed class WebPgPanelTextBehaviourTests
         Assert.Equal("SELECT 1 -- fixed in (#123), then (#4046, #6866)", w.GetProperty("comment").GetString());
     }
 
+    private const string StatementWords = "Statement text withheld by the statement filter.";
+    private const string Containing = "SELECT 1 /* see -- statement text withheld (#4348) */";
+
+    [Fact]
+    public void TheStoredWithheldMarker_ReadsAsPlainWordsInAGridCell_AndAStatementThatHoldsItIsLeftAlone()
+    {
+        var g = Run().GetProperty("withheld").GetProperty("grid");
+        Assert.Equal(StatementWords, Assert.Single(g.GetProperty("marker").EnumerateArray()).GetString());
+        Assert.Equal(StatementWords, Assert.Single(g.GetProperty("padded").EnumerateArray()).GetString());
+        Assert.Equal(Containing, Assert.Single(g.GetProperty("containing").EnumerateArray()).GetString());
+    }
+
+    [Fact]
+    public void TheStoredWithheldMarker_ReadsAsPlainWordsInABlockChainNode_AndAStatementThatHoldsItIsLeftAlone()
+    {
+        var c = Run().GetProperty("withheld").GetProperty("chain");
+        Assert.Equal(StatementWords, c.GetProperty("marker").GetString());
+        Assert.Equal(Containing, c.GetProperty("containing").GetString());
+    }
+
+    [Fact]
+    public void TheStoredWithheldMarker_ReadsAsPlainWordsOnADeadlockGraphCardAndItsSidePanel_AndAStatementThatHoldsItIsLeftAlone()
+    {
+        var d = Run().GetProperty("withheld").GetProperty("deadlock");
+        var marker = d.GetProperty("marker");
+        // The card clips the preview to fit, so it carries the start of the words and never the stored marker.
+        var card = Assert.Single(marker.GetProperty("card").EnumerateArray()).GetString()!;
+        Assert.StartsWith("Statement text withheld", card, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4348", card, StringComparison.Ordinal);
+        Assert.Equal(StatementWords, marker.GetProperty("side").GetString());
+
+        var containing = d.GetProperty("containing");
+        Assert.StartsWith("SELECT 1 /* see -- statement text", Assert.Single(containing.GetProperty("card").EnumerateArray()).GetString()!, StringComparison.Ordinal);
+        Assert.Equal(Containing, containing.GetProperty("side").GetString());
+    }
+
+    [Fact]
+    public void AWithheldPostgresPlan_ReadsAsPlainWordsInThePlanPanel_AndARealPlanIsStillShown()
+    {
+        var p = Run().GetProperty("withheld").GetProperty("pgPlan");
+        var marker = p.GetProperty("marker").GetString()!;
+        Assert.Contains("This plan was withheld by the statement filter.", marker, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4348", marker, StringComparison.Ordinal);
+        Assert.DoesNotContain("Copy", marker, StringComparison.Ordinal);
+        var real = p.GetProperty("real").GetString()!;
+        Assert.Contains("Seq Scan", real, StringComparison.Ordinal);
+        Assert.DoesNotContain("withheld", real, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AWithheldPlan_ReadsAsPlainWords_AndARealPlanIsStillAPlan()
     {

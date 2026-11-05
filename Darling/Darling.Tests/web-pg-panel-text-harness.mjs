@@ -44,7 +44,9 @@ class FakeNode {
   getAttribute(name) {
     return name in this.attrs ? this.attrs[name] : null;
   }
-  addEventListener() {}
+  addEventListener(type, fn) {
+    (this.listeners ||= {})[type] = fn;
+  }
   set textContent(value) {
     this.children = [];
     this.text = String(value);
@@ -162,7 +164,46 @@ try {
     const pre = n.tag === "#text" ? null : find(n, (x) => x.tag === "pre");
     return n.tag === "#text" ? n.text : pre ? pre.textContent : n.textContent;
   };
+  /* The other sites that show a stored statement or plan: the generic grid cell, the block chain node, the deadlock graph card and its side
+     panel, and the PostgreSQL plan cell. Each is fed the exact marker, and a statement that only holds the marker among other text. */
+  const panelsMod = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+  const blockChain = await import(pathToFileURL(path.join(scratch, "pages", "block-chain.js")).href);
+  const deadlockGraph = await import(pathToFileURL(path.join(scratch, "pages", "deadlock-graph.js")).href);
+  const pgPlanViewer = await import(pathToFileURL(path.join(scratch, "pages", "pg-plan-viewer.js")).href);
+  const CONTAINING = "SELECT 1 /* see " + MARKER + " */";
+  const gridCells = (text) => {
+    const t = panelsMod.gridTable([{ sql: text }], { columns: [{ key: "sql", label: "Statement" }], sortable: false, filter: false, tools: false });
+    return collect(t, (n) => n.tag === "td").map((n) => n.textContent);
+  };
+  const chainText = (text) => {
+    const host = blockChain.drawBlockChain({ chain: { is_apex: true, session_id: 51, sql_text: text } });
+    return find(host, (n) => n.tag === "pre").textContent;
+  };
+  const graphOf = (text) => ({
+    width: 600, height: 300, node_width: 240, node_height: 150,
+    processes: [{ id: "p1", spid: 51, x: 10, y: 10, victim: true, sql_text: text }],
+    edges: [],
+  });
+  const deadlockText = (text) => {
+    const g = deadlockGraph.drawDeadlockGraph(graphOf(text), null);
+    const card = find(g, (n) => String(n.className).includes("dlg-node"));
+    return {
+      card: collect(card, (n) => String(n.className).includes("dlg-line")).map((n) => n.textContent),
+      side: find(g, (n) => n.tag === "pre" && String(n.className).includes("code")).textContent,
+    };
+  };
+  let planKey = 0;
+  const pgPlanPanel = (plan) => {
+    /* A new queryid each time: an opened plan is remembered by its row identity, and a second click on the same row would close it. */
+    const host = pgPlanViewer.pgPlanCell("srv-a", { queryid: String(++planKey), plan_hash: "2", plan });
+    find(host, (n) => n.tag === "button").listeners.click();
+    return host.textContent;
+  };
   const withheld = {
+    grid: { marker: gridCells(MARKER), padded: gridCells("  " + MARKER + "\n"), containing: gridCells(CONTAINING) },
+    chain: { marker: chainText(MARKER), containing: chainText(CONTAINING) },
+    deadlock: { marker: deadlockText(MARKER), containing: deadlockText(CONTAINING) },
+    pgPlan: { marker: pgPlanPanel(MARKER), real: pgPlanPanel({ "Node Type": "Seq Scan" }) },
     marker: cellText(MARKER),
     padded: cellText("  " + MARKER + "\n"),
     containing: cellText("SELECT 1 /* see " + MARKER + " */"),
