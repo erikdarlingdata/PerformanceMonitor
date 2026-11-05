@@ -208,27 +208,42 @@ public sealed class WebTileTruthsTests
         Assert.Equal("Unavailable", sweep.GetProperty("Read").GetString());
     }
 
-    /// <summary>#7660: the Skipped Cycles sentence is a note under the tiles, not a tile; its gap is in the browser's zone; the Cause tile
-    /// says what the sentence says.</summary>
+    /// <summary>#7660: the Skipped Cycles panel, drawn through the page's own fanout on the Collection Health tab of both products. The last skip's
+    /// sentence is a strip under the tiles (never a tile) with its gap in the browser's zone, the Cause tile says the sentence's words for every cause
+    /// the service names, and a server that skipped nothing draws no strip at all.</summary>
     [Fact]
-    public void TheSkippedCyclesSentence_IsANoteUnderTheTiles_WithItsGapInLocalTime()
+    public void TheSkippedCyclesSentence_IsAStripUnderTheTiles_OnASkippingServerOnly()
     {
         var r = Run().GetProperty("skippedCycles");
-        var tiles = r.GetProperty("tiles");
 
-        Assert.False(tiles.TryGetProperty("Last message", out _), "the sentence is not a tile");
-        Assert.Equal("running jobs", tiles.GetProperty("Cause").GetString());
-        foreach (var tile in tiles.EnumerateObject())
+        foreach (var site in new[] { "sql", "pg" })
         {
-            Assert.DoesNotContain("Collection fell behind", tile.Value.GetString()!, StringComparison.Ordinal);
+            var s = r.GetProperty(site);
+            Assert.True(s.GetProperty("panel").GetBoolean(), site + ": the panel is on the tab");
+            var tiles = s.GetProperty("tiles");
+            Assert.False(tiles.TryGetProperty("Last message", out _), site + ": the sentence is not a tile");
+            Assert.Equal("running jobs", tiles.GetProperty("Cause").GetString());
+            var strip = Assert.Single(s.GetProperty("strips").EnumerateArray().Select(e => e.GetString()!).ToArray());
+            Assert.Contains("Read OK: the check ran and found 1 skipped cycle", strip, StringComparison.Ordinal);
+            Assert.Contains("was still running when the next one was due", strip, StringComparison.Ordinal);
+            Assert.Contains("The gap ran from " + s.GetProperty("localGap").GetString() + " to ", strip, StringComparison.Ordinal);
+            Assert.DoesNotContain(" UTC", strip, StringComparison.Ordinal);
+            var order = s.GetProperty("order").EnumerateArray().Select(e => e.GetString()).ToArray();
+            Assert.Equal(new[] { "stat", "stat", "stat", "stat", "stat", "stat", "strip" }, order);
         }
 
-        var note = r.GetProperty("note").GetString()!;
-        Assert.Contains("Collection fell behind", note, StringComparison.Ordinal);
-        Assert.Contains("was still running when the next one was due", note, StringComparison.Ordinal);
-        Assert.Contains("The gap ran from " + r.GetProperty("localGap").GetString() + " to ", note, StringComparison.Ordinal);
-        Assert.DoesNotContain(" UTC", note, StringComparison.Ordinal);
-        Assert.Contains("Read OK: the check ran and found 1 skipped cycle", note, StringComparison.Ordinal);
+        foreach (var site in new[] { "healthy", "healthyPg" })
+        {
+            var s = r.GetProperty(site);
+            Assert.True(s.GetProperty("panel").GetBoolean(), site + ": the panel is on the tab");
+            Assert.Equal(0, s.GetProperty("strips").GetArrayLength());
+            Assert.Equal("OK", s.GetProperty("tiles").GetProperty("Read").GetString());
+        }
+
+        Assert.Equal("scheduled analysis", r.GetProperty("analysis").GetProperty("tiles").GetProperty("Cause").GetString());
+        Assert.Equal("none measured", r.GetProperty("unmeasured").GetProperty("tiles").GetProperty("Cause").GetString());
+        Assert.Equal("waiting for a fleet collection slot", r.GetProperty("gate").GetProperty("tiles").GetProperty("Cause").GetString());
+        Assert.Equal("memory launch guard", r.GetProperty("guard").GetProperty("tiles").GetProperty("Cause").GetString());
     }
 
     [Fact]

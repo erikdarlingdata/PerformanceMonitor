@@ -973,7 +973,7 @@ export const SKIPPED_CYCLES_STATS = [
   { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
   { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },
   /* #7660: the tile says the cause in the words the sentence uses. */
-  { key: "skipped_cycles.last_slowest_step", label: "Cause", format: "text", small: true, display: (d) => skippedCycleCause(d && d.skipped_cycles ? d.skipped_cycles.last_slowest_step : null) },
+  { key: "skipped_cycles.last_slowest_step", label: "Cause", format: "text", small: true, display: (d) => skippedCycleCause(d && d.skipped_cycles ? d.skipped_cycles.last_slowest_step : null, d && d.skipped_cycles ? d.skipped_cycles.last_slowest_step_ms : null) },
   { key: "skipped_cycles.last_slowest_step_ms", label: "Cause ran for", format: "ms" },
 ];
 

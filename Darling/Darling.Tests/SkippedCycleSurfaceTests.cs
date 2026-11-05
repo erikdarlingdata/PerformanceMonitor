@@ -9,7 +9,6 @@
 using System;
 using System.Linq;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -333,22 +332,6 @@ public sealed class SkippedCycleSurfaceShapeTests
         var read = tools.IndexOf("SkippedCycleReader.GetSkippedCycleSummaryAsync(", StringComparison.Ordinal);
         var memo = tools.IndexOf("DarlingDataReader.GetCollectionHealthMemoizedAsync(", StringComparison.Ordinal);
         Assert.True(memo >= 0 && read > memo, "the skipped-slot read is its own statement after the memoised collector read");
-    }
-
-    [Fact]
-    public void TheWebPanel_IsUsedAtBothSites_AndReadsOnlyKeysTheBlockHas()
-    {
-        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Equal(2, Regex.Matches(js, @"^\s+SKIPPED_CYCLES_PANEL,\s*$", RegexOptions.Multiline).Count);
-
-        /* #7660: last_message is the note under the tiles, not a tile, so the tiles read every other key of the block. */
-        var shared = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs", "shared.js");
-        var start = shared.IndexOf("const SKIPPED_CYCLES_STATS = [", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        var end = shared.IndexOf("];", start, StringComparison.Ordinal);
-        var stats = shared[start..end];
-        var keys = Regex.Matches(stats, @"key: ""skipped_cycles\.(\w+)""").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(BlockFields.Where(f => f != "last_message").ToArray(), keys);
     }
 
     [Fact]
