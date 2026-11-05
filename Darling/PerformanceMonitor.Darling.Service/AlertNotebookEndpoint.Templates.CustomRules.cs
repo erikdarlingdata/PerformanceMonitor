@@ -45,7 +45,7 @@ internal static partial class AlertNotebookEndpoint
             return cells;
         }
 
-        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(context.CustomRule.DefinitionJson);
+        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(context.CustomRule.DefinitionJson, enforcePerfmonRate: false);
         if (parseError is not null || definition is null)
         {
             cells.Add(CustomRuleUnparseableNoteCell());

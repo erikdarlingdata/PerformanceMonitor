@@ -407,7 +407,8 @@ internal static class DarlingMcpAgentActions
     internal static async Task<AgentActionRefusal?> RuleScopeRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         string definitionJson, int requestServerId, string which, CancellationToken ct)
     {
-        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(definitionJson);
+        /* Scope only: the rate check (#7565) runs where the definition is saved, so a stored rule or an unrelated edit is not judged here. */
+        var (definition, parseError) = CustomAlertRuleDefinition.TryParse(definitionJson, enforcePerfmonRate: false);
         /* A definition that does not parse has no scope to judge: refuse it as invalid, naming the field, so the agent fixes the
            JSON rather than rewriting a scope that was never the problem. (A stored rule that does not parse is rule_scope.) */
         if (definition is null && which == "after")

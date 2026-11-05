@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -609,5 +610,65 @@ public class CustomAlertRuleDefinitionTests
         Assert.Equal(40d, def.CriticalLowerBound);
         Assert.Equal(60d, def.CriticalUpperBound);
         Assert.False(def.BreachesOnZero());
+    }
+
+    // ---- #7565: perfmon_value_per_second is a rate only for one counter and one instance ----
+
+    private const string PerfmonRatePredicate = ",\"predicate\":{\"op\":\"lt\",\"warnThreshold\":10}}";
+
+    private static string PerfmonRateRule(string filters) =>
+        "{\"metric\":{\"source\":\"perfmon_stats\",\"ratio\":\"perfmon_value_per_second\",\"hours\":1,\"filters\":[" + filters + "]}" + PerfmonRatePredicate;
+
+    private const string CounterPin = "{\"dimension\":\"counter_name\",\"op\":\"eq\",\"value\":\"Transactions/sec\"}";
+    private const string InstancePin = "{\"dimension\":\"instance_name\",\"op\":\"eq\",\"value\":\"_Total\"}";
+
+    [Fact]
+    public void PerfmonRate_NoInstancePin_IsRefused_NamingWhatToAdd()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(PerfmonRateRule(CounterPin));
+
+        Assert.Null(def);
+        Assert.NotNull(error);
+        Assert.Contains("perfmon_value_per_second", error);
+        Assert.Contains("instance_name", error);
+        Assert.DoesNotContain("counter_name", error);   // the counter IS pinned, so only the missing pin is named
+        Assert.DoesNotContain("filter server", error);         // an alert is already one server
+    }
+
+    [Fact]
+    public void PerfmonRate_NoFilters_NamesBothPins()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(PerfmonRateRule(string.Empty));
+
+        Assert.Null(def);
+        Assert.Contains("counter_name", error);
+        Assert.Contains("instance_name", error);
+    }
+
+    [Fact]
+    public void PerfmonRate_CounterAndInstancePinned_IsAccepted()
+    {
+        var (def, error) = CustomAlertRuleDefinition.TryParse(PerfmonRateRule(CounterPin + "," + InstancePin));
+
+        Assert.Null(error);
+        Assert.NotNull(def);
+    }
+
+    [Fact]
+    public void PerfmonRate_StoredUnpinnedRule_StillParsesWhenLoaded_AndKeepsEvaluating()
+    {
+        var json = PerfmonRateRule(CounterPin);
+
+        // Loading a rule saved before the check (the evaluator, test-now, the notebook builder) does not enforce it ...
+        var (def, error) = CustomAlertRuleDefinition.TryParse(json, enforcePerfmonRate: false);
+        Assert.Null(error);
+        Assert.NotNull(def);
+
+        // ... so the evaluator's load-time classification keeps it armed instead of reporting it broken.
+        var row = new CustomAlertRule(1, "legacy rate", json, Description: null, Enabled: true, Version: 1,
+            CreatedAt: DateTime.UtcNow, UpdatedAt: DateTime.UtcNow, UpdatedBy: null);
+        var (parsed, broken) = CustomAlertEvaluator.ClassifyRules(new[] { row });
+        Assert.Single(parsed);
+        Assert.Empty(broken);
     }
 }

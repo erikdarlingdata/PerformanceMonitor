@@ -254,6 +254,11 @@ public sealed record ComposeMeasure
     /// by test); null otherwise.</summary>
     public string? WeightColumn { get; init; }
 
+    /// <summary>A reading hint served beside the measure (<c>note</c> in the catalog), for a measure whose name alone
+    /// invites the wrong pick (#7565: <c>perfmon_value</c> is a running total for a <c>/sec</c> counter, not a rate).
+    /// Null for every measure that needs none.</summary>
+    public string? Note { get; init; }
+
     public required string NativeUnit { get; init; }
     public required string DefaultUnit { get; init; }
     public required string UnitFamily { get; init; }
@@ -640,6 +645,11 @@ public static class MeasureCatalog
     private static readonly string[] DefaultTraceDims = { "event_name", "database_name", "object_name", "login_name" };
     private static readonly string[] RunningJobDims = { "job_name" };
     private static readonly string[] JobHistoryDims = { "job_name", "step_name", "run_status_desc", "category_name" };
+    /// <summary>The note on <c>perfmon_value</c> (#7565); the validator's warning names the same measure.</summary>
+    internal const string PerfmonValueNote =
+        "SQL Server's own number. For a /sec counter (such as Transactions/sec) it is the running total since startup and only climbs: " +
+        "chart those with the ratio perfmon_value_per_second (one counter, one instance and one server per series). Fine for a point-in-time counter such as Total Server Memory (KB).";
+
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
     private static readonly string[] AgDatabaseDims = { "ag_name", "database_name", "replica_server_name", "synchronization_state_desc", "suspend_reason_desc" };
@@ -1212,7 +1222,7 @@ public static class MeasureCatalog
         },
 
         /* ── perfmon_stats (EAV: the counter value; the unit VARIES per counter, so it is tagged 'count' as an
-             honest placeholder, and the user picks the counter via counter_name). Two measures, one per stored
+             honest placeholder, and the user picks the counter via counter_name). Two measures on the stored values (#7565 adds the per-second ratio below), one per stored
              number, and the row's stored cntr_type (V132, #3653 A7) decides which is meaningful for the counter
              picked: a GAUGE (Total Server Memory (KB)) is perfmon_value — since V132 the collector writes no
              delta for it, so perfmon_value_delta over a gauge aggregates only NULLs and comes back empty rather
@@ -1225,17 +1235,37 @@ public static class MeasureCatalog
              IS DISTINCT FROM 0 and its NULL delta adds nothing. ── */
         new ComposeMeasure
         {
-            Key = "perfmon_value", DisplayName = "Perfmon counter value", Category = CatPerfmon, SourceTable = "perfmon_stats",
+            Key = "perfmon_value", DisplayName = "Perfmon counter value (running total)", Category = CatPerfmon, SourceTable = "perfmon_stats",
             Archetype = MeasureArchetype.Gauge, Column = "cntr_value",
+            Note = PerfmonValueNote,
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Avg, ValidAggs = GaugeAggs, AllowedDimensions = PerfmonDims,
         },
         new ComposeMeasure
         {
-            Key = "perfmon_value_delta", DisplayName = "Perfmon counter (per-interval delta)", Category = CatPerfmon, SourceTable = "perfmon_stats",
+            Key = "perfmon_value_delta", DisplayName = "Perfmon counter (count per sample interval, not a rate)", Category = CatPerfmon, SourceTable = "perfmon_stats",
             Archetype = MeasureArchetype.Delta, Column = "delta_cntr_value",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = PerfmonDims,
+        },
+        /* #7565: the per-second rate of a cumulative counter. perfmon_stats stores, beside each row's delta, the
+           seconds that delta was measured over (sample_interval_seconds, 0 on a row the collector could not
+           difference), so SUM(delta) / SUM(interval) is the rate across the window, exact for any bucket width and
+           indifferent to a restart marker row (0 / 0 adds nothing). It is a ratio, so it takes no aggregate. */
+        new ComposeMeasure
+        {
+            Key = "perfmon_interval_s", DisplayName = "Perfmon sample interval (seconds)", Category = CatPerfmon, SourceTable = "perfmon_stats",
+            Archetype = MeasureArchetype.Delta, Column = "sample_interval_seconds",
+            NativeUnit = "s", DefaultUnit = "s", UnitFamily = FamilyDuration,
+            DefaultTimeAgg = ComposeAggregate.Sum, ValidAggs = CumulativeAggs, AllowedDimensions = PerfmonDims,
+        },
+        new ComposeMeasure
+        {
+            Key = "perfmon_value_per_second", DisplayName = "Perfmon counter (per second)", Category = CatPerfmon, SourceTable = "perfmon_stats",
+            Kind = MeasureKind.Ratio, NumeratorKey = "perfmon_value_delta", DenominatorKey = "perfmon_interval_s",
+            Note = "Rate of a /sec counter: the change in the counter over the seconds between collections. Exact only for one counter, one instance and one server per series: filter or group by counter_name, instance_name and server, or the validator refuses the panel. Empty for a point-in-time counter.",
+            NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
+            ValidAggs = NoAggs, AllowedDimensions = PerfmonDims,
         },
 
         /* ── query_store_stats. execution_count is a per-interval count (SUM over the window = total executions);
