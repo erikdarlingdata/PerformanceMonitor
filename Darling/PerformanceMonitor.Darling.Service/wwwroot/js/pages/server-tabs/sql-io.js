@@ -90,7 +90,7 @@ export const FILE_IO_COLUMNS = READ_FIELDS.get_file_io_stats.table.columns;
 export const DB_SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
 
 export const TABLE_SIZE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "reserved_mb", label: "Reserved", format: "mbfit" },

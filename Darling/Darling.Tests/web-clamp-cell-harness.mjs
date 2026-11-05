@@ -173,4 +173,59 @@ const pmr = pm.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent
 const pmt = pmr.children.map((c) => c.textContent);
 out.plainModes = { raw: modeNote, counts: pmt[0], full: pmt[1], named: pmt[2], asStored: pmt[3] };
 
+/* #7533: a name column (`name: true`) draws one clamped line carrying the whole name in its title, under the cell class the stylesheet caps; it is not click-to-open.
+   A short name draws the same cell, so the cap only bites on a long one. */
+const longName = "Database_" + "x".repeat(109);
+const nm = VIZ.table({ rows: [{ database_name: longName, note: "short reason", reads: 5 }, { database_name: "master", note: "short reason", reads: 6 }] }, {
+  rowsKey: "rows", title: "Names", tools: false,
+  columns: [
+    { key: "database_name", label: "Database", name: true },
+    { key: "note", label: "Reason", wrap: true },
+    { key: "reads", label: "Reads", format: "int" },
+    { key: "note", label: "Followed", wrap: true, follow: true },
+    { key: "note", label: "Rendered", wrap: true, follow: true, render: (r) => r.note },
+  ],
+});
+const nmr = nm.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody");
+const nameSpan = (r) => r.children[0].findAll((n) => String(n.className).includes("clamp-text"))[0];
+out.nameCol = {
+  tdClass: nmr[0].children[0].className,
+  longTitle: nameSpan(nmr[0]).attrs.title === longName,
+  longText: nameSpan(nmr[0]).textContent === longName,
+  longRole: nameSpan(nmr[0]).attrs.role || null,
+  shortTitle: nameSpan(nmr[1]).attrs.title,
+  tdText: nmr[0].children[0].textContent === longName,
+  wrapTdClass: nmr[0].children[1].className,
+  followTdClass: nmr[0].children[3].className,
+  followRenderTdClass: nmr[0].children[4].className,
+};
+
+/* #7533 review: a path column (`path: true`) keeps the file name visible. The cell is cut at its START (the span runs right to left, so the ellipsis is at the left), and the path's own
+   order lives in a <bdi> child so the drive letter and backslashes do not jump to the other end. Title, text and the bdi all hold the whole path. */
+const longPath = "D:\\MSSQL\\Data\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\Sales_log.ldf";
+const pc = VIZ.table({ rows: [{ file_name: "Sales_log", physical_name: longPath }] }, {
+  rowsKey: "rows", title: "Paths", tools: false,
+  columns: [
+    { key: "file_name", label: "File", name: true },
+    { key: "physical_name", label: "Path", name: true, path: true },
+  ],
+});
+const pcr = pc.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody")[0];
+const pathSpan = pcr.children[1].findAll((n) => String(n.className).includes("clamp-text"))[0];
+const nameSpanOfName = pcr.children[0].findAll((n) => String(n.className).includes("clamp-text"))[0];
+out.pathCol = {
+  tdClass: pcr.children[1].className,
+  nameTdClass: pcr.children[0].className,
+  spanClass: pathSpan.className,
+  dir: pathSpan.attrs.dir,
+  title: pathSpan.attrs.title === longPath,
+  text: pathSpan.textContent === longPath,
+  bdiTags: pathSpan.children.map((c) => c.tag),
+  bdiText: !!pathSpan.children[0] && pathSpan.children[0].textContent === longPath,
+  role: pathSpan.attrs.role || null,
+  nameSpanDir: nameSpanOfName.attrs.dir || null,
+  nameSpanChildren: nameSpanOfName.children.map((c) => c.tag),
+  fileName: longPath.split("\\").pop(),
+};
+
 console.log(JSON.stringify(out));

@@ -29,7 +29,7 @@ const LIMIT = 500;
 const DERIVED_KEYS = ["reads_breakdown", "index_size_gb_text", "captured_at"];
 
 const ROLLUP_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "tables_analyzed", label: "Tables", format: "int" },
   { key: "index_count", label: "Indexes", format: "int" },
   { key: "total_size_gb", label: "Size GB", format: "num2" },
@@ -56,7 +56,7 @@ const RECOMMENDATION_COLUMNS = [
   { key: "action", label: "Action" },
   { key: "result_kind", label: "Result Kind" },
   { key: "consolidation_rule", label: "Rule" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },

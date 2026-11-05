@@ -21,7 +21,7 @@ export const READ_FIELDS = {
         { key: "event_time", label: "Time", format: "time" },
         { key: "blocked_sql_text", label: "Blocked SQL", wrap: true },
         { key: "blocking_sql_text", label: "Blocking SQL", wrap: true },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "blocked_spid", label: "Blocked", format: "int" },
         { key: "blocking_spid", label: "Blocker", format: "int" },
         { key: "wait_time_ms", label: "Wait", format: "ms" },
@@ -39,7 +39,7 @@ export const READ_FIELDS = {
          wider one) outran what the raw tier still holds. */
       noteKey: "truncation_note",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_text", label: "Query", wrap: true },
         { key: "execution_count", label: "Execs", format: "int" },
         { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
@@ -56,7 +56,7 @@ export const READ_FIELDS = {
       noteKey: "truncation_note",
       columns: [
         { key: "full_name", label: "Procedure" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "execution_count", label: "Execs", format: "int" },
         { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
         { key: "avg_cpu_ms", label: "Avg CPU", format: "ms" },
@@ -103,9 +103,9 @@ export const READ_FIELDS = {
       emptyText: "No active-query snapshots in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "query_text", label: "Query", wrap: true },
+        { key: "query_text", label: "Query", wrap: true, follow: true },
         { key: "session_id", label: "SPID", format: "int" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "status", label: "Status" },
         { key: "cpu_time_ms", label: "CPU", format: "ms" },
         { key: "elapsed_time_formatted", label: "Elapsed" },
@@ -191,7 +191,7 @@ export const READ_FIELDS = {
         { key: "wait_duration_ms", label: "Duration", format: "ms" },
         { key: "thread_count", label: "Threads", format: "int" },
         { key: "blocking_session_id", label: "Blocked by", format: "int" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
       ],
     },
   },
@@ -334,7 +334,7 @@ export const READ_FIELDS = {
       columns: [
         { key: "event_time", label: "Time", format: "time" },
         { key: "statement", label: "Statement", wrap: true, valueList: false },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "duration_ms", label: "Duration", format: "ms" },
         { key: "cpu_ms", label: "CPU", format: "ms" },
         { key: "row_count", label: "Rows", format: "int" },
@@ -349,7 +349,7 @@ export const READ_FIELDS = {
       columns: [
         { key: "collection_time", label: "Collected", format: "time" },
         { key: "query_text", label: "Query", wrap: true },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_id", label: "Query ID", format: "int" },
         { key: "recommendation_state", label: "State" },
         { key: "recommendation_reason", label: "Reason", wrap: true },
@@ -378,7 +378,7 @@ export const READ_FIELDS = {
       rowsKey: "jobs",
       emptyText: "No SQL Agent jobs were running at the last collection.",
       columns: [
-        { key: "job_name", label: "Job" },
+        { key: "job_name", label: "Job", name: true },
         { key: "start_time", label: "Started", format: "time" },
         { key: "current_duration_formatted", label: "Running for" },
         { key: "avg_duration_formatted", label: "Average" },
@@ -442,7 +442,7 @@ export const READ_FIELDS = {
       emptyText: "No database sizes in the latest snapshot.",
       noteKey: "note",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "total_size_mb", label: "Total", format: "mb" },
         { key: "used_size_mb", label: "Used", format: "mb" },
         /* size_note: the read's own sentence for the row another database on an Azure SQL Database server gets (its log
@@ -456,15 +456,15 @@ export const READ_FIELDS = {
       rowsKey: "files",
       emptyText: "No file I/O rows in the latest snapshot.",
       columns: [
-        { key: "database_name", label: "Database" },
-        { key: "file_name", label: "File" },
+        { key: "database_name", label: "Database", name: true },
+        { key: "file_name", label: "File", name: true },
         { key: "file_type", label: "Type" },
         { key: "size_mb", label: "Size", format: "mb", nullKey: "size_note" },
         { key: "avg_read_latency_ms", label: "Read latency", format: "num1" },
         { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
         { key: "delta_reads", label: "Reads", format: "int" },
         { key: "delta_writes", label: "Writes", format: "int" },
-        { key: "physical_name", label: "Path", wrap: true },
+        { key: "physical_name", label: "Path", name: true, path: true },
       ],
     },
   },
@@ -474,7 +474,7 @@ export const READ_FIELDS = {
       emptyText:
         "No PVS rows. The collector reads a SQL Server 2019+ DMV, and a server with Accelerated Database Recovery off has nothing to report.",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "is_adr_on", label: "ADR", format: "bool" },
         { key: "pvs_size_mb", label: "PVS size", format: "mb" },
         { key: "pct_of_database", label: "% of DB", format: "num1" },
@@ -492,7 +492,7 @@ export const READ_FIELDS = {
         { key: "event_time", label: "Time", format: "time" },
         { key: "category", label: "Category" },
         { key: "event_name", label: "Event" },
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "object_name", label: "Object" },
         { key: "login_name", label: "Login" },
         { key: "application_name", label: "Application" },
@@ -698,7 +698,7 @@ export const READ_FIELDS = {
       rowsKey: "regressions",
       emptyText: "No Query Store regressions in this window.",
       columns: [
-        { key: "database_name", label: "Database" },
+        { key: "database_name", label: "Database", name: true },
         { key: "query_id", label: "Query id" },
         { key: "severity", label: "Severity" },
         { key: "baseline_cpu_ms", label: "Baseline CPU", format: "ms" },

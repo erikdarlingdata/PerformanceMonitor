@@ -134,6 +134,6 @@ export const PG_INDEX_USAGE_COLUMNS = [
   { key: "blocks_hit", label: "Blocks Hit", format: "int" },
   { key: "stats_were_reset_in_window", label: "Stats Reset", format: "bool" },
   { key: "sample_count", label: "Samples", format: "int" },
-  { key: "index_definition", label: "Definition", wrap: true, valueList: false },
+  { key: "index_definition", label: "Definition", clamp: true, valueList: false },
 ];
 

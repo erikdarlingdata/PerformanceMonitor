@@ -97,7 +97,8 @@ export function pgIoTrendSpecs(ctx) {
       subtitle: ctx.label,
       series: [{ key: "read_bytes_per_second", label: "Read Bytes/sec" }],
       format: "bytes",
-      unit: "bytes/s",
+      /* #7555: the tick labels print their own unit (KB, MB), so the caption says only that the axis is per second. */
+      unit: "/s",
       emptyText: empty,
       noSeriesText: noReadBytesText,
     },
