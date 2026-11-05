@@ -203,13 +203,13 @@ public sealed class DailyHealthReportTests
             IsPostgres = true,
             Band = FleetHealthBand.Warning,
             IsOnline = true,
+            CollectionStale = true,
             DatabaseProtectionOverdue = [new FleetDatabaseProtectionOverdue("full_backup", "appdb", "critical", null, "no full backup")],
         };
         var volumes = new List<VolumeFreeSpaceInfo> { new() { MountPoint = "/data", TotalMb = 1000, FreeMb = 10 } };
 
         var section = DailyHealthReportBuilder.AssembleServer(
             card,
-            "Deadlocks are high",
             [new DailyHealthAlertCount("Deadlocks", 4)],
             [new DailyHealthFailedJob("Agent job", 1, End, null)],
             volumes,
@@ -221,7 +221,7 @@ public sealed class DailyHealthReportTests
         Assert.Empty(section.Protection);
         Assert.Empty(section.LowDisk);
         Assert.Equal(4, section.AlertTotal);
-        Assert.Equal(new[] { "Deadlocks are high" }, section.Reasons);
+        Assert.Equal(new[] { "collection stale" }, section.Reasons);
     }
 
     [Fact]
@@ -247,7 +247,7 @@ public sealed class DailyHealthReportTests
         };
 
         var section = DailyHealthReportBuilder.AssembleServer(
-            card, null, null, [new DailyHealthFailedJob("Nightly", 3, End, "x")], volumes, lowDiskPercent: 10, lowDiskGb: 5);
+            card, null, [new DailyHealthFailedJob("Nightly", 3, End, "x")], volumes, lowDiskPercent: 10, lowDiskGb: 5);
 
         Assert.False(section.IsPostgres);
         Assert.Equal("Nightly", Assert.Single(section.FailedJobs).JobName);
@@ -256,8 +256,32 @@ public sealed class DailyHealthReportTests
 
         var quiet = DailyHealthReportBuilder.AssembleServer(
             new FleetServerCard { ServerId = 9, DisplayName = "sql-2", ServerName = "sql-2", Band = FleetHealthBand.Healthy, IsOnline = true },
-            null, null, null, null, 10, 5);
+            null, null, null, 10, 5);
         Assert.True(quiet.IsQuiet);
+    }
+
+    [Fact]
+    public void TheEmail_ListsOverdueProtectionOnce_InItsOwnSection_NotInTheReasonLine()
+    {
+        var card = new FleetServerCard
+        {
+            ServerId = 11,
+            DisplayName = "sql-protect",
+            ServerName = "sql-protect",
+            Band = FleetHealthBand.Warning,
+            IsOnline = true,
+            CollectionStale = true,
+            DatabaseProtectionOverdue = [new FleetDatabaseProtectionOverdue("full_backup", "appdb", "critical", null, "no full backup")],
+        };
+
+        var section = DailyHealthReportBuilder.AssembleServer(card, null, null, null, 10, 5);
+        var rendered = DailyHealthReportBuilder.Render(Data(section));
+
+        Assert.Equal(new[] { "collection stale" }, section.Reasons);
+        Assert.Equal("appdb", Assert.Single(section.Protection).Database);
+        Assert.DoesNotContain("overdue item", rendered.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("overdue item", rendered.Html, StringComparison.Ordinal);
+        Assert.Contains("appdb", rendered.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -274,7 +298,7 @@ public sealed class DailyHealthReportTests
             FailedCollectorCount = 2,
         };
 
-        var section = DailyHealthReportBuilder.AssembleServer(card, "Offline for ages", null, null, null, 10, 5);
+        var section = DailyHealthReportBuilder.AssembleServer(card, null, null, null, 10, 5);
 
         Assert.False(section.IsQuiet);
         Assert.Empty(section.Reasons);
