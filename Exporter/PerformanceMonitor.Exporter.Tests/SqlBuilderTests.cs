@@ -26,10 +26,11 @@ public class SqlBuilderTests
     }
 
     [Fact]
-    public void BuildSelect_dispatches_dimension_tables_to_their_key_sql()
+    public void BuildSelect_gives_plan_shape_and_query_text_the_shared_query_stats_window_read()
     {
-        Assert.Equal(SqlBuilder.PlanShapeKeySql, SqlBuilder.BuildSelect(DimensionTables.PlanShape, null));
-        Assert.Equal(SqlBuilder.QueryTextKeySql, SqlBuilder.BuildSelect(DimensionTables.QueryText, null));
+        // The two keys are built in DuckDB from the one query_stats window read, so that read is their store SQL.
+        Assert.Equal(SqlBuilder.QueryStatsWindowSql, SqlBuilder.BuildSelect(DimensionTables.PlanShape, null));
+        Assert.Equal(SqlBuilder.QueryStatsWindowSql, SqlBuilder.BuildSelect(DimensionTables.QueryText, null));
     }
 
 }
