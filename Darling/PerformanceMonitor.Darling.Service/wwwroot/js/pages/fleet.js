@@ -944,7 +944,25 @@ export function metricBands(c, store) {
     /* #6873: a chip only when a full backup, a log backup or a CHECKDB is overdue. It is not a band: nothing above reads it, and a
        server with nothing overdue (or a platform-managed one) shows no extra chip. The words come from the server. */
     ...databaseProtectionChip(c),
+    /* #7647: a chip when a database's state deviates (a Critical one bands the server), and a muted "n/a" when the state is not collected, never a 0 or an OK. */
+    ...databaseStateChip(c),
   ]);
+}
+
+/* #7647: names at most three databases, then "and N more". The service sends the Critical states first. */
+export function databaseStateDetail(ds) {
+  const shown = ds.deviations.slice(0, 3).map((d) => d.database + " " + d.state);
+  const more = ds.deviations.length - shown.length;
+  return shown.join(", ") + (more > 0 ? " and " + fmtInt(more) + " more" : "");
+}
+
+function databaseStateChip(c) {
+  const ds = c.database_states;
+  if (!ds) return [];
+  if (ds.collected === false) return [chip("Database state", "n/a", "Unknown", "Database state is not collected on this server.")];
+  if (!ds.deviation_count) return [];
+  const n = ds.deviation_count;
+  return [chip("Database state", fmtInt(n) + (n === 1 ? " database" : " databases"), ds.critical_count > 0 ? "Critical" : "Warning", databaseStateDetail(ds), true)];
 }
 
 function agentAlertChip(c) {

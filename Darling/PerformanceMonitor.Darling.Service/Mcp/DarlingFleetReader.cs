@@ -971,6 +971,7 @@ GROUP BY server_id, collector_name";
         /* #6927 (V228): the blocking band's tiers, read once per roll-up for the same reason. */
         var blockingTiers = await BlockingBandStore.ReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
         var identityCapacity = await ReadIdentityCapacityAsync(postgres, now, cancellationToken, logger);
+        var databaseStates = await ReadDatabaseStatesAsync(postgres, servers, now, cancellationToken);
 
         var cards = new List<FleetServerCard>(servers.Count);
         foreach (var server in servers)
@@ -1004,10 +1005,11 @@ GROUP BY server_id, collector_name";
             identityCapacity.TryGetValue(server.ServerId, out var serverIdentityCapacity);
 
             databaseProtection.TryGetValue(server.ServerId, out var serverDatabaseProtection);
+            databaseStates.TryGetValue(server.ServerId, out var serverDatabaseStates);
 
             cards.Add(BuildCard(
                 server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers));
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt, collected.OlderCollection, serverAgentAlertGaps, serverDatabaseProtection, serverIdentityCapacity, blockingTiers, serverDatabaseStates));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds,
@@ -1129,6 +1131,28 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst));
     }
 
+    /// <summary>#7647: each SQL Server target's database states, through the Database State alert's own statement
+    /// (<see cref="DarlingDatabaseStateDeviations.ReadAsync"/>), one bounded probe per server on one connection. A PostgreSQL target has no such snapshot and is
+    /// left out of the map. A server whose read finds no snapshot inside <see cref="DarlingDatabaseStateDeviations.Freshness"/> maps to "not collected".</summary>
+    internal static async Task<Dictionary<int, FleetDatabaseStates>> ReadDatabaseStatesAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<FleetServerRow> servers, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var map = new Dictionary<int, FleetDatabaseStates>();
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        foreach (var server in servers)
+        {
+            if (MonitoredEngineKind.IsPostgres(server.EngineKind))
+            {
+                continue;
+            }
+
+            var read = await DarlingDatabaseStateDeviations.ReadAsync(connection, server.ServerId, nowUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            map[server.ServerId] = FleetDatabaseStates.Of(read);
+        }
+
+        return map;
+    }
+
     private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
     {
         string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
@@ -1159,7 +1183,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         IReadOnlyList<FleetAgentAlertGap>? agentAlertGaps = null,
         IReadOnlyList<FleetDatabaseProtectionOverdue>? databaseProtectionOverdue = null,
         FleetIdentityCapacity? identityCapacity = null,
-        BlockingBandThresholds? blockingTiers = null)
+        BlockingBandThresholds? blockingTiers = null,
+        FleetDatabaseStates? databaseStates = null)
     {
 
         /* #7028: the band and the card read ONE count, the blocking waits (#5644) of the source the alerts would
@@ -1259,6 +1284,8 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             CollectorCount = collectors.Total,
             /* #7561: a column at its critical bar is a failing insert, so it bands the server Critical (the same rule ToHealthMetrics hands the re-band). */
             IdentityCapacityCritical = FleetServerCard.IsIdentityCritical(identityCapacity),
+            /* #7647: a database in a state the alert grades Critical bands the server Critical. Not collected leaves it false: no reading, and the card says so. */
+            DatabaseStateCritical = databaseStates is { CriticalCount: > 0 },
         };
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
@@ -1359,7 +1386,9 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             IdentityCapacity = identityCapacity,
             AdvisoryTiles = ServerHealthClassifier.AdvisoryTiles(
                 agentAlertGaps?.Count ?? 0, databaseProtectionOverdue?.Count ?? 0,
-                identityCapacity?.ColumnsAtBar ?? 0, FleetServerCard.IsIdentityCritical(identityCapacity)),
+                identityCapacity?.ColumnsAtBar ?? 0, FleetServerCard.IsIdentityCritical(identityCapacity),
+                databaseStates?.DeviationCount ?? 0, databaseStates is { CriticalCount: > 0 }),
+            DatabaseStates = databaseStates,
             DeadlockSeverity = ServerHealthClassifier.DeadlockSeverity(
                 deadlocksForBand, deadlockWindow, deadlockTiers),
             DeadlockCollectorBand = deadlockCollectorBand,
@@ -1615,6 +1644,12 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
         {
             parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+        }
+
+        /* #7647: the database-state tile's own words. A Critical state bands the server (and says so), any other deviation only lists it. */
+        if (c.DatabaseStates is { DeviationCount: > 0 } databaseStates)
+        {
+            parts.Add(databaseStates.Reason);
         }
 
         if (c.AgentAlertGaps is { Count: > 0 } gaps)
@@ -2909,6 +2944,12 @@ public sealed class FleetServerCard
     /// no column is, and on every server that never scans. A chip on the card and nothing more: no band reads it.</summary>
     [JsonPropertyName("identity_capacity")] public FleetIdentityCapacity? IdentityCapacity { get; init; }
 
+    /// <summary>#7647: the databases whose state deviates, read through the Database State alert's own statement (the two-sample rule, the expected states and
+    /// the ignore setting carry over). A Critical state (SUSPECT, RECOVERY_PENDING, EMERGENCY) bands the server Critical. Any other deviation adds the "Database state"
+    /// tile. <c>collected</c> false means no database-state snapshot is that fresh: not collected for this part, which is neither healthy nor zero. Null on a
+    /// PostgreSQL target, which has no such snapshot.</summary>
+    [JsonPropertyName("database_states")] public FleetDatabaseStates? DatabaseStates { get; init; }
+
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
     [JsonPropertyName("display_name")] public string DisplayName { get; init; } = "";
     [JsonPropertyName("server_name")] public string ServerName { get; init; } = "";
@@ -3312,10 +3353,35 @@ public sealed class FleetServerCard
         /* #3539 A8d: the share's denominator, or the re-band would grade presence-flat again. */
         CollectorCount = CollectorCount,
         IdentityCapacityCritical = IsIdentityCritical(IdentityCapacity),
+        DatabaseStateCritical = DatabaseStates is { CriticalCount: > 0 },
     };
 
     internal static bool IsIdentityCritical(FleetIdentityCapacity? identityCapacity) =>
         identityCapacity is { ColumnsAtBar: > 0 } && string.Equals(identityCapacity.WorstBand, IdentityCapacityMath.BandCritical, StringComparison.Ordinal);
+}
+
+/// <summary>One server's database states for the fleet card (#7647). <see cref="Collected"/> false is "not collected", with no counts to read as zero.</summary>
+public sealed record FleetDatabaseStates(
+    [property: JsonPropertyName("collected")] bool Collected,
+    [property: JsonPropertyName("deviation_count")] int DeviationCount,
+    [property: JsonPropertyName("critical_count")] int CriticalCount,
+    [property: JsonPropertyName("deviations")] IReadOnlyList<DatabaseStateDeviation> Deviations)
+{
+    internal static FleetDatabaseStates Of(DatabaseStateRead read)
+    {
+        if (!read.Collected)
+        {
+            return new FleetDatabaseStates(false, 0, 0, Array.Empty<DatabaseStateDeviation>());
+        }
+
+        /* Critical states first, so the tile and the reason name the ones that band the server before any "and N more". */
+        var critical = DarlingDatabaseStateDeviations.Critical(read.Deviations);
+        var ordered = critical.Concat(read.Deviations.Where(d => !critical.Contains(d))).ToList();
+        return new FleetDatabaseStates(true, ordered.Count, critical.Count, ordered);
+    }
+
+    /// <summary>The Needs attention clause (see <see cref="DarlingDatabaseStateDeviations.Reason"/>).</summary>
+    [JsonIgnore] public string Reason => DarlingDatabaseStateDeviations.Reason(Deviations);
 }
 
 /// <summary>The identity columns at a bar on one server, as the fleet card carries them (#6875).</summary>
