@@ -2183,7 +2183,7 @@ public static class FactAdvice
         var fallback = _byKey[key];
         // #7537: what the number counts. The remediation still names the regular finding's threshold by `noun`.
         var counted = countNoun ?? noun;
-        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and the baseline is.
+        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and (#7588) the baseline is built from snapshot rows too.
         if (dmvCountNoun is not null && (FactMeta(facts, key, CountFamilyMetadata.FromDmvSnapshotsKey) ?? 0) >= 1)
         {
             counted = dmvCountNoun;
