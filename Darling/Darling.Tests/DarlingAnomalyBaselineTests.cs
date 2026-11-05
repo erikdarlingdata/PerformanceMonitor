@@ -1275,6 +1275,97 @@ public sealed class DarlingAnomalyBaselineTests
         }
     }
 
+    /// <summary>A provider whose I/O latency compute always faults (its statement does not exist) and counts how often it was asked to run.</summary>
+    private sealed class FaultingIoBaselineProvider(NpgsqlDataSource postgres) : PgBaselineProvider(postgres)
+    {
+        public int IoComputes;
+
+        protected override string? ResolveBaselineQuery(string metricName)
+        {
+            if (metricName != MetricNames.IoLatency)
+            {
+                return base.ResolveBaselineQuery(metricName);
+            }
+
+            Interlocked.Increment(ref IoComputes);
+            return "SELECT * FROM no_such_io_baseline_table";
+        }
+    }
+
+    /// <summary>
+    /// #7644: the I/O read gate reads the baseline key twice in one pass, the bucket map and then (the map is empty on a
+    /// fault) the <c>GetBaselineAsync</c> fallback. A compute that faults, a 60 s command timeout on the busy server, must run
+    /// ONCE for that pass: the fallback is a hit on the faulted entry the provider keeps for the pass, not a second timeout.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoGate_WhenTheBaselineComputeFaults_RunsItOncePerPass_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live I/O gate fault test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 6; // own id - this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+            var analysisTime = historyStart.AddDays(7);
+
+            /* The gate's own witness: a row in the 30 days before the window, outside the window. */
+            await InsertAsync(connection,
+                "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                500L, historyStart, ioServerId, "IO-FAULT-PASS", TestWaitType, 1L, 100L);
+
+            /* The window: reads over the 250 floor with a stall per read, so the gate reaches the baseline fallback. */
+            for (var i = 0; i < 3; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(510 + i), analysisTime.AddMinutes(5 * (i + 1)), ioServerId, "IO-FAULT-PASS", 400L, 0L, 40000L);
+            }
+
+            var provider = new FaultingIoBaselineProvider(postgres);
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = ioServerId,
+                ServerName = "IO-FAULT-PASS",
+                TimeRangeStart = analysisTime,
+                TimeRangeEnd = analysisTime.AddMinutes(30),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            await detector.DetectAnomaliesAsync(context);
+
+            Assert.Equal(1, provider.IoComputes);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using (var command = new NpgsqlCommand(
+                    $"DELETE FROM file_io_stats WHERE server_id = {ioServerId}; " +
+                    $"DELETE FROM wait_stats WHERE server_id = {ioServerId};", cleanup))
+                {
+                    await command.ExecuteNonQueryAsync(cleanupCt);
+                }
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
     /* ────────────────── #4298: every PgTargetBaselineProvider arm is a daily-cache arm ────────────────── */
 
     /// <summary>

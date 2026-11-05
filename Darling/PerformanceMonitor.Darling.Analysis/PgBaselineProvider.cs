@@ -136,6 +136,13 @@ public class PgBaselineProvider
     /// <summary>Cache TTL — baselines are recomputed after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
+    /// <summary>#7644: how long a FAULTED compute (a command timeout or a connection fault) is kept in the provider's own cache.
+    /// The detectors read one key twice in a pass, back to back: the bucket map, then the <c>GetBaselineAsync</c> fallback when
+    /// the map came back empty. Two minutes covers that pair on a pass that is busy with other gates, and is under the
+    /// 5 minute floor of the analysis interval, so the next pass computes again and a timeout is never "no baseline" for the
+    /// hour. The shared web read (<see cref="GetOrComputeSharedAsync"/>) ignores a faulted entry and always computes.</summary>
+    internal static readonly TimeSpan FaultedEntryTtl = TimeSpan.FromMinutes(2);
+
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
 
     /* #3941: the process's shared tier (see BaselineCache for the invalidation rule), or null for a private cache. */
@@ -366,9 +373,11 @@ public class PgBaselineProvider
             serverId, cacheKey, roundedHour, () => BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken));
     }
 
-    /// <summary>The cache half of <see cref="GetOrComputeBaselinesAsync"/>, with the compute passed in. A faulted entry is answered
-    /// to the caller and not stored (#7644, as on the shared read): stored, a command timeout or a connection fault would read as
-    /// "no baseline" for the whole <see cref="CacheTtl"/>. A genuine "no data" entry is stored.</summary>
+    /// <summary>The cache half of <see cref="GetOrComputeBaselinesAsync"/>, with the compute passed in. A faulted entry is kept
+    /// in this provider's own cache for <see cref="FaultedEntryTtl"/> only (#7644): long enough that the detector's second read of
+    /// the same key in the same pass (the bucket map, then the <c>GetBaselineAsync</c> fallback) is a hit and not a second 60 s
+    /// timeout, short enough that the next pass computes again. Stored for the whole <see cref="CacheTtl"/> it would read as
+    /// "no baseline" for the hour, and it never reaches the shared tier. A genuine "no data" entry is stored for the hour.</summary>
     internal async Task<CachedBaseline> GetOrComputeUnsharedAsync(
         int serverId, string cacheKey, DateTime roundedHour, Func<Task<CachedBaseline>> build)
     {
@@ -378,11 +387,7 @@ public class PgBaselineProvider
         }
 
         var entry = await build();
-        if (!entry.Faulted)
-        {
-            Store(serverId, cacheKey, entry);
-        }
-
+        Store(serverId, cacheKey, entry);
         return entry;
     }
 
@@ -617,11 +622,8 @@ public class PgBaselineProvider
                     Key = key,
                     Faulted = faulted
                 };
-                if (!faulted)
-                {
-                    Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
-                }
-
+                /* A faulted chunk is kept for FaultedEntryTtl only (see IsFresh): the second read of the key in this pass is a hit. */
+                Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
                 entries[key] = entry;
             }
         }
@@ -688,8 +690,9 @@ public class PgBaselineProvider
     /// <summary>
     /// A fresh entry for the analysis hour, from this provider's own cache or, on a miss there, the process's shared
     /// tier (#3941). Precedence: a local SUCCESS; then a shared one (copied into the local cache, so the rest of this
-    /// provider's life is a local hit); then a local FAILURE — "no baseline this pass", exactly as before #3941. A
-    /// shared success beats a local failure because it is the answer the failed compute was trying to get.
+    /// provider's life is a local hit); then a local FAILURE — "no baseline this pass". The local failure is a faulted
+    /// entry kept for <see cref="FaultedEntryTtl"/> (#7644), so the detector's second read of a key in one pass is a hit.
+    /// A shared success beats a local failure because it is the answer the failed compute was trying to get.
     /// </summary>
     private bool TryGetFresh(int serverId, string cacheKey, DateTime roundedHour, [NotNullWhen(true)] out CachedBaseline? cached)
     {
@@ -720,14 +723,17 @@ public class PgBaselineProvider
     /// <see cref="TryGetFresh"/> and <see cref="BaselineCache.TryGet"/>) already stops matching the instant the
     /// requested day rolls over, which is what actually bounds an entry to "the rest of the UTC day it was computed
     /// in" — the whole point, two calls an hour or more apart on the same day share the one compute. Every
-    /// hourly-cache metric, and a FAILED compute of ANY metric (<see cref="CachedBaseline.FreshUntilUtc"/> null — a
-    /// failure never earns the day-long trust), keep the original rolling <see cref="CachedBaseline.RealTime"/> plus
-    /// <see cref="CacheTtl"/> bound, so a timeout still retries within the hour. Shared by <see cref="BaselineCache"/>'s
+    /// hourly-cache metric keeps the original rolling <see cref="CachedBaseline.RealTime"/> plus
+    /// <see cref="CacheTtl"/> bound. A FAULTED entry (<see cref="CachedBaseline.Faulted"/>, #7644; it never earns the day-long
+    /// trust) is fresh for <see cref="FaultedEntryTtl"/> only: the provider's own cache keeps it that long so one pass's second
+    /// read of the key is a hit, then the next pass computes again. Shared by <see cref="BaselineCache"/>'s
     /// live check and sweep, so the shared tier never evicts a still-fresh daily entry early.</summary>
     internal static bool IsFresh(CachedBaseline entry, DateTime nowUtc)
-        => entry.FreshUntilUtc is DateTime freshUntil
-            ? nowUtc < freshUntil
-            : (nowUtc - entry.RealTime) < CacheTtl;
+        => entry.Faulted
+            ? (nowUtc - entry.RealTime) < FaultedEntryTtl
+            : entry.FreshUntilUtc is DateTime freshUntil
+                ? nowUtc < freshUntil
+                : (nowUtc - entry.RealTime) < CacheTtl;
 
     /// <summary>Files a compute in this provider's cache and, when it SUCCEEDED, in the shared tier (#3941). A failed
     /// compute (null buckets) is this caller's "no baseline this pass" and nobody else's.</summary>

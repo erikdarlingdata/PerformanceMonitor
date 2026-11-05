@@ -214,10 +214,10 @@ public sealed class OverviewBaselineSharedComputeTests
     }
 
     /// <summary>What the real compute hands back when its statement times out or the store is unreachable: null buckets, flagged as a fault.</summary>
-    private static PgBaselineProvider.CachedBaseline Faulted(DateTime roundedKey) => new()
+    private static PgBaselineProvider.CachedBaseline Faulted(DateTime roundedKey, DateTime? ranAt = null) => new()
     {
         ComputedAt = roundedKey,
-        RealTime = DateTime.UtcNow,
+        RealTime = ranAt ?? DateTime.UtcNow,
         Clock = LocalClockWindow.Utc(roundedKey),
         Buckets = null,
         Faulted = true,
@@ -272,7 +272,7 @@ public sealed class OverviewBaselineSharedComputeTests
     }
 
     [Fact]
-    public async Task OnTheUnsharedPath_AFaultedEntry_IsNotCached_AndTheNextRequestComputesAgain()
+    public async Task OnTheUnsharedPath_AFaultedEntry_IsAHitForTheRestOfThePass()
     {
         await using var postgres = Unreachable();
         var provider = new PgBaselineProvider(postgres);
@@ -285,8 +285,40 @@ public sealed class OverviewBaselineSharedComputeTests
         var second = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
 
         Assert.True(first.Faulted);
+        Assert.Same(first, second);
+        Assert.Equal(1, computes);
+    }
+
+    [Fact]
+    public async Task OnTheUnsharedPath_AFaultedEntry_IsNotKeptForTheNextPass()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<PgBaselineProvider.CachedBaseline> Build()
+            => Task.FromResult(Interlocked.Increment(ref computes) == 1
+                ? Faulted(key, ranAt: DateTime.UtcNow - PgBaselineProvider.FaultedEntryTtl - TimeSpan.FromSeconds(1))
+                : Computed(key));
+
+        var first = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+
+        Assert.True(first.Faulted);
         Assert.NotNull(second.Buckets);
         Assert.Equal(2, computes);
+    }
+
+    [Fact]
+    public void AFaultedEntry_IsFreshForTheFaultedTtl_NotTheCacheTtl()
+    {
+        var key = new PgBaselineProvider(Unreachable()).RoundedKeyTime(MetricNames.IoLatency, Now);
+        var ranAt = DateTime.UtcNow;
+        var faulted = Faulted(key, ranAt);
+
+        Assert.True(PgBaselineProvider.IsFresh(faulted, ranAt + PgBaselineProvider.FaultedEntryTtl - TimeSpan.FromSeconds(1)));
+        Assert.False(PgBaselineProvider.IsFresh(faulted, ranAt + PgBaselineProvider.FaultedEntryTtl));
+        Assert.True(PgBaselineProvider.FaultedEntryTtl < TimeSpan.FromMinutes(5), "the analysis interval's floor is 5 minutes: the next pass must compute again");
     }
 
     [Fact]
@@ -319,7 +351,7 @@ public sealed class OverviewBaselineSharedComputeTests
             LocalClockWindow.Utc(key), null, null, faulted));
 
     [Fact]
-    public async Task OnTheKeyedPath_AFaultedChunk_IsNotCached_AndTheNextRequestComputesAgain()
+    public async Task OnTheKeyedPath_AFaultedChunk_IsAHitForTheRestOfThePass()
     {
         await using var postgres = Unreachable();
         var provider = new PgBaselineProvider(postgres);
@@ -333,9 +365,8 @@ public sealed class OverviewBaselineSharedComputeTests
 
         Assert.True(first["a"].Faulted);
         Assert.Null(first["a"].Buckets);
-        Assert.NotNull(second["a"].Buckets);
-        Assert.False(second["a"].Faulted);
-        Assert.Equal(2, computes);
+        Assert.Same(first["a"], second["a"]);
+        Assert.Equal(1, computes);
     }
 
     [Fact]
