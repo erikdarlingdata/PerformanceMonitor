@@ -42,6 +42,11 @@ public sealed class FleetSweepIdentityFloorTests
             new DailyHealthSignals { HasData = true, CollectionRuns = 60, MemoryPressureEvents = memoryPressureEvents, Window = Span },
             0, null, IdentityCapacity: identity);
 
+    private const string CritClause = "Identity capacity critical (1 column at its limit)";
+
+    private static FleetSweepServerReading NoDataReading(int id, string name, FleetIdentityCapacity? identity) =>
+        new(id, name, new DailyHealthSignals { HasData = false, Window = Span }, 0, null, IdentityCapacity: identity);
+
     private static FleetSweepComposition Compose(params FleetSweepServerReading[] readings) =>
         FleetSweepEngine.Compose(
             Now, Now - Span, alertsEnabled: true, serversExpected: readings.Length, readings,
@@ -56,7 +61,7 @@ public sealed class FleetSweepIdentityFloorTests
 
         var verdict = composition.Verdicts.Single(v => v.ServerId == 1);
         Assert.Equal("Critical", verdict.Band);
-        Assert.Contains("1 column at its limit", verdict.BandReason);
+        Assert.Equal(CritClause, verdict.BandReason);
         Assert.Equal("Healthy", composition.Verdicts.Single(v => v.ServerId == 2).Band);
 
         using var report = JsonDocument.Parse(composition.Run.ReportJson);
@@ -80,9 +85,21 @@ public sealed class FleetSweepIdentityFloorTests
         var change = Assert.Single(report.RootElement.GetProperty("changes").GetProperty("band_transitions").EnumerateArray());
         Assert.Equal("Warning", change.GetProperty("from").GetString());
         Assert.Equal("Critical", change.GetProperty("to").GetString());
-        var reason = change.GetProperty("reason").GetString();
-        Assert.Contains("5 memory-pressure events", reason);
-        Assert.Contains("1 column at its limit", reason);
+        Assert.Equal("5 memory-pressure events; " + CritClause, change.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public void AServerWithNoDataInTheSpan_StaysNoData_EvenWithAColumnAtItsLimit()
+    {
+        var composition = Compose(NoDataReading(1, "silent", Crit));
+
+        var verdict = composition.Verdicts.Single();
+        Assert.Equal("No Data", verdict.Band);
+        Assert.Equal("No collection inside the sweep span.", verdict.BandReason);
+        Assert.DoesNotContain("Identity", verdict.BandReason);
+
+        using var report = JsonDocument.Parse(composition.Run.ReportJson);
+        Assert.Empty(report.RootElement.GetProperty("critical_servers").EnumerateArray());
     }
 
     [Fact]

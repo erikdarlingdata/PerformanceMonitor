@@ -255,8 +255,12 @@ public static class FleetSweepEngine
                 var classified = DailyHealthBandCalculator.Classify(reading.Signals, banding);
                 /* #7669: a state that stays true until someone acts sets a floor on the sweep's band (Fleet Overview's
                    OverallMetricSeverity does the same), so the sweep is never better than the card for it. */
-                if (reading.IdentityCapacityCritical)
+                var eventsBand = classified;
+                var floored = eventsBand != DailyHealthBand.NoData && reading.IdentityCapacityCritical;
+                if (floored)
                 {
+                    /* A server with no data in the span stays No Data, as Fleet Overview bands it Offline: the identity read looks
+                       back 168 hours, so it can name a column for a server that collected nothing in this span. */
                     classified = DailyHealthBand.Critical;
                 }
 
@@ -276,10 +280,12 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
                 };
-                if (reading.IdentityCapacityCritical && reading.IdentityCapacity is { } identity)
+                if (floored && reading.IdentityCapacity is { } identity)
                 {
                     var identityReason = ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns);
-                    reason = string.IsNullOrEmpty(reason) ? identityReason : reason + "; " + identityReason;
+                    /* The events alone band it Healthy: BuildReasons would say "No issues detected.", which the clause contradicts,
+                       so the clause stands alone. With event reasons, they stay and the clause follows. */
+                    reason = eventsBand == DailyHealthBand.Healthy ? identityReason : reason + "; " + identityReason;
                 }
             }
 
