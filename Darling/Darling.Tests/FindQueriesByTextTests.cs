@@ -98,6 +98,16 @@ public sealed class FindQueriesByTextTests
     public void EscapeLike_EscapesTheBackslashThePercentAndTheUnderscore() =>
         Assert.Equal(@"a\\b\%c\_d", DarlingMcpFindQueriesByTextTools.EscapeLike(@"a\b%c_d"));
 
+    /// <summary>T15 names this whole (a bcp, then a -P value), but the piece 100 characters before the secret holds no bcp, so a cut taken before the judge shows the secret.</summary>
+    private const string Secret = "hunter2secret";
+
+    private static readonly string WithheldBySecretText =
+        "EXEC xp_cmdshell 'bcp Sales.dbo.Ledger out c:\\x.dat -c " + new string('x', 200) + " -P " + Secret + "'";
+
+    /// <summary>The match is at the head and the secret is past the 300 characters the excerpt would hold: the judge still has to see all of it.</summary>
+    private static readonly string WithheldByLateSecretText =
+        "SELECT * FROM dbo.EarlyMarker " + new string('y', 500) + " EXEC xp_cmdshell 'bcp t out x.dat -P " + Secret + "late'";
+
     private static async Task SeedAsync(NpgsqlConnection c, CancellationToken ct)
     {
         foreach (var (id, name) in new[] { (1, "fq-a"), (2, "fq-b") })
@@ -118,6 +128,13 @@ public sealed class FindQueriesByTextTests
         await QueryStore(1, "Sales", 5, "SELECT 505 off, aXb FROM dbo.Promo");
         await QueryStore(2, "Sales", 6, "SELECT * FROM dbo.Orders /* other server */");
         await QueryStore(1, "Sales", 7, new string('x', 400) + " NEEDLE_TEXT " + new string('y', 3000));
+        /* Two hits per source for "qqcapprobe", so the cap tests can ask for exactly the hit count, one fewer and one more. */
+        await QueryStore(1, "Sales", 20, "SELECT * FROM dbo.QqCapProbeOne");
+        await QueryStore(1, "Sales", 21, "SELECT * FROM dbo.QqCapProbeTwo");
+        /* Stored before the pattern named these (or by a collector that did not judge): the secret sits well past the 100 characters
+           before it, and past the bcp that gives the rule its anchor. */
+        await QueryStore(1, "Sales", 30, WithheldBySecretText);
+        await QueryStore(1, "Sales", 31, WithheldByLateSecretText);
 
         /* The plan cache: text lives in query_text_dim behind a digest. Two samples of one hash, so the read must return the hash once. */
         async Task Dim(byte[] digest, string text) =>
@@ -133,10 +150,22 @@ public sealed class FindQueriesByTextTests
         await Dim(d1, "SELECT * FROM dbo.Orders WHERE OrderId = @p");
         await Dim(d2, "UPDATE dbo.Widgets SET n = 1");
         await Dim(d3, "SELECT 1 FROM dbo.Orders");
+        var d4 = new byte[] { 4, 4, 4, 4 };
+        var d5 = new byte[] { 5, 5, 5, 5 };
+        var d6 = new byte[] { 6, 6, 6, 6 };
+        var d7 = new byte[] { 7, 7, 7, 7 };
+        await Dim(d4, "SELECT * FROM dbo.QqCapProbeOne");
+        await Dim(d5, "SELECT * FROM dbo.QqCapProbeTwo");
+        await Dim(d6, WithheldBySecretText);
+        await Dim(d7, WithheldByLateSecretText);
         await Stat(1, "fq-a", "Sales", "0xAAAA", d1, TimeSpan.FromHours(3));
         await Stat(1, "fq-a", "Sales", "0xAAAA", d1, TimeSpan.FromHours(1));
         await Stat(1, "fq-a", "Sales", "0xBBBB", d2, TimeSpan.FromHours(1));
         await Stat(2, "fq-b", "Sales", "0xCCCC", d3, TimeSpan.FromHours(1));
+        await Stat(1, "fq-a", "Sales", "0xDD01", d4, TimeSpan.FromHours(1));
+        await Stat(1, "fq-a", "Sales", "0xDD02", d5, TimeSpan.FromHours(2));
+        await Stat(1, "fq-a", "Sales", "0xEE01", d6, TimeSpan.FromHours(1));
+        await Stat(1, "fq-a", "Sales", "0xEE02", d7, TimeSpan.FromHours(1));
     }
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlDataSource Source)> OpenAsync(CancellationToken ct)
@@ -222,6 +251,94 @@ public sealed class FindQueriesByTextTests
         Assert.Contains("NEEDLE_TEXT", excerpt, StringComparison.Ordinal);
         Assert.Equal(DarlingMcpFindQueriesByTextTools.ExcerptLead, excerpt.IndexOf("NEEDLE_TEXT", StringComparison.Ordinal));
         Assert.Equal(400 + " NEEDLE_TEXT ".Length + 3000, row.GetProperty("text_length").GetInt32());
+    }
+
+    [Fact]
+    public async Task TheCapSaysTruncated_OnlyWhenAnotherHitWaitsPastIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _d = source;
+
+        /* Two hits per source. limit 2 is EXACTLY the hit count: nothing waits, so not truncated. limit 1 leaves one waiting: truncated.
+           limit 3 is more than the hits: not truncated. */
+        foreach (var (limit, returned, truncated) in new[] { (1, 1, true), (2, 2, false), (3, 2, false) })
+        {
+            var sources = Parse(await Run(source, "qqcapprobe", "fq-a", limit: limit)).GetProperty("sources");
+            foreach (var name in new[] { "query_store", "plan_cache" })
+            {
+                var one = sources.GetProperty(name);
+                Assert.True(returned == one.GetProperty("returned").GetInt32(), $"{name} limit {limit}: returned");
+                Assert.True(truncated == one.GetProperty("truncated").GetBoolean(), $"{name} limit {limit}: truncated");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AStatementTheJudgeWithholds_IsListedWithTheMarkerOnly_InBothSources()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _d = source;
+
+        var sources = Parse(await Run(source, Secret, "fq-a")).GetProperty("sources");
+
+        /* The reply echoes the caller's own pattern at the top level, so the secret is looked for in the sources only. */
+        var raw = sources.GetRawText();
+        foreach (var piece in new[] { "hunter2", "bcp", "xp_cmdshell", "xxxxxxxxxx" })
+        {
+            Assert.DoesNotContain(piece, raw, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var queryStore = sources.GetProperty("query_store").GetProperty("rows").EnumerateArray().ToArray();
+        Assert.Equal(new long[] { 30, 31 }, queryStore.Select(r => r.GetProperty("query_id").GetInt64()).ToArray());
+        var planCache = sources.GetProperty("plan_cache").GetProperty("rows").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "0xEE01", "0xEE02" }, planCache.Select(r => r.GetProperty("query_hash").GetString()!).OrderBy(h => h, StringComparer.Ordinal).ToArray());
+
+        /* A withheld row says what a withheld statement says anywhere else: the marker, and no length and no piece of the text. */
+        foreach (var row in queryStore.Concat(planCache))
+        {
+            Assert.Equal(SensitiveStatements.PlaceholderText, row.GetProperty("excerpt").GetString());
+            Assert.Equal(JsonValueKind.Null, row.GetProperty("text_length").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task AStatementWhoseSecretLiesPastTheExcerpt_IsStillJudgedWhole()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await OpenAsync(ct);
+        await using var _s = scratch;
+        await using var _d = source;
+
+        /* The match is at the head and the first 300 characters are plain; the named part is 500 characters later. A judge that saw only the
+           excerpt would call it clean and show the yyyy run. */
+        var sources = Parse(await Run(source, "EarlyMarker", "fq-a")).GetProperty("sources");
+        foreach (var name in new[] { "query_store", "plan_cache" })
+        {
+            var row = sources.GetProperty(name).GetProperty("rows").EnumerateArray().Single();
+            Assert.Equal(SensitiveStatements.PlaceholderText, row.GetProperty("excerpt").GetString());
+        }
+
+        Assert.DoesNotContain("yyyyyyyyyy", sources.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Shape_CutsAroundTheMatch_AndNeverSplitsASurrogatePair()
+    {
+        /* The excerpt starts 100 characters before the match, which here is the pair's low half (index 11). */
+        var text = new string('c', 10) + "\uD83D\uDE00" + new string('a', 99) + "needle" + new string('b', 400);
+        var (length, excerpt) = DarlingMcpFindQueriesByTextTools.Shape(text, "needle");
+        Assert.Equal(text.Length, length);
+        Assert.StartsWith("\uD83D\uDE00", excerpt, StringComparison.Ordinal);
+        Assert.Equal(DarlingMcpFindQueriesByTextTools.ExcerptLength, excerpt!.Length);
+
+        /* A match the C# search cannot find again still gives an excerpt from the head, not a failure. */
+        var (headLength, head) = DarlingMcpFindQueriesByTextTools.Shape("SELECT 1", "zzz");
+        Assert.Equal(8, headLength);
+        Assert.Equal("SELECT 1", head);
     }
 
     [Fact]

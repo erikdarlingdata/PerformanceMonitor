@@ -40,6 +40,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// source's statement runs in its own transaction under <c>SET LOCAL statement_timeout</c> (<see cref="BudgetMilliseconds"/>), so the
 /// read stays under about ten seconds; a source that runs out is reported <c>stopped</c> and the other source is unaffected. A
 /// trigram index is a later, opt-in change, so the search stays scoped to one server.</para>
+///
+/// <para><b>The judge runs on the whole text, then the excerpt is cut (#5320).</b> The SQL hands back the whole stored text of the at most
+/// <c>limit + 1</c> matched rows, and the C# side judges it with <see cref="SensitiveStatements.Text"/> before it cuts anything, the same
+/// order <c>McpHelpers.TruncateStatement</c> and <c>StatementPreview</c> keep. A cut taken in SQL would hand the judge only the piece: a rule
+/// that needs context (a <c>bcp</c> name more than 100 characters before its <c>-P</c> value) loses its anchor in the piece, and the
+/// host's <c>SensitiveStatementOutputFilter</c> judges only what the reply carries. A statement the judge names is listed with the withheld
+/// marker in place of the excerpt, with no length and no excerpt of its text, like any other withheld statement. The match itself
+/// (<c>ILIKE</c>) is a match, not the judge: it only chooses which rows are read.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpFindQueriesByTextTools
@@ -60,62 +68,92 @@ public sealed class DarlingMcpFindQueriesByTextTools
     public const int ExcerptLead = 100;
 
     /// <summary>
-    /// Test seam: the statement time each source may run, and a delay run first inside the same timed statement so a test can
-    /// force a stop deterministically. The tool itself always uses <see cref="Default"/>.
+    /// Test seam: the statement time each source may run, and a delay a test can force. The delay is its own <c>SELECT pg_sleep(...)</c>,
+    /// run in the same transaction after <c>SET LOCAL statement_timeout</c> and before the search, so the timeout cancels it and the source
+    /// stops deterministically. The tool itself always uses <see cref="Default"/>.
     /// </summary>
     internal sealed record SourceBudget(int Milliseconds, double TestDelaySeconds = 0)
     {
         public static SourceBudget Default { get; } = new(BudgetMilliseconds);
     }
 
-    /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 the raw pattern (for the excerpt position), $5 row cap + 1.
+    /// <summary>Query Store text. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1. The whole text comes back so the judge
+    /// sees all of it before the excerpt is cut (see the class summary); the cap keeps that to at most $4 texts.
     /// Primary-key order, so a common pattern stops at the cap instead of reading the scope.</summary>
     internal const string QueryStoreSql = @"
 SELECT t.database_name,
        t.query_id,
        t.query_hash,
        t.last_seen,
-       length(t.query_sql_text) AS text_length,
-       substr(t.query_sql_text, greatest(1, p.pos - 100), 300) AS excerpt
+       t.query_sql_text
 FROM query_store_text AS t
-CROSS JOIN LATERAL (SELECT strpos(lower(t.query_sql_text), lower($4)) AS pos) AS p
 WHERE t.server_id = $1
 AND   ($2::text IS NULL OR t.database_name = $2)
 AND   t.query_sql_text ILIKE '%' || $3 || '%' ESCAPE '\'
 ORDER BY t.database_name, t.query_id
-LIMIT $5";
+LIMIT $4";
 
-    /// <summary>Plan-cache text of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 the raw pattern, $5 row cap + 1,
-    /// $6 the raw-tier floor (naive UTC). The server's distinct (hash, database, digest) in the window come first, so the pattern is tested
-    /// once per distinct text instead of once per sample; one row per query_hash, the newest sighting.</summary>
+    /// <summary>Plan-cache text of the raw tier. $1 server_id, $2 database or null, $3 the escaped pattern, $4 row cap + 1,
+    /// $5 the raw-tier floor (naive UTC). The server's distinct (hash, database, digest) in the window come first, so the pattern is tested
+    /// once per distinct text instead of once per sample; one row per query_hash, the newest sighting. The match and the page carry the digest
+    /// only: the whole text (<c>query_text_dim.query_text</c> has no size cap) is read by primary key for the at most $4 rows of the page, so a
+    /// common pattern never sorts every matching text.</summary>
     internal const string PlanCacheSql = @"
 WITH seen AS MATERIALIZED (
     SELECT query_hash, database_name, query_text_digest, MAX(collection_time) AS last_collected
     FROM query_stats
     WHERE server_id = $1
-    AND   collection_time >= $6
+    AND   collection_time >= $5
     AND   query_text_digest IS NOT NULL
     AND   ($2::text IS NULL OR database_name = $2)
     GROUP BY query_hash, database_name, query_text_digest
 ),
 hits AS (
     SELECT DISTINCT ON (s.query_hash)
-           s.query_hash, s.database_name, s.last_collected,
-           length(d.query_text) AS text_length,
-           substr(d.query_text, greatest(1, strpos(lower(d.query_text), lower($4)) - 100), 300) AS excerpt
+           s.query_hash, s.database_name, s.last_collected, s.query_text_digest
     FROM seen AS s
     JOIN query_text_dim AS d ON d.digest = s.query_text_digest
     WHERE d.query_text ILIKE '%' || $3 || '%' ESCAPE '\'
     ORDER BY s.query_hash, s.last_collected DESC
+),
+page AS (
+    SELECT query_hash, database_name, last_collected, query_text_digest
+    FROM hits
+    ORDER BY last_collected DESC, query_hash
+    LIMIT $4
 )
-SELECT query_hash, database_name, last_collected, text_length, excerpt
-FROM hits
-ORDER BY last_collected DESC, query_hash
-LIMIT $5";
+SELECT p.query_hash, p.database_name, p.last_collected, d.query_text
+FROM page AS p
+JOIN query_text_dim AS d ON d.digest = p.query_text_digest
+ORDER BY p.last_collected DESC, p.query_hash";
 
     /// <summary>Escapes the LIKE metacharacters (<c>\</c>, <c>%</c>, <c>_</c>) so the pattern matches the text as typed.</summary>
     internal static string EscapeLike(string pattern) =>
         pattern.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("%", "\\%", StringComparison.Ordinal).Replace("_", "\\_", StringComparison.Ordinal);
+
+    /// <summary>
+    /// What the reply carries for one stored text (#5320): the judge runs on the WHOLE text first, then the excerpt is cut from the judged
+    /// text, around the first match. A text the judge names is the withheld marker (<see cref="SensitiveStatements.PlaceholderText"/>) with no
+    /// length, so a withheld row says no more than a withheld statement says anywhere else. A text that is clean carries its whole length and
+    /// <see cref="ExcerptLength"/> characters starting <see cref="ExcerptLead"/> characters before the match; when the match cannot be found
+    /// again here (the SQL fold of case and this one differ on an unusual letter) the excerpt starts at the head of the text.
+    /// </summary>
+    internal static (int? TextLength, string? Excerpt) Shape(string? stored, string pattern)
+    {
+        if (stored is null) return (null, null);
+
+        var judged = SensitiveStatements.Text(stored);
+        if (judged is null || string.Equals(judged, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+        {
+            return (null, SensitiveStatements.PlaceholderText);
+        }
+
+        var at = judged.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+        var start = Math.Max(0, at - ExcerptLead);
+        if (start > 0 && char.IsLowSurrogate(judged[start])) start--;
+        var tail = judged.AsSpan(start);
+        return (judged.Length, tail[..McpHelpers.TextElementCutLength(tail, ExcerptLength)].ToString());
+    }
 
     /// <summary>What each source covers, for the reply and for an empty answer.</summary>
     internal static string QueryStoreHorizon { get; } =
@@ -129,7 +167,7 @@ LIMIT $5";
         + " days, one row per query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements on ONE server whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. server_name is required; database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text.")]
+        "Finds statements on ONE server whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. server_name is required; database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -183,26 +221,38 @@ LIMIT $5";
             var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
 
             var queryStore = await RunSourceAsync(
-                postgres, QueryStoreSql, queryStoreBudget, resolved.ServerId, database, escaped, text, limit, null, QueryStoreHorizon, database,
-                r => new
+                postgres, QueryStoreSql, queryStoreBudget, resolved.ServerId, database, escaped, limit, null, QueryStoreHorizon, database,
+                r => (Database: r.GetString(0), QueryId: r.GetInt64(1), Hash: r.IsDBNull(2) ? null : r.GetString(2), LastSeen: r.GetDateTime(3),
+                    Stored: r.IsDBNull(4) ? null : r.GetString(4)),
+                raw =>
                 {
-                    database_name = r.GetString(0),
-                    query_id = r.GetInt64(1),
-                    query_hash = r.IsDBNull(2) ? null : r.GetString(2),
-                    last_seen_at = Utc(r.GetDateTime(3)),
-                    text_length = r.GetInt32(4),
-                    excerpt = r.IsDBNull(5) ? null : r.GetString(5),
+                    var (textLength, excerpt) = Shape(raw.Stored, text);
+                    return new
+                    {
+                        database_name = raw.Database,
+                        query_id = raw.QueryId,
+                        query_hash = raw.Hash,
+                        last_seen_at = Utc(raw.LastSeen),
+                        text_length = textLength,
+                        excerpt,
+                    };
                 }, cancellationToken);
 
             var planCache = await RunSourceAsync(
-                postgres, PlanCacheSql, planCacheBudget, resolved.ServerId, database, escaped, text, limit, floor, PlanCacheHorizon, database,
-                r => new
+                postgres, PlanCacheSql, planCacheBudget, resolved.ServerId, database, escaped, limit, floor, PlanCacheHorizon, database,
+                r => (Hash: r.IsDBNull(0) ? null : r.GetString(0), Database: r.IsDBNull(1) ? null : r.GetString(1), LastCollected: r.GetDateTime(2),
+                    Stored: r.IsDBNull(3) ? null : r.GetString(3)),
+                raw =>
                 {
-                    query_hash = r.IsDBNull(0) ? null : r.GetString(0),
-                    database_name = r.IsDBNull(1) ? null : r.GetString(1),
-                    last_collected_at = Utc(r.GetDateTime(2)),
-                    text_length = r.GetInt32(3),
-                    excerpt = r.IsDBNull(4) ? null : r.GetString(4),
+                    var (textLength, excerpt) = Shape(raw.Stored, text);
+                    return new
+                    {
+                        query_hash = raw.Hash,
+                        database_name = raw.Database,
+                        last_collected_at = Utc(raw.LastCollected),
+                        text_length = textLength,
+                        excerpt,
+                    };
                 }, cancellationToken);
 
             return JsonSerializer.Serialize(new
@@ -225,12 +275,14 @@ LIMIT $5";
         DateTime.SpecifyKind(value, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     /// <summary>One source: the statement under <c>SET LOCAL statement_timeout</c> in its own transaction. A statement that runs out is
-    /// <c>stopped</c> (SQLSTATE 57014), not an error, so the other source still answers.</summary>
-    private static async Task<object> RunSourceAsync<T>(
-        NpgsqlDataSource postgres, string sql, SourceBudget budget, int serverId, string? database, string escaped, string raw, int limit, DateTime? floor,
-        string horizon, string? databaseScope, Func<NpgsqlDataReader, T> map, CancellationToken cancellationToken)
+    /// <c>stopped</c> (SQLSTATE 57014), not an error, so the other source still answers. <paramref name="read"/> takes the raw row (whole
+    /// text included) while the statement runs; <paramref name="shape"/> judges and cuts it after the connection is back in the pool, for
+    /// the rows kept (the row past the cap is dropped unjudged).</summary>
+    private static async Task<object> RunSourceAsync<TRaw, TRow>(
+        NpgsqlDataSource postgres, string sql, SourceBudget budget, int serverId, string? database, string escaped, int limit, DateTime? floor,
+        string horizon, string? databaseScope, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
-        var rows = new List<T>();
+        var rows = new List<TRaw>();
         var started = DateTime.UtcNow;
         try
         {
@@ -255,7 +307,6 @@ LIMIT $5";
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)database ?? DBNull.Value });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = escaped });
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = raw });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = limit + 1 });
                 if (floor is not null)
                 {
@@ -265,7 +316,7 @@ LIMIT $5";
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    rows.Add(map(reader));
+                    rows.Add(read(reader));
                 }
             }
         }
@@ -283,20 +334,21 @@ LIMIT $5";
                 horizon,
                 returned = 0,
                 truncated = false,
-                rows = Array.Empty<T>(),
+                rows = Array.Empty<TRow>(),
             };
         }
 
         var truncated = rows.Count > limit;
         if (truncated) rows.RemoveAt(rows.Count - 1);
+        var shaped = rows.ConvertAll(r => shape(r));
         return new
         {
-            status = rows.Count == 0 ? "empty" : "ok",
-            message = rows.Count == 0 ? "No statement in this source contains the pattern. Only what the horizon covers was searched." : null,
+            status = shaped.Count == 0 ? "empty" : "ok",
+            message = shaped.Count == 0 ? "No statement in this source contains the pattern. Only what the horizon covers was searched." : null,
             horizon,
-            returned = rows.Count,
+            returned = shaped.Count,
             truncated,
-            rows,
+            rows = shaped,
         };
     }
 }

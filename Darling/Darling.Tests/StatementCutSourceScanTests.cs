@@ -168,10 +168,6 @@ public sealed class StatementCutSourceScanTests
             "BoundGraphText bounds a graph its caller already judged whole (graphNormalized = SensitiveStatements.Text(...)); it cuts whole lines of judged text and never sees raw"),
         new("PerformanceMonitor.Alerting/AlertContextBuilders.cs", "window.topstatements.take", 1,
             "the Client Timeouts card lists the first AttentionTopListCap items of window.TopStatements (#5640): Take counts LIST ITEMS (top fingerprints), it cuts no statement text. Each item's SampleText was judged whole by the statement filter before it was stored (AttentionCollector: filter, then fingerprint, then the 4000-char cut), a text the filter withheld has no fingerprint and so no item, and the card prints it through TruncateStatement, which judges again before it cuts"),
-        new("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindQueriesByTextTools.cs", "substr(t.query_sql_text,greatest(1,p.pos-100),300)", 1,
-            "find_queries_by_text (#7610) takes a 300 character excerpt around a match its WHERE clause already judged on the whole Query Store text (ILIKE over the full query_sql_text). The excerpt is returned in place of the text, never judged in its place, and the tool is refused at maskLiterals and metadataOnly, so it only runs where the whole text is shown"),
-        new("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindQueriesByTextTools.cs", "substr(d.query_text,greatest(1,strpos(lower(d.query_text),lower($4))-100),300)", 1,
-            "find_queries_by_text (#7610) takes a 300 character excerpt around a match its WHERE clause already judged on the whole plan-cache text (ILIKE over the full query_text_dim.query_text). The excerpt is returned in place of the text, never judged in its place, and the tool is refused at maskLiterals and metadataOnly, so it only runs where the whole text is shown"),
     };
 
     // ------------------------------------------------------------------ the scanner
