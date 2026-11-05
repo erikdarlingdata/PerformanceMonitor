@@ -1335,6 +1335,10 @@ public sealed class DarlingMcpDataTools
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
                             hours_back, leftOut?.Count ?? 0));
+                /* #7724: the collector's no-run answers (no baseline yet, or no successful run inside the window) are unavailable, which EmptyAsync
+                   below leaves alone. For a server that is offline by the SUCCESS-run rule the lead goes in front of them, so "check collection health"
+                   is not the first thing an 8-day-offline server's caller reads. An empty or not_collected page is not touched here. */
+                emptyPage = await DarlingServerOfflineNote.WithLeadAsync(emptyPage!, postgres, resolved.ServerId, resolved.DisplayName, cancellationToken, now);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(
                     WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken, requestedStart);
             }

@@ -246,9 +246,12 @@ internal static class DarlingServerOfflineNote
     /// <summary>
     /// <paramref name="answer"/>, when it is an <c>unavailable</c> envelope for an offline server, with <see cref="LeadAsync"/>'s
     /// sentence put in front of its <c>message</c>. Any other answer, and any answer for a server that is not offline, comes back unchanged.
+    /// With <paramref name="windowEndUtc"/> (#7724) offline is judged as of the read's window end, as <see cref="EmptyAsync"/> does, so an as_of
+    /// read of a window inside collected history keeps its own answer; without it, as of now.
     /// </summary>
     internal static async Task<string> WithLeadAsync(
-        string answer, NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken)
+        string answer, NpgsqlDataSource postgres, int serverId, string displayName, CancellationToken cancellationToken,
+        DateTime? windowEndUtc = null)
     {
         JsonObject? node;
         try
@@ -267,7 +270,7 @@ internal static class DarlingServerOfflineNote
             return answer;
         }
 
-        var lead = await LeadAsync(postgres, serverId, displayName, DateTime.UtcNow, cancellationToken);
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc ?? DateTime.UtcNow, cancellationToken, windowEndUtc);
         if (lead is null)
         {
             return answer;

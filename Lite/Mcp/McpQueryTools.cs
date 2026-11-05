@@ -295,11 +295,14 @@ public sealed class McpQueryTools
 
             if (rows.Count == 0)
             {
-                return await WithEmptyWindowNoticeAsync(McpHelpers.WithDatabasesLeftOut(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
+                /* #7724: the collector's no-run answers are unavailable, which WithEmptyWindowNoticeAsync leaves alone. For a server that is offline
+                   by the SUCCESS-run rule the offline lead goes in front of them (Darling's twin does the same). */
+                var emptyPage = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "procedure_stats", awsRdsKind: AwsRdsKind.None)
                     ?? EmptyProcedureStatsStatus(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "procedure_stats", hours_back, asOfUtc: windowEnd),
-                        hours_back, leftOut?.Count ?? 0), leftOut)!,
+                        hours_back, leftOut?.Count ?? 0);
+                emptyPage = await WithOfflineLeadAsync(dataService, resolved.ServerId, windowEnd, emptyPage);
+                return await WithEmptyWindowNoticeAsync(McpHelpers.WithDatabasesLeftOut(emptyPage, leftOut)!,
                     dataService, QueryWindowRelation.ProcedureStats, resolved.ServerId, requestedStart, nowUtc, "procedure_stats");
             }
 
@@ -1781,6 +1784,52 @@ public sealed class McpQueryTools
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
     private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd, DateTime? windowStart = null)
     {
+        var (lead, newest) = await OfflineLeadOrNullAsync(dataService, serverId, windowEnd);
+        if (lead is null)
+        {
+            return null;
+        }
+
+        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does,
+           after the offline lead. A caller that does not pass its window start keeps the offline sentence. */
+        var offlineOnly = McpHelpers.Status("unavailable", lead + " " + OfflineAnswerEnd);
+        return newest is { } last
+            ? McpHelpers.OfflineEmptyAnswer(lead, last, windowEnd, windowStart, offlineOnly)
+            : offlineOnly;
+    }
+
+    /// <summary>
+    /// #7724: <paramref name="answer"/>, when it is an <c>unavailable</c> envelope for a server that is offline as of <paramref name="windowEnd"/>,
+    /// with the offline sentence (<see cref="OfflineLeadOrNullAsync"/>, the one <see cref="OfflineAnswerOrNullAsync"/> opens with) in front of its
+    /// <c>message</c>, as Darling's <c>DarlingServerOfflineNote.WithLeadAsync</c> does. Any other answer, and any answer for a server that is not offline,
+    /// comes back unchanged.
+    /// </summary>
+    internal static async Task<string> WithOfflineLeadAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer)
+    {
+        if (ReadStatus(answer) is not { Word: "unavailable" } || await OfflineLeadOrNullAsync(dataService, serverId, windowEnd) is not ({ } lead, _))
+        {
+            return answer;
+        }
+
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject node
+                && node["message"] is System.Text.Json.Nodes.JsonValue message && message.TryGetValue<string>(out var text))
+            {
+                node["message"] = lead + " " + text;
+                return node.ToJsonString(McpHelpers.JsonOptions);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return answer;
+    }
+
+    /// <summary>The sentence that opens an offline answer, and the newest SUCCESS collection it judged by (null when the log holds none), or a null lead when the server is not offline as of <paramref name="windowEnd"/> (or the read failed).</summary>
+    private static async Task<(string? Lead, DateTime? Newest)> OfflineLeadOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
+    {
         DateTime? last;
         try
         {
@@ -1788,7 +1837,7 @@ public sealed class McpQueryTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return null;
+            return (null, null);
         }
 
         if (last is not { } newest)
@@ -1801,27 +1850,23 @@ public sealed class McpQueryTools
             if (ServerHealthClassifier.ClassifyFreshness(null, registered, RetentionService.OldestRetainedInstant(windowEnd), windowEnd)
                 != ServerFreshness.Offline)
             {
-                return null;
+                return (null, null);
             }
 
-            return McpHelpers.Status(
-                "unavailable",
-                $"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
-                + "so nothing is arriving to read, whatever the collectors would otherwise report. " + OfflineAnswerEnd);
+            return ($"{OfflineSubject(dataService, serverId)} is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report.", null);
         }
 
         if (windowEnd <= newest
             || ServerHealthClassifier.ClassifyFreshness(newest, windowEnd) != ServerFreshness.Offline)
         {
-            return null;
+            return (null, newest);
         }
 
         var lead = $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
             + "so nothing is arriving to read, whatever the collectors would otherwise report.";
 
-        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does,
-           after the offline lead. A caller that does not pass its window start keeps the offline sentence. */
-        return McpHelpers.OfflineEmptyAnswer(lead, newest, windowEnd, windowStart, McpHelpers.Status("unavailable", lead + " " + OfflineAnswerEnd));
+        return (lead, newest);
     }
 
     private const string OfflineAnswerEnd = "An empty result here is missing data, not a finding.";
