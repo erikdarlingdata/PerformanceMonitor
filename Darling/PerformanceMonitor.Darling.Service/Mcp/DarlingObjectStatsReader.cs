@@ -517,7 +517,7 @@ internal static class DarlingObjectStatsReader
     /// <para>#5244: $3 is the database filter (a text[], NULL = every database; the shape of <see cref="DatabaseFilter.Clause"/>).
     /// The snapshot $2 stays the server's newest, so a filtered and an unfiltered call read the same capture.</para>
     /// </summary>
-    public const string DatabaseSizeLatestSql = """
+    public const string DatabaseSizeLatestSql = $"""
         SELECT
             collection_time,
             database_name,
@@ -527,7 +527,7 @@ internal static class DarlingObjectStatsReader
             CAST(used_size_mb AS double precision) AS used_size_mb,
             CAST(auto_growth_mb AS double precision) AS auto_growth_mb,
             CAST(max_size_mb AS double precision) AS max_size_mb,
-            volume_mount_point,
+            {VolumeKey.Sql} AS volume_mount_point,
             CAST(volume_total_mb AS double precision) AS volume_total_mb,
             CAST(volume_free_mb AS double precision) AS volume_free_mb,
             file_id,
