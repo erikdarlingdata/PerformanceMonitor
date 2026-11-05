@@ -608,7 +608,8 @@ try {
         labels: edits.map((b) => b.attrs["aria-label"]),
         ids: edits.map((b) => b.attrs["data-server-id"]),
         rows: tableRows(),
-        notice: all(main, (n) => n.className.split(/\s+/).includes("notice")).map(text),
+        /* #7558: the summary under the heading is a quiet caption now, not a yellow strip; it is read from its box, whatever its class. */
+        notice: strips("notice").map((s) => s.text),
         requests: requests.map((r) => r.method + " " + r.url),
         form: openForm() !== null,
       };
@@ -1087,7 +1088,8 @@ try {
       const table = byTag(main, "table")[0];
       const headRow = table.children[0].children[0];
       const rows = table.children[1].children;
-      const notice = all(main, (n) => n.className.split(/\s+/).includes("notice")).map(text);
+      /* #7558: the summary is a quiet caption now, so it is read from its box, whatever its class. */
+      const notice = strips("notice").map((s) => s.text);
       return {
         headers: headRow.children.map((th) => (th.children[0] || th).textContent),
         cells: rows.map((tr) => tr.children.map(text)),
