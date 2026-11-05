@@ -71,6 +71,18 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(new[] { "0.0", "0.2", "0.4", "0.6", "0.8", "1.0" }, Strings(r.GetProperty("plainAxis")));
     }
 
+    /// <summary>#7586: the FinOps Version Store (PVS) size trend, drawn by the shipped tab (version-store.js) from a stand-in read. A range
+    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value; a large range keeps its two decimals.</summary>
+    [Fact]
+    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndKeepsTwoOnALargeRange()
+    {
+        var r = Run();
+        var small = Strings(r.GetProperty("pvsSmall"));
+        Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, small);
+        Assert.Equal(small.Length, small.Distinct().Count());
+        Assert.Equal(new[] { "0.00", "2,000.00", "4,000.00", "6,000.00", "8,000.00", "10,000.00" }, Strings(r.GetProperty("pvsLarge")));
+    }
+
     /// <summary>A range that was already whole reads exactly as before, and a formatter that ignores the step still draws no
     /// repeated label: the repeat is left blank.</summary>
     [Fact]

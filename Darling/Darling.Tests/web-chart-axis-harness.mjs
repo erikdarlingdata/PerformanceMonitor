@@ -328,4 +328,26 @@ out.formatters = {
   mb: [200, 1023, 1024, 2048].map((v) => util.fmtMb(v)),
 };
 
+/* #7586: the FinOps Version Store (PVS) tab's size trend, drawn by the real tab. Its read is answered by a stand-in fetch; the tab
+   builds its own chart, so the axis labels below come from the formatter the page ships (not a copy of it). */
+async function pvsAxis(sizes) {
+  const now = Date.now();
+  const points = sizes.map((v, i) => ({ collection_time: new Date(now - (sizes.length - i) * 60000).toISOString().slice(0, 19), pvs_size_mb: v }));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const raw = JSON.stringify({ as_of: iso(now), databases: [], trend: [{ database_name: "AppDb", points }] });
+    return { status: 200, ok: true, text: async () => raw };
+  };
+  try {
+    const pvs = await import(pathToFileURL(path.join(scratch, "pages", "finops", "version-store.js")).href);
+    const root = pvs.tab.build("SRV1", {});
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    return axesOf(root).leftLabels;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+out.pvsSmall = await pvsAxis([0.001, 0.004, 0.002, 0.009, 0.003, 0.006, 0.0005]);
+out.pvsLarge = await pvsAxis([1200, 4800, 2500, 9100, 3300, 6000, 700]);
+
 console.log(JSON.stringify(out));

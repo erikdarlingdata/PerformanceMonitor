@@ -35,6 +35,8 @@ class FakeNode {
     return this.children[0] || null;
   }
   appendChild(child) {
+    /* The loading strip is what a trend redraw puts in the chart slot first; __order keeps it beside the scroll (#7586). */
+    if (child.className === "strip loading") (globalThis.__order ||= []).push("redraw");
     this.children.push(child);
     return child;
   }
@@ -66,6 +68,7 @@ class FakeNode {
   }
   scrollIntoView(opts) {
     (globalThis.__scrolled ||= []).push(opts);
+    (globalThis.__order ||= []).push("scroll");
   }
   set textContent(value) {
     this.children = [];
@@ -368,9 +371,11 @@ const scenarios = {
     const trendReads = () => fetches.filter((f) => f.includes("get_query_trend")).map((f) => Object.fromEntries(new URL(f, "http://viewer.test").searchParams));
     const before = trendReads().length;
     const startedOn = select.value;
+    globalThis.__order = [];
     buttons[1].fire("click");
+    const order = globalThis.__order.slice();
     await settleFast();
-    found = { buttons: buttons.length, startedOn, selected: select.value, before, reads: trendReads().slice(before), scrolled: (globalThis.__scrolled || []).length };
+    found = { buttons: buttons.length, startedOn, selected: select.value, before, reads: trendReads().slice(before), scrolled: (globalThis.__scrolled || []).length, order };
     return [card];
   },
   topQueriesLocal: () => {

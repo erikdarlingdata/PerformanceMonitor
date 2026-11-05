@@ -193,6 +193,9 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Equal("0xBBB", read.GetProperty("query_hash").GetString());
         Assert.Equal("db2", read.GetProperty("database_name").GetString());
         Assert.Equal(1, found.GetProperty("scrolled").GetInt32());
+        // The click's own synchronous work: the scroll starts before the chart slot is redrawn, because the redraw (a loading strip) shortens
+        // the page and a smooth scroll begun after it stops short of the picker.
+        Assert.Equal(new[] { "scroll", "redraw" }, Strings(found, "order"));
     }
 
     [Fact]
