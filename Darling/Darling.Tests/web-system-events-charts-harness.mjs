@@ -103,10 +103,19 @@ const specs = sec.systemEventsChartSpecs("last 24 h");
 const byTitle = Object.fromEntries(specs.map((s) => [s.title, s]));
 const out = { titles: specs.map((s) => s.title), spans: specs.map((s) => s.span), hides: specs.every((s) => s.hideWhenNoRows === true) };
 
-/* A counter collected as 0 is a real 0: the chart draws. A counter no bucket carried says so. */
+/* #7549: a counter that is 0 in every bucket says so in one line, as one no bucket carried does. One bucket above 0 draws the chart. */
 const zeros = { entries: [0, 1, 2].map((i) => entry(i, { bad_pages_detected: 0, latch_warnings: null })), sick_spinlock_types: [] };
 out.zeroDrawn = drew(byTitle["Corruption Events: Bad Pages"], zeros);
 out.absent = drew(byTitle["Contention Events: Latch Warnings"], zeros);
+out.oneAboveZero = drew(byTitle["Corruption Events: Bad Pages"], { entries: [0, 1, 2].map((i) => entry(i, { bad_pages_detected: i === 1 ? 1 : 0 })), sick_spinlock_types: [] });
+/* A chart with more than one series keeps the chart when any series is above 0, and says the line when all of them are 0. */
+const twoSeries = { title: "Two", viz: "line", rowsKey: "points", xKey: "t", series: [{ key: "a", label: "A" }, { key: "b", label: "B" }], emptyText: "none", allZeroText: "All zero.", read: "x", windowHours: 24 };
+const drewLine = (rows) => {
+  const node = panels.VIZ.line({ points: rows }, twoSeries);
+  return { text: node.textContent, hasChart: find(node, (n) => n.tag === "svg").length > 0 };
+};
+out.twoSeriesOneNonZero = drewLine([0, 1, 2].map((i) => ({ t: iso(T0 + i * 600000), a: 0, b: i === 2 ? 3 : 0 })));
+out.twoSeriesAllZero = drewLine([0, 1, 2].map((i) => ({ t: iso(T0 + i * 600000), a: 0, b: 0 })));
 out.hasData = {
   zero: sec.counterHasData(zeros.entries, "bad_pages_detected"),
   absent: sec.counterHasData(zeros.entries, "latch_warnings"),
@@ -127,11 +136,12 @@ out.spinPoints = sec.spinlockPoints(spin);
 out.spinDrawn = drew(byTitle["Contention Events: Sick Spinlocks"], spin);
 out.spinNone = drew(byTitle["Contention Events: Sick Spinlocks"], { sick_spinlock_types: [], entries: [entry(0, { sick_spinlocks: [] })] });
 
-/* #6439: the "charted below" sentence is shown only when a chart is drawn: a collected 0 or a named sick spinlock draws; a window
+/* #6439: the "charted below" sentence is shown only when a chart is drawn: a counter above 0 or a named sick spinlock draws; a window
    with no row, or rows that carry no counter and no spinlock (an Azure SQL Database), draws nothing. */
 out.intro = {
   text: sec.COUNTERS_INTRO,
   zero: sec.counterChartsDrawn(zeros),
+  oneAbove: sec.counterChartsDrawn({ entries: [entry(0, { latch_warnings: 0 }), entry(1, { latch_warnings: 2 })], sick_spinlock_types: [] }),
   spin: sec.counterChartsDrawn(spin),
   noRows: sec.counterChartsDrawn({ entries: [], sick_spinlock_types: [] }),
   noData: sec.counterChartsDrawn({ entries: [entry(0, { bad_pages_detected: null, latch_warnings: null })], sick_spinlock_types: [] }),

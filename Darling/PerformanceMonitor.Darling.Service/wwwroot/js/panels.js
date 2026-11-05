@@ -1545,6 +1545,9 @@ function vizLine(data, desc) {
      Say what happened, in the read's own words when it has a message, instead of a chart with nothing on it. */
   const drawable = (v) => v != null && v !== "" && Number.isFinite(Number(v));
   if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
+  /* #7549: `allZeroText` is the one line drawn in place of a chart whose every measured value, in every series, is 0: a healthy server's counters are flat
+     lines on a 0 to 1 axis, a full card each, that say less than a sentence. One value above 0, in any series, keeps the chart. */
+  if (desc.allZeroText && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key]) && Number(p[s.key]) > 0))) return emptyStrip(desc.allZeroText);
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,

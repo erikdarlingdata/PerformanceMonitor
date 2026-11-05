@@ -30,6 +30,11 @@ export const COUNTER_CHARTS = [
   { group: "Contention Events", title: "Latch Warnings", key: "latch_warnings", unit: "events", empty: "No latch warning count was reported" },
 ];
 
+/** True when at least one bucket carries a number above 0 for `key` (#7549): a window of collected zeros is a healthy one and draws a line of text, not a chart. */
+export function counterHasValue(entries, key) {
+  return (entries || []).some((e) => e && e[key] != null && Number(e[key]) > 0);
+}
+
 /** True when at least one bucket carries a number for `key`. A 0 counts: it is a collected zero. */
 export function counterHasData(entries, key) {
   return (entries || []).some((e) => e && e[key] != null && !Number.isNaN(Number(e[key])));
@@ -56,7 +61,8 @@ export function spinlockPoints(data) {
 VIZ.healthCounter = (data, desc) => {
   const key = desc.series[0].key;
   if (!counterHasData(getEntries(data, desc), key)) return emptyStrip(desc.emptyText);
-  return VIZ.line(data, { ...desc, format: "int" });
+  /* #7549: a counter that is 0 in every bucket says so in its one line, the text an absent counter gets ("No bad pages were reported in this window."). */
+  return VIZ.line(data, { ...desc, format: "int", allZeroText: desc.emptyText });
 };
 
 /* "Spinlocks" viz: a line per sick spinlock type the read named, or the empty text when none was reported. */
@@ -71,10 +77,10 @@ VIZ.healthSpinlocks = (data, desc) => {
 export const COUNTERS_INTRO =
   "The corruption and contention counters are charted below (each point is the largest value in its time bucket); the raw parsed rows follow.";
 
-/** True when at least one counter chart or the sick spinlock chart of this chart read draws a line, the test for COUNTERS_INTRO. */
+/** True when at least one counter chart or the sick spinlock chart of this chart read draws a line (a counter above 0 somewhere in the window), the test for COUNTERS_INTRO. */
 export function counterChartsDrawn(data) {
   const entries = (data && data.entries) || [];
-  return COUNTER_CHARTS.some((c) => counterHasData(entries, c.key)) || spinlockPoints(data).series.length > 0;
+  return COUNTER_CHARTS.some((c) => counterHasValue(entries, c.key)) || spinlockPoints(data).series.length > 0;
 }
 
 function getEntries(data, desc) {

@@ -84,13 +84,14 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.True(r.GetProperty("hides").GetBoolean());
     }
 
-    /// <summary>A counter collected as 0 draws a chart; a counter no bucket carried says so instead of drawing a zero line.</summary>
+    /// <summary>#7549: a counter that is 0 in every bucket, like one no bucket carried, says so in one line instead of drawing a flat chart.</summary>
     [Fact]
-    public void ACollectedZero_IsDrawn_AndAnAbsentCounter_SaysSo()
+    public void ACounterThatIsZeroInEveryBucket_SaysSoInOneLine_AndAnAbsentCounterSaysSo()
     {
         var r = Run();
 
-        Assert.True(r.GetProperty("zeroDrawn").GetProperty("hasChart").GetBoolean());
+        Assert.False(r.GetProperty("zeroDrawn").GetProperty("hasChart").GetBoolean());
+        Assert.Equal("No bad pages were reported in this window.", r.GetProperty("zeroDrawn").GetProperty("text").GetString());
         Assert.False(r.GetProperty("absent").GetProperty("hasChart").GetBoolean());
         Assert.Equal("No latch warning count was reported in this window.", r.GetProperty("absent").GetProperty("text").GetString());
         var has = r.GetProperty("hasData");
@@ -98,6 +99,18 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.False(has.GetProperty("absent").GetBoolean());
         Assert.False(has.GetProperty("missingField").GetBoolean());
         Assert.False(has.GetProperty("none").GetBoolean());
+    }
+
+    /// <summary>#7549: one bucket above 0 draws the chart, and a chart of two series keeps it when either series is above 0.</summary>
+    [Fact]
+    public void OneValueAboveZero_KeepsTheChart_InOneSeriesOrMany()
+    {
+        var r = Run();
+
+        Assert.True(r.GetProperty("oneAboveZero").GetProperty("hasChart").GetBoolean());
+        Assert.True(r.GetProperty("twoSeriesOneNonZero").GetProperty("hasChart").GetBoolean());
+        Assert.False(r.GetProperty("twoSeriesAllZero").GetProperty("hasChart").GetBoolean());
+        Assert.Equal("All zero.", r.GetProperty("twoSeriesAllZero").GetProperty("text").GetString());
     }
 
     /// <summary>One line per sick spinlock type, with a gap in the buckets that did not name it; no type named is an empty line, not a chart.</summary>
@@ -126,7 +139,8 @@ public sealed class WebSystemEventsChartsBehaviourTests
         var intro = Run().GetProperty("intro");
 
         Assert.Contains("charted below", intro.GetProperty("text").GetString(), StringComparison.Ordinal);
-        Assert.True(intro.GetProperty("zero").GetBoolean());
+        Assert.False(intro.GetProperty("zero").GetBoolean());
+        Assert.True(intro.GetProperty("oneAbove").GetBoolean());
         Assert.True(intro.GetProperty("spin").GetBoolean());
         Assert.False(intro.GetProperty("noRows").GetBoolean());
         Assert.False(intro.GetProperty("noData").GetBoolean());
