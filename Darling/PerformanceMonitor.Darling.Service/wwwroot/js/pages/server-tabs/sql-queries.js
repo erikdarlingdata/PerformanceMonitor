@@ -15,7 +15,7 @@ import { statsHistoryColumn } from "../stats-history.js";
 import { windowParams } from "../../time-slicer.js";
 import { activePlanColumns, planColumn } from "../plan-viewer.js";
 import { comparePick, compareControl } from "../top-compare.js";
-import { codeDisclosure, listCell, panelShell, discontinuityStrip, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
+import { activeQueriesMonitor, codeDisclosure, listCell, panelShell, discontinuityStrip, pickerControl, topRankingLabel, rankedParams, withTagPick, tagFilterPicker, tagColumn, compareDrawn, rankedCard, slicedSlot, tablePanel, linePanel, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS } from "./shared.js";
 
 /**
  * Top Queries by CPU, plus that ONE query's per-collection history — the browser's per-query drill-down (#2520).
@@ -231,20 +231,34 @@ export function activeQueriesPanel(server, ctx) {
   /* #6302: the snapshot picker (active-snapshots.js) reads the window's snapshot times, under the tag pick and the wait filter the grid
      uses, and draws the grid for the latest one, or the one picked; "All snapshots in window" draws it as it was. */
   /* #6301: under the time slicer. `w` is the page range or the slicer's selection; the snapshot list and the grid both read it. */
-  const card = slicedTagCard("active", { server, ctx }, (tagPicker, w) =>
-    activeQueriesSnapshotSlot(server, w, wait, withTagPick({}, "active"), (snapshotTime, snapPicker) =>
+  const card = slicedTagCard("active", { server, ctx }, (tagPicker, w) => {
+    /* #7573: the monitor's own statements are left out by default (on a quiet server every active query is the monitor's). The rows stay stored; this switch sends
+       include_monitor to the strip, the snapshot list and the grid. The strip is drawn once per tab build, so a change rebuilds the tab, as the wait filter's clear does. */
+    tagPicker.appendChild(
+      pickerControl(
+        "Monitor statements",
+        [{ value: "hide", label: "Left out" }, { value: "show", label: "Included" }],
+        (value) => {
+          activeQueriesMonitor.include = value === "show";
+          window.dispatchEvent(new Event("hashchange"));
+        },
+        activeQueriesMonitor.include ? "show" : "hide"
+      )
+    );
+    return activeQueriesSnapshotSlot(server, w, wait, withTagPick(activeQueriesMonitor.include ? { include_monitor: true } : {}, "active"), (snapshotTime, snapPicker) =>
       activeQueriesGrid(server, w, wait, snapshotTime, snapPicker ? el("div", {}, [tagPicker, snapPicker]) : tagPicker)
-    )
-  );
+    );
+  });
   /* #6386: the live read ("Run live now") sits above the stored snapshots, in the stored grid's columns. */
-  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS), card]);
+  const wrap = el("div", {}, [activeQueriesLiveBar(server, ACTIVE_COLUMNS, activeQueriesMonitor.include), card]);
   wrap.style.display = "contents";
   return wrap;
 }
 
 function activeQueriesGrid(server, ctx, wait, snapshotTime, control) {
   /* The "All snapshots" grid is an event list, cut to the selection; a picked snapshot is one instant and is read as it is. */
-  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait } : { server, hours: ctx.hours, limit: 50 }, ctx, !snapshotTime);
+  const monitorParam = activeQueriesMonitor.include ? { include_monitor: true } : {};
+  const base = windowParams(wait ? { server, hours: ctx.hours, limit: 500, wait_type: wait, ...monitorParam } : { server, hours: ctx.hours, limit: 50, ...monitorParam }, ctx, !snapshotTime);
   const panel = tablePanel(
     "Active Queries",
     "get_active_queries",
@@ -312,7 +326,7 @@ export const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and p
 export const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "regression_reason", label: "Why" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "recent_aborted_count", label: "Recent Timeouts", format: "int" },
@@ -364,7 +378,7 @@ export const QUERY_HEATMAP_COLUMNS = [
 ];
 
 export const QUERY_STORE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
@@ -409,7 +423,7 @@ export function qsReasonsText(row) {
 }
 
 export const QS_CLUTTER_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "verdict", label: "Verdict", sevKey: "verdict" },
   { key: "verdict_reasons", label: "Reasons", render: (r) => document.createTextNode(qsReasonsText(r)) },
   /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
@@ -482,7 +496,7 @@ export const LONG_QUERY_COLUMNS = [
   { key: "writes", label: "Writes", group: "I/O and rows", format: "int" },
   { key: "row_count", label: "Rows", group: "I/O and rows", format: "int" },
   { key: "result", label: "Result" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", group: "Session", format: "int" },
   { key: "client_app_name", label: "App", group: "Session" },
@@ -500,8 +514,9 @@ export const PLAN_CORRECTION_COLUMNS = [
   { key: "first_seen", label: "First seen", format: "time" },
   { key: "collection_time", label: "Last seen", format: "time" },
   { key: "capture_count", label: "Captures", format: "int" },
-  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
-  { key: "database_name", label: "Database" },
+  /* #7541: the closed Query summary takes width from the window (wrap-follow), so Reason, which says why the row is there, is in view at 1280 and not 1200px along. */
+  { key: "query_text", label: "Query", wrap: true, follow: true, valueList: false, render: (r) => codeDisclosure(r.query_text) },
+  { key: "database_name", label: "Database", name: true },
   { key: "recommendation_state", label: "State" },
   { key: "recommendation_state_reason", label: "State Reason", wrap: true },
   { key: "recommendation_reason", label: "Reason", wrap: true },
@@ -526,7 +541,7 @@ export const PLAN_CORRECTION_COLUMNS = [
 ];
 
 export const AUTO_TUNING_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "force_last_good_plan_desired_state", label: "Desired" },
   { key: "force_last_good_plan_actual_state", label: "Actual" },
   { key: "force_last_good_plan_reason", label: "Reason", wrap: true },
@@ -539,7 +554,7 @@ const ACTIVE_COLUMNS = [
   { key: "query_text", label: "Query Text", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   tagColumn(),
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },
   { key: "program_name", label: "Program" },

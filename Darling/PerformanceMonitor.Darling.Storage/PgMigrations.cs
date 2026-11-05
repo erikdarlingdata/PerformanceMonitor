@@ -2549,7 +2549,29 @@ ALTER TABLE collect.blocked_process_reports ADD COLUMN IF NOT EXISTS blocking_op
 CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_process_reports;";
 
     /// <summary>
-    /// V242 (#7590): <c>collect.servers.connect_down_since</c> and <c>collect.servers.last_connect_error</c>, the service's own answer to
+    /// V242 (#7567): <c>collect.pg_statement_text.own_entries</c>, which <c>(user_id, database_id)</c> entries of a statement's
+    /// <c>queryid</c> are the monitoring service's own (their stored <c>pg_stat_statements</c> text ends with
+    /// <c>PgOwnStatement.Marker</c>). One nullable <c>jsonb</c>, no DEFAULT, no backfill: a JSON array of <c>[user_id, database_id]</c>
+    /// pairs, replaced on every hourly text upsert, so an entry that stops being the service's drops out at the next fetch. NULL
+    /// means no entry of the queryid is known to be the service's, so the statement is shown. The text row's own prune and
+    /// delete carry the column with them. An older build ignores it.
+    /// </summary>
+    private const string V242Sql = PgStatementText.AddOwnEntriesColumnSql;
+
+    /// <summary>
+    /// V243 (#7573): <c>collect.waiting_tasks.program_name</c>, the program name of the waiting task's session, read from
+    /// <c>sys.dm_exec_sessions</c> on session_id so a reader can leave the monitor's own waits out. One nullable <c>text</c>, no DEFAULT, no
+    /// backfill (V241's shape): a row stored before this rung never read it, so NULL is the honest value, and a reader never hides a NULL.
+    /// Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after <c>database_name</c>, because the writer is a positional binary
+    /// COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload, and this ALTER
+    /// no-ops there) and an upgraded one share one physical column order. There is no <c>v_waiting_tasks</c> view on this store, so no view is
+    /// re-expanded. An older build writes its own column list, so the column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V243Sql = @"
+ALTER TABLE collect.waiting_tasks ADD COLUMN IF NOT EXISTS program_name text;";
+
+    /// <summary>
+    /// V244 (#7590): <c>collect.servers.connect_down_since</c> and <c>collect.servers.last_connect_error</c>, the service's own answer to
     /// "can I reach this server right now". A failed connect stamps the first failure's time (kept while the failures continue, so it
     /// survives a service restart) and the exception message the service log prints; a good connect clears both. Every surface that bands a
     /// server reads them, so a server whose connection has failed reads Offline at once instead of waiting out the 30 minute collection age.
@@ -2557,7 +2579,7 @@ CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_proces
     /// next retry. All three nullable, no DEFAULT, no backfill: NULL says the last connect succeeded or none has failed since this rung, which makes no claim.
     /// No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
     /// </summary>
-    private const string V242Sql = @"
+    private const string V244Sql = @"
 ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS connect_down_since timestamp,
     ADD COLUMN IF NOT EXISTS last_connect_error text,
@@ -3062,7 +3084,9 @@ $rung$;";
         new Migration(239, "compose-fleet-rollup", V239Sql),
         new Migration(240, "query-store-top-daily-weighted", V240Sql),
         new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
-        new Migration(242, "server-connect-down-state", V242Sql),
+        new Migration(242, "pg-statement-text-own-entries", V242Sql),
+        new Migration(243, "waiting-tasks-program-name", V243Sql),
+        new Migration(244, "server-connect-down-state", V244Sql),
     };
 
     /// <summary>

@@ -17,13 +17,13 @@ import { el, readTool, readErrorStrip, emptyStrip, captionStrip, errorStrip, loa
 /* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
 const TREND_HOURS = 168;
 
-const COLUMNS = [
-  { key: "database_name", label: "Database" },
+export const COLUMNS = [
+  { key: "database_name", label: "Database", name: true },
   { key: "is_adr_on", label: "ADR on", format: "bool" },
   { key: "pvs_size_mb", label: "PVS off-row MB", format: "num2" },
   { key: "pct_of_database", label: "% of database", format: "num2", nullKey: "pct_of_database_reason", wrap: true },
   { key: "online_index_version_store_mb", label: "Online index store MB", format: "num2" },
-  { key: "database_data_size_mb", label: "Database data size", format: "mb" },
+  { key: "database_data_size_mb", label: "Database data size", format: "mbfit" },
   { key: "aborted_transaction_count", label: "Aborted transactions", format: "int" },
   { key: "aborted_version_cleaner_start_time", label: "Aborted cleaner start", format: "time" },
   { key: "aborted_version_cleaner_end_time", label: "Aborted cleaner end", format: "time" },

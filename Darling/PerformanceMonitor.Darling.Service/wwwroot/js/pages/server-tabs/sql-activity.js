@@ -266,7 +266,7 @@ export const APPLICATION_COLUMNS = [
 ];
 
 export const JOB_COLUMNS = [
-  { key: "job_name", label: "Job" },
+  { key: "job_name", label: "Job", name: true },
   { key: "job_enabled", label: "Enabled", format: "bool" },
   { key: "start_time", label: "Started", format: "time" },
   { key: "current_duration_formatted", label: "Running for" },
@@ -280,7 +280,7 @@ export const JOB_COLUMNS = [
 /* The Job History grid on the Activity tab: the cross-server page's columns less Server, since the tab is one server's. */
 export const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
-  { key: "job_name", label: "Job" },
+  { key: "job_name", label: "Job", name: true },
   { key: "category", label: "Category" },
   { key: "step", label: "Step" },
   { key: "status", label: "Status" },
@@ -305,7 +305,7 @@ export function wholeOrTwoPlaces(v) {
 
 const PERFMON_COLUMNS = [
   { key: "counter_name", label: "Counter" },
-  { key: "instance_name", label: "Instance" },
+  { key: "instance_name", label: "Instance", name: true },
   { key: "per_second", label: "Per second", format: "rate" },
   { key: "running_total", label: "Total since counter start", format: "int" },
   { key: "value", label: "Value", align: "right", display: (r) => wholeOrTwoPlaces(r.value) },
@@ -327,13 +327,13 @@ export function perfmonColumns(counters) {
 }
 
 export const INDEX_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
   { key: "index_type", label: "Type" },
   { key: "classification", label: "Classification" },
-  { key: "reserved_mb", label: "Reserved", format: "mb" },
+  { key: "reserved_mb", label: "Reserved", format: "mbfit" },
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "user_updates", label: "Updates", format: "int" },

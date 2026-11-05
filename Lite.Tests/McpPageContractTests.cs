@@ -1393,13 +1393,43 @@ VALUES ($1, $2, $3, $4, 'Db', $5, '0xPLANHASH', $6, '0xPLANH', $7, $2, $2, 10, $
 
     /// <summary>One query_snapshots row. <paramref name="waitType"/> is the row's own wait; left null it is the old default, LCK_M_X for a
     /// blocked row and no wait for the rest (#5235 lets a test name any wait, a trailing space included).</summary>
-    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs, string? waitType = null) => ExecAsync(@"
+    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs, string? waitType = null, string? programName = null) => ExecAsync(@"
 INSERT INTO query_snapshots
     (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id,
-     wait_type, cpu_time_ms, total_elapsed_time_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+     wait_type, cpu_time_ms, total_elapsed_time_ms, program_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         _nextId--, Naive(at), _serverId, ServerName, sessionId, database, text,
-        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, waitType ?? (blockingSessionId > 0 ? "LCK_M_X" : null), cpuMs, cpuMs * 2);
+        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, waitType ?? (blockingSessionId > 0 ? "LCK_M_X" : null), cpuMs, cpuMs * 2, programName);
+
+    /* #7573 review: a monitor query that heads a blocking chain stays on the default page, as a WAITFOR head does, so the application session stuck
+       behind it can name its blocker. Session 50 (the monitor's) blocks 60 (an application's); 70 is monitor noise that blocks nobody. */
+    [Fact]
+    public async Task AMonitorSessionThatHeadsABlockingChain_StaysOnTheDefaultPage_AndItsVictimNamesIt()
+    {
+        var t = DateTime.UtcNow.AddMinutes(-5);
+        await SeedSnapshotAsync(t, 50, "Db", "SELECT head", blockingSessionId: 0, cpuMs: 10, programName: "PerformanceMonitorLite");
+        await SeedSnapshotAsync(t, 60, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 50, cpuMs: 500, programName: "Orders.Api");
+        await SeedSnapshotAsync(t, 70, "Db", "SELECT noise", blockingSessionId: 0, cpuMs: 5, programName: "PerformanceMonitorDarling");
+
+        var root = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
+        var rows = root.GetProperty("queries").EnumerateArray().ToArray();
+        Assert.Equal(new[] { 50, 60 }, rows.Select(r => r.GetProperty("session_id").GetInt32()).OrderBy(s => s).ToArray());
+        Assert.True(Row(rows, 50).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 60).GetProperty("blocker_not_shown").ValueKind);
+    }
+
+    /* #7573 review: an empty answer under a filter says the monitor's statements were left out, as the unfiltered empty answer does. */
+    [Fact]
+    public async Task AnEmptyAnswerUnderAFilter_SaysTheMonitorsStatementsWereLeftOut_WhenTheSwitchIsOff()
+    {
+        await SeedSnapshotAsync(DateTime.UtcNow.AddMinutes(-5), 50, "Db", "SELECT head", blockingSessionId: 0, cpuMs: 10, programName: "PerformanceMonitorLite");
+
+        var filtered = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "NoSuchDb"));
+        Assert.Contains("monitor's own statements are left out", filtered.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var asked = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "NoSuchDb", include_monitor: true));
+        Assert.DoesNotContain("monitor's own statements are left out", asked.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
 
     private Task SeedRunAsync(DateTime at) => ExecAsync(@"
 INSERT INTO collection_log

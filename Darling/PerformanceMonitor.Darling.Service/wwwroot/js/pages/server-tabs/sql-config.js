@@ -22,7 +22,7 @@ export const SERVER_CONFIG_COLUMNS = [
 /* The WPF Database Configuration grid's columns in its order and wording, less its per-row Collected column:
    the read stamps one captured_at on the whole snapshot, so the panel subtitle carries it instead. */
 export const DB_CONFIG_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "state", label: "State" },
   { key: "compatibility_level", label: "Compat Level", format: "int" },
   { key: "collation", label: "Collation" },
@@ -54,7 +54,7 @@ export const DB_CONFIG_COLUMNS = [
 
 /* The WPF Scoped Configuration grid: one row per database setting; Collected is the snapshot's captured_at. */
 const SCOPED_CONFIG_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "name", label: "Setting" },
   { key: "value", label: "Value" },
   { key: "value_for_secondary", label: "Value for Secondary" },
@@ -81,12 +81,12 @@ export function scopedConfigPanel(server) {
 }
 
 export const QS_HEALTH_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "actual_state", label: "Actual" },
   { key: "desired_state", label: "Desired" },
   { key: "state_matches_desired", label: "Match", format: "bool" },
   { key: "readonly_reason_decoded", label: "Read-only reason", wrap: true },
-  { key: "current_storage_size_mb", label: "Used", format: "mb" },
+  { key: "current_storage_size_mb", label: "Used", format: "mbfit" },
   { key: "max_storage_size_mb", label: "Cap", format: "mb" },
   { key: "pct_of_cap", label: "% of cap", format: "num1" },
   { key: "size_based_cleanup_mode", label: "Cleanup" },
@@ -140,7 +140,7 @@ function identityLastScanned(r) {
   return at ? localTime(at) : "—";
 }
 const IDENTITY_COLUMNS = [
-  { key: "database", label: "Database" },
+  { key: "database", label: "Database", name: true },
   { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
   { key: "column", label: "Column" },
   { key: "data_type", label: "Type", render: (r) => el("span", { text: identityType(r) }), sortValue: identityType },
@@ -151,7 +151,7 @@ const IDENTITY_COLUMNS = [
   { key: "band", label: "Band", format: "text", small: true },
 ];
 const IDENTITY_SCAN_COLUMNS = [
-  { key: "database", label: "Database" },
+  { key: "database", label: "Database", name: true },
   { key: "scan_state", label: "Scan state", render: (r) => el("span", { text: identityScanState(r) }), sortValue: identityScanState },
   /* A database not yet scanned has no scan in the window: its last scan before the window (if any) is shown instead. */
   { key: "scanned_at", label: "Last scanned", format: "time", small: true, render: (r) => el("span", { text: identityLastScanned(r) }), sortValue: (r) => r.scanned_at || r.last_scanned_at || "" },
@@ -229,7 +229,7 @@ const AGENT_ALERT_COLUMNS = [
   { key: "enabled", label: "Enabled", format: "bool" },
   { key: "severity", label: "Severity", format: "int" },
   { key: "message_id", label: "Error", format: "int" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "operator_count", label: "Operators", format: "int" },
   { key: "fired_in_window", label: "Fired in the window", format: "bool" },
   { key: "occurrence_count", label: "Times fired", format: "int" },
@@ -285,7 +285,7 @@ function protectionFact(key, label) {
   };
 }
 const DATABASE_PROTECTION_COLUMNS = [
-  { key: "database", label: "Database" },
+  { key: "database", label: "Database", name: true },
   { key: "state", label: "State", small: true },
   protectionFact("full_backup", "Last full backup"),
   protectionFact("log_backup", "Last log backup"),

@@ -75,7 +75,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     last_connect_error = NULL,
     next_connect_attempt = NULL;";
 
-    /* The failed-connect half of the registry (V242, #7590). connect_down_since keeps the FIRST failure of an outage (COALESCE), so it also
+    /* The failed-connect half of the registry (V244, #7590). connect_down_since keeps the FIRST failure of an outage (COALESCE), so it also
        survives a service restart while the server stays down; the error is the latest, and next_connect_attempt is when the backoff will try again.
        A server that has NEVER connected has no row (the good connect's upsert writes it), and the most common first failure is exactly that: a wrong
        host name or a bad password on the day it is added. The insert arm gives it one from the configuration (id, storage name, display name, enabled,
@@ -90,7 +90,7 @@ ON CONFLICT (server_id) DO UPDATE SET
     last_connect_error = EXCLUDED.last_connect_error,
     next_connect_attempt = EXCLUDED.next_connect_attempt;";
 
-    /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints and the time the backoff will try again (V242, #7590).
+    /// <summary>Records on the registry that the connect to this server failed, with the error text the service log prints and the time the backoff will try again (V244, #7590).
     /// A server that has never connected gets its registry row from <paramref name="config"/> here (see <see cref="MarkConnectFailedSql"/>).
     /// Failure-isolated like the other observability writes: it logs at Debug and never throws.</summary>
     public static async Task MarkConnectFailedAsync(NpgsqlDataSource postgres, MonitoredServer config, string? error, ILogger? logger, CancellationToken cancellationToken, DateTime? nextAttemptUtc = null)

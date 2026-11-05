@@ -116,6 +116,26 @@ public sealed class DarlingMcpPgPercentDenominatorTests
         Assert.False(root.GetProperty("truncated").GetBoolean());
     }
 
+    /// <summary>
+    /// #7567: a statement that is the monitoring service's own is kept in the list and carries <c>service_statement: true</c>;
+    /// an ordinary one carries <c>false</c>. Read from the reply's JSON, and the Viewer's grid prefixes the same rows.
+    /// </summary>
+    [Fact]
+    public void TopQueries_MarksTheServicesOwnStatement_InTheJson_AndTheViewerPrefixesItsText()
+    {
+        var own = Statement(0) with { QueryText = "SELECT pg_sleep($1)\n/* PerformanceMonitor Darling */", IsServiceStatement = true };
+        var app = Statement(1) with { QueryText = "SELECT id FROM orders" };
+        var root = Parse(DarlingMcpPgStatementTools.BuildTopQueriesJson(
+            "srv", 24, new DarlingPgStatementReader.PgTopQueriesPage([own, app], WindowTotal), limit: 5));
+
+        var rows = root.GetProperty("queries");
+        Assert.True(rows[0].GetProperty("service_statement").GetBoolean());
+        Assert.False(rows[1].GetProperty("service_statement").GetBoolean());
+
+        Assert.StartsWith("[Performance Monitor's own statement] SELECT pg_sleep", PerformanceMonitor.Darling.Viewer.PgDisplay.Statement(own).QueryText, StringComparison.Ordinal);
+        Assert.Equal("SELECT id FROM orders", PerformanceMonitor.Darling.Viewer.PgDisplay.Statement(app).QueryText);
+    }
+
     /* ───────────────────────── get_pg_wait_stats ───────────────────────── */
 
     private static DarlingPgWaitReader.PgWaitRow Wait(int i) =>

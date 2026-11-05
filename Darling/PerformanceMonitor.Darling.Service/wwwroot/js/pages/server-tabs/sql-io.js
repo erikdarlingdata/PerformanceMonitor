@@ -6,9 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter } from "../../util.js";
+import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter, parseUtc } from "../../util.js";
 import { getPanelSignal } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
+import { bucketMsOf } from "../../chart-gaps.js";
 import { READ_FIELDS } from "../../read-fields.js";
 import { panelShell, discontinuityStrip, linePanel } from "./shared.js";
 
@@ -42,17 +43,20 @@ export function fileIoPanel(server, ctx) {
       ...r,
       line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
     }));
+    /* #7572: the step a gap is judged by, from every row (a row with no figure still marks a collection), so a collector slower than the bucket keeps its line. */
+    const bucketMs = bucketMsOf(res.data.bucket_minutes, rows.map((r) => { const d = parseUtc(r.time); return d ? d.getTime() : NaN; }));
     /* The desktop draws read and write latency as two stacked charts over the same lines; so does this panel, one read
        feeding both. Each chart keeps its own top series by its own peak; a bucket with no reads (or no writes) has a null figure and is left out of that chart rather than drawn as 0. */
     const read = pivot(rows.filter((r) => r.avg_read_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_read_latency_ms" });
     const write = pivot(rows.filter((r) => r.avg_write_latency_ms != null), { xKey: "time", seriesKey: "line", valueKey: "avg_write_latency_ms" });
     if (!read.series.length && !write.series.length) return mount(body, [keptWindowStrip(res), emptyStrip("No file I/O samples in this window.")]);
+    colorByName(read.series, write.series);
     /* #3653 A5: the payload's baseline discontinuities as a notice above the chart. */
     /* #2802: axis spans the requested window (ctx.hours ending now), not the pivoted data's own extent. A
        narrowed read spans the hours it answered for. */
     const draw = (title, data, id, empty) =>
       data.series.length
-        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours) }, id, chartZoomScope(ctx.hours))]
+        ? [el("h4", { text: title }), zoomableLineChart({ atTime: { server }, points: data.points, xKey: "time", series: data.series, formatValue: (v, o) => fmtInt(v, o) + " ms", unit: "ms", ...windowFromHours(res.keptHours || ctx.hours), bucketMs }, id, chartZoomScope(ctx.hours))]
         : [el("h4", { text: title }), emptyStrip(empty)];
     mount(body, [
       keptWindowStrip(res),
@@ -79,8 +83,23 @@ function pivot(rows, { xKey, seriesKey, valueKey }, maxSeries = 8) {
   }
   const names = [...peak.keys()].sort((a, b) => peak.get(b) - peak.get(a)).slice(0, maxSeries);
   const points = [...byTime.values()].sort((a, b) => String(a[xKey]).localeCompare(String(b[xKey])));
-  const series = names.map((n, i) => ({ key: n, label: n, color: SERIES_COLORS[i % SERIES_COLORS.length] }));
+  const series = names.map((n) => ({ key: n, label: n }));
   return { points, series };
+}
+
+/**
+ * #7535: the Read and Write charts each keep their own top series, so each list has its own order, and a color given by a list's own
+ * order put one file in two colors. The colors come from the two lists together instead: the Read chart's series first (the order it
+ * had before), then the Write series it does not hold, so one name has one color in both charts. The #7401 palette, as before.
+ */
+export function colorByName(...lists) {
+  const colors = new Map();
+  for (const list of lists) {
+    for (const s of list) if (!colors.has(s.key)) colors.set(s.key, SERIES_COLORS[colors.size % SERIES_COLORS.length]);
+  }
+  for (const list of lists) {
+    for (const s of list) s.color = colors.get(s.key);
+  }
 }
 
 export const TEMPDB_SERIES = READ_FIELDS.get_tempdb_trend.line.series;
@@ -90,15 +109,15 @@ export const FILE_IO_COLUMNS = READ_FIELDS.get_file_io_stats.table.columns;
 export const DB_SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
 
 export const TABLE_SIZE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
-  { key: "reserved_mb", label: "Reserved", format: "mb" },
-  { key: "used_mb", label: "Used", format: "mb" },
+  { key: "reserved_mb", label: "Reserved", format: "mbfit" },
+  { key: "used_mb", label: "Used", format: "mbfit" },
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "index_count", label: "Indexes", format: "int" },
-  { key: "growth_7d_mb", label: "7d growth", format: "mb" },
-  { key: "growth_30d_mb", label: "30d growth", format: "mb" },
+  { key: "growth_7d_mb", label: "7d growth", format: "mbfit" },
+  { key: "growth_30d_mb", label: "30d growth", format: "mbfit" },
   { key: "growth_pct_30d", label: "30d %", format: "num1" },
 ];
 

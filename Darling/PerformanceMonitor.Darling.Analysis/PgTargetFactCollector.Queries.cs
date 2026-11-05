@@ -78,12 +78,13 @@ public sealed partial class PgTargetFactCollector
     /// <c>PgStatementStatsCollector.BuildQueryText</c>), so a pre-13 target never populates this table and
     /// there is no unit branch to write here.</para>
     ///
-    /// <para><b>No text here, by census.</b> <c>pg_statement_text</c> is dimension-shaped (V73: "not a
-    /// hypertable and not a collector table"), and <c>PgTargetFactCollectorTests</c> pins every <c>FROM</c> /
-    /// <c>JOIN</c> target of this collector to a collector table, the registry or a CTE — so the text and its
-    /// <c>hashtext()</c> (the breadcrumb that survives the <c>queryid</c> re-key a major upgrade performs) are
-    /// the drill-down's (<c>PgTargetDrillDownCollector.Queries.cs</c>), which has no such pin and is where
-    /// the text is read for display anyway. The fact carries <c>queryid</c> in its key and its metadata.</para>
+    /// <para><b>Text is read only to leave out the service's own statements, never for display (#7567).</b>
+    /// <c>pg_statement_text</c> is dimension-shaped (V73: "not a hypertable and not a collector table"), and
+    /// this read touches it only through <c>PgOwnStatement.NotOwnOnStats</c>, an anti-join that drops the
+    /// statements whose stored text carries the service's marker comment. No text and no <c>hashtext()</c>
+    /// (the breadcrumb that survives the <c>queryid</c> re-key a major upgrade performs) is selected: those
+    /// are the drill-down's (<c>PgTargetDrillDownCollector.Queries.cs</c>), where the text is read for
+    /// display. The fact carries <c>queryid</c> in its key and its metadata.</para>
     /// </summary>
     public const string PgTargetTopStatementsSql = @"
 WITH stmt_series AS (
@@ -101,6 +102,8 @@ WITH stmt_series AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
+    /* #7567: the service's own statements (PgOwnStatement.Marker) are no bad actor and no part of the window's total. */
+    AND   " + PerformanceMonitor.Collectors.PgOwnStatement.NotOwnOnStats + @"
     WINDOW identity AS (
         PARTITION BY queryid, database_id, user_id, toplevel
         ORDER BY collection_time

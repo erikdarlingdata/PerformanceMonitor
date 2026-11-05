@@ -7,10 +7,10 @@
  */
 
 import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, windowFromHours } from "../../util.js";
-import { getPanelSignal, VIZ } from "../../panels.js";
+import { getPanelSignal, setPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
-import { panelShell, discontinuityStrip, withWaitLink, withPanelSignal } from "./shared.js";
+import { panelShell, discontinuityStrip, withWaitLink, withPanelSignal, pickerControl, tablePanelPlain } from "./shared.js";
 
 /** The most waits the Wait Stats chart draws at once: one read each, and the palette has ten colors. */
 const MAX_WAITS_CHARTED = 10;
@@ -157,8 +157,53 @@ export const WAITING_TASK_COLUMNS = [
   /* #7571: the read rolls a session's threads on one wait type into one row; this is how many, so a parallel query's chart total can be matched. */
   { key: "thread_count", label: "Threads", format: "int" },
   { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
 ];
+
+/* #7573: whether the Waiting Tasks grid includes the monitor's own waits (left out by default; on a quiet server they are most of what waits). The rows stay stored; the switch
+   sends include_monitor. At MODULE scope so the 60 s rebuild keeps the pick. */
+export const waitingTasksMonitor = { include: false };
+
+/** The Waiting Tasks grid with its "Monitor statements" switch under the title. A pick draws the grid again; each draw aborts the one before it, as tagFilteredCard does. */
+export function waitingTasksPanel(server, ctx) {
+  const slot = el("div", {}, []);
+  slot.style.display = "contents";
+  let drawing = null;
+  const draw = () => {
+    if (drawing) drawing.abort();
+    const mine = new AbortController();
+    drawing = mine;
+    const outer = getPanelSignal();
+    if (outer) outer.addEventListener("abort", () => mine.abort(), { once: true });
+    const picker = el("div", { class: "picker-row" }, [
+      pickerControl(
+        "Monitor statements",
+        [{ value: "hide", label: "Left out" }, { value: "show", label: "Included" }],
+        (value) => {
+          waitingTasksMonitor.include = value === "show";
+          draw();
+        },
+        waitingTasksMonitor.include ? "show" : "hide"
+      ),
+    ]);
+    setPanelSignal(mine.signal);
+    const card = tablePanelPlain(
+      "Waiting Tasks",
+      "get_waiting_tasks",
+      { server, hours: ctx.hours, limit: 30, ...(waitingTasksMonitor.include ? { include_monitor: true } : {}) },
+      "tasks",
+      withWaitLink(WAITING_TASK_COLUMNS, server, "collection_time"),
+      ctx.label,
+      "No waiting tasks were captured in this window.",
+      2,
+      picker
+    );
+    setPanelSignal(outer);
+    mount(slot, [card]);
+  };
+  draw();
+  return slot;
+}
 
 export const LATCH_COLUMNS = [
   { key: "latch_class", label: "Latch Class" },

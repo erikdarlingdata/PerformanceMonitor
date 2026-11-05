@@ -75,7 +75,7 @@ public partial class ViewerServerTab
         {
             _pendingActiveQueriesWindow = null;
             var pendingDataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, pending.FromUtc, pending.ToUtc);
-            var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter);
+            var pendingReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, pending.FromUtc, pending.ToUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             await AwaitReadWatchingProbeAsync(pendingReadTask, pendingDataStartTask, "Active Queries");
             var (pendingTotalCount, pendingSnapshots) = pendingReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(pendingSnapshots);
@@ -91,7 +91,7 @@ public partial class ViewerServerTab
            since: say where coverage starts (the Queries tab's "Showing since" banner) rather than draw a shorter
            range as if it were the whole. */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, startUtc, endUtc);
-        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -102,7 +102,7 @@ public partial class ViewerServerTab
 
     private async Task LoadActiveQueriesSlicerAsync(DateTime startUtc, DateTime endUtc)
     {
-        var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var data = await _dataService.GetActiveQuerySlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
         _activeQueriesSlicerData = data;
         _activeQueriesSlicerMetric = "Sessions";
         if (data.Count == 0)
@@ -116,7 +116,7 @@ public partial class ViewerServerTab
         try
         {
             var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
             var (totalCount, snapshots) = dataReadTask.Result;
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
@@ -200,7 +200,7 @@ public partial class ViewerServerTab
             }
 
             LatestSnapshotIndicator.Text = "Loading...";
-            var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter);
+            var (batchTime, rows) = await _dataService.GetLatestQuerySnapshotBatchAsync(_server.ServerId, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
             _querySnapshotsFilterMgr!.UpdateData(rows);
             /* #4953: the grid now holds the newest stored batch, not the range the "Showing since" banner described, so the
                banner comes down (collapsed, text cleared). The next range read raises it again through UpdateTruncationBanner.
@@ -377,7 +377,7 @@ public partial class ViewerServerTab
            rows read, and set the banner once they are bound, as the deep-link branch of LoadActiveQueriesAsync does for
            the same window (a deep link reaches both, and the two writes agree). */
         var dataStartTask = _dataService.GetQuerySnapshotsDataStartAsync(_server.ServerId, fromUtc, toUtc);
-        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter);
+        var dataReadTask = _dataService.GetLatestQuerySnapshotsAsync(_server.ServerId, fromUtc, toUtc, databaseNames: SelectedDatabaseFilter, includeMonitor: ActiveQueriesIncludeMonitor);
         await AwaitReadWatchingProbeAsync(dataReadTask, dataStartTask, "Active Queries");
         var (totalCount, snapshots) = dataReadTask.Result;
         _querySnapshotsFilterMgr!.UpdateData(snapshots);

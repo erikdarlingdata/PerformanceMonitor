@@ -428,7 +428,13 @@ public static partial class PgTargetAdvice
         };
     }
 
-    private static string Sigma(double sigma) => sigma.ToString("0.#", CultureInfo.InvariantCulture);
+    /// <summary>A deviation in "times its usual variation". <c>AnomalyGate</c> clamps the stored value at
+    /// <see cref="AnomalyThresholds.SigmaDisplayCap"/>, so a value at the cap is a floor and is worded as one, the way
+    /// <c>FactAdvice.SigmaText</c> does (#7567).</summary>
+    private static string Sigma(double sigma) =>
+        sigma >= AnomalyThresholds.SigmaDisplayCap - 1e-9
+            ? "at least " + AnomalyThresholds.SigmaDisplayCap.ToString("0.#", CultureInfo.InvariantCulture)
+            : sigma.ToString("0.#", CultureInfo.InvariantCulture);
 
     /// <summary>The static block's source sentence — the clause before the hedge — so the composed block still
     /// names the table and the difference the number came from.</summary>

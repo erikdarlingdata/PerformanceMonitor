@@ -902,7 +902,7 @@ public sealed partial class DarlingWorker
                 }
             }
 
-            var (queryIds, texts) = await ReadPgStatementTextAsync(runtime, cancellationToken);
+            var (queryIds, texts, ownEntries) = await ReadPgStatementTextAsync(runtime, cancellationToken);
             if (queryIds.Count == 0)
             {
                 return;
@@ -917,6 +917,7 @@ public sealed partial class DarlingWorker
             upsert.Parameters.AddWithValue(queryIds.ToArray());
             upsert.Parameters.AddWithValue(texts.ToArray());
             upsert.Parameters.AddWithValue(stamps);
+            upsert.Parameters.AddWithValue(ownEntries.ToArray());
             await upsert.ExecuteNonQueryAsync(cancellationToken);
 
             _logger.LogInformation(
@@ -964,11 +965,13 @@ public sealed partial class DarlingWorker
     /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
     /// it can be tested against.</para>
     /// </summary>
-    internal static async Task<(List<long> QueryIds, List<string> Texts)> ReadPgStatementTextAsync(
+    internal static async Task<(List<long> QueryIds, List<string> Texts, List<string?> OwnEntries)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
     {
         var queryIds = new List<long>();
         var texts = new List<string>();
+        /* #7567: per queryid, the JSON list of [userid, dbid] entries whose text carries the service's marker, or null. */
+        var ownEntries = new List<string?>();
 
         /* The upsert keys on (server_id, queryid) and a batch carrying one queryid twice does not lose one
            row - PostgreSQL aborts the whole statement with 21000, so the non-duplicate rows are lost with
@@ -998,7 +1001,8 @@ public sealed partial class DarlingWorker
         await DarlingCollectorRunner.ResolvePgExtensionSchemasAsync(
             schemas, PgStatementStatsCollector.Instance, connection, logger: null, cancellationToken);
         await using var command = new Npgsql.NpgsqlCommand(
-            PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas),
+            PerformanceMonitor.Collectors.PgOwnStatement.Mark(
+                PgStatementText.FetchSqlFor(runtime.Target.IsAurora, runtime.Target.PostgresMajorVersion, schemas)),
             connection) { CommandTimeout = PgStatementText.FetchCommandTimeoutSeconds };
         command.Parameters.AddWithValue(PgStatementTextRowCap);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1017,9 +1021,10 @@ public sealed partial class DarlingWorker
 
             queryIds.Add(queryId);
             texts.Add(reader.GetString(1));
+            ownEntries.Add(reader.IsDBNull(2) ? null : reader.GetString(2));
         }
 
-        return (queryIds, texts);
+        return (queryIds, texts, ownEntries);
     }
 
     /// <summary>#2219: the row cap for one text fetch — comfortably above PostgreSQL's default

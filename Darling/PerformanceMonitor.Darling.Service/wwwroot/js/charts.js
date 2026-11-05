@@ -17,11 +17,11 @@
  */
 
 import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
-import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
 /* Re-exported so every existing import of the gap rule from charts.js keeps working (it moved to chart-gaps.js, #6291). */
-export { gapThresholdMs, splitAtGaps };
+export { gapThresholdMs, splitAtGaps, bucketMsOf };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -242,12 +242,15 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  *   gapSeamMs  — optional UTC-epoch ms (#7508): where a series joins two grains (hourly points, then per-interval points).
  *                The collection-gap rule judges each side against its own spacing. Absent => one rule for the series, as before.
+ *   bucketMs   — optional ms (#7572): the width of one bucket of a trend whose reply states it (`bucket_minutes`). A step longer than
+ *                one bucket breaks the line, so a quiet series thinned to its buckets with readings still shows its silences, and a
+ *                lone reading is a dot. Absent => the cadence the series shows for itself, as before.
  *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
  *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
  *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -311,7 +314,7 @@ export function renderLineChart(spec) {
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
   const rowTimes = rows.map((p) => p.t.getTime());
-  const gapMs = gapThresholdMs(rowTimes, gapSeamMs);
+  const gapMs = gapThresholdMs(rowTimes, gapSeamMs, bucketMs);
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -358,7 +361,7 @@ export function renderLineChart(spec) {
      at 100 and never exceed it, so a 96% reading no longer rounds the axis up to a "120%" tick. */
   /* #7488: a size axis whose labels step up to the next unit (60,000 MB reads "GB") picks its ticks in that unit, so it reads 20, 40, 60 GB
      and not 19.5, 39.1, 58.6. Under 1,024 of its own unit (or with no sizeUnit) the ticks are exactly what they were. */
-  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeAxisPer(sizeUnit, dataMax));
+  const scale = sizedScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeUnit);
   const yMin = scale.min;
   const yMax = scale.max;
 
@@ -383,7 +386,7 @@ export function renderLineChart(spec) {
     if (m2 === -Infinity) { m2 = 1; n2 = 0; }
     n2 = Math.min(0, n2);
     if (m2 === n2) m2 = n2 + 1;
-    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, sizeAxisPer(series2.sizeUnit, m2));
+    scale2 = sizedScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, series2.sizeUnit);
     yLabels2 = axisTickLabels(scale2.ticks, scale2.step, series2.formatValue || ((v) => String(v)));
     rightGutter = axisGutterPx(yLabels2, 56);
   }
@@ -576,7 +579,7 @@ export function renderLineChart(spec) {
         /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. The
            threshold comes from THIS series' own spacing: a 15-minute series on a chart of 1-minute buckets is not a
            run of gaps. */
-        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i]), gapSeamMs))) {
+        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
           const linePts = run.map((i) => xs[i] + "," + plotY(readVal(rows[i].r, s.key)));
           /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
              reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
@@ -615,7 +618,7 @@ export function renderLineChart(spec) {
       }
       /* Broken at collection gaps like a primary line (#5644 W7), by its own spacing (a 15-minute overlay over
          1-minute buckets draws one line, not a dot per sample). */
-      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i]), gapSeamMs))) {
+      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
         const pts2 = run.map((i) => xs[i] + "," + Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(rows[i].r[series2.key])))));
         if (pts2.length === 1) {
           /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
@@ -1345,8 +1348,10 @@ function niceNum(range, round) {
  */
 export function axisTickLabels(ticks, step, format) {
   const seen = new Set();
+  /* #7555: the largest tick goes with each one, so a size formatter prints the whole axis in one unit (0 GB, 0.5 GB, 1.0 GB, 1.5 GB). */
+  const axisMax = Math.max(0, ...ticks.map((t) => Math.abs(Number(t)) || 0));
   return ticks.map((t) => {
-    const text = String(format(t, { step }));
+    const text = String(format(t, { step, axisMax }));
     if (seen.has(text)) return "";
     seen.add(text);
     return text;
@@ -1356,6 +1361,19 @@ export function axisTickLabels(ticks, step, format) {
 /** The room in px an axis needs for its widest label, plus the gap to the plot and to the box edge. */
 export function axisGutterPx(labels, minPx) {
   return Math.max(minPx, Math.ceil(labelsPx(labels)) + 14);
+}
+
+/**
+ * #7555: a size axis's scale, with its ticks and its labels on one basis. The labels print in the unit of the TOP TICK (axisTickLabels), so the
+ * ticks have to be picked in that same unit. The data max alone is not enough: 1,023 MB of data rounds up to a 1,500 MB top tick, which labels in
+ * GB, so a grid picked in MB (500, 1000, 1500) would print 0.5, 1.0, 1.5 GB and the 1,000 MB line would read 1.0 GB (1,024 MB). So the axis is
+ * first scaled in its own unit, and when its top tick steps up a unit it is scaled again in that unit (0.2 ... 1.0 GB). A unit that is not a
+ * size, or a top tick under 1,024, keeps the first scale (#7488).
+ */
+function sizedScale(min, max, maxTicks, clampMax, integer, sizeUnit) {
+  const first = niceScale(min, max, maxTicks, clampMax, integer);
+  const per = sizeAxisPer(sizeUnit, first.max);
+  return per > 1 ? niceScale(min, max, maxTicks, clampMax, integer, per) : first;
 }
 
 /**

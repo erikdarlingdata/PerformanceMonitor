@@ -39,12 +39,12 @@ const SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
    the host's RAM, so they are named that way and the read's own memory_note is shown. */
 const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
-const MEMORY_STATS = [
+export const MEMORY_STATS = [
   { key: "captured_at", label: "Collected", format: "reltime", small: true },
   { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: AZURE_SQL_DATABASE },
-  { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available", format: "mbfit", hideWhen: AZURE_SQL_DATABASE },
+  { key: "available_physical_memory_mb", label: "Available under limit", format: "mbfit", showWhen: AZURE_SQL_DATABASE },
   { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
   { key: "total_server_memory_mb", label: "Total server", format: "mb" },
   { key: "target_server_memory_mb", label: "Target server", format: "mb" },
@@ -92,7 +92,7 @@ const TREND_COLUMNS = [
 
 /* top-keys:begin */
 const TOP_TOTAL_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },
   { key: "io_share_pct", label: "IO %", format: "num1" },
   { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
@@ -100,7 +100,7 @@ const TOP_TOTAL_COLUMNS = [
 ];
 
 const TOP_AVG_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "avg_cpu_ms", label: "Avg CPU (ms)", format: "num2" },
   { key: "avg_io_mb", label: "Avg IO (MB)", format: "num2" },
   { key: "execution_count", label: "Execs", format: "int" },
