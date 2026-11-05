@@ -37,7 +37,7 @@ public sealed class ViewerPerfmonSqlTests
         Assert.Contains("WHERE server_id = $1", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(counter_name), counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
     }
 
     [Fact]

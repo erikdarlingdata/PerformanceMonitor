@@ -110,6 +110,40 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", CollectionIdGenerator.Next(), at, ServerId, S
     }
 
     [Fact]
+    public async Task PerfmonCounterPicker_ListsNamesWithoutCase_AgainstLivePostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live name-order test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, cCollation: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        var at = DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5));
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Unspecified);
+
+        /* Byte order would put Alpha, Beta, Delta, alpha, beta, gamma. */
+        foreach (var counter in new[] { "gamma", "Delta", "beta", "alpha", "Alpha", "Beta" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", CollectionIdGenerator.Next(), at, ServerId, ServerName, "SQLServer:Workload Group Stats", counter, "default", 1L, 0L, 60, 65792);
+        }
+
+        var now = DateTime.UtcNow;
+        Assert.Equal(
+            ["Alpha", "alpha", "Beta", "beta", "Delta", "gamma"],
+            await viewer.GetDistinctPerfmonCountersAsync(ServerId, now.AddHours(-1), now, cancellationToken: ct));
+        Assert.Equal(
+            ["Alpha", "alpha", "Beta", "beta", "Delta", "gamma"],
+            await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, ServerId, now.AddHours(-1), now, ct));
+    }
+
+    [Fact]
     public async Task PerfmonCounters_OrderNamesWithoutCase_ThenByInstance_AgainstLivePostgres()
     {
         var cs = ConnectionString;

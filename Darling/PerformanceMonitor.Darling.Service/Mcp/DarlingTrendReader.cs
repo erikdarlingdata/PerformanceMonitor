@@ -537,12 +537,12 @@ internal static class DarlingTrendReader
     /// <c>DistinctPerfmonCountersSql</c>). $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string DistinctPerfmonCountersSql = """
-        SELECT DISTINCT counter_name
+        SELECT DISTINCT counter_name, lower(counter_name) AS name_key
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name
         """;
 
     public static async Task<List<string>> GetDistinctPerfmonCountersAsync(

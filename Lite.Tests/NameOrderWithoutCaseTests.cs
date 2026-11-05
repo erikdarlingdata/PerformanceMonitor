@@ -108,6 +108,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", _nextId--, at, ServerId,
             (await _dataService.GetLatestPerfmonStatsAsync(ServerId)).Select(r => r.CounterName + "/" + r.InstanceName));
     }
 
+    [Fact]
+    public async Task PerfmonCounterPicker_ListsNamesWithoutCase()
+    {
+        var at = DateTime.UtcNow.AddMinutes(-5);
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+
+        /* Byte order would put Alpha, Beta, Delta, alpha, beta, gamma. */
+        foreach (var counter in new[] { "gamma", "Delta", "beta", "alpha", "Alpha", "Beta" })
+        {
+            await ExecAsync(
+                @"INSERT INTO perfmon_stats (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name, cntr_value, delta_cntr_value, sample_interval_seconds, cntr_type)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", _nextId--, at, ServerId, "NameOrderServer", "SQLServer:Workload Group Stats", counter, "default", 1L, 0L, 60, 65792);
+        }
+
+        Assert.Equal(
+            ["Alpha", "alpha", "Beta", "beta", "Delta", "gamma"],
+            await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1));
+    }
+
     private async Task ExecAsync(string sql, params object[] values)
     {
         using var readLock = _duckDb.AcquireReadLock();
