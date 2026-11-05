@@ -72,6 +72,7 @@ The straggler guard ignores sessions with the same name, so keep it different fr
 
 The exporter connects with an ordinary PostgreSQL login. Give it a role that can read the tables it exports and nothing else.
 It does not need to write, and it does not need to be a superuser.
+The role's grants are the boundary. The session guards below limit what a bug can cost, but they do not replace a read-only role.
 
 The password comes from one place that the config names:
 
@@ -90,8 +91,8 @@ There is no fallback. If the named source is empty or missing, the run stops wit
 
 Every connection sets these limits before it reads anything:
 
-- `default_transaction_read_only = on`, so a write fails.
-- `statement_timeout`, from `store.statement_timeout_seconds` (120 by default).
+- `default_transaction_read_only = on`. This is a session default, not a lock: each transaction starts read-only unless a statement turns that off, and the exporter never does. The role's grants are what stop a write.
+- `statement_timeout`, from `store.statement_timeout_seconds`. The default is 120 seconds with a config file and 600 seconds when `export` runs on flags alone. `--statement-timeout-seconds` sets it either way.
 - `lock_timeout = 5s`.
 - `work_mem = 16MB`.
 - `max_parallel_workers_per_gather = 0`.
