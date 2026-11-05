@@ -125,7 +125,7 @@ public sealed class QueryStoreReadOnlyHintLiveTests
 
         /* The extended wrapper: an answer with rows gets the member, an empty answer keeps its message hint. */
         var wrapped = await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
-            "{\"queries\":[{\"database_name\":\"ErrDb\"}]}", dataSource, serverId, serverName, DatabaseFilter.All, ct, rowDatabases: ["ErrDb"]);
+            "{\"queries\":[{\"database_name\":\"ErrDb\"}]}", dataSource, serverId, serverName, DatabaseFilter.All, rowDatabases: ["ErrDb"], cancellationToken: ct);
         Assert.Contains("ERROR state", JsonDocument.Parse(wrapped).RootElement.GetProperty(DarlingRuntimePrecondition.QueryStoreErrorNoteKey).GetString()!, StringComparison.Ordinal);
     }
 }

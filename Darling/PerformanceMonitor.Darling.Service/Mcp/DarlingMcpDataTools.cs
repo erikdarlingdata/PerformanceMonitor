@@ -1731,7 +1731,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new

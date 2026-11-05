@@ -386,7 +386,7 @@ ORDER BY database_name";
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
         string answer, NpgsqlDataSource postgres, int serverId, string serverName, DatabaseFilter databases,
-        CancellationToken cancellationToken = default, IEnumerable<string>? rowDatabases = null)
+        IEnumerable<string>? rowDatabases = null, CancellationToken cancellationToken = default)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
