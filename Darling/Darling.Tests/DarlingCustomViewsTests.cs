@@ -268,6 +268,43 @@ public sealed class DarlingCustomViewsTests
         Assert.Null(result.Warnings);
     }
 
+    private static string VariableFilter(string dimension, string variable) =>
+        "{\"dimension\":\"" + dimension + "\",\"op\":\"eq\",\"value\":\"$" + variable + "\"}";
+
+    [Theory]
+    [InlineData("counter and instance by variable, server by literal")]
+    [InlineData("counter, instance and server all by variable")]
+    public void ValidateDefinition_AcceptsThePerfmonRate_WhenAnEqFilterIsPinnedByAVariable(string form)
+    {
+        // #7565: a variable-valued eq holds one value (a declared variable has no multi-select mode), so it pins its dimension.
+        var all = form.Contains("all", StringComparison.Ordinal);
+        var variables = "{\"name\":\"ctr\",\"dimension\":\"counter_name\"},{\"name\":\"inst\",\"dimension\":\"instance_name\"}"
+            + (all ? ",{\"name\":\"srv\",\"dimension\":\"server\"}" : "");
+        var filters = string.Join(",", VariableFilter("counter_name", "ctr"), VariableFilter("instance_name", "inst"),
+            all ? VariableFilter("server", "srv") : s_serverPin);
+        var json = "{\"variables\":[" + variables + "],\"panels\":[" + PerfmonPanel(PerfmonRate, filters) + "]}";
+
+        var result = DarlingWebEndpoints.ValidateDefinition(json);
+
+        Assert.True(result.IsValid, result.Error);
+        Assert.Null(result.Warnings);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RefusesThePerfmonRate_WhenOnlyANonServerVariableIsDeclared_AndTheServerIsNotPinned()
+    {
+        // #7565: only a variable on the server dimension counts as pinning the server. A declared server variable
+        // is taken as "one server" without the validator seeing the run's picker: a run that picks All is not caught.
+        var json = "{\"variables\":[{\"name\":\"inst\",\"dimension\":\"instance_name\"}],\"panels\":["
+            + PerfmonPanel(PerfmonRate, string.Join(",", s_counterPin, VariableFilter("instance_name", "inst"))) + "]}";
+
+        var result = DarlingWebEndpoints.ValidateDefinition(json);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("filter server eq", result.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("filter instance_name eq", result.Error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ValidateDefinition_RefusesAMultiValueEq_AsNotPinned()
     {

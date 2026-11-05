@@ -602,7 +602,8 @@ public static partial class CustomViewValidation
     /// per collection for Transactions/sec, <c>DarlingTrendReader</c>). The validator refuses the panel instead of charting a wrong
     /// rate. A dimension is pinned by an <c>eq</c> filter with one literal (or a variable, which holds one value), or by being in
     /// groupBy. The server is also pinned by a declared <c>server</c> variable: the validator cannot see the run's server picker,
-    /// so the variable is the one place a saved view says it is one server. Returns the error, or null when the panel is fine.
+    /// so the variable is the one place a saved view says it is one server. A variable has no multi-select mode, so a declared
+    /// <c>server</c> variable always counts, even though a run that picks All for it is not caught (documented, #7565). Returns the error, or null when the panel is fine.
     /// </summary>
     private static string? PerfmonRateError(PanelPlan plan, IReadOnlyList<ComposeVariable> variables, string where)
     {
