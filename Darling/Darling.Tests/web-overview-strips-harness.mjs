@@ -277,6 +277,18 @@ if (scenario === "crosshair") {
   out.floorOneMinute = { enough: slow(1, 17, 1).markers, short: slow(1, 16, 1).markers };
   out.floorThirtyMinute = { short: slow(30, 499, 30).markers, enough: slow(30, 500, 30).markers };
   out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);
+} else if (scenario === "linuxcpu") {
+  /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU: other_process_cpu is null on every sample. The CPU strip draws the SQL line
+     alone and says so; a Total line over a null Other would sit on the SQL line and claim the host was measured. */
+  const linux = { ...reads, cpu: data({ samples: Array.from({ length: 61 }, (_, i) => ({ sample_time: iso(i), sql_server_cpu: 10 + i, other_process_cpu: null, total_cpu: null })) }) };
+  const built = strips.buildStrips(linux);
+  const drawn = strips.drawStrips(built, domain, 1000, null);
+  const g = find(drawn.node, (n) => n.attrs["data-strip"] === "cpu")[0];
+  out.series = built.find((s) => s.key === "cpu").series.map((s) => s.label);
+  out.lines = find(g, (n) => n.tag === "polyline").length;
+  out.notes = find(g, (n) => n.attrs.class === "strip-baseline-note").map((n) => n.textContent);
+  out.measuredSeries = strips.buildStrips(reads).find((s) => s.key === "cpu").series.map((s) => s.label);
+  out.measuredNotes = find(find(strips.drawStrips(strips.buildStrips(reads), domain, 1000, null).node, (n) => n.attrs["data-strip"] === "cpu")[0], (n) => n.attrs.class === "strip-baseline-note").length;
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },

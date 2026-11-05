@@ -24,9 +24,11 @@ export const NOTE_MAX_DAYS = 365;
 export const SIGN_IN_SENTENCE = "Sign in to the web as an admin to make this change, or use the Viewer.";
 
 /** Whether this session may make the person-made investigation changes: "yes" for a signed-in admin, "sign-in" for a seat that can edit
-    but is not signed in (the pages list only and say so), "no" for a read-only seat. */
+    but is not signed in (the pages list only and say so), "off" for a seat that can edit on a store whose web.allowAdminWrites is off
+    (#7700: the service refuses every change, so the pages list only and say so, with util.js listOnlyNote), "no" for a read-only seat. */
 export function writeAccess(session) {
   if (!session || session.can_edit !== true) return "no";
+  if (session.admin_writes_off === true) return "off";
   return session.signed_in_admin === true ? "yes" : "sign-in";
 }
 

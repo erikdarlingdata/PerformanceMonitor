@@ -76,7 +76,7 @@ AND   collection_time = (
     WHERE server_id = $1
 )
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
-ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
+ORDER BY persistent_version_store_size_mb DESC NULLS LAST, lower(database_name), database_name";
 
     /// <summary>The #2018 trend window for the TOP-5 databases by newest PVS size, per-point
     /// percent-of-database. $1 server_id, $2 window start (naive UTC), $3 database filter (#5244: a text[], NULL = every
@@ -92,7 +92,7 @@ WITH top_dbs AS (
         WHERE server_id = $1
     )
     AND   ($3::text[] IS NULL OR database_name = ANY($3))
-    ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
+    ORDER BY persistent_version_store_size_mb DESC NULLS LAST, lower(database_name), database_name
     LIMIT 5
 )
 SELECT
@@ -106,7 +106,7 @@ FROM v_pvs_stats p
 JOIN top_dbs t ON t.database_name = p.database_name
 WHERE p.server_id = $1
 AND   p.collection_time >= $2
-ORDER BY p.database_name, p.collection_time";
+ORDER BY lower(p.database_name), p.database_name, p.collection_time";
 
     /// <summary>One database's newest PVS snapshot row.</summary>
     public sealed record PvsStatsRow(

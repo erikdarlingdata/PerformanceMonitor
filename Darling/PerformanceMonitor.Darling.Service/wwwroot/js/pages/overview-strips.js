@@ -122,12 +122,18 @@ export function buildStrips(reads) {
   const rowsOf = (res, key) => (res && res.kind === "data" && res.data && Array.isArray(res.data[key]) ? res.data[key] : []);
 
   const cpuRows = rowsOf(reads.cpu, "samples");
+  /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so other_process_cpu is null on every point. The strip then draws the SQL line
+     alone and says so: a Total line built from a null Other would sit on the SQL line and claim the host was measured. */
+  const hostKnown = cpuRows.some((r) => r && r.other_process_cpu != null);
   const cpu = {
     key: "cpu", title: "CPU", unit: "%", min: 0, max: 100,
     series: [
       { label: "SQL", color: "#2eaef1", points: toTimed(cpuRows, "sample_time", (r) => r.sql_server_cpu) },
-      { label: "Total", color: "#9aa5b1", points: toTimed(cpuRows, "sample_time", (r) => (r.sql_server_cpu ?? 0) + (r.other_process_cpu ?? 0)) },
+      ...(hostKnown
+        ? [{ label: "Total", color: "#9aa5b1", points: toTimed(cpuRows, "sample_time", (r) => (r.other_process_cpu == null ? null : (r.sql_server_cpu ?? 0) + r.other_process_cpu)) }]
+        : []),
     ],
+    hostNote: cpuRows.length && !hostKnown ? "This server cannot report host CPU" : null,
     note: note(reads.cpu, "No CPU samples in this window."),
   };
 
@@ -349,6 +355,12 @@ export function drawStrips(strips, domain, width, onZoom) {
       const bn = svg("text", { class: "strip-baseline-note", x: plotR, y: top + 12, "text-anchor": "end" });
       bn.textContent = s.baselineNote;
       g.appendChild(bn);
+    }
+
+    if (s.hostNote && hasData) {
+      const hn = svg("text", { class: "strip-baseline-note", x: plotL, y: top + 12, "text-anchor": "start" });
+      hn.textContent = s.hostNote;
+      g.appendChild(hn);
     }
 
     if (!hasData) {

@@ -90,7 +90,7 @@ public sealed class ExcludedDatabasesPickerTests
         Assert.Contains("FROM v_database_size_stats", sql, StringComparison.Ordinal);
         Assert.Contains("UNION", sql, StringComparison.Ordinal);
         Assert.Contains("NOT IN ('master', 'model', 'msdb', 'tempdb')", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(database_name), database_name", sql, StringComparison.Ordinal);
 
         /* Positional param, no bare now(), no N'' literals, no @-params. */
         Assert.Contains("$1", sql, StringComparison.Ordinal);

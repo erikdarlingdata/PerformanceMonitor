@@ -270,7 +270,7 @@ SELECT
     CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END
 FROM combined c
 CROSS JOIN totals t
-ORDER BY c.database_name";
+ORDER BY lower(c.database_name), c.database_name";
         command.CommandText = SwapViews(command.CommandText, WorkloadAndIoTables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
