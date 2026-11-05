@@ -162,6 +162,8 @@ export const SERVER_TABS = [
         unit: "%",
         span: 2,
         emptyText: "No CPU samples in this window.",
+        hideEmptySeries: true,
+        footNoteKey: "host_cpu_note",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
       serverTrendPanel(server, ctx, "cpu_scheduler"),

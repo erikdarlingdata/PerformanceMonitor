@@ -215,7 +215,9 @@ public sealed class TimeHonestyRungTests
         /* The default frame is the statement the property has always spelled, on one arm. */
         Assert.Equal(serverLocal, Flat(LocalDataService.CpuUtilizationTrendSql));
         Assert.Contains($"GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {origin}), $4) AS bucket_start", serverLocal, StringComparison.Ordinal);
-        Assert.DoesNotContain("CASE", serverLocal, StringComparison.Ordinal);
+        /* No frame-choice arm. (#7682 put CASE WHEN other_process_cpu_utilization IS NOT NULL around the total, so the
+           rule is about the instant arm, not about CASE as a word.) */
+        Assert.DoesNotContain("CASE WHEN sample_time_utc", serverLocal, StringComparison.Ordinal);
         Assert.Contains("MIN(sample_time) AS first_sample_time", serverLocal, StringComparison.Ordinal);
         Assert.EndsWith("FROM raw GROUP BY 1 ORDER BY 1", serverLocal, StringComparison.Ordinal);
 
@@ -226,7 +228,9 @@ public sealed class TimeHonestyRungTests
             $"ELSE GREATEST(time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time_utc, {origin}), $2) END AS bucket_start",
             utc, StringComparison.Ordinal);
         Assert.Contains("MIN(COALESCE(sample_time_utc, sample_time)) AS first_sample_time", utc, StringComparison.Ordinal);
-        Assert.Contains("COUNT(*) AS sample_count, (sample_time_utc IS NULL) AS bucket_is_server_local FROM raw GROUP BY 1, 6 ORDER BY 1, 6", utc, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS sample_count, (sample_time_utc IS NULL) AS bucket_is_server_local, " +
+            "CAST(ROUND(AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END)) AS INTEGER) AS total_cpu " +
+            "FROM raw GROUP BY 1, 6 ORDER BY 1, 6", utc, StringComparison.Ordinal);
 
         /* The rows selected do not depend on the frame: the same per-arm predicate, and the raw rows only gain the twin. */
         const string predicate =

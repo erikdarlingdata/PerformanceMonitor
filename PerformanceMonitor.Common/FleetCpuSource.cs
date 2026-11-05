@@ -125,17 +125,18 @@ public static class FleetCpuProvenance
     /// <c>SQL Server + other-process</c> sum, else the Performance Insights instance total.
     ///
     /// <para>Here rather than written out on each card so the two surfaces cannot drift on the fallback
-    /// (which is the whole defect #3267 is: one surface reading a source the other does not). The
-    /// <c>?? 0</c> on other-process is the pre-existing SQL-Server-on-Linux behaviour and is deliberately
-    /// unchanged — it treats an underivable host share as zero, which under-reports rather than
-    /// invents.</para>
+    /// (which is the whole defect #3267 is: one surface reading a source the other does not). With a
+    /// ring-buffer reading but no other-process figure (SQL Server on Linux before 2025 CU1, #7682) the
+    /// total is UNKNOWN and this returns null: it used to add 0, which printed the SQL figure as the host
+    /// total. A caller that bands or alerts on "the CPU figure" falls back to the SQL figure itself
+    /// (<c>total ?? sql</c>), and a card that prints it labels it SQL CPU.</para>
     /// </summary>
     public static double? TotalNonIdleCpuPercent(
         double? ringBufferCpuPercent,
         double? otherProcessCpuPercent,
         double? instanceCpuPercent) =>
         ringBufferCpuPercent.HasValue
-            ? ringBufferCpuPercent.Value + (otherProcessCpuPercent ?? 0)
+            ? (otherProcessCpuPercent.HasValue ? ringBufferCpuPercent.Value + otherProcessCpuPercent.Value : null)
             : instanceCpuPercent;
 
     /// <summary>

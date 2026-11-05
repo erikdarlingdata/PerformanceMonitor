@@ -215,7 +215,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 /* Total non-idle CPU = SQL + other-process (Lite's CpuUtilizationData.TotalCpu). The
                    viewer's raw read exposes the two components; sum them here for the Total series. */
                 var sqlSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.SqlServerCpu)).ToList();
-                var totalSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)(d.SqlServerCpu + d.OtherProcessCpu))).ToList();
+                /* #7682: a bucket without other-process CPU (SQL Server on Linux before 2025 CU1) has no total. Plot the
+                   buckets that have one; with none, the SQL line is all that is known. */
+                var measuredTotals = cpuTask.Result.Where(d => d.TotalCpu.HasValue).ToList();
+                var totalSeries = measuredTotals.Count == 0
+                    ? sqlSeries
+                    : measuredTotals.Select(d => (d.SampleTime.ToOADate(), d.TotalCpu!.Value)).ToList();
                 UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
             }
             else
