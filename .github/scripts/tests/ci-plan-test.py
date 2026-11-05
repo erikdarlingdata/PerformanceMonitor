@@ -112,26 +112,22 @@ big = {"classes": {"darling": classes([f"B{i}" for i in range(100)]), "lite": l_
 SERVICE = "Darling/PerformanceMonitor.Darling.Service/X.cs"
 
 
-def run(files, event="pull_request", base="dev", head="feature/x", draft=False, labels=(), cat=catalog):
-    return cp.plan(event, base, head, draft, list(labels), files, rules, cat)
+def run(files, event="pull_request", base="dev", head="feature/x", labels=(), cat=catalog):
+    return cp.plan(event, base, head, list(labels), files, rules, cat)
 
 
 # --- the gate -------------------------------------------------------------------------------------------------
 check("gate: a PR without labels runs", run(["README.md"], labels=())["outcome"], "run")
 check("gate: an unrelated label runs", run(["README.md"], labels=("bug",))["outcome"], "run")
 check("gate: no label, tests planned", run([SERVICE], labels=())["legs"], "2")
-check("gate: draft", run(["Darling/X.cs"], draft=True)["outcome"], "skip-draft")
-check("gate: draft is not run", run(["Darling/X.cs"], draft=True)["run"], "false")
-check("gate: draft without labels still skips", run(["README.md"], labels=(), draft=True)["outcome"], "skip-draft")
+check("gate: draft runs", run(["Darling/X.cs"])["outcome"], "run")
+check("gate: draft is run", run(["Darling/X.cs"])["run"], "true")
 check("gate: train label", run(["Darling/X.cs"], labels=("merge-train",))["outcome"], "train-blocked")
 check("gate: train label is not run", run(["Darling/X.cs"], labels=("merge-train",))["run"], "false")
-check("gate: train label beats draft", run(["Darling/X.cs"], draft=True, labels=("merge-train",))["outcome"],
-      "train-blocked")
-check("gate: train branch runs a draft", run(["Darling/X.cs"], draft=True, head="train/2026-10-23")["outcome"], "run")
+check("gate: train branch runs", run(["Darling/X.cs"], head="train/2026-10-23")["outcome"], "run")
 check("gate: train branch runs despite the train label",
       run(["Darling/X.cs"], head="train/a", labels=("merge-train",))["outcome"], "run")
 check("gate: a dev push ignores the label", run(["README.md"], event="push", labels=())["outcome"], "run")
-check("gate: a push ignores draft", run(["README.md"], event="push", draft=True)["outcome"], "run")
 
 # --- the areas -------------------------------------------------------------------------------------------------
 r = run(["README.md", "docs/a.png"])
@@ -220,8 +216,8 @@ js = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/app.js"
 check("web js: changed", run([js])["check_web_js"], "true")
 check("web js: other Service file", run(["Darling/PerformanceMonitor.Darling.Service/X.cs"])["check_web_js"], "false")
 check("web js: a root-level wwwroot/js path", run(["wwwroot/js/a.js"])["check_web_js"], "true")
-check("web js: not on a skipped run", run([js], draft=True)["check_web_js"], "false")
-check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], draft=True)["actionlint"], "false")
+check("web js: not on a skipped run", run([js], labels=("merge-train",))["check_web_js"], "false")
+check("actionlint: not on a skipped run", run([".github/workflows/pr.yml"], labels=("merge-train",))["actionlint"], "false")
 check("pg old targets: a collector file", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"])["pg_old_targets"], "true")
 check("pg old targets: the catalog", run(["PerformanceMonitor.Collectors/CollectorCatalog.cs"])["pg_old_targets"], "true")
 check("pg old targets: the fetch script", run(["Darling/tools/fetch-pg-target.ps1"])["pg_old_targets"], "true")
@@ -229,14 +225,13 @@ check("pg old targets: the start script", run([".github/scripts/start-test-pg.ps
 check("pg old targets: the test class", run(["Darling/Darling.Tests/PgCollectorsOnOldTargetsLiveTests.cs"])["pg_old_targets"], "true")
 check("pg old targets: a SQL Server collector", run(["PerformanceMonitor.Collectors/WaitStatsCollector.cs"])["pg_old_targets"], "false")
 check("pg old targets: not on a push", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], event="push")["pg_old_targets"], "false")
-check("pg old targets: not on a draft", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], draft=True)["pg_old_targets"], "false")
+check("pg old targets: not on a skipped run", run(["PerformanceMonitor.Collectors/PgVersionSql.cs"], labels=("merge-train",))["pg_old_targets"], "false")
 
 # --- parsing ---------------------------------------------------------------------------------------------------
 check("labels: JSON", cp.parse_labels('["ci-next", "bug"]'), ["ci-next", "bug"])
 check("labels: comma list", cp.parse_labels("ci-next, bug"), ["ci-next", "bug"])
 check("labels: empty", cp.parse_labels(""), [])
 check("labels: empty array", cp.parse_labels("[]"), [])
-check("bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "null")], [True, True, False, False, False])
 
 # --- the changed-classes plan (#6734) ---------------------------------------------------------------------------
 DT = "Darling/Darling.Tests/"
@@ -310,9 +305,64 @@ with tempfile.TemporaryDirectory() as hroot:
 
 # The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
 real_cat = cp.load_catalog()
+# --- a draft narrows the scope (#7727) -------------------------------------------------------------------------
+def draft_run(files, draft=True, event="pull_request", base="dev", **kw):
+    """The plan of a draft (or, with draft=False, of a pull request that is ready). A plan that has no draft input answers a draft
+    with nothing, so its checks fail."""
+    try:
+        return cp.plan(event, base, "feature/x", [], files, rules, kw.get("cat", cc_cat), draft=draft)
+    except TypeError:  # a plan with no draft input: a ready pull request still plans as before, a draft has no answer
+        return {} if draft else cp.plan(event, base, "feature/x", [], files, rules, kw.get("cat", cc_cat))
+
+
+LITE_SRC = "Lite/Services/X.cs"
+r = draft_run([SERVICE, DT + "D3Tests.cs"])
+check("draft: product file + changed test file: areas", r.get("areas"), "classes")
+check("draft: product file + changed test file: scope", (r.get("darling_scope"), r.get("lite_scope")), ("classes", "none"))
+check("draft: product file + changed test file: the class and the Guard classes", r.get("darling_classes"), "D3,D4,D1")
+check("draft: product file + changed test file: minutes and legs", (r.get("test_minutes"), r.get("legs")), ("3.0", "1"))
+check("draft: the why line names the rule", "a draft runs only its own test classes and the Guard classes" in r.get("why", ""), True)
+r = draft_run([SERVICE])
+check("draft: product file only: Guard classes only", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("classes", "classes", "D1"))
+check("draft: product file only: no Lite", (r.get("lite_scope"), r.get("lite_classes"), r.get("build")), ("none", "", "true"))
+r = draft_run([SERVICE, DT + "D1Tests.cs"])
+check("draft: a changed Guard class is picked once", r.get("darling_classes"), "D1")
+r = draft_run([SERVICE, LITE_SRC, DT + "D3Tests.cs", LT + "L2Tests.cs"])
+check("draft: both suites: classes", (r.get("darling_classes"), r.get("lite_classes")), ("D3,D4,D1", "L2"))
+check("draft: both suites: scope", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("classes", "classes", "classes"))
+r = draft_run([LITE_SRC])
+check("draft: a Lite-only product file: Darling Guard, no Lite", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1", "none"))
+r = draft_run([LITE_SRC, LT + "L1Tests.cs"])
+check("draft: a Lite product file + Lite test: both", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1"))
+# A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
+r = draft_run([SERVICE, DT + "Helpers.cs"])
+check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
+check("draft: an unsafe test file: the why line", "Helpers.cs is not a plain test class file" in r.get("why", ""), True)
+r = draft_run([SERVICE, DT + "NoSuchTests.cs"])
+check("draft: a test file the map does not know: full", r.get("darling_scope"), "full")
+r = draft_run([SERVICE, DT + "Probe.csproj"])
+check("draft: a .csproj in the test tree: full", r.get("darling_scope"), "full")
+# The same files on a pull request that is ready for review: as today.
+for files in ([SERVICE, DT + "D3Tests.cs"], [SERVICE]):
+    r = draft_run(files, draft=False)
+    check(f"ready: {len(files)} file(s): full", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("darling", "full", ""))
+check("ready: the why line has no draft rule", "draft runs only" in draft_run([SERVICE], draft=False).get("why", ""), False)
+# Docs-only, test-only, a dev push and a base other than dev: as today, draft or not.
+for flag in (True, False):
+    check(f"draft={flag}: docs-only", draft_run(["README.md"], draft=flag).get("areas"), "docs-only")
+    r = draft_run(["README.md", DT + "D3Tests.cs"], draft=flag)
+    check(f"draft={flag}: test-only has no Guard classes", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+    check(f"draft={flag}: a dev push is every area", draft_run([SERVICE], draft=flag, event="push").get("darling_scope"), "full")
+    check(f"draft={flag}: a base other than dev is every area",
+          draft_run([SERVICE], draft=flag, base="main").get("areas"), "all")
+    check(f"draft={flag}: a path no area knows is every area",
+          draft_run([SERVICE, "no-such-area/odd.bin"], draft=flag).get("areas"), "all")
+check("draft: parse_bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "no")] if hasattr(cp, "parse_bool") else None,
+      [True, True, False, False, False])
+
 tbl = real_cat["files"]
 one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["safe"] and len(e["classes"]) == 1)
-r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one], live_rules := cs.Rules(), real_cat)
+r = cp.plan("pull_request", "dev", "x", [], ["README.md", one], live_rules := cs.Rules(), real_cat)
 check("real table: one class file narrows", (r["areas"], r["darling_classes"]), ("classes", tbl[one]["classes"][0]))
 check("real table: every row has a class", all(e["classes"] for e in tbl.values()), True)
 no_test = {(s, c) for s, m in real_cat["classes"].items() for c, t in m.items() if cs.NO_TESTS_TRAIT in t}
@@ -322,7 +372,7 @@ check("real table: some file has a helper beside its tests", any(set(e["classes"
 check("real table: every safe file picks a class", all(e["tests"] for e in tbl.values() if e["safe"]), True)
 unsafe = [f for f, e in tbl.items() if not e["safe"]]
 check("real table: some helper files are unsafe", bool(unsafe), True)
-r = cp.plan("pull_request", "dev", "x", False, [], ["README.md", one, unsafe[0]], live_rules, real_cat)
+r = cp.plan("pull_request", "dev", "x", [], ["README.md", one, unsafe[0]], live_rules, real_cat)
 check("real table: an unsafe file is full", r["darling_scope"], "full")
 
 # --- the command line writes $GITHUB_OUTPUT --------------------------------------------------------------------
@@ -334,7 +384,7 @@ real_rules = cs.Rules
 cs.Rules = lambda: rules  # the command line builds its own Rules; give it the stand-ins
 try:
     with contextlib.redirect_stdout(io.StringIO()):
-        code = cp.main(["--event", "pull_request", "--base", "dev", "--draft", "false", "--labels", '["bug"]',
+        code = cp.main(["--event", "pull_request", "--base", "dev", "--labels", '["bug"]',
                         "--files-file", files_path, "--github-output", out_path])
 finally:
     cs.Rules = real_rules

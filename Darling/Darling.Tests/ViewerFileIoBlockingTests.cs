@@ -56,7 +56,7 @@ public sealed class ViewerFileIoBlockingSqlTests
 
         /* #4234: buckets by date_bin, grouped per series (database_name, file_name) then the bucket start. */
         Assert.Contains("GROUP BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(database_name), database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("HAVING COUNT(rated_reads) > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* Both window bounds are applied (top_files CTE + main query). */

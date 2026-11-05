@@ -110,7 +110,7 @@ WITH top_dbs AS (
         FROM {pvsRelation}
         WHERE server_id = $1
     ){dbClause}
-    ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name
+    ORDER BY persistent_version_store_size_mb DESC NULLS LAST, lower(database_name), database_name
     LIMIT 5
 )
 SELECT
@@ -124,7 +124,7 @@ FROM v_pvs_stats p
 JOIN top_dbs t ON t.database_name = p.database_name
 WHERE p.server_id = $1
 AND   p.collection_time >= $2
-ORDER BY p.database_name, p.collection_time";
+ORDER BY lower(p.database_name), p.database_name, p.collection_time";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
         foreach (var db in dbValues)
@@ -193,7 +193,7 @@ AND   collection_time = (
     FROM {pvsRelation}
     WHERE server_id = $1
 ){dbClause}
-ORDER BY persistent_version_store_size_mb DESC NULLS LAST, database_name";
+ORDER BY persistent_version_store_size_mb DESC NULLS LAST, lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)

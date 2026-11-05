@@ -171,6 +171,8 @@ public static partial class DarlingWebEndpoints
         "send_daily_health_report_now",
         /* #6401: the global agent switch and the undo of a non-plan agent change over MCP; the web has its own PUT /api/agent-changes/switch and
            PUT /api/agent-changes/{id}/undo, neither a generic read. */
+        /* #7610: an assistant searches query text across servers over MCP; the web page has no panel for it. */
+        "find_queries_by_text",
         "set_agent_actions_enabled",
         "undo_agent_change",
         "get_command_result",
