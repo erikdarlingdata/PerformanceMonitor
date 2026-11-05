@@ -156,4 +156,26 @@ CROSS JOIN range(0, 2) AS ff(f)";
 
         Assert.Equal(8, dots);
     }
+
+    [Fact]
+    public void TheTooltipArrow_JudgesEachValueAgainstTheStepItsXFallsIn_AndNoneInAnHourWithoutOne()
+    {
+        string?[] arrows = new string?[3];
+        StaTestThread.Run(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            using var manager = new PerformanceMonitor.Ui.CorrelatedCrosshairManager();
+            manager.AddLane(chart, "I/O ms", "ms");
+            manager.SetLaneBaselineSteps(chart,
+                [new(100, 101, 1, 0, 2), new(101, 102, 5, 4, 6)], minAnomalyValue: 2);
+            manager.SetLaneData(chart, new[] { 100.5, 101.5, 102.5 }, new[] { 5.0, 5.0, 5.0 });
+            arrows[0] = manager.HoverArrowAt(chart, 100.5);   // 5 ms over the first hour's 0..2 band
+            arrows[1] = manager.HoverArrowAt(chart, 101.5);   // 5 ms inside the second hour's 4..6 band
+            arrows[2] = manager.HoverArrowAt(chart, 102.5);   // an hour with no step
+        });
+
+        Assert.Equal("▲", arrows[0]);
+        Assert.Null(arrows[1]);
+        Assert.Null(arrows[2]);
+    }
 }
