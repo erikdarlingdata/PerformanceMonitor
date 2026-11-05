@@ -647,6 +647,56 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)]);
     }
 
+    /// <summary>
+    /// #7639: the deadlock create was refused in every database of an Azure SQL Database server. The deadlock run still reads
+    /// (the master item's durable telemetry arm needs no session), and only then records the failure the ensure carried, as
+    /// PERMISSIONS or SESSION_MISSING. It used to throw before the read, so the telemetry deadlocks never reached the store.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ACarriedEnsureFailure_OnAzureSqlDatabase_DoesNotStopTheDeadlockRead_AndTheRunRecordsTheFailureAfterIt(bool permission)
+    {
+        var order = new List<string>();
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", permission);
+
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            "deadlocks", isAzureSqlDb: true, fault, () => { order.Add("read"); return Task.CompletedTask; }, NullLogger.Instance, "azure"));
+
+        Assert.Equal(new[] { "read" }, order);
+        Assert.Equal(permission, raised is DarlingXeSessionDeniedException);
+        Assert.Equal(!permission, raised is DarlingXeSessionMissingException);
+        Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A read that fails after a failed ensure is dropped: the ensure's failure is the cause, and the one the run records.</summary>
+    [Fact]
+    public async Task ACarriedEnsureFailure_IsRecordedEvenWhenTheReadAfterItFails()
+    {
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
+
+        var raised = await Assert.ThrowsAsync<DarlingXeSessionMissingException>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            "deadlocks", isAzureSqlDb: true, fault, () => throw new InvalidOperationException("The read failed."), NullLogger.Instance, "azure"));
+
+        Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("The read failed.", raised.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Everywhere else the read of a session that does not exist would return zero rows, so it does not run: the blocked-process collector, and any other engine.</summary>
+    [Theory]
+    [InlineData("blocked_process_report", true)]
+    [InlineData("deadlocks", false)]
+    public async Task ACarriedEnsureFailure_ElsewhereThanTheAzureDeadlockRun_DoesNotRead(string collector, bool isAzureSqlDb)
+    {
+        var read = false;
+        var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
+
+        await Assert.ThrowsAsync<DarlingXeSessionMissingException>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+            collector, isAzureSqlDb, fault, () => { read = true; return Task.CompletedTask; }, NullLogger.Instance, "azure"));
+
+        Assert.False(read);
+    }
+
     [Fact]
     public void L4_TheServerProbe_ComparesEventsActionsAndTargets_AndAnswersTwoForAnotherDefinition()
     {

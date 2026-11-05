@@ -142,13 +142,7 @@ ALTER EVENT SESSION [{DeadlockXeSessionName}] ON SERVER STATE = START;", connect
 
             /* #7639: some databases were refused their session while others were ensured. The run still succeeded, and its note says
                which databases are not in it and why, so a short or empty grid is not read as a quiet server. */
-            if (_xeEnsurePartialNotes.TryGetValue(XeSessionEnsureWarnedKey(server, DeadlockXeSessionName), out var partialNote)
-                && partialNote.Length > 0)
-            {
-                var telemetry = TelemetryFor(GetServerId(server));
-                telemetry.HostNote = PerformanceMonitor.Collectors.EnumeratedCollectorDriver.MergeNotes(telemetry.HostNote, partialNote);
-            }
-
+            ApplyXeEnsurePartialNote(server, XeSessionEnsureWarnedKey(server, DeadlockXeSessionName));
             return rows;
         }
 

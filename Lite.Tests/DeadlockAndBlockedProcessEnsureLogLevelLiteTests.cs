@@ -445,7 +445,8 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
         Assert.Same(rig.ServerFailure, raised.InnerException);
     }
 
-    private static string CollectorName(string session) => session == Deadlock ? "deadlocks" : "blocked_process_report";
+    private static string CollectorName(string session) =>
+        session == Deadlock ? "deadlocks" : session == Attention ? "attention" : "blocked_process_report";
 
     /// <summary>The collector's own line for a failed ensure, as <c>RunCollectorAsync</c> writes it.</summary>
     private static string CollectorLine(string session) => $"{CollectorName(session)} Failed to ensure {session} XE session";
@@ -770,6 +771,31 @@ public sealed class DeadlockAndBlockedProcessEnsureLogLevelLiteTests : IDisposab
 
         var run = Assert.Single(await ReadRunsAsync(rig, Deadlock));
         Assert.Equal("SUCCESS", run.Status);
+        Assert.Contains("beta", run.Error, StringComparison.Ordinal);
+        Assert.Contains("The create was refused in beta.", run.Error, StringComparison.Ordinal);
+        Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7639: the same partial refusal on the blocked process and client timeout runs. Their sessions were made in the other
+    /// databases and refused in one, and the run succeeded without saying so, so a short grid read as a quiet server. Their run
+    /// notes now name the refused database, the server's reason and the grant, as the deadlock run's does. The refused
+    /// database cannot be opened, which the Azure loop skips, and the other two read no rows, so the run succeeds.
+    /// </summary>
+    [Theory]
+    [InlineData(BlockedProcess)]
+    [InlineData(Attention)]
+    public async Task AnEnsureRefusedInOneDatabase_PutsTheSameNoteOnTheBlockedProcessAndClientTimeoutRuns(string session)
+    {
+        var rig = await BuildRigAsync();
+        rig.Refuse.Add("beta");
+        rig.Readable["alpha"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), Array.Empty<object[]>());
+        rig.Readable["gamma"] = () => new FakeDeadlockReader(Array.Empty<object[]>(), Array.Empty<object[]>());
+
+        await RunCollectorAsync(rig, session);
+
+        var run = Assert.Single(await ReadRunsAsync(rig, session));
+        Assert.True(run.Status == "SUCCESS", run.Status + ": " + run.Error);
         Assert.Contains("beta", run.Error, StringComparison.Ordinal);
         Assert.Contains("The create was refused in beta.", run.Error, StringComparison.Ordinal);
         Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Error, StringComparison.Ordinal);

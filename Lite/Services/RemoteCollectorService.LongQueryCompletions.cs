@@ -172,6 +172,10 @@ public partial class RemoteCollectorService
         {
             _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
             _longQueryTraceFaultLogged.TryRemove(server.Id, out _);
+
+            /* #7639: turned off, the sessions are dropped and their slots are free, so a refusal from before does not hold the next create. */
+            _xeEnsurePartialNotes.TryRemove(LongQueryPartialNoteKey(server), out _);
+            ForgetHeldCreateRefusals(server.Id, "long query completions");
         }
 
         if (!enabled)
@@ -248,8 +252,18 @@ public partial class RemoteCollectorService
 
                 /* #3754: the session exists (everywhere it could) - a fault from an earlier cycle is over. */
                 _longQueryTraceFault.TryRemove(server.Id, out _);
-                _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
                 _longQueryTraceFaultLogged.TryRemove(server.Id, out _);
+
+                /* #7639: a cycle refused in some databases and ensured in others is still a failing cycle for the log: the cycles
+                   after it tell the same refusals at Debug until a cycle has none. */
+                if (_xeEnsurePartialNotes.ContainsKey(LongQueryPartialNoteKey(server)))
+                {
+                    _longQueryTraceCreateWarned[server.Id] = true;
+                }
+                else
+                {
+                    _longQueryTraceCreateWarned.TryRemove(server.Id, out _);
+                }
 
                 /* The server's own session has no cleanup pass while the trace is on, so a create that succeeded is the end of
                    a run of failed drops: the next time it is turned off, the count starts again (#4964). */
@@ -421,6 +435,9 @@ public partial class RemoteCollectorService
                string the step would have opened (#4961). */
             var createInDatabase = LongQueryTraceDatabaseOverrideForTests;
             var stepInDatabase = LongQueryTraceStepOverrideForTests;
+
+            /* #7639: this cycle's account of the databases refused while others were ensured; the driver sets it, the run's note reads it. */
+            _xeEnsurePartialNotes.TryRemove(LongQueryPartialNoteKey(server), out _);
             await EnsureDatabaseScopedXeSessionsAsync(
                 server, "long query completions", sessionName,
                 (connection, token) => new SqlConnectionStringBuilder(connection.ConnectionString).ApplicationIntent == ApplicationIntent.ReadOnly
@@ -428,6 +445,8 @@ public partial class RemoteCollectorService
                     : EnsureLongQueryCompletionsXeSessionAzureSqlDbAsync(server, connection, sessionName, token),
                 create, cancellationToken,
                 repeatsAtDebug: createRepeats,
+                onPartialRefusal: XeEnsurePartialRefusalSink(server, "long query completions", LongQueryPartialNoteKey(server)),
+                holdRepeatedRefusals: true,
                 explainRefusal: ex => IsReadOnlyDatabaseRefusal(ex) ? LongQueryTraceDatabases.ReadOnlyDatabaseMessage() : null,
                 ensureInDatabase: createInDatabase is not null
                     ? async (databaseName, token) =>
@@ -1391,8 +1410,16 @@ END;", connection);
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ensureFailure).Throw();
         }
 
-        return await ReadXeSessionAsync(
+        var rows = await ReadXeSessionAsync(
             "long query completions",
             () => RunCollectorDefinitionAsync(LongQueryCompletionsCollector.Instance, server, cancellationToken));
+
+        /* #7639: some databases were refused their session while others were ensured: the run's note says which and why. A server
+           where every database was refused kept a fault above and reads nothing: this capture has no server-wide arm to read. */
+        ApplyXeEnsurePartialNote(server, LongQueryPartialNoteKey(server));
+        return rows;
     }
+
+    /// <summary>The key of the long-query trace's partial-refusal note (#7639), kept with the other captures' in <see cref="_xeEnsurePartialNotes"/>.</summary>
+    private static string LongQueryPartialNoteKey(ServerConnection server) => XeSessionEnsureWarnedKey(server, "long query completions");
 }

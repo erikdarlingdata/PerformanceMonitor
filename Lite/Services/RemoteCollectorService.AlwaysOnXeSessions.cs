@@ -69,7 +69,25 @@ public partial class RemoteCollectorService
     private readonly ConcurrentDictionary<string, (DateTime At, SqlException Failure)> _alwaysOnCreateRefused = new(StringComparer.Ordinal);
 
     private static string AlwaysOnReadOnlyRefusalKey(string serverId, string databaseName, AlwaysOnXeSessionKind kind) =>
-        serverId + "\u0001" + databaseName.ToUpperInvariant() + "\u0001" + kind.ToString();
+        XeCreateRefusalKey(serverId, databaseName, kind.ToString());
+
+    /// <summary>The key of one capture's held create refusal in one database of one registration (#7639): the server id, the database in upper case, the capture.</summary>
+    private static string XeCreateRefusalKey(string serverId, string databaseName, string capture) =>
+        serverId + "\u0001" + databaseName.ToUpperInvariant() + "\u0001" + capture;
+
+    /// <summary>Forgets a registration's held create refusals of one capture, so a trace turned off and on again is not held by a refusal from before (#7639).</summary>
+    private void ForgetHeldCreateRefusals(string serverId, string capture)
+    {
+        var prefix = serverId + "\u0001";
+        var suffix = "\u0001" + capture;
+        foreach (var key in _alwaysOnCreateRefused.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal) && key.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                _alwaysOnCreateRefused.TryRemove(key, out _);
+            }
+        }
+    }
 
     /// <summary>Forgets what the ensure holds for a removed server's databases.</summary>
     private void ForgetAlwaysOnReadOnlyRefusals(string serverId)
@@ -176,9 +194,7 @@ public partial class RemoteCollectorService
                 AppLogger.Debug("XeSession", refusal);
             }
         }
-        catch (SqlException ex) when (AlwaysOnXeSessions.CarriesAzureCaps(ex)
-                                      && !RetryHelper.IsTransient(ex)
-                                      && !SqlServerPermissionErrors.IsPermissionDenied(ex.Number))
+        catch (SqlException ex) when (CreateRefusalWillRepeat(ex))
         {
             /* #7639: held for the hour (see _alwaysOnCreateRefused), and raised to the shared driver's per-database catch as before. */
             _alwaysOnCreateRefused[refusalKey] = (utcNow, ex);

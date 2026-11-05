@@ -799,6 +799,35 @@ public sealed partial class DarlingWorker
     internal static bool IsDeadlocksCollector(string collectorName) =>
         string.Equals(collectorName, DeadlocksCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// #6893, #7639: the run of a deadlock or blocked-process collector whose last ensure could not create the session. It always ends by
+    /// throwing the ensure's failure, so the row is PERMISSIONS or SESSION_MISSING. On Azure SQL Database the deadlock read goes ahead
+    /// first: it still has the logical server's durable telemetry arm (the master item, no session needed, #2641), so a create refused
+    /// in every database does not end the run before the read. A read failure of its own is dropped: the ensure's is the cause and the
+    /// one a person can act on. Every other collector and engine does not read, as a read of a session that does not exist returns zero rows.
+    /// </summary>
+    internal static async Task RaiseCaptureEnsureFaultAsync(
+        string collectorName, bool isAzureSqlDb, DarlingXeSessions.XeEnsureFailure captureFault, Func<Task> read, ILogger logger, string serverName)
+    {
+        Exception captureFailure = captureFault.IsPermission
+            ? new DarlingXeSessionDeniedException(captureFault.Message)
+            : new DarlingXeSessionMissingException(captureFault.Message);
+
+        if (IsDeadlocksCollector(collectorName) && isAzureSqlDb)
+        {
+            try
+            {
+                await read();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogDebug("[{Server}] Deadlock read after a failed ensure: {Message}", serverName, ex.Message);
+            }
+        }
+
+        throw captureFailure;
+    }
+
     internal static bool IsAttentionCollector(string collectorName) =>
         string.Equals(collectorName, AttentionCollector.Instance.Name, StringComparison.OrdinalIgnoreCase);
 
