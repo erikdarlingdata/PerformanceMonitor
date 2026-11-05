@@ -256,6 +256,9 @@ public sealed class DarlingMcpQueryFleetSummaryTools
         var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_fleet_summary"), out var windowEnd);
         if (validation != null) return validation;
 
+        /* Observe the token before the first store call, as the other converted reads do (WebReadCancellationPinTests). */
+        cancellationToken.ThrowIfCancellationRequested();
+
         try
         {
             var start = windowEnd.AddHours(-hours_back);

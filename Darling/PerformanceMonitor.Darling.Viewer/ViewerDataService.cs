@@ -1456,8 +1456,10 @@ SELECT
        connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'checkdb_overdue_threshold_hours' AND NOT attisdropped),
     /* V246 (#7609) adds the (query_hash, bucket) index on the corrected hourly Query Store rollup. Found by catalog so the answer does not depend on the
-       connecting role's privileges. A store without that view (no TimescaleDB) has nothing to index, so it reads as done. Named only in this probe line. */
-    (to_regclass('collect.query_store_stats_corrected_hourly') IS NULL OR EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_qs_corrected_hourly_hash_bucket'))";
+       connecting role's privileges. A store without that view (no TimescaleDB) has nothing to index, so it reads as done, but only once the rung below (V245's column) is there too: a store behind V245 has no view yet either, and must not read as the top rung. */
+    (EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = 'ix_qs_corrected_hourly_hash_bucket')
+        OR (to_regclass('collect.query_store_stats_corrected_hourly') IS NULL
+            AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'checkdb_overdue_threshold_hours' AND NOT attisdropped)))";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
