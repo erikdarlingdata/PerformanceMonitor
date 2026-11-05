@@ -364,7 +364,8 @@ a:hover { text-decoration: underline; }
   gap: 0.5rem;
 }
 .panel .panel-sub { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
-.panel.span-2 { grid-column: 1 / -1; }
+/* #7534: span-solo is set by panel-layout.js on a span-1 panel with no span-1 partner on its row. */
+.panel.span-2, .panel.span-solo { grid-column: 1 / -1; }
 /* #6439: a sentence over a group of cards (the System Events counter charts) spans the full row; the slot stays empty (and takes no room) until a chart is drawn. */
 .panel-intro { grid-column: 1 / -1; }
 .panel-intro:empty { display: none; }

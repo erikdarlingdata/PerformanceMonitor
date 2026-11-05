@@ -46,6 +46,7 @@
  */
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
+import { keepLonePanelsWide } from "../panel-layout.js";
 import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
@@ -360,7 +361,11 @@ export function renderServer(main, server, tabId, opts) {
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
   /* The notice for a carried-over range this tab reads only part of (reachNoteText), between the tab bar and the panels. */
   reachSlot = el("div", { class: "reach-note-slot" });
-  if (!keep && !inPlace) gridNode = el("div", { class: "panel-grid" });
+  if (!keep && !inPlace) {
+    gridNode = el("div", { class: "panel-grid" });
+    /* #7534: a half-width panel with no partner on its row takes the whole row, whatever tab it is on and whichever panels hide. */
+    keepLonePanelsWide(gridNode);
+  }
   if (inPlace) {
     /* The grid is not detached: replacing only the pieces around it keeps its panels' scroll positions and the reader's place. */
     keepScroll(() => replaceNodes(main, shellNodes, [head, whySlot, tabsSlot, reachSlot]));
