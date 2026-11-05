@@ -614,6 +614,8 @@ table.data .export-only { display: none; }
 table.data td.flow-cell { min-width: 12rem; max-width: none; overflow-wrap: anywhere; }
 /* #7410: a narrower floor for the short wrapping columns of a wide grid (Logging Settings Audit), so its last column is not pushed past the panel at 1280 px. */
 table.data td.flow-cell.flow-narrow { min-width: 8rem; }
+/* #7539: a one-word setting column (Change needs: "reload" or "restart") wraps its longer note, so the width goes to the text columns. */
+table.data td.change-cell { white-space: normal; min-width: 4.5rem; max-width: 8rem; }
 table.data td.flow-cell .disclosure { max-width: none; }
 table.data td.flow-cell .disclosure > .disc-summary { white-space: normal; overflow: visible; text-overflow: clip; }
 /* The query text of Top Query Shapes keeps room to read: its closed summary is one line, and without a floor the auto layout squeezes it to a few characters. */
