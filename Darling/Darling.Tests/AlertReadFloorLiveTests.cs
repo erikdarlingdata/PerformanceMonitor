@@ -358,6 +358,15 @@ VALUES ($1, $2, $3, 'sentinel', 'AG1', $4, 'NODE2', $5, false)",
             Assert.Equal(new[] { "CritDb|RECOVERY_PENDING", "OffDb|OFFLINE" }, read.Deviations.Select(d => d.Database + "|" + d.State).ToArray());
             Assert.Single(DarlingDatabaseStateDeviations.Critical(read.Deviations));
 
+            Assert.Equal(t1, read.NewestCollectionUtc!.Value, TimeSpan.FromMilliseconds(1));
+
+            /* Only the newest snapshot is inside the window (the floor falls between the two): the two-sample rule has nothing to compare, so the join drops
+               CritDb and the read finds no deviation. That is "could not judge", not "healthy": a RECOVERY_PENDING server must not read as collected. */
+            var single = await DarlingDatabaseStateDeviations.ReadAsync(connection, States, now.AddMinutes(112), LiveTimeoutSeconds, ct);
+            Assert.False(single.Collected);
+            Assert.Empty(single.Deviations);
+            Assert.Null(single.NewestCollectionUtc);
+
             /* The newest snapshot is older than the freshness window: the databases' state is unknown, which is not "no deviations". */
             var stale = await DarlingDatabaseStateDeviations.ReadAsync(connection, States, now.AddHours(3), LiveTimeoutSeconds, ct);
             Assert.False(stale.Collected);

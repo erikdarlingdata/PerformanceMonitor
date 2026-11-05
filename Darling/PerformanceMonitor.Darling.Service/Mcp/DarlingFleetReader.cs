@@ -3365,24 +3365,28 @@ public sealed class FleetServerCard
         identityCapacity is { ColumnsAtBar: > 0 } && string.Equals(identityCapacity.WorstBand, IdentityCapacityMath.BandCritical, StringComparison.Ordinal);
 }
 
-/// <summary>One server's database states for the fleet card (#7647). <see cref="Collected"/> false is "not collected", with no counts to read as zero.</summary>
+/// <summary>One server's database states for the fleet card (#7647). <see cref="Collected"/> false is "not collected", with no counts to read as zero.
+/// <see cref="CollectedAt"/> is the newest snapshot's time as UTC ISO text, null when not collected.</summary>
 public sealed record FleetDatabaseStates(
     [property: JsonPropertyName("collected")] bool Collected,
     [property: JsonPropertyName("deviation_count")] int DeviationCount,
     [property: JsonPropertyName("critical_count")] int CriticalCount,
-    [property: JsonPropertyName("deviations")] IReadOnlyList<DatabaseStateDeviation> Deviations)
+    [property: JsonPropertyName("deviations")] IReadOnlyList<DatabaseStateDeviation> Deviations,
+    [property: JsonPropertyName("collected_at")] string? CollectedAt = null)
 {
     internal static FleetDatabaseStates Of(DatabaseStateRead read)
     {
         if (!read.Collected)
         {
-            return new FleetDatabaseStates(false, 0, 0, Array.Empty<DatabaseStateDeviation>());
+            return new FleetDatabaseStates(false, 0, 0, Array.Empty<DatabaseStateDeviation>(), null);
         }
 
         /* Critical states first, so the tile and the reason name the ones that band the server before any "and N more". */
         var critical = DarlingDatabaseStateDeviations.Critical(read.Deviations);
         var ordered = critical.Concat(read.Deviations.Where(d => !critical.Contains(d))).ToList();
-        return new FleetDatabaseStates(true, ordered.Count, critical.Count, ordered);
+        /* The newest snapshot's time (UTC ISO text), so a reader can tell a 2-minute-old state from a 119-minute-old one. */
+        var collectedAt = read.NewestCollectionUtc?.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+        return new FleetDatabaseStates(true, ordered.Count, critical.Count, ordered, collectedAt);
     }
 
     /// <summary>The Needs attention clause (see <see cref="DarlingDatabaseStateDeviations.Reason"/>).</summary>

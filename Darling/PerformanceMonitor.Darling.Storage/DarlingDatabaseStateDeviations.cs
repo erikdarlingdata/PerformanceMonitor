@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -129,6 +130,7 @@ ORDER BY d.database_name";
     {
         var deviations = new List<DatabaseStateDeviation>();
         var collected = false;
+        DateTime? newest = null;
         using var command = new NpgsqlCommand(SinceSql, connection) { CommandTimeout = commandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.Add(new NpgsqlParameter
@@ -139,8 +141,15 @@ ORDER BY d.database_name";
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* The read always returns a row carrying the times (database_name NULL when nothing deviates); a NULL newest time is no snapshot in the window. */
-            collected = collected || !reader.IsDBNull(5);
+            /* The read always returns a row carrying the times (database_name NULL when nothing deviates). The two-sample rule needs BOTH the newest and the
+               previous snapshot inside the window: with one, the join drops every row, so "no deviations" would only mean "could not judge", and a
+               RECOVERY_PENDING server would read healthy. A NULL in either time is therefore not collected. */
+            if (!reader.IsDBNull(4) && !reader.IsDBNull(5))
+            {
+                collected = true;
+                newest = DateTime.SpecifyKind(reader.GetDateTime(5), DateTimeKind.Utc);
+            }
+
             if (reader.IsDBNull(0))
             {
                 continue;
@@ -152,7 +161,7 @@ ORDER BY d.database_name";
                 reader.IsDBNull(2) ? string.Empty : reader.GetString(2)));
         }
 
-        return new DatabaseStateRead(collected, deviations);
+        return new DatabaseStateRead(collected, deviations, collected ? newest : null);
     }
 
     /// <summary>Which of the deviations the alert grades Critical (<see cref="DatabaseStateTokens.SeverityFor"/>), in the order the read returned them.</summary>
@@ -162,7 +171,7 @@ ORDER BY d.database_name";
     /// <summary>
     /// The Needs attention reason clause for the database-state tile, said the same on the web, the Viewer and the MCP tool. A Critical state bands the
     /// server, so it leads and says so ("Database state critical (Sales RECOVERY_PENDING, Orders SUSPECT and 2 more)"). Any other deviation reads
-    /// "Database state OFFLINE: Archive". At most <see cref="NamesShown"/> databases are named, then "and N more".
+    /// "Database state deviates (Archive OFFLINE)". At most <see cref="NamesShown"/> databases are named, then "and N more".
     /// </summary>
     public static string Reason(IReadOnlyList<DatabaseStateDeviation> deviations)
     {
@@ -180,8 +189,12 @@ ORDER BY d.database_name";
 
 /// <summary>One database whose state is not its expected state in both of the two newest snapshots (#7647). <see cref="State"/> is the effective state
 /// (STANDBY for a log-shipping secondary), <see cref="Expected"/> is empty for a pending critical first observation.</summary>
-public sealed record DatabaseStateDeviation(string Database, string State, string Expected);
+public sealed record DatabaseStateDeviation(
+    [property: JsonPropertyName("database")] string Database,
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("expected")] string Expected);
 
 /// <summary>What the deviation read found for one server. <see cref="Collected"/> false means no snapshot inside the freshness window: the state of its
-/// databases is unknown, which is not the same as none deviating.</summary>
-public sealed record DatabaseStateRead(bool Collected, IReadOnlyList<DatabaseStateDeviation> Deviations);
+/// databases is unknown, which is not the same as none deviating. <see cref="Collected"/> needs two snapshots inside the window (the two-sample rule), so
+/// a window holding one reads as not collected. <see cref="NewestCollectionUtc"/> is the time of the newest snapshot (UTC), null when not collected.</summary>
+public sealed record DatabaseStateRead(bool Collected, IReadOnlyList<DatabaseStateDeviation> Deviations, DateTime? NewestCollectionUtc = null);

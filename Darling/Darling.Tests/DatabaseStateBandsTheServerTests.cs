@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Text.Json;
 using PerformanceMonitor.Collectors;
@@ -16,6 +18,7 @@ using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -111,6 +114,97 @@ public sealed class DatabaseStateBandsTheServerTests
         Assert.Equal(FleetHealthBand.Healthy, uncollected.Band);
         using var doc = JsonDocument.Parse(JsonSerializer.Serialize(uncollected, DarlingFleetReader.JsonOptions));
         Assert.False(doc.RootElement.GetProperty("database_states").GetProperty("collected").GetBoolean());
+    }
+
+    private static readonly string[] DeviationKeys = { "database", "expected", "state" };
+
+    /// <summary>The deviation's keys as the web page and the MCP tool receive them: snake_case like the rest of the card, never PascalCase.</summary>
+    private static void AssertSnakeCaseDeviation(JsonElement card)
+    {
+        var states = card.GetProperty("database_states");
+        var deviation = states.GetProperty("deviations")[0];
+        Assert.Equal(DeviationKeys, deviation.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal("Sales", deviation.GetProperty("database").GetString());
+        Assert.Equal("RECOVERY_PENDING", deviation.GetProperty("state").GetString());
+        Assert.Equal("ONLINE", deviation.GetProperty("expected").GetString());
+    }
+
+    [Fact]
+    public void ADeviationOnTheCard_SerializesSnakeCaseKeys_ForTheFleetEndpointAndTheMcpTool()
+    {
+        var broken = Card(2, "restarted", States(("Sales", "RECOVERY_PENDING")));
+
+        /* /api/fleet: one card through the shared options. */
+        using var web = JsonDocument.Parse(JsonSerializer.Serialize(broken, DarlingFleetReader.JsonOptions));
+        AssertSnakeCaseDeviation(web.RootElement);
+
+        /* get_fleet_overview: the tool serializes the whole result to a node with the same options, then to text, and its cards carry the same shape. */
+        var rollup = DarlingFleetReader.BuildRollup(new[] { broken }, Now, Now.AddHours(-1), Now);
+        var tool = JsonSerializer.SerializeToNode(rollup, DarlingFleetReader.JsonOptions)!.AsObject().ToJsonString(DarlingFleetReader.JsonOptions);
+        using var mcp = JsonDocument.Parse(tool);
+        AssertSnakeCaseDeviation(mcp.RootElement.GetProperty("cards")[0]);
+    }
+
+    [Fact]
+    public void TheCardSaysWhenTheDatabaseStateWasCollected_AndNullWhenItWasNot()
+    {
+        var newest = Now.AddMinutes(-2);
+        var collected = Card(1, "fresh", FleetDatabaseStates.Of(new DatabaseStateRead(true, Array.Empty<DatabaseStateDeviation>(), newest)));
+        var uncollected = Card(2, "none", FleetDatabaseStates.Of(new DatabaseStateRead(false, Array.Empty<DatabaseStateDeviation>(), newest)));
+
+        using var fresh = JsonDocument.Parse(JsonSerializer.Serialize(collected, DarlingFleetReader.JsonOptions));
+        Assert.Equal("2026-09-10T11:58:00Z", fresh.RootElement.GetProperty("database_states").GetProperty("collected_at").GetString());
+        using var none = JsonDocument.Parse(JsonSerializer.Serialize(uncollected, DarlingFleetReader.JsonOptions));
+        Assert.Equal(JsonValueKind.Null, none.RootElement.GetProperty("database_states").GetProperty("collected_at").ValueKind);
+    }
+
+    /// <summary>Runs the shipped Fleet page under Node (the silence harness's <c>dbstate</c> scenario) against one card exactly as the service serialized it.</summary>
+    private static bool TryRunPage(string cardJson, out JsonElement result)
+    {
+        result = default;
+        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-fleet-silence-harness.mjs"));
+        psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.ArgumentList.Add("dbstate");
+        psi.Environment["FLEET_CARD_JSON"] = cardJson;
+
+        Process proc;
+        try
+        {
+            proc = Process.Start(psi)!;
+        }
+        catch (Win32Exception)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return false;
+        }
+
+        using (proc)
+        {
+            var error = proc.StandardError.ReadToEndAsync();
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            if (!proc.WaitForExit(30000))
+            {
+                proc.Kill(entireProcessTree: true);
+                Assert.Fail("the fleet page harness did not finish in 30 s");
+            }
+
+            Assert.True(proc.ExitCode == 0, "the fleet page harness failed: " + error.Result);
+            using var doc = JsonDocument.Parse(output);
+            result = doc.RootElement.Clone();
+            return true;
+        }
+    }
+
+    [Fact]
+    public void TheFleetPagesChip_PrintsTheDatabaseAndItsState_FromThePayloadTheServiceSends()
+    {
+        var broken = Card(2, "restarted", States(("Sales", "RECOVERY_PENDING")));
+        if (!TryRunPage(JsonSerializer.Serialize(broken, DarlingFleetReader.JsonOptions), out var r)) return;
+
+        var chip = Assert.Single(r.GetProperty("chips").EnumerateArray()).GetString()!;
+        Assert.Contains("Sales RECOVERY_PENDING", chip, StringComparison.Ordinal);
+        Assert.DoesNotContain("undefined", chip, StringComparison.Ordinal);
     }
 
     [Fact]
