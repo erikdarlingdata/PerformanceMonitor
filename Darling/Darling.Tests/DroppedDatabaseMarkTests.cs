@@ -111,4 +111,34 @@ public sealed class DroppedDatabaseMarkTests
         Assert.Equal(new[] { "listed1" }, await DroppedDatabaseRows.FillAsync(new List<string> { "listed1" }, 5, null, ReadLeftOut));
         Assert.Empty(asked);
     }
+    /// <summary>#7725: the Lite desktop grids' fill (the same rule as <c>DroppedDatabaseRows.FillAsync</c>): the listed rows first, the fill after
+    /// them and only for the room the limit leaves, each fill row flagged, and the cell reads "name (dropped)" for a flagged row only.</summary>
+    [Fact]
+    public async Task GridFill_PutsTheListedRowsFirst_FlagsTheFill_AndLabelsOnlyTheFlaggedCell()
+    {
+        var askedTop = new List<int>();
+        Task<List<string>> ReadLeftOut(IReadOnlyList<string> databases, int top)
+        {
+            Assert.Equal(new[] { "GoneDb" }, databases);
+            askedTop.Add(top);
+            return Task.FromResult(new List<string> { "dropped1", "dropped2" }.Take(top).ToList());
+        }
+
+        var flagged = new List<string>();
+        var rows = await DroppedDatabaseMark.FillAsync(new List<string> { "listed1" }, 2, new[] { "GoneDb" }, ReadLeftOut, flagged.Add);
+        Assert.Equal(new[] { "listed1", "dropped1" }, rows);
+        Assert.Equal(new[] { "dropped1" }, flagged);
+        Assert.Equal(new[] { 1 }, askedTop);
+
+        /* A full page, or nothing left out: no second read and no flag. */
+        askedTop.Clear();
+        flagged.Clear();
+        Assert.Equal(new[] { "listed1" }, await DroppedDatabaseMark.FillAsync(new List<string> { "listed1" }, 1, new[] { "GoneDb" }, ReadLeftOut, flagged.Add));
+        Assert.Equal(new[] { "listed1" }, await DroppedDatabaseMark.FillAsync(new List<string> { "listed1" }, 5, null, ReadLeftOut, flagged.Add));
+        Assert.Empty(askedTop);
+        Assert.Empty(flagged);
+
+        Assert.Equal("Sales (dropped)", DroppedDatabaseMark.Display("Sales", dropped: true));
+        Assert.Equal("Sales", DroppedDatabaseMark.Display("Sales", dropped: false));
+    }
 }

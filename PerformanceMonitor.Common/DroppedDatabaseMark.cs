@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Common;
 
@@ -23,6 +24,37 @@ public static class DroppedDatabaseMark
 {
     /// <summary>The row key that marks a row from a database the server no longer lists.</summary>
     public const string Key = "database_dropped";
+
+    /// <summary>What a grid's database cell shows after the name of a database the server no longer lists.</summary>
+    public const string Suffix = " (dropped)";
+
+    /// <summary>The grid's database cell: the name, with <see cref="Suffix"/> after a database the server no longer lists.</summary>
+    public static string Display(string databaseName, bool dropped) => dropped ? databaseName + Suffix : databaseName;
+
+    /// <summary>
+    /// The grid-side fill (the Lite desktop grids): <paramref name="listed"/> (the ranking over the databases the server still lists)
+    /// followed by the fill. When it is short of <paramref name="top"/> and databases were left out, <paramref name="readLeftOut"/> reads the
+    /// left-out databases for the rest and <paramref name="mark"/> flags each of those rows.
+    /// </summary>
+    public static async Task<List<T>> FillAsync<T>(
+        List<T> listed, int top, IReadOnlyList<string>? leftOut, Func<IReadOnlyList<string>, int, Task<List<T>>> readLeftOut, Action<T> mark)
+    {
+        if (leftOut is null || leftOut.Count == 0 || listed.Count >= top)
+        {
+            return listed;
+        }
+
+        var fill = await readLeftOut(leftOut, top - listed.Count);
+        foreach (var row in fill)
+        {
+            mark(row);
+        }
+
+        var combined = new List<T>(listed.Count + fill.Count);
+        combined.AddRange(listed);
+        combined.AddRange(fill);
+        return combined;
+    }
 
     /// <summary>The left-out names that have NO row in the reply (ordinal), or null when every one has a row.</summary>
     public static IReadOnlyList<string>? WithoutRows(IReadOnlyList<string>? leftOut, IEnumerable<string?> rowDatabases)

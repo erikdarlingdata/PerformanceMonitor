@@ -32,7 +32,7 @@ public sealed class ViewerProcedureStatsRow : QueryTagRowBase
     /// first and fills what the limit leaves from the dropped ones, which carry this mark.</summary>
     public bool IsDropped { get; set; }
     /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
-    public string DatabaseDisplay => IsDropped ? DatabaseName + " (dropped)" : DatabaseName;
+    public string DatabaseDisplay => DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string SchemaName { get; set; } = "";
     public string ObjectName { get; set; } = "";
     public string ObjectType { get; set; } = "";

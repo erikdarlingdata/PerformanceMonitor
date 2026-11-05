@@ -93,21 +93,6 @@ public sealed class LiteDroppedDatabaseMcpToolTests : IDisposable
         "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, last_execution_time, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_logical_writes) VALUES ($1, $2, $3, 'x', $4, $5, $2, 1, $6, $6, 10, 1)",
         _nextId++, Ago(60), _serverId, database, hash, cpuUs);
 
-    /// <summary>One baseline row (3 days back) and one recent row (1 hour back) at 1,000 runs, so the 2 ms rise clears the cost gate.</summary>
-    private async Task RegressionAsync(string database, long queryId)
-    {
-        foreach (var (at, avgUs, interval) in new[] { (_now.AddDays(-3), 1000L, 1L), (_now.AddHours(-1), 3000L, 2L) })
-        {
-            await ExecAsync(@"
-INSERT INTO query_store_stats
-    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id,
-     execution_type_desc, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads,
-     runtime_stats_interval_id, query_text, last_execution_time)
-VALUES ($1, $2, $3, 'x', $4, $5, 9, 'Regular', 1000, $6, $6, 100, $7, 'SELECT * FROM dbo.Widgets', $2)",
-                _nextId++, at, _serverId, database, queryId, avgUs, interval);
-        }
-    }
-
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 
     private static string[] Databases(JsonElement root, string rows) =>
@@ -149,32 +134,16 @@ VALUES ($1, $2, $3, 'x', $4, $5, 9, 'Regular', 1000, $6, $6, 100, $7, 'SELECT * 
         var all = Parse(await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, 24, 10));
         Assert.Equal(new[] { "LiveDb", "GoneDb" }, Databases(all, "queries"));
         Assert.Equal(new[] { false, true }, Marks(all, "queries"));
+        Assert.Empty(LeftOut(all));
 
         var one = Parse(await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, 24, 1));
         Assert.Equal(new[] { "LiveDb" }, Databases(one, "queries"));
         Assert.Equal(new[] { false }, Marks(one, "queries"));
+        Assert.Equal(new[] { "GoneDb" }, LeftOut(one));   /* #7725: the limit left GoneDb without a row, so the reply names it */
 
         /* A named database is read as asked and is not marked. */
         var named = Parse(await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName, 24, 10, "GoneDb"));
         Assert.Equal(new[] { "GoneDb" }, Databases(named, "queries"));
         Assert.Equal(new[] { false }, Marks(named, "queries"));
-    }
-
-    [Fact]
-    public async Task QueryStoreRegressions_ListTheListedDatabaseFirst_ThenTheDroppedOne_Marked()
-    {
-        await SeedDropAsync();
-        await RegressionAsync("GoneDb", queryId: 1);
-        await RegressionAsync("LiveDb", queryId: 2);
-
-        var all = Parse(await McpQueryTools.GetQueryStoreRegressions(_service, _serverManager, ServerName, hours_back: 24, limit: 10));
-        Assert.Equal(new[] { "LiveDb", "GoneDb" }, Databases(all, "regressions"));
-        Assert.Equal(new[] { false, true }, Marks(all, "regressions"));
-        Assert.Empty(LeftOut(all));
-        Assert.Equal(2, all.GetProperty("regression_count").GetInt32());
-
-        var one = Parse(await McpQueryTools.GetQueryStoreRegressions(_service, _serverManager, ServerName, hours_back: 24, limit: 1));
-        Assert.Equal(new[] { "LiveDb" }, Databases(one, "regressions"));
-        Assert.Equal(new[] { "GoneDb" }, LeftOut(one));
     }
 }

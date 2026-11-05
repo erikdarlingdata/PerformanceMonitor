@@ -2172,6 +2172,10 @@ public class QueryStatsRow
     public bool CanGetActualPlan => !string.IsNullOrEmpty(QueryText);
 
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists (the ranking puts the listed databases first and fills what the limit leaves from the dropped ones).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
@@ -2267,6 +2271,10 @@ public class ProcedureStatsRow
     public bool CanAssignQueryTag => Helpers.QueryTagGrid.TargetOf(this) != null;
 
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists (the ranking puts the listed databases first and fills what the limit leaves from the dropped ones).</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => PerformanceMonitor.Common.DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string SchemaName { get; set; } = "";
     public string ObjectName { get; set; } = "";
     public string ObjectType { get; set; } = "";

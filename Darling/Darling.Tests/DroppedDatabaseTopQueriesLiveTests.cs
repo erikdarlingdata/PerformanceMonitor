@@ -97,6 +97,8 @@ public sealed class DroppedDatabaseTopQueriesLiveTests
             Assert.Equal(new[] { "LiveDb", "OtherDb", "GoneDb" }, all.Select(q => q.GetProperty("database_name").GetString()!).ToArray());
             Assert.Equal(new[] { false, false, true }, all.Select(Dropped).ToArray());
             Assert.False(all[0].TryGetProperty("database_dropped", out _), "a listed database's row carries no database_dropped key");
+            /* #7725: every left-out database has a row in the reply, so there is nothing to disclose. */
+            Assert.Equal(JsonValueKind.Null, allDocument.RootElement.GetProperty("databases_left_out").ValueKind);
         }
 
         /* A limit the listed rows fill leaves GoneDb out, heavier as it is. */
@@ -105,6 +107,9 @@ public sealed class DroppedDatabaseTopQueriesLiveTests
         {
             Assert.Equal(new[] { "LiveDb", "OtherDb" }, two.Select(q => q.GetProperty("database_name").GetString()!).ToArray());
             Assert.DoesNotContain(two, Dropped);
+            /* #7725: GoneDb has no row in this reply, so the reply names it, as get_top_procedures_by_cpu does. */
+            Assert.Equal(new[] { "GoneDb" }, twoDocument.RootElement.GetProperty("databases_left_out").EnumerateArray().Select(n => n.GetString()!).ToArray());
+            Assert.Contains("no longer lists", twoDocument.RootElement.GetProperty("databases_left_out_note").GetString(), StringComparison.Ordinal);
         }
 
         /* One slot left over: the fill takes the dropped database's row. */

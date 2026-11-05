@@ -1089,7 +1089,8 @@ internal static class DarlingDataReader
     /// the text lookup reads <c>query_stats</c> plus <c>query_text_dim</c> for the newest row only, which resolves the #1767 payload dimension — the plan
     /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
     /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
-    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page).
+    /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page),
+    /// $8 the databases to leave out (#7725: the ones the server dropped, ranked after the listed ones by a second read; NULL = none).
     /// </summary>
     public const string TopQueriesSql = $"""
         WITH winners AS MATERIALIZED (
@@ -1589,11 +1590,11 @@ internal static class DarlingDataReader
     /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC; $3 is EXCLUSIVE — a
     /// bucket is stamped at its START, so the bucket that begins at $3 lies after the window and is not read),
     /// $4 top, $5 database
-    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the materialization
-    /// ceiling (naive UTC), bound only when the ceiling is known.
-    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $7</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
+    /// filter (NULL = all), $6 the candidate limit (#5313: top + 5 first, larger on a refill round), $7 the databases to leave out
+    /// (#7725: the ones the server dropped; NULL = none), $8 the materialization ceiling (naive UTC), bound only when the ceiling is known.
+    /// <c>$CEIL$</c> becomes <c>AND f.bucket &lt; $8</c> or nothing. <c>$IOSUMS$</c> (#5329) is the three reads/writes
     /// sums on <c>query_stats_io_hourly</c> and typed NULLs on the stitched relation. <c>min_dop</c> and host-object grouping need columns only raw carries, so
-    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6 or $7.
+    /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6, $7 or $8.
     /// </summary>
     public const string TopQueriesHourlySql = """
         WITH ranked AS MATERIALIZED (
@@ -2071,7 +2072,7 @@ internal static class DarlingDataReader
         try
         {
         /* #5313: the WAITFOR trim can leave the page short; TopFill asks again with a larger $6 while more
-           candidates exist, under its bound. $6 is the candidate limit, $7 the ceiling when there is one. */
+           candidates exist, under its bound. $6 is the candidate limit, $7 the databases left out (#7725), $8 the ceiling when there is one. */
         rows = await TopFill.RunAsync(top, async candidates =>
         {
             var page = new List<TopQueryRow>();

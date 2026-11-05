@@ -37,7 +37,7 @@ public sealed class ViewerQueryStatsRow : QueryTagRowBase
     /// first and fills what the limit leaves from the dropped ones, which carry this mark (the Top Procedures grid's rule).</summary>
     public bool IsDropped { get; set; }
     /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
-    public string DatabaseDisplay => IsDropped ? DatabaseName + " (dropped)" : DatabaseName;
+    public string DatabaseDisplay => DroppedDatabaseMark.Display(DatabaseName, IsDropped);
     public string QueryHash { get; set; } = "";
     public DateTime? LastExecutionTime { get; set; }
     public DateTime? CreationTime { get; set; }
