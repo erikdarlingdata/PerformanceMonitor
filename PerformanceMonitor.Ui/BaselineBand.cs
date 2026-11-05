@@ -77,6 +77,9 @@ public static class BaselineBand
             var rect = plot.Add.Rectangle(step.FromX, step.ToX, step.Lower, step.Upper);
             rect.FillStyle.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(FillAlpha);
             rect.LineStyle.Width = 0;
+            /* #7386: a step is a band, not a collected point. The first one starts at the window's left edge, so unmarked it would stand in
+               for "the earliest point drawn" and cancel the trimmed axis start the lanes share. */
+            ChartAxisStart.Baseline(rect);
             rectangles.Add(rect);
         }
 
@@ -86,6 +89,7 @@ public static class BaselineBand
             mean.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(60);
             mean.LinePattern = ScottPlot.LinePattern.Dashed;
             mean.LineWidth = 1;
+            ChartAxisStart.Baseline(mean);
         }
 
         return rectangles;
