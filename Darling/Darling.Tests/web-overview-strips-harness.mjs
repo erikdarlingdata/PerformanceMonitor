@@ -272,6 +272,8 @@ if (scenario === "crosshair") {
     };
   };
   out.slowCollector = slow(1, 1000);
+  /* The same 5 minute collector: a row holds 5 minutes of reads, so the floor is 84 (250 per 15 minutes over 5), not the 17 of one 1 minute bucket. */
+  out.floorSlowCollector = { short: slow(1, 83).markers, enough: slow(1, 84).markers };
   out.floorOneMinute = { enough: slow(1, 17, 1).markers, short: slow(1, 16, 1).markers };
   out.floorThirtyMinute = { short: slow(30, 499, 30).markers, enough: slow(30, 500, 30).markers };
   out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);

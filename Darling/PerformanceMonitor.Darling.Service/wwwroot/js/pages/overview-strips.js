@@ -163,12 +163,15 @@ export function buildStrips(reads) {
     const minutes = res && res.kind === "data" && res.data ? res.data.bucket_minutes : null;
     return bucketMsOf(minutes, withCadence ? rowsOf(res, "trend").map((r) => { const d = parseUtc(r.time); return d ? d.getTime() : NaN; }) : null);
   };
+  const ioStepMs = ioBucketMs(reads.io, true);
+  const ioWidthMs = ioBucketMs(reads.io, false);
   const io = {
     key: "io", title: "I/O latency", unit: "ms", min: 0,
     /* #7572: `bucketMs` is the step a gap is judged by: the reply's bucket width, or the rows' own cadence when a collector scheduled slower than the bucket
        keeps fewer rows than buckets (every row counts, the ones with no reads too, since each marks a collection). A step longer than that breaks the line.
-       `bucketWidthMs` is the width alone, the span the reads of one bucket were counted over. */
-    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: ioBucketMs(reads.io, true), bucketWidthMs: ioBucketMs(reads.io, false) }],
+       `readSpanMs` is the span one row's reads were counted over, which the read floor scales by: the bucket width, or the collection step when the
+       collector is slower than the bucket (`bucketMsOf` returned 1.5 times that step), since such a row holds the reads of the whole step. */
+    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: ioStepMs, readSpanMs: ioStepMs > ioWidthMs ? ioStepMs / 1.5 : ioWidthMs }],
     note: note(reads.io, "No file I/O samples in this window."),
   };
 
@@ -180,10 +183,10 @@ const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
 /** #7572: the reads a bucket needs behind its latency before it may carry the red dot, per FIFTEEN MINUTES of bucket. An average over a handful of reads
  *  is noise (one read at 80 ms is a dot for the whole bucket). 250 per 15 minutes is the bar the PostgreSQL I/O baseline puts on a bucket
  *  (PgTargetScorer.IoBaselineBucketMinimumReads). It is not Analysis's IoVolumeFloor.MinimumReads, which counts 250 reads over a window of an hour or more
- *  (a looser bar per minute). The bucket varies with the window (1 to 30 minutes), so the floor is scaled to the bucket's width. The desktop lanes apply no
- *  read floor. */
+ *  (a looser bar per minute). The bucket varies with the window (1 to 30 minutes), so the floor is scaled to the span a row's reads were counted over: the
+ *  bucket width, or the collection step when the collector is slower than the bucket. The desktop lanes apply no read floor. */
 const ANOMALY_MIN_READS_PER_15_MIN = { io: 250 };
-/** The reads one bucket of `widthMs` needs (a bucket whose width the reply did not state counts as 15 minutes). */
+/** The reads a row counted over `widthMs` needs (a span the reply did not state counts as 15 minutes). */
 export function minReadsFor(key, widthMs) {
   const per15 = ANOMALY_MIN_READS_PER_15_MIN[key] || 0;
   return per15 === 0 ? 0 : Math.max(1, Math.ceil((per15 * (widthMs > 0 ? widthMs : 15 * 60000)) / (15 * 60000)));
@@ -218,7 +221,7 @@ export function applyBaselines(strips, res, window, opts) {
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
       const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
-      const minReads = minReadsFor(s.key, line.bucketWidthMs);
+      const minReads = minReadsFor(s.key, line.readSpanMs);
       s.markers = line.points.filter((p) => (minReads === 0 || p.reads >= minReads) && ((p.v > upper && p.v >= floor) || p.v < lower)).map((p) => ({ t: p.t, v: p.v }));
     }
   }
