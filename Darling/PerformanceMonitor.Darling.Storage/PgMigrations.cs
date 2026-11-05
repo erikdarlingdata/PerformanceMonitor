@@ -2549,6 +2549,16 @@ ALTER TABLE collect.blocked_process_reports ADD COLUMN IF NOT EXISTS blocking_op
 CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_process_reports;";
 
     /// <summary>
+    /// V242 (#7567): <c>collect.pg_statement_text.own_entries</c>, which <c>(user_id, database_id)</c> entries of a statement's
+    /// <c>queryid</c> are the monitoring service's own (their stored <c>pg_stat_statements</c> text ends with
+    /// <c>PgOwnStatement.Marker</c>). One nullable <c>jsonb</c>, no DEFAULT, no backfill: a JSON array of <c>[user_id, database_id]</c>
+    /// pairs, replaced on every hourly text upsert, so an entry that stops being the service's drops out at the next fetch. NULL
+    /// means no entry of the queryid is known to be the service's, so the statement is shown. The text row's own prune and
+    /// delete carry the column with them. An older build ignores it.
+    /// </summary>
+    private const string V242Sql = PgStatementText.AddOwnEntriesColumnSql;
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3047,6 +3057,7 @@ $rung$;";
         new Migration(239, "compose-fleet-rollup", V239Sql),
         new Migration(240, "query-store-top-daily-weighted", V240Sql),
         new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
+        new Migration(242, "pg-statement-text-own-entries", V242Sql),
     };
 
     /// <summary>
