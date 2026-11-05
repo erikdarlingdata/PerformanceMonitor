@@ -409,7 +409,7 @@ public static class DarlingXeSessions
 
             /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates, after the excluded databases
                (the list above already leaves those out, so they win). Empty = every database. A database left off is never attempted, so
-               it is neither refused nor in any run note, and a session already there is left alone. */
+               it is neither refused nor in any run note, and a per-install session already there is left alone. */
             databases = XeSessionDatabaseList.Apply(databases, server.Config.XeSessionDatabases).ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1462,10 +1462,10 @@ SELECT /* PerformanceMonitorDarling */
         var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /* #7639: the "Databases that get Extended Events sessions" list narrows the creates only. The monitored set the drop reads stays whole, so a
-           session already in a database left off the list is kept, not dropped (the legacy drop below skips those databases too). */
+           session this install made in a database left off the list is kept, not dropped. The ownerless legacy session is not governed by the list:
+           its drop below reaches every listed database, left off or not, because it holds an Azure session slot that nothing owns. */
         var plannedCreates = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
         var narrowedCreates = XeSessionDatabaseList.Apply(plannedCreates, server.Config.XeSessionDatabases);
-        var leftOffTheList = new HashSet<string>(plannedCreates.Except(narrowedCreates, StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
 
         foreach (var databaseName in narrowedCreates)
         {
@@ -1594,7 +1594,7 @@ SELECT /* PerformanceMonitorDarling */
             KeptElsewhere(listedForTheDrop));
 
         /* The legacy drops the creates did not reach: the databases outside the monitored set. */
-        foreach (var legacyDatabase in legacyDatabases.Where(database => !created.Contains(database) && !leftOffTheList.Contains(database)))
+        foreach (var legacyDatabase in legacyDatabases.Where(database => !created.Contains(database)))
         {
             await legacyPass.DropAsync(legacyDatabase, (legacyName, token) => DropSessionInDatabaseAsync(server, runner, legacyName, legacyDatabase, token), cancellationToken);
         }

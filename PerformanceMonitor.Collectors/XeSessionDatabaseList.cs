@@ -25,7 +25,7 @@ public static class XeSessionDatabaseList
     /// <summary>
     /// <paramref name="databases"/> narrowed to the names on <paramref name="included"/> (case-insensitive, trimmed), in the
     /// order given. Returns every database when <paramref name="included"/> is null, empty or only blanks. Only a create list
-    /// goes through here: a session that already exists in a database left off the list is left alone, never dropped.
+    /// goes through here: a session this install made in a database left off the list is left alone, never dropped. The ownerless legacy long-query session is not governed by the list.
     /// </summary>
     public static IReadOnlyList<string> Apply(IEnumerable<string> databases, IEnumerable<string>? included)
     {

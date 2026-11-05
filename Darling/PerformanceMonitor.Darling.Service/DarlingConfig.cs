@@ -2764,7 +2764,7 @@ public sealed class MonitoredServer
     /// #7639: on Azure SQL Database, the databases that get Extended Events sessions (deadlock, blocked process, client timeout, long
     /// query completions), each a database-scoped session that Azure caps per pool. Empty, the default, means every database. When set,
     /// only these get a session; <see cref="ExcludedDatabases"/> still applies and wins. A server-scoped session on a box SQL Server
-    /// covers every database and ignores this. A session already in a database left off the list is left in place, never dropped.
+    /// covers every database and ignores this. A session this install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session is dropped in every database, as it does not belong to the list.
     /// Stored in <c>config.config_monitored_servers.xe_session_databases</c> (V247).
     /// </summary>
     [JsonPropertyName("xeSessionDatabases")]

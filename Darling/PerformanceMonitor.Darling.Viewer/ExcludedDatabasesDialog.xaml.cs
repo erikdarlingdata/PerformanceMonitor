@@ -54,7 +54,7 @@ public partial class ExcludedDatabasesDialog : Window
             HeaderText.Text = $"Databases for Extended Events Sessions — {displayName}";
             DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Darling makes up to four per database "
                 + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. Leave every box clear to give every "
-                + "database a session. Excluded Databases still apply and win. Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them.";
+                + "database a session. Excluded Databases still apply and win. Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them. The old long query session from before Darling named its sessions is still removed everywhere.";
         }
         else
         {
@@ -67,20 +67,39 @@ public partial class ExcludedDatabasesDialog : Window
     /// <summary>#7639: true when the dialog edits the Extended Events session databases instead of the excluded databases.</summary>
     private readonly bool _xeSessionsMode;
 
+    /// <summary>
+    /// #7639: the saved Extended Events session database list, or the reason it could not be read. A failed read is not an empty list:
+    /// the caller must not offer a Save, since an empty list saved over the stored one means every database.
+    /// </summary>
+    public static async Task<(List<string> List, string? Failure)> ReadXeSessionDatabasesAsync(Func<Task<List<string>>> read)
+    {
+        try
+        {
+            return (await read(), null);
+        }
+        catch (Exception ex)
+        {
+            return (new List<string>(), ex.Message);
+        }
+    }
+
     private async Task LoadAsync()
     {
         var existing = _row.ExcludedDatabases ?? new List<string>();
         if (_xeSessionsMode)
         {
-            try
+            var read = await ReadXeSessionDatabasesAsync(() => _dataService.GetMonitoredServerXeSessionDatabasesAsync(_row.ServerId));
+            if (read.Failure is not null)
             {
-                existing = await _dataService.GetMonitoredServerXeSessionDatabasesAsync(_row.ServerId);
+                /* #7639: an empty list in place of the unreadable one would let a Save replace the stored list with it, and an empty
+                   list means every database. Show why and turn Save off, so a failed read can never be saved over the stored list. */
+                ViewerLogger.Warn("ExcludedDatabasesDialog", $"Could not read the Extended Events session databases: {read.Failure}");
+                SaveButton.IsEnabled = false;
+                StatusText.Text = $"Could not read the saved list ({read.Failure}). Save is turned off so the stored list is not replaced. Close this window and open it again to retry.";
+                return;
             }
-            catch (Exception ex)
-            {
-                existing = new List<string>();
-                ViewerLogger.Warn("ExcludedDatabasesDialog", $"Could not read the Extended Events session databases: {ex.Message}");
-            }
+
+            existing = read.List;
         }
 
         StatusText.Text = "Loading collected databases…";

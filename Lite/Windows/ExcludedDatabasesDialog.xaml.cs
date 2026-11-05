@@ -55,7 +55,7 @@ public partial class ExcludedDatabasesDialog : Window
             DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Lite makes up to four per database "
                 + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. "
                 + "Leave every box clear to give every database a session. Excluded Databases still apply and win. "
-                + "Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them.";
+                + "Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them. The old long query session from before sessions were named per install is still removed everywhere.";
         }
         else
         {

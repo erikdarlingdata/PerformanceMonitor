@@ -76,6 +76,7 @@ public sealed class LongQueryTraceAzureLimitsLiteTests : IDisposable
 
         public DateTime Clock { get; set; } = new(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         public List<string> Calls { get; } = new();
+        public List<string> LegacyCalls { get; } = new();
         public Dictionary<string, int> Refuse { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -112,6 +113,7 @@ public sealed class LongQueryTraceAzureLimitsLiteTests : IDisposable
         {
             if (sessionName == LongQueryCompletionsCollector.LegacyXeSessionName)
             {
+                rig.LegacyCalls.Add(database);
                 return Task.CompletedTask;
             }
 
@@ -284,6 +286,24 @@ public sealed class LongQueryTraceAzureLimitsLiteTests : IDisposable
         rig.Server.XeSessionDatabases = new List<string>();
         await ReconcileAsync(rig);
         Assert.Contains("beta", rig.Calls);
+    }
+
+    /// <summary>
+    /// #7639: the list narrows the per-install creates only. The ownerless legacy session holds an Azure session slot that nothing owns,
+    /// so its drop still reaches a database left off the list. This pins the behaviour Lite already had, so a change that narrowed the
+    /// legacy drop by the list, as Darling's did before this fix, fails here.
+    /// </summary>
+    [Fact]
+    public async Task TheXeSessionDatabaseList_DoesNotNarrowTheLegacyDrop_ADatabaseLeftOffStillGetsIt()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = new List<string> { "alpha" };
+
+        await ReconcileAsync(rig);
+
+        Assert.Equal(new[] { "alpha" }, rig.Calls);
+        Assert.Contains("beta", rig.LegacyCalls);
+        Assert.Contains("gamma", rig.LegacyCalls);
     }
 
     /// <summary>

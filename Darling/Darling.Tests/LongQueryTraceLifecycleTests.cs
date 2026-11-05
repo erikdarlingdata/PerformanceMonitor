@@ -1538,6 +1538,23 @@ public sealed class LongQueryTraceLifecycleTests : IAsyncDisposable
         Assert.Equal(ThreeDatabases.Length, rig.Records.Rows.Count);
     }
 
+    /* #7639: "Databases that get Extended Events sessions" narrows the per-install creates only. The ownerless legacy session holds an
+       Azure session slot that nothing owns, so its drop still reaches the databases left off the list. */
+    [Fact]
+    public async Task Azure_TheXeSessionDatabaseList_NarrowsTheCreates_ButTheLegacyDropStillReachesTheDatabasesLeftOff()
+    {
+        var rig = BuildRig();
+        rig.Config.XeSessionDatabases = new List<string> { "alpha" };
+        rig.LegacySessions.UnionWith(new[] { "alpha", "beta" });
+
+        await rig.ReconcileAsync(enabled: true);
+
+        Assert.Equal(new[] { "alpha" }, rig.Created);
+        Assert.Contains("legacy:beta", rig.Events);
+        Assert.DoesNotContain("beta", rig.LegacySessions);
+        Assert.DoesNotContain(rig.Calls, call => call.Database == "beta");
+    }
+
     [Fact]
     public async Task Legacy_ARecordThatCannotBeRead_SkipsTheLegacyStep_NeverDropsTwice_AndTriesAgainOnTheNextPass()
     {

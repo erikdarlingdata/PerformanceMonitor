@@ -165,8 +165,9 @@ public class ServerConnection : INotifyPropertyChanged
     /// #7639: on Azure SQL Database, the databases that get Extended Events sessions (deadlock, blocked process, client
     /// timeout, long query completions), each a database-scoped session that Azure caps per pool. Empty = every database,
     /// which is how it worked before this setting. When set, only these get a session; <see cref="ExcludedDatabases"/> still
-    /// applies and wins. A server-scoped session on a box SQL Server covers every database and ignores this. A session that
-    /// already exists in a database left off the list is left in place, never dropped. Saved in servers.json; an older file
+    /// applies and wins. A server-scoped session on a box SQL Server covers every database and ignores this. A session this
+    /// install made in a database left off the list is left in place, never dropped. The ownerless legacy long-query session
+    /// is dropped in every database. Saved in servers.json; an older file
     /// without the field loads it as empty.
     /// </summary>
     public System.Collections.Generic.List<string> XeSessionDatabases { get; set; } = new();

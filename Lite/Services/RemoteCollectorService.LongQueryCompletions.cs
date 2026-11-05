@@ -429,7 +429,8 @@ public partial class RemoteCollectorService
             await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: true, afterTheCap, cancellationToken);
 
             /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates only. The set returned for the
-               drop stays the monitored one, so a session already in a database left off the list is kept, not dropped. */
+               drop stays the monitored one, so a session this install made in a database left off the list is kept, not dropped. The legacy ownerless session is still dropped
+               there (RunLegacyLongQuerySessionAsync is not narrowed by the list). */
             var create = XeSessionDatabaseList.Apply(
                 LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create,
                 server.XeSessionDatabases);
