@@ -1185,6 +1185,8 @@ export function fmtBool(v) {
 /** Named formatters a panel descriptor can reference (the #1563-friendly, string-keyed registry). */
 export const FORMATTERS = {
   int: fmtInt,
+  /* #7552: an identifier (a process id, a query id) is a name and not a quantity: no thousands separator, so it can be copied into pg_terminate_backend or sp_query_store_force_plan. */
+  id: (v) => (v == null || v === "" ? "—" : String(v)),
   num1: (v, o) => fmtNum(v, placesFor(o, 1)),
   num2: (v, o) => fmtNum(v, placesFor(o, 2)),
   rate: fmtRate,

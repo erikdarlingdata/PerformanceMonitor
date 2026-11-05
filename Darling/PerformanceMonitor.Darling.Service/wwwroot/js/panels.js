@@ -1315,7 +1315,7 @@ export function visibleColumns(cols, rows) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "id", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
 }
 
 /* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging
@@ -1699,6 +1699,7 @@ export function statusToSev(status) {
       return "Healthy";
     case "STALE":
     case "WARNING":
+    case "REVIEW":
     case "PERMISSIONS":
     case "SKIPPED":
       return "Warning";
