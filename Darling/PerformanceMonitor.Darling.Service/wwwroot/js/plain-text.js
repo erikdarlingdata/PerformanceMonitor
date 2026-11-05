@@ -350,6 +350,11 @@ export function plainText(text) {
 
   t = measurementCountsText(t);
 
+  /* #7548: a service sentence that ends a clause with the issue that explained it, "(#3061)" or "(#4046, #6866)", is written for a reader of
+     the code. The page has no use for the number, so the parenthesis goes with it, and so does a closing ", #4735" inside a longer one. */
+  t = t.replace(/\s*\(#\d+(?:\s*[,;/]\s*#\d+)*\)/g, "");
+  t = t.replace(/,\s*#\d+(?:\s*[,;/]\s*#\d+)*\)/g, ")");
+
   /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
      answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
      index with its reason (release walk, PG18 Storage). */
@@ -497,6 +502,9 @@ const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/
     apply to this kind of server" (release walk, PG18 OS CPU by Query). */
 const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
 
+/** #7548: the grant that lets the monitoring login read pg_stats, said once for the panels that need it. */
+const PG_STATS_GRANT = "Run GRANT pg_read_all_data TO <login> on PostgreSQL 14 and above, or GRANT SELECT on the tables on 13.";
+
 /**
  * #7410: the one plain sentence a panel shows for an empty reply that names a setup step, built from the reply's structured
  * `hints` (`reason`, and for a missing extension its `extensions` and `restart_required`) and never from the message text, which
@@ -514,7 +522,18 @@ export function shortEmptyLine(res, extensionLine) {
     return "No query in this range changed enough between snapshots to attribute CPU to it." +
       (hours > 0 ? " A range of the last " + hours + (hours === 1 ? " hour" : " hours") + " or more reaches one that did." : " A longer range may.");
   }
+  /* #7548: the answered-only Index Bloat ranking when no index has an answer. The login that cannot read pg_stats is the commonest cause, and
+     it is the one a person can fix, so it gets the grant. Any other cause points at the table above that lists the reason for each index. */
+  if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
+    const top = h.suppressed_by_reason[0];
+    return top && top.reason === "ColumnWidthsNotVisible"
+      ? "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT
+      : "No index has a bloat estimate. The Index Bloat (estimated) table above gives the reason for each one.";
+  }
   if (typeof h.reason !== "string") return null;
+  if (h.reason === "pg_stats_unreadable") {
+    return "No column statistics are collected because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+  }
   if (h.reason === "extension_missing") {
     if (extensionLine) return extensionLine;
     const names = Array.isArray(h.extensions) ? h.extensions.filter((n) => typeof n === "string" && n) : [];

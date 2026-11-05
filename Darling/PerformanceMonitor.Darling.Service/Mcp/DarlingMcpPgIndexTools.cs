@@ -454,7 +454,9 @@ public sealed class DarlingMcpPgIndexTools
                     "empty",
                     $"No column statistics for {resolved.DisplayName} in the last {hours_back} hour(s). "
                     + "This collector runs DAILY, so a window shorter than a day can be empty on a "
-                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message), cancellationToken);
+                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message,
+                    /* #7548: the web panel says one sentence and the grant for a login that cannot read pg_stats, built from this field and not from the message. */
+                    coverage.Arm == PgColumnStatsCoverageArm.StatisticsNotVisible ? new { reason = "pg_stats_unreadable" } : null), cancellationToken);
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
