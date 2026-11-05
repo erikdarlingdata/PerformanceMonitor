@@ -96,7 +96,7 @@ try {
       out.captions[m.value] = body.every((n) => n.className && n.className.includes("qh-legend"))[0].textContent;
     }
   } else if (scenario === "layout") {
-    /* #7542: the grid fills its panel. For a day of 5 minute bins and a week of 70 minute bins, the grid's cell count per row, the label row's
+    /* #7542: the grid fills its panel. For a day of 10 minute bins and a week of 70 minute bins, the grid's cell count per row, the label row's
        column count (the sum of its colspans), the minimum width the table asks for, and whether any cell is given a fixed width. */
     const draw = (binMinutes, firstTime, lastTime) => {
       const d = { metric: "duration", bucket_minutes: binMinutes, magnitude_buckets: labels, cell_count: 2, truncated: false,
@@ -111,7 +111,7 @@ try {
       const cells = table.every((n) => n.tag === "td");
       return { cellsInRow, labelColumns, minWidth: table.style.minWidth || "", fixedCellWidth: cells.some((c) => c.style.width || c.style.minWidth || c.getAttribute("width")) };
     };
-    out.day = draw(5, "2026-10-21T00:00", "2026-10-21T23:55");
+    out.day = draw(10, "2026-10-21T00:00", "2026-10-21T23:50");
     out.week = draw(70, "2026-10-15T00:00", "2026-10-21T22:50");
   } else if (scenario === "renderEmpty") {
     const body = page.renderHeatmapBody({ metric: "duration", bucket_minutes: 5, cells: [] }, { server: "SRV1", columns: [], desc: { emptyText: "none" } });

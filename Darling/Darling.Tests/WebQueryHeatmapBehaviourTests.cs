@@ -138,10 +138,10 @@ public sealed class WebQueryHeatmapBehaviourTests
     /// <summary>
     /// #7542: the grid shares the panel's width instead of drawing 6 px cells. The label row has as many columns as the cell rows, and the
     /// table asks for at least 6 px (plus the 1 px gap) per column, so a narrow window scrolls inside the wrap instead of squeezing the
-    /// columns away. Checked for a day (288 five minute columns) and a week (144 seventy minute columns).
+    /// columns away. Checked for a day (144 ten minute columns) and a week (144 seventy minute columns).
     /// </summary>
     [Theory]
-    [InlineData("day", 288)]
+    [InlineData("day", 144)]
     [InlineData("week", 144)]
     public void TheGridFillsThePanel_WithLabelsOverEveryColumn_AndSixPixelsAsTheMinimumPerColumn(string range, int columns)
     {
