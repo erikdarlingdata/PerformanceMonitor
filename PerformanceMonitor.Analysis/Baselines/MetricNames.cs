@@ -24,6 +24,9 @@ public static class MetricNames
     /// baseline, so a write window is judged against write history and not against the read series (#6696).</summary>
     public const string IoWriteLatency = "io_write_latency";
     public const string Blocking = "blocking";
+    /// <summary>The blocking spike's baseline when the window counted DMV snapshot rows rather than blocked process reports (#7588):
+    /// events per covered hour over <c>dmv_blocking_snapshots</c>, so the ratio compares snapshot rows with snapshot rows.</summary>
+    public const string BlockingSnapshot = "blocking_snapshot";
     public const string Deadlock = "deadlock";
     public const string Memory = "memory";
 
