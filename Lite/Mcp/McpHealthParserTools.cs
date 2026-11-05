@@ -283,7 +283,7 @@ public sealed class McpHealthParserTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
-                system_cpu_note = SystemHealthHostCpu.NoteFor(hostOs),
+                system_cpu_note = SystemHealthHostCpu.SchedulerNoteFor(hostOs),
                 last_captured_at = Stamp(lastCapturedAt),
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),

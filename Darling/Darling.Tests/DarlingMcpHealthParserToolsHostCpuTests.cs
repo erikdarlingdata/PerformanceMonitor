@@ -125,7 +125,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
         RunSchedulerAsync("sched-linux-quiet", "Ubuntu", sqlCpu: 0, idle: 0, root =>
         {
             Assert.False(root.TryGetProperty("issues", out _));
-            Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
             return Task.CompletedTask;
         });
 
@@ -137,7 +137,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.Equal(94, issue.GetProperty("sql_cpu_utilization").GetInt64());
             Assert.Equal(JsonValueKind.Null, issue.GetProperty("other_process_cpu").ValueKind);
             Assert.Equal(JsonValueKind.Null, issue.GetProperty("system_idle").ValueKind);
-            Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
             return Task.CompletedTask;
         });
 
@@ -207,7 +207,7 @@ public sealed class SystemHealthHostCpuRuleTests
 
         Assert.Equal(empty, SystemHealthHostCpu.WithNote(empty, "Windows"));
         Assert.Equal(empty, SystemHealthHostCpu.WithNote(empty, null));
-        Assert.Equal(SystemHealthHostCpu.LinuxNote,
+        Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote,
             JsonDocument.Parse(SystemHealthHostCpu.WithNote(empty, "Ubuntu")!).RootElement.GetProperty("system_cpu_note").GetString());
     }
 

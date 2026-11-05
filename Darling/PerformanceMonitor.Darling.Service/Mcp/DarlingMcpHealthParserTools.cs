@@ -451,7 +451,7 @@ public sealed class DarlingMcpHealthParserTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
-                system_cpu_note = SystemHealthHostCpu.NoteFor(c.HostOs),
+                system_cpu_note = SystemHealthHostCpu.SchedulerNoteFor(c.HostOs),
                 last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),

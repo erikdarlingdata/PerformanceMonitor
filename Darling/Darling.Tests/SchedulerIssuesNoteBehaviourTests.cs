@@ -28,8 +28,19 @@ public sealed class SchedulerIssuesNoteBehaviourTests
     [Fact]
     public async Task TheSchedulerIssuesCard_ShowsTheHostCpuNote_AndNoFigureInTheClearedColumns()
     {
+        var result = await RunHarnessAsync();
+
+        Assert.True(result.GetProperty("found").GetBoolean());
+        Assert.Equal([SystemHealthHostCpu.SchedulerLinuxNote], result.GetProperty("notices").EnumerateArray().Select(n => n.GetString()).ToArray());
+        Assert.Equal("94", result.GetProperty("sqlCpu").GetString());
+        Assert.Equal("—", result.GetProperty("otherProcess").GetString());
+        Assert.Equal("—", result.GetProperty("idle").GetString());
+    }
+
+    private static async Task<JsonElement> RunHarnessAsync()
+    {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        psi.Environment["HARNESS_INPUT"] = JsonSerializer.Serialize(new { note = SystemHealthHostCpu.LinuxNote });
+        psi.Environment["HARNESS_INPUT"] = JsonSerializer.Serialize(new { note = SystemHealthHostCpu.SchedulerLinuxNote });
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "scheduler-issues-note-harness.mjs"));
         psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
 
@@ -41,10 +52,9 @@ public sealed class SchedulerIssuesNoteBehaviourTests
         catch (Win32Exception)
         {
             Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return;
+            return default;
         }
 
-        JsonElement result;
         using (proc)
         {
             var error = proc.StandardError.ReadToEndAsync();
@@ -57,13 +67,7 @@ public sealed class SchedulerIssuesNoteBehaviourTests
 
             Assert.True(proc.ExitCode == 0, "the Scheduler Issues note harness failed: " + await error);
             using var doc = JsonDocument.Parse(output.Split('\n').First(l => l.StartsWith('{')));
-            result = doc.RootElement.Clone();
+            return doc.RootElement.Clone();
         }
-
-        Assert.True(result.GetProperty("found").GetBoolean());
-        Assert.Equal([SystemHealthHostCpu.LinuxNote], result.GetProperty("notices").EnumerateArray().Select(n => n.GetString()).ToArray());
-        Assert.Equal("94", result.GetProperty("sqlCpu").GetString());
-        Assert.Equal("—", result.GetProperty("otherProcess").GetString());
-        Assert.Equal("—", result.GetProperty("idle").GetString());
     }
 }

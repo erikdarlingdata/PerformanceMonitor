@@ -125,7 +125,7 @@ VALUES ($1, $2, $3, $4, 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 1638
         var root = JsonDocument.Parse(await McpHealthParserTools.GetSchedulerIssues(Service(), _serverManager, ServerName, 24, 50, AsOf)).RootElement;
 
         Assert.False(root.TryGetProperty("issues", out _));
-        Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+        Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
     }
 
     [Fact]
@@ -139,7 +139,7 @@ VALUES ($1, $2, $3, $4, 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 1638
         Assert.Equal(94, issue.GetProperty("sql_cpu_utilization").GetInt64());
         Assert.Equal(JsonValueKind.Null, issue.GetProperty("other_process_cpu").ValueKind);
         Assert.Equal(JsonValueKind.Null, issue.GetProperty("system_idle").ValueKind);
-        Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+        Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
     }
 
     [Theory]
