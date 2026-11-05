@@ -17,6 +17,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -133,6 +134,14 @@ public sealed class FleetCardPostgresBlockingLiveTests
             var rollup = DarlingFleetReader.BuildRollup(cards.Values.ToList(), now, now.AddHours(-1), now);
             Assert.Equal(31, rollup.TotalBlockingEvents);
             Assert.Equal(HealthSeverity.Critical, rollup.TotalBlockingSeverity);
+
+            /* The Viewer's fleet total is the same number: the captures that saw blocking, 25 + 6 (the quiet target adds 0, the target
+               with no capture in the window adds nothing). It used to count SQL Server sources only, so it read 0 here. */
+            using var totals = new NpgsqlCommand("SELECT total_blocking_events FROM (" + ViewerDataService.FleetTotalsSql + ") AS t", connection);
+            totals.Parameters.AddWithValue(DateTime.SpecifyKind(now.AddHours(-1), DateTimeKind.Unspecified));
+            totals.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
+            totals.Parameters.AddWithValue(EventWindowFloor.For(now.AddHours(-1)));
+            Assert.Equal(31L, Convert.ToInt64(await totals.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
 
             bodySucceeded = true;
         }

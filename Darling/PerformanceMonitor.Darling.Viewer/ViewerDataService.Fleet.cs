@@ -169,6 +169,19 @@ SELECT
                 GROUP BY server_id
             ) AS dmv ON xe.server_id = dmv.server_id
         ) AS per_server
+    )
+    /* #7654: a PostgreSQL target adds the captures that saw blocking, the count its Fleet card shows (the service's fleet total adds
+       the same). A server with no capture in the window adds nothing. collection_log is windowed on collection_time alone, like the
+       pg_database_stats arm below. A SQL Server has no pg_blocking row, so it adds 0 here. */
+    +
+    (
+        SELECT COUNT(*)
+        FROM collection_log
+        WHERE collector_name = 'pg_blocking'
+        AND   status = 'SUCCESS'
+        AND   rows_collected > 0
+        AND   collection_time >= $1
+        AND   collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
