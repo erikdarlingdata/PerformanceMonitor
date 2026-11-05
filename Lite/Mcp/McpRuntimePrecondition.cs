@@ -187,15 +187,49 @@ internal static class McpRuntimePrecondition
         }
     }
 
+    /// <summary>The payload member that carries <see cref="QueryStoreErrorNoteAsync"/>'s sentence on an answer with rows (#7675).</summary>
+    public const string QueryStoreErrorNoteKey = "query_store_error_note";
+
+    /// <summary>
+    /// #7675: the sentence for an answer WITH rows when a database those rows come from has a Query Store in the ERROR state
+    /// (<see cref="CollectorRuntimePrecondition.QueryStoreErrorNote"/>). Null when none is, when there is no health row, and when the
+    /// read fails: the rows are already in hand and a diagnostic must not turn them into an error.
+    /// </summary>
+    public static async Task<string?> QueryStoreErrorNoteAsync(
+        LocalDataService dataService, int serverId, string? databaseName, IEnumerable<string> rowDatabases)
+    {
+        try
+        {
+            var (states, observedUtc) = await dataService.GetQueryStoreStatesAsync(
+                serverId, string.IsNullOrEmpty(databaseName) ? null : new[] { databaseName });
+            return CollectorRuntimePrecondition.QueryStoreErrorNote(states, observedUtc, rowDatabases);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// <paramref name="answer"/> with <see cref="QueryStoreNotWritingHintAsync"/>'s sentence appended to its message when the
     /// answer is an empty or unavailable status (#6074). Other statuses already say their own cause.
     /// </summary>
     public static async Task<string> WithQueryStoreNotWritingHintAsync(
-        string answer, LocalDataService dataService, int serverId, string serverName, string? databaseName)
+        string answer, LocalDataService dataService, int serverId, string serverName, string? databaseName,
+        IEnumerable<string>? rowDatabases = null)
     {
         if (!McpHelpers.IsEmptyOrUnavailableStatus(answer))
         {
+            /* #7675: an answer WITH rows (rowDatabases names the databases they come from) says so when one of those stores is in the
+               ERROR state: its rows are old and nothing says so. A JSON object only; the empty and unavailable answers keep their hint. */
+            if (rowDatabases is not null
+                && await QueryStoreErrorNoteAsync(dataService, serverId, databaseName, rowDatabases) is { } errorNote
+                && System.Text.Json.Nodes.JsonNode.Parse(answer) is System.Text.Json.Nodes.JsonObject payload)
+            {
+                payload[QueryStoreErrorNoteKey] = errorNote;
+                return payload.ToJsonString(McpHelpers.JsonOptions);
+            }
+
             return answer;
         }
 

@@ -314,7 +314,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
                         actual_state = c.ActualState,
                         desired_state = c.DesiredState,
                         readonly_reason = c.ReadonlyReason,
-                        readonly_reason_decoded = c.ReadonlyReason == 0 ? null : QueryStoreReadonlyReason.Decode(c.ReadonlyReason),
+                        readonly_reason_decoded = QueryStoreReadonlyReason.DecodeWithState(c.ActualState, c.ReadonlyReason) is { Length: > 0 } decoded ? decoded : null,
                         current_storage_size_mb = c.CurrentStorageMb,
                         max_storage_size_mb = c.MaxStorageMb,
                         pct_of_cap = Round(QueryStoreClutter.PctOfCap(c), 1),
