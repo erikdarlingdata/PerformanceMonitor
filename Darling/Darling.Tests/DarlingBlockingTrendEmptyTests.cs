@@ -47,6 +47,67 @@ public sealed class DarlingBlockingTrendEmptyTests
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>
+    /// #7724: a server that went offline partway through the window. Both trends ran inside it, and a window that ends after the outage began
+    /// is not a genuine all-clear: the answer says what was collected, through when, and that nothing after is known.
+    /// </summary>
+    [Fact]
+    public async Task AnOfflineServer_WithCollectionInTheWindow_SaysWhatWasCollected_NotAnAllClear_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live blocking-trend empty test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            /* Three days of runs that saw nothing, the last one three days ago: inside a 7-day window, long before its end. */
+            var last = HoursAgo(72);
+            foreach (var collector in new[] { "blocked_process_report", "dmv_blocking_snapshot", "deadlocks" })
+            {
+                await SeedRunAsync(connection, ct, collector, last.AddHours(-2));
+                await SeedRunAsync(connection, ct, collector, last);
+            }
+
+            var expected = DateTime.SpecifyKind(last, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var answer in new[]
+            {
+                await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 168),
+                await DarlingMcpBlockingTools.GetDeadlockTrend(dataSource, ServerName, 168),
+            })
+            {
+                var root = JsonDocument.Parse(answer).RootElement;
+                Assert.Equal("unavailable", root.GetProperty("status").GetString());
+                Assert.Equal(
+                    "Nothing was recorded through the last collection at " + expected + ". Nothing after that is known.",
+                    root.GetProperty("message").GetString());
+                Assert.StartsWith(expected[..19], root.GetProperty("collected_through").GetString(), StringComparison.Ordinal);
+                Assert.DoesNotContain("genuine all-clear", answer, StringComparison.Ordinal);
+            }
+
+            /* A window that holds no collection keeps its own answer: the server is offline, but nothing of it was collected inside the window. */
+            var narrow = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(dataSource, ServerName, 1)).RootElement;
+            Assert.False(narrow.TryGetProperty("collected_through", out _));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task NeverCollected_AGapInTheWindow_AndAGenuineAllClear_AreThreeDifferentAnswers_AgainstDevPostgres()
     {

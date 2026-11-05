@@ -101,6 +101,42 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal(new[] { "message", "status" }, root.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// #7724: a server that went offline partway through a wide window. Its newest success is three days back, inside a 7-day window, so the
+    /// empty reads and both trends say what was collected through that instant and that nothing after is known. None calls the window a genuine all-clear.
+    /// </summary>
+    [Theory]
+    [InlineData("deadlocks")]
+    [InlineData("blocked_process_reports")]
+    [InlineData("blocking_trend")]
+    [InlineData("deadlock_trend")]
+    public async Task OfflineServer_WithACollectionInTheWindow_SaysWhatWasCollectedThrough(string family)
+    {
+        var last = DateTime.UtcNow.AddDays(-3);
+        await SeedAsync(last);
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR");
+
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+        var answer = family switch
+        {
+            "deadlocks" => await McpBlockingTools.GetDeadlocks(service, _serverManager, ServerName, 168),
+            "blocked_process_reports" => await McpBlockingTools.GetBlockedProcessReports(service, _serverManager, ServerName, 168),
+            "blocking_trend" => await McpBlockingTools.GetBlockingTrend(service, _serverManager, ServerName, 168),
+            _ => await McpBlockingTools.GetDeadlockTrend(service, _serverManager, ServerName, 168),
+        };
+
+        var root = JsonDocument.Parse(answer).RootElement;
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith("Nothing was recorded through the last collection at ", message, StringComparison.Ordinal);
+        Assert.EndsWith(". Nothing after that is known.", message, StringComparison.Ordinal);
+        var through = DateTime.Parse(root.GetProperty("collected_through").GetString()!, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+        Assert.InRange((through - last).TotalSeconds, -2, 2);
+        Assert.DoesNotContain("genuine all-clear", answer, StringComparison.Ordinal);
+    }
+
     [Theory]
     [MemberData(nameof(Families))]
     public async Task ServerCollectedJustNow_KeepsItsTrueNegativeEmpty(string family)
