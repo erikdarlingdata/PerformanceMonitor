@@ -119,18 +119,36 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal("Gamma", step.GetProperty("shown").GetString());
     }
 
-    /* #7702 item 1: a 0.002 GB figure printed 0.00. It now prints in the unit that fits (2.0 MB). #7701: a left-over database says since when,
-       and Collected sits right after Database in the roll-up. */
+    /* #7702 item 1: a 0.002 GB figure printed 0.00. It now prints in the unit that fits (2.0 MB), and an index of 0.4 MB, which the read
+       sends as 0.000391 GB, prints 0.4 MB, not 0.400384 MB. #7701: a left-over database says since when, Collected sits right after
+       Database in the roll-up, and a live database that shares its name with a left-over one keeps its Collected time on its
+       recommendations (the left-over twin does not make the name ambiguous). */
     [Fact]
     public void ASmallSizePrintsNonZero_ALeftOverDatabaseCarriesItsMark_AndCollectedFollowsDatabase()
     {
         var step = Run().GetProperty("sizes");
         var text = step.GetProperty("text").GetString()!;
         Assert.Contains("2.0 MB", text, StringComparison.Ordinal);
-        Assert.Contains("0.4096 MB", text, StringComparison.Ordinal);
+        Assert.Contains("0.41 MB", text, StringComparison.Ordinal);
+        Assert.Contains("0.4 MB", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.400384", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.4096", text, StringComparison.Ordinal);
         Assert.DoesNotContain("0.00", text, StringComparison.Ordinal);
         Assert.Contains("Not collected since", text, StringComparison.Ordinal);
         var header = step.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal("Collected", header[header.ToList().IndexOf("Database") + 1]);
+    }
+
+    [Fact]
+    public void ALiveDatabaseSharingANameWithALeftOverOne_KeepsItsCollectedTimeOnItsRecommendations()
+    {
+        var tables = Run().GetProperty("sizes").GetProperty("tables").EnumerateArray().ToList();
+        var grid = tables.Single(t => t.GetProperty("rows").EnumerateArray().Any(r => r.EnumerateArray().Any(c => c.GetString() == "IX1")));
+        var header = grid.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToList();
+        var row = grid.GetProperty("rows").EnumerateArray().Single(r => r.EnumerateArray().Any(c => c.GetString() == "IX1"))
+            .EnumerateArray().Select(c => c.GetString()!).ToList();
+        var collected = row[header.IndexOf("Collected")];
+        Assert.NotEqual("—", collected);
+        Assert.NotEmpty(collected);
     }
 }

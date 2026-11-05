@@ -79,10 +79,20 @@ const RECOMMENDATION_COLUMNS = [
   { key: "script", label: "Script", wrap: true, mono: true, pre: true },
 ];
 
+// A size the read sends in GB, shown in the unit that fits it. The read rounds GB to six places, so an index of 0.4 MB arrives as
+// 0.000391 GB, and fmtMbFit would print it back as 0.400384 MB: digits nobody measured. Under 1 MB it prints at most two decimals
+// (0.4 MB); a positive size under 0.005 MB reads "<0.01 MB", never 0 (#7702 item 1). From 1 MB up fmtMbFit already rounds.
+function gbSizeText(gb) {
+  const mb = gb * 1024;
+  if (Math.abs(mb) >= 1 || mb === 0) return fmtMbFit(mb);
+  const cents = Math.round(mb * 100);
+  return cents === 0 ? "<0.01 MB" : fmtMbFit(cents / 100);
+}
+
 // The reads cell as the desktop writes it. The overall row carries no counters, so its cell stays missing.
 function rollupRow(r) {
   const gbs = {};
-  for (const k of GB_KEYS) gbs[gbText(k)] = r[k] == null ? null : fmtMbFit(r[k] * 1024);
+  for (const k of GB_KEYS) gbs[gbText(k)] = r[k] == null ? null : gbSizeText(r[k]);
   // #7701: a database whose snapshot is left over (left_over, set by the read) is in no total; the mark says since when.
   const status = r.left_over ? "Not collected since " + localTime(r.captured_at) : "";
   return { ...r, ...gbs, status_text: status, reads_breakdown: r.total_reads == null ? null : fmtInt(r.total_reads) + " (" + fmtInt(r.user_seeks) + " seeks, " + fmtInt(r.user_scans) + " scans, " + fmtInt(r.user_lookups) + " lookups)" };
@@ -99,7 +109,7 @@ function capturedByName(databases) {
 }
 
 function recommendationRow(r, captured) {
-  return { ...r, index_size_gb_text: fmtMbFit(r.index_size_gb * 1024), captured_at: captured.get(r.database_name) ?? null };
+  return { ...r, index_size_gb_text: gbSizeText(r.index_size_gb), captured_at: captured.get(r.database_name) ?? null };
 }
 
 // The latest choice per server: the Database box's fields (db, draft, caret, focused; names are the databases of the last unfiltered

@@ -181,7 +181,9 @@ public sealed partial class ViewerDataService
         var idByName = new Dictionary<string, int?>(StringComparer.Ordinal);
         foreach (var rollup in result.DatabaseRollups)
         {
-            if (rollup.DatabaseName == null)
+            /* #7701: a left-over rollup is in the list for display and owns no recommendation, so it must not make a current
+               database that shares its name look ambiguous. The web page's capturedByName applies the same rule. */
+            if (rollup.DatabaseName == null || (rollup.DatabaseId is { } rollupId && leftOverIds != null && leftOverIds.Contains(rollupId)))
             {
                 continue;
             }

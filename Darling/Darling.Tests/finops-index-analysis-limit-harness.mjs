@@ -177,7 +177,8 @@ try {
       { database_name: "Alpha", total_size_gb: 0.002, unused_size_gb: 0.0004, captured_at: "2026-01-15T12:00:00.0000000Z" },
       { database_name: "Alpha", total_size_gb: 0.5, left_over: true, captured_at: "2026-01-05T12:00:00.0000000Z" },
     ],
-    recommendations: [{ ...rec(1), index_size_gb: 0.0004 }],
+    // 0.000391 GB is how the read sends an index of 0.4 MB (six places); it must print 0.4 MB, not 0.400384 MB.
+    recommendations: [{ ...rec(1), index_size_gb: 0.000391 }],
   });
   root = tab.build("srv-f", {});
   await settle();
@@ -185,6 +186,11 @@ try {
   out.sizes = {
     text: root.textContent,
     header: findAll(headerRow, byTag("th")).map((n) => n.textContent),
+    // every grid as header + body rows, so a test can read one cell of one row
+    tables: findAll(root, byTag("table")).map((t) => ({
+      header: findAll(t, byTag("th")).map((n) => n.textContent),
+      rows: findAll(t, byTag("tr")).map((r) => findAll(r, byTag("td")).map((n) => n.textContent)).filter((r) => r.length),
+    })),
   };
   console.log(JSON.stringify(out));
 } finally {
