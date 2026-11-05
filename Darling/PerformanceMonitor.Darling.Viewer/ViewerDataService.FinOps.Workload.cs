@@ -57,7 +57,7 @@ public sealed partial class ViewerDataService
             _dataSource, serverId, rollups, coverage, cutoff, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
         /* #7725: a database the server no longer lists keeps its row and is marked, the rule the web page and get_finops_database_resources
            use (the one "still listed" source #5633 uses). An unknown set (no recent snapshot) marks nothing. */
-        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(_dataSource, serverId, windowStartUtc: cutoff, cancellationToken: cancellationToken);
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(_dataSource, serverId, windowStartUtc: cutoff, logger: null, cancellationToken: cancellationToken);
         var rows = items.ConvertAll(DatabaseResourceUsageRow.From);
         foreach (var row in rows)
         {

@@ -53,7 +53,7 @@ public sealed partial class DarlingMcpFinOpsTools
 
         var notice = await NoticeAsync(emptyAnswer: false);
         /* #7725: a row in a database the server no longer lists is marked database_dropped, so the page can say so. */
-        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: start, cancellationToken: ct);
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: start, logger: null, cancellationToken: ct);
         var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,

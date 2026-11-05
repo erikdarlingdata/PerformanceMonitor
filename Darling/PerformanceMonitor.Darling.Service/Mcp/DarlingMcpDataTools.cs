@@ -850,7 +850,7 @@ public sealed class DarlingMcpDataTools
                and what the limit leaves is filled from the dropped databases, ranked the same way and marked database_dropped. `databases`
                itself stays the caller's choice for the empty-page probes below. */
             var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
-                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, cancellationToken: cancellationToken);
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, logger: null, cancellationToken: cancellationToken);
             var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
                 postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
