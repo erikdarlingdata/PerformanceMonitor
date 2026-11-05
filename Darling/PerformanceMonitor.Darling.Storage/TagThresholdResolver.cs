@@ -29,6 +29,15 @@ public sealed record TagOverrideWinner(int TagId, double Value);
 /// </summary>
 public static class TagThresholdResolver
 {
+    /// <summary>The registry's server ids: every server a tag can cover (#5750). Schema-qualified, so the service, the Viewer and the tools read it the same way.</summary>
+    public const string ServersSql = "SELECT server_id FROM config.config_monitored_servers";
+
+    /// <summary>The tag tree (#5750): every tag and its parent (NULL for a root).</summary>
+    public const string TagsSql = "SELECT id, parent_id FROM config.server_tags";
+
+    /// <summary>The server-to-tag assignments (#5750).</summary>
+    public const string TagMapSql = "SELECT server_id, tag_id FROM config.server_tag_map";
+
     /// <summary>The winning tag override per (server, key) for every server some tag covers.</summary>
     public static IReadOnlyDictionary<(int ServerId, string Key), TagOverrideWinner> Resolve(
         IReadOnlyCollection<TagOverrideCandidate> rows,

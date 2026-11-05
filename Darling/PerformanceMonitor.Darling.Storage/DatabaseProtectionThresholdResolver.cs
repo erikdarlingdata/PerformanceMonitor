@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -48,16 +49,16 @@ public static class DatabaseProtectionThresholdSettings
         "SELECT backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours " +
         "FROM config.config_alert_settings WHERE id = 1";
 
-    /// <summary>The server's own database and server overrides of the three keys. A tag override is not here: the service's sweep resolves tags with the tag tree
-    /// (<c>DarlingThresholdOverrides</c>), and the reads that call this are the tool, the fleet page and the Viewer.</summary>
+    /// <summary>The server's own database and server overrides of the three keys, and every tag override (#6926). A tag override has no server id: it reaches a
+    /// server through the tag tree, which <see cref="TagThresholdResolver"/> walks, the same resolution the service's alerts use.</summary>
     public const string OverridesSql =
-        "SELECT database_name, threshold_key, value FROM config.config_threshold_overrides " +
-        "WHERE server_id = $1 AND scope_tag_id IS NULL AND threshold_key = ANY($2)";
+        "SELECT id, server_id, database_name, scope_tag_id, threshold_key, value FROM config.config_threshold_overrides " +
+        "WHERE threshold_key = ANY($2) AND (scope_tag_id IS NOT NULL OR server_id = $1)";
 
-    /// <summary>Every server's database and server overrides of the three keys, for the fleet reads that judge many servers in one pass.</summary>
+    /// <summary>Every server's database and server overrides of the three keys, and every tag override, for the fleet reads that judge many servers in one pass.</summary>
     public const string FleetOverridesSql =
-        "SELECT server_id, database_name, threshold_key, value FROM config.config_threshold_overrides " +
-        "WHERE server_id IS NOT NULL AND scope_tag_id IS NULL AND threshold_key = ANY($1)";
+        "SELECT id, server_id, database_name, scope_tag_id, threshold_key, value FROM config.config_threshold_overrides " +
+        "WHERE threshold_key = ANY($1) AND (scope_tag_id IS NOT NULL OR server_id IS NOT NULL)";
 
     /// <summary>One read of the global ages and every server's overrides; <paramref name="serverId"/> picks a server's resolver. Reads as <see cref="ReadAsync"/> does when a table cannot be read.</summary>
     public static async Task<Func<int, DatabaseProtectionThresholdResolver>> ReadFleetAsync(
@@ -66,6 +67,7 @@ public static class DatabaseProtectionThresholdSettings
         ArgumentNullException.ThrowIfNull(postgres);
         var global = await ReadGlobalAsync(postgres, commandTimeoutSeconds, cancellationToken);
         var byServer = new Dictionary<int, List<(string? Database, string Key, double Value)>>();
+        var tagRows = new List<TagOverrideCandidate>();
         try
         {
             await using var command = postgres.CreateCommand(FleetOverridesSql);
@@ -74,17 +76,92 @@ public static class DatabaseProtectionThresholdSettings
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var id = reader.GetInt32(0);
+                if (!reader.IsDBNull(3))
+                {
+                    tagRows.Add(new TagOverrideCandidate(reader.GetInt64(0), reader.GetInt32(3), reader.GetString(4), reader.GetDouble(5)));
+                    continue;
+                }
+
+                var id = reader.GetInt32(1);
                 if (!byServer.TryGetValue(id, out var list))
                     byServer[id] = list = [];
-                list.Add((reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetString(2), reader.GetDouble(3)));
+                list.Add((reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(4), reader.GetDouble(5)));
             }
         }
         catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.InsufficientPrivilege or PostgresErrorCodes.UndefinedTable)
         {
         }
 
-        return serverId => DatabaseProtectionThresholdResolver.FromRows(global, byServer.TryGetValue(serverId, out var rows) ? rows : []);
+        var tagWinners = await ReadTagWinnersAsync(postgres, tagRows, commandTimeoutSeconds, cancellationToken);
+        return serverId => DatabaseProtectionThresholdResolver.FromRows(
+            global, byServer.TryGetValue(serverId, out var rows) ? rows : [], TagWinnersFor(tagWinners, serverId));
+    }
+
+    private static Dictionary<string, int> TagWinnersFor(IReadOnlyDictionary<(int ServerId, string Key), TagOverrideWinner> winners, int serverId)
+    {
+        var forServer = new Dictionary<string, int>();
+        foreach (var key in Keys)
+        {
+            if (winners.TryGetValue((serverId, key), out var winner))
+                forServer[key] = (int)winner.Value;
+        }
+
+        return forServer;
+    }
+
+    /// <summary>
+    /// The tag override that wins per (server, key) (#6926), by the one resolution the service's alerts use: <see cref="TagThresholdResolver"/>, the deepest tag
+    /// the server is under. Reads the registry, the tag tree and the server-to-tag map only when a tag override exists. A role that cannot read those tables
+    /// reads as no tag override, never as an error, as the other reads here do. A row outside its key's bounds or not an integer is skipped, as the service skips it.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<(int ServerId, string Key), TagOverrideWinner>> ReadTagWinnersAsync(
+        NpgsqlDataSource postgres, List<TagOverrideCandidate> tagRows, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var accepted = tagRows.FindAll(r => DarlingThresholdKeys.TryGet(r.Key, out var entry) && r.Value == Math.Floor(r.Value) && r.Value >= entry.Min && r.Value <= entry.Max);
+        if (accepted.Count == 0)
+            return new Dictionary<(int ServerId, string Key), TagOverrideWinner>();
+
+        var known = new HashSet<int>();
+        var parents = new Dictionary<int, int?>();
+        var serverTags = new Dictionary<int, HashSet<int>>();
+        try
+        {
+            await using (var command = postgres.CreateCommand(TagThresholdResolver.ServersSql))
+            {
+                command.CommandTimeout = commandTimeoutSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    known.Add(reader.GetInt32(0));
+            }
+
+            await using (var command = postgres.CreateCommand(TagThresholdResolver.TagsSql))
+            {
+                command.CommandTimeout = commandTimeoutSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                    parents[reader.GetInt32(0)] = reader.IsDBNull(1) ? null : reader.GetInt32(1);
+            }
+
+            await using (var command = postgres.CreateCommand(TagThresholdResolver.TagMapSql))
+            {
+                command.CommandTimeout = commandTimeoutSeconds;
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!serverTags.TryGetValue(serverId, out var tags))
+                        serverTags[serverId] = tags = [];
+                    tags.Add(reader.GetInt32(1));
+                }
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.InsufficientPrivilege or PostgresErrorCodes.UndefinedTable)
+        {
+            return new Dictionary<(int ServerId, string Key), TagOverrideWinner>();
+        }
+
+        return TagThresholdResolver.Resolve(
+            accepted, known, parents, serverTags.ToDictionary(p => p.Key, p => (IReadOnlyCollection<int>)p.Value), true);
     }
 
     private static async Task<DatabaseProtectionGlobalThresholds> ReadGlobalAsync(NpgsqlDataSource postgres, int commandTimeoutSeconds, CancellationToken cancellationToken)
@@ -115,6 +192,7 @@ public static class DatabaseProtectionThresholdSettings
         ArgumentNullException.ThrowIfNull(postgres);
         var global = await ReadGlobalAsync(postgres, commandTimeoutSeconds, cancellationToken);
         var rows = new List<(string? Database, string Key, double Value)>();
+        var tagRows = new List<TagOverrideCandidate>();
         try
         {
             await using var command = postgres.CreateCommand(OverridesSql);
@@ -123,18 +201,24 @@ public static class DatabaseProtectionThresholdSettings
             command.Parameters.AddWithValue(Keys);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
-                rows.Add((reader.IsDBNull(0) ? null : reader.GetString(0), reader.GetString(1), reader.GetDouble(2)));
+            {
+                if (!reader.IsDBNull(3))
+                    tagRows.Add(new TagOverrideCandidate(reader.GetInt64(0), reader.GetInt32(3), reader.GetString(4), reader.GetDouble(5)));
+                else
+                    rows.Add((reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(4), reader.GetDouble(5)));
+            }
         }
         catch (PostgresException ex) when (ex.SqlState is PostgresErrorCodes.InsufficientPrivilege or PostgresErrorCodes.UndefinedTable)
         {
         }
 
-        return DatabaseProtectionThresholdResolver.FromRows(global, rows);
+        var tagWinners = await ReadTagWinnersAsync(postgres, tagRows, commandTimeoutSeconds, cancellationToken);
+        return DatabaseProtectionThresholdResolver.FromRows(global, rows, TagWinnersFor(tagWinners, serverId));
     }
 }
 
 /// <summary>
-/// One server's effective Database Protection ages (#7611): for a database, its override, else the server's, else the global value, else the built-in one.
+/// One server's effective Database Protection ages (#7611): for a database, its override, else the server's, else the tag's (#6926, the deepest tag the server is under), else the global value, else the built-in one.
 /// The one resolution the sweep's alerts, <c>get_database_protection</c>, the fleet page and the Viewer share, so none of them keeps its own copy. It only
 /// supplies the ages: <see cref="DatabaseProtectionBands"/> stays the one judgment.
 /// </summary>
@@ -152,10 +236,12 @@ public sealed class DatabaseProtectionThresholdResolver
     /// <summary>The global ages, before any override.</summary>
     public DatabaseProtectionGlobalThresholds Global { get; }
 
-    /// <summary>A resolver over the rows of <c>config.config_threshold_overrides</c> for one server. A row whose key is not one of the three, whose value is not
+    /// <summary>A resolver over the rows of <c>config.config_threshold_overrides</c> for one server, plus the tag override that won per wire name
+    /// (<paramref name="tagOverrides"/>, from <see cref="TagThresholdResolver"/>). A row whose key is not one of the three, whose value is not
     /// an integer inside the key's bounds, is skipped, as <c>DarlingThresholdOverrides</c> skips it.</summary>
     public static DatabaseProtectionThresholdResolver FromRows(
-        DatabaseProtectionGlobalThresholds global, IEnumerable<(string? Database, string Key, double Value)> rows)
+        DatabaseProtectionGlobalThresholds global, IEnumerable<(string? Database, string Key, double Value)> rows,
+        IReadOnlyDictionary<string, int>? tagOverrides = null)
     {
         var map = new Dictionary<(string Database, string Key), int>();
         foreach (var (database, key, raw) in rows)
@@ -169,7 +255,9 @@ public sealed class DatabaseProtectionThresholdResolver
         {
             if (!string.IsNullOrEmpty(database) && map.TryGetValue((database, wire), out var perDatabase))
                 return perDatabase;
-            return map.TryGetValue((string.Empty, wire), out var perServer) ? perServer : globalValue;
+            if (map.TryGetValue((string.Empty, wire), out var perServer))
+                return perServer;
+            return tagOverrides is not null && tagOverrides.TryGetValue(wire, out var perTag) ? perTag : globalValue;
         });
     }
 

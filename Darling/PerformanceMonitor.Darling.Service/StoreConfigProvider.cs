@@ -2826,13 +2826,13 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
 
     /// <summary>The registry's server ids: every server a route's scope can name (#5750). The desired-state table, whose
     /// <c>server_id</c> is the key an alert carries as <c>AlertOutcome.ServerKey</c>.</summary>
-    public const string RouteScopeServersSql = "SELECT server_id FROM config_monitored_servers";
+    public const string RouteScopeServersSql = TagThresholdResolver.ServersSql;
 
     /// <summary>The tag tree (#5750): every tag and its parent (NULL for a root).</summary>
-    public const string RouteScopeTagsSql = "SELECT id, parent_id FROM server_tags";
+    public const string RouteScopeTagsSql = TagThresholdResolver.TagsSql;
 
     /// <summary>The server-to-tag assignments (#5750).</summary>
-    public const string RouteScopeTagMapSql = "SELECT server_id, tag_id FROM server_tag_map";
+    public const string RouteScopeTagMapSql = TagThresholdResolver.TagMapSql;
 
     /// <summary>
     /// The three inputs <see cref="NotificationRouteScopeExpander.Expand"/> needs, read from the store (#5750): the known server ids,

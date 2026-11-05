@@ -775,4 +775,119 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
             return 0;
         });
     }
+
+    private static DarlingServer ProtectionServer() =>
+        new(ServerId, Name, Name, true, 16, engineKind: MonitoredEngineKind.SqlServer, engineEdition: CollectorEngineCapability.UnknownEngineEdition);
+
+    [Fact]
+    public void ATagOverride_BeatsTheGlobalValue_ButNotAServerOrDatabaseOverride()
+    {
+        var tags = new Dictionary<string, int> { [DarlingThresholdKeys.LogBackupOverdueMinutes] = 1440 };
+        var global = DatabaseProtectionGlobalThresholds.Default;
+
+        Assert.Equal(TimeSpan.FromMinutes(1440), DatabaseProtectionThresholdResolver.FromRows(global, [], tags).For("A").LogBackup);
+        Assert.Equal(TimeSpan.FromMinutes(60), DatabaseProtectionThresholdResolver.FromRows(global, []).For("A").LogBackup);
+
+        var server = DatabaseProtectionThresholdResolver.FromRows(global, [(null, DarlingThresholdKeys.LogBackupOverdueMinutes, 120)], tags);
+        Assert.Equal(TimeSpan.FromMinutes(120), server.For("A").LogBackup);
+        var database = DatabaseProtectionThresholdResolver.FromRows(
+            global, [(null, DarlingThresholdKeys.LogBackupOverdueMinutes, 120), ("A", DarlingThresholdKeys.LogBackupOverdueMinutes, 30)], tags);
+        Assert.Equal((TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(120)), (database.For("A").LogBackup, database.For("B").LogBackup));
+    }
+
+    [Fact]
+    public async Task ATagOverride_OfTheServersTag_MovesTheToolTheFleetFactsAndTheViewer_AndAServerOverrideStillBeatsIt()
+    {
+        await WithStoreAsync(async (connection, ct) =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-5);
+            await InsertCaptureAsync(connection, ct, at, Db("Sales", at, TimeSpan.FromDays(1), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+        }, async (postgres, connection, ct) =>
+        {
+            async Task<bool> ToolLogOverdue()
+            {
+                using var doc = JsonDocument.Parse(await DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(postgres, Name));
+                return doc.RootElement.GetProperty("databases")[0].GetProperty("log_backup").GetProperty("overdue").GetBoolean();
+            }
+
+            async Task<string> ViewerStatus()
+            {
+                await using var viewer = new ViewerDataService(postgres.ConnectionString);
+                return (await viewer.ReadDatabaseProtectionAsync(ProtectionServer(), DateTime.UtcNow, cancellationToken: ct)).Status;
+            }
+
+            async Task<bool> FleetOverdue() =>
+                (await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow, ct)).ContainsKey(ServerId);
+
+            /* 90 minutes old against the 60-minute age is overdue everywhere. */
+            Assert.True(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Overdue, await ViewerStatus());
+            Assert.True(await FleetOverdue());
+
+            /* A 1440-minute override on a tag above the server's own tag moves all three, as it moves the service's alert. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, 'protection-tag', 'protection-tag') ON CONFLICT DO NOTHING", ServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.server_tags (name, parent_id) VALUES ('Production', NULL), ('east', 1)");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES ($1, 2)", ServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config.config_threshold_overrides (scope_tag_id, threshold_key, value, set_by) VALUES (1, $1, 1440, 'test')", DarlingThresholdKeys.LogBackupOverdueMinutes);
+            Assert.False(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Ok, await ViewerStatus());
+            Assert.False(await FleetOverdue());
+
+            /* A server override of 30 minutes beats the tag's 1440. */
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                await ThresholdOverrideStore.UpsertAsync(connection, transaction, ServerId, null, DarlingThresholdKeys.LogBackupOverdueMinutes, 30, "test", null, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            Assert.True(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Overdue, await ViewerStatus());
+            Assert.True(await FleetOverdue());
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task AStoreUpgradedFromV244_GainsTheThreeAgesAtTheirDefaults_AndKeepsItsOtherAlertSettings()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database protection alert tests.");
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: a scratch database of its own, migrated from the ladder below. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_alert_settings (id) VALUES (1) ON CONFLICT DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE config.config_alert_settings SET cpu_threshold_percent = 91, backup_overdue_enabled = TRUE");
+
+            /* The store as V244 left it: none of the three columns, and no V245 row in the version table. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 244, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 245");
+            await using (var check = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_attribute WHERE attrelid = 'config.config_alert_settings'::regclass AND NOT attisdropped " +
+                "AND attname IN ('backup_overdue_threshold_hours', 'log_backup_overdue_threshold_minutes', 'checkdb_overdue_threshold_hours')", connection))
+            {
+                Assert.Equal(0L, await check.ExecuteScalarAsync(ct));
+            }
+
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            var row = await viewer.GetAlertSettingsAsync(ct);
+            Assert.NotNull(row);
+            Assert.Equal((168, 60, 336), (row.BackupOverdueThresholdHours, row.LogBackupOverdueThresholdMinutes, row.CheckDbOverdueThresholdHours));
+            Assert.Equal(91, row.CpuThresholdPercent);
+            Assert.True(row.BackupOverdueEnabled);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
 }
