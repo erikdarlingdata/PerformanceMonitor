@@ -2084,8 +2084,8 @@ public static class FactAdvice
 
         var rem =
             "If it was a one-time event — a report run, a backfill, a deploy — no action beyond awareness. " +
-            "If it recurs or sustains, it will cross the standard thresholds and surface as a first-class " +
-            "finding with its own detail on a later window; treat it then with the matching wait or resource advice.";
+            "If it recurs or sustains, it will cross the standard thresholds and appear on the Recommendations tab " +
+            "with its own detail on a later window; treat it then with the matching wait or resource advice.";
 
         return fallback with
         {
@@ -2207,7 +2207,7 @@ public static class FactAdvice
                 "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
                 "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
                 "that was reliably zero and now is not will usually recur; if it recurs or sustains, it will cross the standard " +
-                $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
+                $"{noun} threshold and appear on the Recommendations tab with its chain or graph detail on a later window; treat it then.";
             return fallback with
             {
                 Headline = $"{Plural(current.Value, counted)} this window — against a month in which this hour saw none",
@@ -2227,7 +2227,7 @@ public static class FactAdvice
                 "hour-of-week yet to compare against. Treat it as a new event, not a proven regression: check whether it " +
                 "coincides with a workload change, a deploy, or a one-off before treating it as chronic." + unitNote;
             var remNew =
-                $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
+                $"If it recurs or sustains, it will cross the standard {noun} threshold and appear on the Recommendations tab " +
                 "with its chain or graph detail on a later window; treat it then. A one-time event that matches a known cause needs only awareness.";
             return fallback with
             {
@@ -2245,7 +2245,7 @@ public static class FactAdvice
         inv.Append(unitNote);
 
         var rem =
-            $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
+            $"If it recurs or sustains, it will cross the standard {noun} threshold and appear on the Recommendations tab " +
             "with its chain or graph detail on a later window; treat it then. A one-time spike that matches a known event needs only awareness.";
 
         return fallback with

@@ -128,11 +128,46 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
-    public void OnlyIncidentFindings_LinkToTheServersQueriesTab_NotConfigFixes()
+    public void OnlyIncidentFindings_LinkToTheirFamilysTab_NotConfigFixes()
     {
         var links = Strings(Run("link"));
         Assert.Equal(3, links.Length);
-        Assert.All(links, l => Assert.Equal("#/server/srv-a/queries", l));
+        // The sample cards are CPU cards (#7677): the link goes to the CPU tab, not Queries.
+        Assert.All(links, l => Assert.Equal("#/server/srv-a/cpu", l));
+    }
+
+    /// <summary>#7677: every card used to carry "Open Queries tab" whatever its text said. Each card now opens the tab that holds its evidence,
+    /// the button names that tab, and a card with no tab of its own (or a standing setting, or no window) has no button.</summary>
+    [Fact]
+    public void EachCard_OpensTheTabThatHoldsItsEvidence_AndTheButtonNamesIt()
+    {
+        var r = Run("tabLinks");
+        void Opens(string card, string tab, string label)
+        {
+            var a = Assert.Single(r.GetProperty(card).EnumerateArray());
+            Assert.Equal("#/server/srv-a/" + tab, a.GetProperty("href").GetString());
+            Assert.Equal("Open " + label + " tab", a.GetProperty("text").GetString());
+        }
+        void NoButton(string card) => Assert.Empty(r.GetProperty(card).EnumerateArray());
+
+        Opens("waits", "waits", "Wait Stats");
+        Opens("blocking", "blocking", "Blocking");
+        Opens("deadlock", "blocking", "Blocking");
+        Opens("memory", "memory", "Memory");
+        Opens("io", "io", "File I/O");
+        Opens("queries", "queries", "Queries");
+        Opens("anomalyWait", "waits", "Wait Stats");
+        Opens("anomalyDeadlock", "blocking", "Blocking");
+        Opens("anomalyByRootFact", "blocking", "Blocking");
+        Opens("pgWaits", "waits", "Waits");
+        Opens("pgBlocking", "activity", "Activity");
+        Opens("pgAnomalyDeadlock", "activity", "Activity");
+        NoButton("anomalyUnmapped");
+        NoButton("tempdb");
+        NoButton("pgTemp");
+        NoButton("configFix");
+        NoButton("standingState");
+        NoButton("noWindow");
     }
 
     [Fact]
@@ -148,7 +183,8 @@ public sealed class AnalysisFindingsTabTests
     {
         var groups = Run("standingLink").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => Strings(g.GetProperty("links")));
         Assert.Empty(groups.Single(g => g.Key.StartsWith("VolumeLow", StringComparison.Ordinal)).Value);
-        Assert.Equal(new[] { "Open Queries tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
+        // The WaitSpike sample card is a CPU card (#7677): its button names the CPU tab, not Queries.
+        Assert.Equal(new[] { "Open CPU tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
     }
 
     [Fact]
