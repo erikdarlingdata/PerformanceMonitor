@@ -104,7 +104,9 @@ public sealed class DarlingMcpMemoryGrantTools
                 resource_semaphore_id = r.ResourceSemaphoreId,
                 pool_id = r.PoolId,
                 target_memory_mb = r.TargetMemoryMb,
-                max_target_memory_mb = r.MaxTargetMemoryMb,
+                /* #7676: the DMV has no max target for the small-query semaphore (id 1) and the collector stores that NULL as 0:
+                   null here, never a 0 that reads as a zero ceiling. */
+                max_target_memory_mb = r.ResourceSemaphoreId == 1 ? (double?)null : r.MaxTargetMemoryMb,
                 total_memory_mb = r.TotalMemoryMb,
                 available_memory_mb = r.AvailableMemoryMb,
                 granted_memory_mb = r.GrantedMemoryMb,

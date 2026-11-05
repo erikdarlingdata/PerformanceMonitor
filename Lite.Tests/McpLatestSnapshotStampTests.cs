@@ -124,6 +124,21 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
     }
 
     [Fact]
+    public async Task GetResourceSemaphore_ShowsNoMaxTargetForTheSmallQuerySemaphore_NotAZero()
+    {
+        var (@base, anchor) = Past();
+        /* The DMV has no max target for the small-query semaphore (id 1), so it must read null, not the 0 the collector stores (#7676). */
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 500, semaphore: 0);
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 100, semaphore: 1);
+
+        var root = Parse(await McpMemoryTools.GetResourceSemaphore(_dataService, _serverManager, ServerName, 1, anchor));
+
+        var bySemaphore = root.GetProperty("grants").EnumerateArray().ToDictionary(g => g.GetProperty("resource_semaphore_id").GetInt32());
+        Assert.Equal(12000d, bySemaphore[0].GetProperty("max_target_memory_mb").GetDouble());
+        Assert.Equal(JsonValueKind.Null, bySemaphore[1].GetProperty("max_target_memory_mb").ValueKind);
+    }
+
+    [Fact]
     public async Task GetMemoryGrants_ReadsThePoolWindow_WithANullSemaphoreId()
     {
         var (@base, anchor) = Past();

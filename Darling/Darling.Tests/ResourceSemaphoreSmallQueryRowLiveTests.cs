@@ -71,6 +71,15 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
             var perSemaphoreWindow = await DarlingResourceSemaphoreReader.GetWindowAsync(postgres, ServerId, start, end, 30, ct);
             Assert.Equal(new short?[] { 0, 1 }, perSemaphoreWindow.Select(r => r.ResourceSemaphoreId).ToArray());
 
+            /* get_resource_semaphore: the small-query semaphore has no max target, so the tool says null and not a stored 0 (#7676). */
+            using (var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpMemoryGrantTools.GetResourceSemaphore(postgres, ServerName)))
+            {
+                var byId = doc.RootElement.GetProperty("grants").EnumerateArray()
+                    .ToDictionary(g => g.GetProperty("resource_semaphore_id").GetInt32());
+                Assert.Equal(12000d, byId[0].GetProperty("max_target_memory_mb").GetDouble());
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, byId[1].GetProperty("max_target_memory_mb").ValueKind);
+            }
+
             /* Per pool: the two semaphores summed into one row. */
             var perPool = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(postgres, ServerId, start, end, ct);
             var pool = Assert.Single(perPool);
