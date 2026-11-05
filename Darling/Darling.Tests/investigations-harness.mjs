@@ -186,6 +186,27 @@ try {
     closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
   };
 
+  /* #7700: the same seat on a store with web.allowAdminWrites off. The cached session is edited in place: the service refuses a close,
+     so no Close form is drawn and the section says why. */
+  const { getSession } = await import(pathToFileURL(path.join(scratch, "views-api.js")).href);
+  const session = await getSession();
+  Object.assign(session, { signed_in_admin: true, managed_store: true, admin_writes_off: true });
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  const closeParts = () => ({
+    offLines: all(main, "div").filter((d) => d.attrs["data-close-off"] === "1").map((d) => d.textContent),
+    signInLines: all(main, "div").filter((d) => d.attrs["data-close-sign-in"] === "1").length,
+    closeInputs: all(main, "input").filter((i) => i.attrs["data-close-reason"] === "1").length,
+    closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
+  });
+  out.writesOff = closeParts();
+  session.admin_writes_off = false;
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  out.writesOn = closeParts();
+  session.signed_in_admin = false;
+  session.managed_store = false;
+
   // A poll rebuild keeps the open request.
   fetches.length = 0;
   renderInvestigations(main);

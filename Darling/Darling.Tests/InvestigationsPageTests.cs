@@ -106,6 +106,21 @@ public sealed class InvestigationsPageTests
         Assert.Equal(0, picked.GetProperty("closeButtons").GetInt32());
     }
 
+    /// <summary>#7700: a signed-in admin on a store with web.allowAdminWrites off gets no Close form (the service refuses it), and the
+    /// section says why; with the switch on the form is back.</summary>
+    [Fact]
+    public void WithTheSwitchOff_TheCloseForm_IsNotDrawn_AndTheSectionNamesTheSwitch()
+    {
+        var run = Run();
+        var off = run.GetProperty("writesOff");
+        Assert.Equal(0, off.GetProperty("closeInputs").GetInt32());
+        Assert.Equal(0, off.GetProperty("closeButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("signInLines").GetInt32());
+        var line = Assert.Single(Strings(off.GetProperty("offLines")));
+        Assert.Contains("set web.allowAdminWrites to true in darling.json", line, StringComparison.Ordinal);
+        Assert.Equal(1, run.GetProperty("writesOn").GetProperty("closeInputs").GetInt32());
+    }
+
     [Fact]
     public void TheRebuild_KeepsTheOpenRequest_AndCloseEmptiesThePane()
     {
