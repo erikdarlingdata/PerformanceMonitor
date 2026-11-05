@@ -241,9 +241,10 @@ public sealed class LatestValueLookbackSqlTests
     public void TheLiteTwin_CarriesTheSameStatement(string name, string liteFile)
     {
         var darling = Normalize(SqlFor(name)).Trim();
-        /* Lite's source interpolates the shared compiled-plan predicate (#7445); Darling's const already holds its value. */
+        /* Lite's source interpolates the shared compiled-plan predicate (#7445) and the shared volume key (#7704); Darling's const already holds their values. */
         var lite = Normalize(File.ReadAllText(Path.Combine(RepoRoot(), liteFile)))
-            .Replace("{PlanCacheBloatRule.CompiledPredicateSql}", PlanCacheBloatRule.CompiledPredicateSql, StringComparison.Ordinal);
+            .Replace("{PlanCacheBloatRule.CompiledPredicateSql}", PlanCacheBloatRule.CompiledPredicateSql, StringComparison.Ordinal)
+            .Replace("{VolumeKey.Sql}", PerformanceMonitor.Common.VolumeKey.Sql, StringComparison.Ordinal);
 
         /* Map Darling's base-table references onto the v_ views Lite reads; a v_ reference is left alone. */
         var asLite = Regex.Replace(darling, @"\bFROM (?!v_)(\w+)", m =>

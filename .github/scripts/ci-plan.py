@@ -159,6 +159,14 @@ def unknown_paths(rules, files: "list[str]") -> "list[str]":
     return [f for f in files if f not in docs and f not in known]
 
 
+def _real(catalog: "dict | None", suite: str, names: "list[str]", mapped: "dict | tuple" = ()) -> "list[str]":
+    """The names the test host lists (#7739). A class the map holds ran, so it is real; any other name must pass the catalog's
+    `listed` check (a private nested fixture, an abstract base or a class inside a test's string is not listed, and a plan that
+    names one stops its leg, #6734). A catalog without `listed` (a stand-in) keeps every name."""
+    listed = (catalog or {}).get("listed")
+    return list(names) if listed is None else [c for c in names if c in mapped or listed(suite, c)]
+
+
 def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "dict[str, list[str]] | None":
     """{suite: [class names]} when every file is documentation or a test-class file, else None (#6734).
     A test-class file is a .cs file the catalog's file table knows, that declares a class holding a test, with no base class
@@ -175,7 +183,7 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
         row = table.get(f) if f.endswith(".cs") else None
         if not row or row["suite"] not in picks or not f.startswith(TEST_TREES[row["suite"]]) or not row["safe"]:
             return None
-        picks[row["suite"]] += [c for c in row["tests"] if c not in picks[row["suite"]]]
+        picks[row["suite"]] += [c for c in _real(catalog, row["suite"], row["tests"]) if c not in picks[row["suite"]]]
     return picks if any(picks.values()) else None
 
 
@@ -196,7 +204,7 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
             row = table.get(f) if f.endswith(".cs") else None
             if not row or row["suite"] != suite or not row["safe"]:
                 return None, f"{f} is not a plain test class file, so its suite runs in full"
-            changed[suite] += [c for c in row["tests"] if c not in changed[suite]]
+            changed[suite] += [c for c in _real(catalog, suite, row["tests"]) if c not in changed[suite]]
     guard = [c for c, t in classes["darling"].items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t]
     picks = {"darling": (changed["darling"] + [c for c in guard if c not in changed["darling"]]) if darling_scope != "none" else [],
              "lite": changed["lite"] if lite_scope != "none" else []}
@@ -228,7 +236,7 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
             return None, selection.get("error") or "no test map was given"
         sel = _CS.map_select(test_map, files, [], catalog["classes"], event="pull_request", base_ref=base,
                              now=selection.get("now"), max_age_days=MAP_MAX_AGE_HOURS / 24.0, named=selection.get("named"),
-                             shared_diff=selection.get("shared_diff"), **_CS.selection_args(rules))
+                             shared_diff=selection.get("shared_diff"), listed=catalog.get("listed"), **_CS.selection_args(rules))
         if sel["full"]:
             return None, f"{sel['reason']} ({age})"
         table = catalog.get("files") or {}
@@ -243,7 +251,7 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
                     names += [c for c in row["tests"] if c in runs]
             if suite == "darling":
                 names += [c for c, t in tree.items() if c in runs and "Stage=Guard" in t]
-            picks[suite] = list(dict.fromkeys(names))
+            picks[suite] = _real(catalog, suite, list(dict.fromkeys(names)), test_map["classes"].get(suite, {}))
         if not any(picks.values()):
             return None, f"the map selected no class ({age})"
         for suite, names in picks.items():
@@ -343,7 +351,7 @@ def load_catalog(root: str = ROOT) -> dict:
     """The test classes of the tree with their traits, and the weight tables."""
     classes = _CS.scan_classes(root)
     return {"classes": classes, "files": _file_table(root, classes), "darling_weights": load_weights(DARLING_WEIGHTS),
-            "lite_weights": load_weights(LITE_WEIGHTS)}
+            "lite_weights": load_weights(LITE_WEIGHTS), "listed": _CS.listed_checker(root)}
 
 
 def _file_table(root: str, classes: "dict[str, dict[str, set[str]]]") -> "dict[str, dict]":

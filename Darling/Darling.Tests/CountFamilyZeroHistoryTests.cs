@@ -166,7 +166,7 @@ public sealed class CountFamilyZeroHistoryTests
             "Treat it as a new event, not a proven regression: check whether it coincides with a workload change, a deploy, or a one-off before treating it as chronic. This counts blocked process report rows",
             block.Investigation, StringComparison.Ordinal);
         Assert.Equal(
-            "If it recurs or sustains, it will cross the standard blocking event threshold and surface as a first-class finding " +
+            "If it recurs or sustains, it will cross the standard blocking event threshold and appear on the Recommendations tab " +
             "with its chain or graph detail on a later window; treat it then. A one-time event that matches a known cause needs only awareness.",
             block.Remediation);
     }
@@ -182,7 +182,7 @@ public sealed class CountFamilyZeroHistoryTests
             "This is a spike against the time-of-week baseline, not necessarily a sustained problem — check whether it coincides with a workload change or a one-off event.",
             block.Investigation);
         Assert.Equal(
-            "If it recurs or sustains, it will cross the standard deadlock threshold and surface as a first-class finding " +
+            "If it recurs or sustains, it will cross the standard deadlock threshold and appear on the Recommendations tab " +
             "with its chain or graph detail on a later window; treat it then. A one-time spike that matches a known event needs only awareness.",
             block.Remediation);
     }
