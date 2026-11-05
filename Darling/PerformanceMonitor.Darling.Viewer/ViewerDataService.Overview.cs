@@ -769,6 +769,18 @@ public sealed class ServerSummaryItem
     /// <summary>The Needs attention clause for the databases whose state deviates, or empty when none does or the state is not collected.</summary>
     public string DatabaseStateReason => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? DarlingDatabaseStateDeviations.Reason(DatabaseStates.Deviations) : "";
 
+    /// <summary>True when the Database state row shows: collected, and at least one database deviates (#7647).</summary>
+    public bool HasDatabaseStateDeviations => DatabaseStates is { Collected: true, Deviations.Count: > 0 };
+
+    /// <summary>Database state value, "1 database" or "N databases" (the web chip's words).</summary>
+    public string DatabaseStateDisplay => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? (DatabaseStates.Deviations.Count == 1 ? "1 database" : $"{DatabaseStates.Deviations.Count} databases") : "";
+
+    /// <summary>Database state detail: the databases named, Critical first, at most <see cref="DarlingDatabaseStateDeviations.NamesShown"/> then "and N more".</summary>
+    public string DatabaseStateDetail => DatabaseStateReason;
+
+    /// <summary>The row's dot and value brush: the card's critical red when a Critical state bands the card, else its warning amber.</summary>
+    public SolidColorBrush DatabaseStateBrush => DatabaseStateCriticalCount > 0 ? s_criticalBrush : s_warningBrush;
+
     /// <summary>True when the Identity capacity row shows.</summary>
     public bool HasIdentityCapacity => IdentityCapacity is { ColumnsAtBar: > 0 };
 

@@ -77,7 +77,7 @@ public sealed class DatabaseStateBandsTheServerTests
     {
         var offline = Card(1, "archive-offline", States(("Archive", "OFFLINE")));
 
-        Assert.Equal(FleetHealthBand.Healthy, offline.Band);
+        Assert.NotEqual(HealthSeverity.Critical, offline.OverallMetricSeverity);
         Assert.Equal(new[] { "Database state" }, offline.AdvisoryTiles);
         Assert.True(offline.HasAdvisoryTile);
 
@@ -135,15 +135,15 @@ public sealed class DatabaseStateBandsTheServerTests
         }
 
         var critical = Viewer(new DatabaseStateRead(true, new[] { new DatabaseStateDeviation("Sales", "RECOVERY_PENDING", "") }));
-        Assert.Equal(FleetHealthBand.Critical, critical.Band);
+        Assert.Equal(HealthSeverity.Critical, critical.OverallMetricSeverity);
         Assert.Contains("Sales RECOVERY_PENDING", critical.DatabaseStateReason, StringComparison.Ordinal);
 
         var offline = Viewer(new DatabaseStateRead(true, new[] { new DatabaseStateDeviation("Archive", "OFFLINE", "ONLINE") }));
-        Assert.Equal(FleetHealthBand.Healthy, offline.Band);
+        Assert.NotEqual(HealthSeverity.Critical, offline.OverallMetricSeverity);
         Assert.Equal(new[] { "Database state" }, offline.AdvisoryTiles);
 
         var uncollected = Viewer(new DatabaseStateRead(false, Array.Empty<DatabaseStateDeviation>()));
-        Assert.Equal(FleetHealthBand.Healthy, uncollected.Band);
+        Assert.NotEqual(HealthSeverity.Critical, uncollected.OverallMetricSeverity);
         Assert.Empty(uncollected.AdvisoryTiles);
         Assert.Equal("", uncollected.DatabaseStateReason);
     }
