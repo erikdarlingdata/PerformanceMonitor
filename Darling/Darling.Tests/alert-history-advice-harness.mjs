@@ -40,7 +40,13 @@ class FakeNode {
 }
 class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
 globalThis.Node = FakeNode;
-globalThis.document = { createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+const bodyNode = new FakeNode("body");
+globalThis.document = { body: bodyNode, createElement: (t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+/* The Export CSV button hands a Blob to a download link: keep each blob so a scenario can read the file text. */
+const downloads = [];
+URL.createObjectURL = (blob) => { downloads.push(blob); return "blob:fake"; };
+URL.revokeObjectURL = () => {};
+bodyNode.appendChild = (a) => { a.click = () => {}; return FakeNode.prototype.appendChild.call(bodyNode, a); };
 globalThis.location = { hash: "#/alerts" };
 
 const jsDir = process.argv[2];
@@ -195,6 +201,32 @@ try {
       out.calls = detailReadsOf().length;
       out.request = detailReadsOf()[0];
       out.fields = s.fields;
+    },
+    /* #7646: a state_only row's stored 0 reads as a dash in the Value and Threshold cells, a nonzero value on such a row and a 0 on a
+       measured row stay numbers. */
+    async stateOnlyValue() {
+      alertsReply = { alerts: [
+        row(0, { metric_name: "Database State", current_value: 0, threshold_value: 0, state_only: true }),
+        row(1, { metric_name: "Agent Not Running", current_value: 3, threshold_value: 0, state_only: true }),
+        row(2, { metric_name: "High CPU", current_value: 0, threshold_value: 0, state_only: false }),
+      ], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.cells = {};
+      const heads = main.all("th").map((th) => th.textContent);
+      const at = (label) => heads.indexOf(label);
+      for (const tr of bodyRows(main)) {
+        out.cells[tr.children[at("Metric")].textContent] = [tr.children[at("Value")].textContent, tr.children[at("Threshold")].textContent];
+      }
+      /* #7646: the CSV export writes the same dash for a state-only zero, and the raw stored number on every other row. */
+      main.all("button").find((b) => b.textContent === "Export CSV").fire("click");
+      const csv = (await downloads[downloads.length - 1].text()).replace(/^﻿/, "");
+      const lines = csv.split("\r\n");
+      const csvHeads = lines[0].split(",");
+      out.csv = {};
+      for (const line of lines.slice(1)) {
+        const f = line.split(",");
+        out.csv[f[csvHeads.indexOf("Metric")]] = [f[csvHeads.indexOf("Value")], f[csvHeads.indexOf("Threshold")]];
+      }
     },
     async failedFetch() {
       alertsReply = { alerts: [analysisRow({ server_id: 3 })], truncated: false };

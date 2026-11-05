@@ -295,7 +295,7 @@ ORDER BY pool_id, resource_semaphore_id";
                 ResourceSemaphoreId = reader.IsDBNull(1) ? 0 : (int)ToInt64(reader.GetValue(1)),
                 PoolId = reader.IsDBNull(2) ? 0 : (int)ToInt64(reader.GetValue(2)),
                 TargetMemoryMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                MaxTargetMemoryMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                MaxTargetMemoryMb = reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 TotalMemoryMb = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
                 AvailableMemoryMb = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6)),
                 GrantedMemoryMb = reader.IsDBNull(7) ? 0 : ToDouble(reader.GetValue(7)),
@@ -577,7 +577,8 @@ public class ResourceSemaphoreRow
     public int ResourceSemaphoreId { get; set; }
     public int PoolId { get; set; }
     public double TargetMemoryMb { get; set; }
-    public double MaxTargetMemoryMb { get; set; }
+    /// <summary>Null for the small-query semaphore (id 1): the DMV's own NULL, kept as NULL (#7676).</summary>
+    public double? MaxTargetMemoryMb { get; set; }
     public double TotalMemoryMb { get; set; }
     public double AvailableMemoryMb { get; set; }
     public double GrantedMemoryMb { get; set; }
