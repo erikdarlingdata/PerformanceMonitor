@@ -516,7 +516,7 @@ public partial class FinOpsTab : UserControl
         MemoryUtilText.Text = $"{stolenPct:N1}%"; /* one decimal, as the tooltip and the web tile say it (#7562) */
         SetBar(MemoryUtilBar, MemUtilFilled, MemUtilEmpty, stolenPct);
         /* A figure that reads amber or red says why (#6139); below amber there is nothing to say. */
-        var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct);
+        var stolenNote = ProvisioningVerdict.StolenMemoryNote(stolenPct, System.Globalization.CultureInfo.CurrentCulture);
         MemoryUtilText.ToolTip = MemoryUtilBar.ToolTip = stolenNote.Length == 0 ? null : stolenNote;
 
         /* Buffer Pool % = Buffer Pool / Physical Memory */

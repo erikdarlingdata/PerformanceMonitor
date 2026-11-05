@@ -112,10 +112,12 @@ public static class ProvisioningVerdict
         totalServerMemoryMb > 0 ? (decimal)((totalServerMemoryMb - bufferPoolMb) / totalServerMemoryMb * 100.0) : 0m;
 
     /// <summary>The tooltip for a Stolen Mem % figure that reads amber or red, so a coloured figure says why; empty when it is not.</summary>
-    public static string StolenMemoryNote(double stolenPercent) =>
+    /// <param name="stolenPercent">The Stolen Mem % figure.</param>
+    /// <param name="culture">The culture the figures are written in: the current culture for a desktop tooltip (so it matches the tile beside it), the invariant culture for MCP text.</param>
+    public static string StolenMemoryNote(double stolenPercent, IFormatProvider culture) =>
         stolenPercent < (double)HighStolenMemoryPercent
             ? ""
-            : string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            : string.Create(culture,
                 $"{stolenPercent:0.#}% of the memory SQL Server holds is outside the buffer pool (plans, grants, other caches). Amber from {HighStolenMemoryPercent:N0}%, red above 85%.");
 
     /// <summary>Over-provisioned: a downsizing candidate.</summary>
