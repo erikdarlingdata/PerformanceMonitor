@@ -97,7 +97,7 @@ mem_latest AS (
    is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Darling read. */
 server_info AS (
-    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition, ag_replica_role
     FROM " + propertiesRelation + @"
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -136,7 +136,8 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     s.engine_edition,
-    s.edition
+    s.edition,
+    s.ag_replica_role
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -163,6 +164,8 @@ LEFT JOIN grants g ON true";
 
            A window with no CPU sample at all has no verdict: its NULL average read as 0% CPU would call the
            server OVER_PROVISIONED. The row's empty status is its no-verdict value; the tab shows "No Data". */
+        /* #7705: a secondary replica's own load does not size it, so it gets the not-judged verdict whatever it measured. */
+        var isAgSecondary = ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(18) ? null : reader.GetString(18));
         var status = reader.IsDBNull(0) ? "" : ProvisioningVerdict.Evaluate(
             avgCpu, maxCpu, p95Cpu,
             maxGrantWaiters: reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12)),
@@ -175,7 +178,8 @@ LEFT JOIN grants g ON true";
             edition: reader.IsDBNull(17) ? null : reader.GetString(17),
             cpuSamples: reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3)),
             stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
-                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))));
+                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))),
+            isAgSecondary: isAgSecondary);
 
         return new UtilizationEfficiencyRow
         {
@@ -196,7 +200,8 @@ LEFT JOIN grants g ON true";
             MaxWorkersCount = maxWorkers,
             CurrentWorkersCount = currentWorkers,
             CpuCount = reader.IsDBNull(11) ? 0 : Convert.ToInt32(reader.GetValue(11)),
-            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16))
+            EngineEdition = reader.IsDBNull(16) ? 0 : Convert.ToInt32(reader.GetValue(16)),
+            IsAgSecondary = isAgSecondary
         };
     }
 
@@ -267,12 +272,13 @@ SELECT
     sp.edition,
     c.cpu_samples,
     m.avg_total_mb,
-    m.avg_buffer_pool_mb
+    m.avg_buffer_pool_mb,
+    sp.ag_replica_role
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
 LEFT JOIN (
-    SELECT engine_edition, edition
+    SELECT engine_edition, edition, ag_replica_role
     FROM v_server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -305,7 +311,8 @@ ORDER BY c.day";
                 cpuSamples: ToInt64(reader.GetValue(13)),
                 stolenMemoryPercent: reader.IsDBNull(14) || reader.IsDBNull(15)
                     ? null
-                    : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))));
+                    : ProvisioningVerdict.StolenMemoryPercent(Convert.ToDouble(reader.GetValue(14)), Convert.ToDouble(reader.GetValue(15))),
+                isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
             items.Add(new ProvisioningTrendRow
             {

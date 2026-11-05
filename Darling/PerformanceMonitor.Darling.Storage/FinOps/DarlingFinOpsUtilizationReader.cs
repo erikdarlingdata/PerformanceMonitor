@@ -102,7 +102,7 @@ mem_latest AS (
    is the vcore_count parsed from the service objective, and NULL for an objective that names no vCores (a DTU-model objective
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Lite read. */
 server_info AS (
-    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
+    SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition, ag_replica_role
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -141,7 +141,8 @@ SELECT
     COALESCE(g.forced_grants, 0),
     COALESCE(g.grant_utilization_pct, 0),
     s.engine_edition,
-    s.edition
+    s.edition,
+    s.ag_replica_role
 FROM cpu_stats c
 CROSS JOIN mem_latest m
 LEFT JOIN server_info s ON true
@@ -205,12 +206,13 @@ SELECT
     sp.edition,
     c.cpu_samples,
     m.avg_total_mb,
-    m.avg_buffer_pool_mb
+    m.avg_buffer_pool_mb,
+    sp.ag_replica_role
 FROM daily_cpu c
 LEFT JOIN daily_mem m ON m.day = c.day
 LEFT JOIN daily_grants g ON g.day = c.day
 LEFT JOIN (
-    SELECT engine_edition, edition
+    SELECT engine_edition, edition, ag_replica_role
     FROM server_properties
     WHERE server_id = $1
     ORDER BY collection_time DESC
@@ -280,7 +282,8 @@ ORDER BY CAST(collection_time AS DATE)";
             edition: reader.IsDBNull(17) ? null : reader.GetString(17),
             cpuSamples: reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
             stolenMemoryPercent: (decimal)FinOpsUtilizationFigures.StolenMemoryPct(
-                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))));
+                reader.IsDBNull(4) ? 0 : Convert.ToInt32(reader.GetValue(4)), reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7))),
+            isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(18) ? null : reader.GetString(18)));
 
         return new UtilizationEfficiencyDto(
             AvgCpuPct: avgCpu,
@@ -336,7 +339,8 @@ ORDER BY CAST(collection_time AS DATE)";
                 cpuSamples: Convert.ToInt64(reader.GetValue(13)),
                 stolenMemoryPercent: reader.IsDBNull(14) || reader.IsDBNull(15) || Convert.ToDouble(reader.GetValue(14)) <= 0
                     ? null
-                    : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0));
+                    : (decimal)((Convert.ToDouble(reader.GetValue(14)) - Convert.ToDouble(reader.GetValue(15))) / Convert.ToDouble(reader.GetValue(14)) * 100.0),
+                isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(16) ? null : reader.GetString(16)));
 
             items.Add(new ProvisioningTrendDto(
                 reader.GetDateTime(0),
