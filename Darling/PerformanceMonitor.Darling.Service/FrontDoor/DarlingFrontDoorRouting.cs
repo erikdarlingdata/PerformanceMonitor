@@ -97,6 +97,7 @@ internal static class DarlingFrontDoorRouting
         "get_mute_rules",
         "get_notification_routes",
         "get_people",
+        "get_query_fleet_summary",
         "get_read_latency",
         "get_server_actions",
         "get_store_host",

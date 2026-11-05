@@ -365,6 +365,9 @@ public static partial class DarlingWebEndpoints
             ["get_query_store_duration_trend"] = (c, pg, an) => DatabaseNames(c) is { } databases
                 ? DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), databases, c.RequestAborted)
                 : DatabaseNamesRefusal(c),
+            ["get_query_fleet_summary"] = (c, pg, an) => RequireText(c, "query_hash", out var qfsHash)
+                ? DarlingMcpQueryFleetSummaryTools.GetQueryFleetSummary(pg, qfsHash, Hours(c, DarlingMcpQueryFleetSummaryTools.DefaultHoursBack), AsOf(c), Rows(c, "limit", DarlingMcpQueryFleetSummaryTools.DefaultLimit), c.RequestAborted)
+                : MissingParam("query_hash"),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
                     ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted)

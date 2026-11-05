@@ -1563,6 +1563,11 @@ internal static class DarlingTrendReader
     public static RetentionTier ResolveTier(DateTime startUtc, DateTime nowUtc, bool hourlyAvailable, TierCoverage coverage) =>
         DurationTrendRouting.ResolveTier(startUtc, nowUtc, hourlyAvailable, coverage);
 
+    /// <summary><see cref="ResolveTier(DateTime, DateTime, bool, TierCoverage)"/> at the WALL CLOCK, the "now" the rollup's lag is measured against
+    /// (never the window's end, see <see cref="ShouldUseRawTier"/>). For a tool that is anchored by <c>as_of</c> and so must not name the clock itself (#7609).</summary>
+    public static RetentionTier ResolveTierAtWallClock(DateTime startUtc, bool hourlyAvailable, TierCoverage coverage) =>
+        ResolveTier(startUtc, DateTime.UtcNow, hourlyAvailable, coverage);
+
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
     /// <c>window_truncated</c> — <see cref="DurationTrendRouting.TruncationSlack"/>, by alias (#3653). Lite's twin

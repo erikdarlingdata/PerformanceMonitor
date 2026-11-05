@@ -142,6 +142,7 @@ public static partial class CustomViewValidation
         "get_query_duration_trend",
         "get_query_store_duration_trend",
         "get_query_trend",
+        "get_query_fleet_summary",
         "get_server_summary",
         "get_overview_baselines",
         "get_daily_summary",
