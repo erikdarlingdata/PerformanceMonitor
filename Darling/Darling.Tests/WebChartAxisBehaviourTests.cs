@@ -71,6 +71,18 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(new[] { "0.0", "0.2", "0.4", "0.6", "0.8", "1.0" }, Strings(r.GetProperty("plainAxis")));
     }
 
+    /// <summary>#7586: the FinOps Version Store (PVS) size trend, drawn by the shipped tab (version-store.js) from a stand-in read. A range
+    /// under 0.01 MB reads one decimal finer than the step needs, so every tick is its own value; a large range keeps its two decimals.</summary>
+    [Fact]
+    public void ThePvsSizeAxis_GrowsDecimalsWithItsStep_AndKeepsTwoOnALargeRange()
+    {
+        var r = Run();
+        var small = Strings(r.GetProperty("pvsSmall"));
+        Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, small);
+        Assert.Equal(small.Length, small.Distinct().Count());
+        Assert.Equal(new[] { "0.00", "2,000.00", "4,000.00", "6,000.00", "8,000.00", "10,000.00" }, Strings(r.GetProperty("pvsLarge")));
+    }
+
     /// <summary>A range that was already whole reads exactly as before, and a formatter that ignores the step still draws no
     /// repeated label: the repeat is left blank.</summary>
     [Fact]
@@ -78,11 +90,50 @@ public sealed class WebChartAxisBehaviourTests
     {
         var r = Run();
         Assert.Equal(new[] { "0%", "20%", "40%", "60%", "80%", "100%" }, Strings(r.GetProperty("wholePct")));
-        Assert.Equal(new[] { "0 ms", "200 ms", "400 ms", "600 ms", "800 ms", "1.0 s" }, Strings(r.GetProperty("wholeMs")));
+        // #7586: one unit per axis, from the largest tick: the 1,000 ms top reads in seconds, so no "800 ms, 1.0 s" on one axis.
+        Assert.Equal(new[] { "0 s", "0.2 s", "0.4 s", "0.6 s", "0.8 s", "1.0 s" }, Strings(r.GetProperty("wholeMs")));
         var labels = Strings(r.GetProperty("roundingAxis")).Where(l => l.Length > 0).ToArray();
         Assert.Equal(labels.Length, labels.Distinct().Count());
         Assert.Contains("0 ms", labels);
         Assert.Contains("1 ms", labels);
+    }
+
+    /// <summary>#7587: the issue's rate axis. Gridlines 0, 0.002 ... 0.01 read 0, 0, 0, 0.01, 0.01, 0.01, so the 0.006 gridline carried the "0.01"
+    /// label. Each now reads its own value. A formatter a decimal short grows decimals on a second pass with a finer step instead of blanking,
+    /// and one that ignores the step altogether still never repeats a label.</summary>
+    [Fact]
+    public void ASmallRateAxis_LabelsEachGridlineWithItsOwnValue()
+    {
+        var r = Run().GetProperty("smallRate");
+        var expected = new[] { "0 MB/s", "0.002 MB/s", "0.004 MB/s", "0.006 MB/s", "0.008 MB/s", "0.01 MB/s" };
+        Assert.Equal(expected, Strings(r.GetProperty("labels")));
+        Assert.Equal(new[] { "0", "0.002", "0.004", "0.006", "0.008", "0.01" },
+            r.GetProperty("scale").GetProperty("ticks").EnumerateArray().Select(t => t.GetDouble().ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+        // the drawn chart: 0.0042 MB/s peaks are not rounded into 0.01 steps
+        var drawn = Strings(r.GetProperty("drawn")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(drawn.Length, drawn.Distinct().Count());
+        Assert.DoesNotContain("0.01 MB/s", drawn.Take(drawn.Length - 1));
+        // a tooltip (no step) keeps two places, but a small rate keeps two significant digits and never reads 0
+        Assert.Equal(new[] { "0.0042", "1,234.57", "0" }, Strings(r.GetProperty("tooltip")));
+        var oneShort = Strings(r.GetProperty("oneShort"));
+        Assert.Equal(new[] { "0.000", "0.002", "0.004", "0.006", "0.008", "0.010" }, oneShort);
+        var blind = Strings(r.GetProperty("blind")).Where(l => l.Length > 0).ToArray();
+        Assert.Equal(blind.Length, blind.Distinct().Count());
+    }
+
+    /// <summary>#7586: the per-query history chart for a 30 s query read "0 ms ... 80,000 ms". A duration axis prints one unit from its largest
+    /// tick, and its ticks sit on round numbers of that unit.</summary>
+    [Fact]
+    public void ADurationAxis_PrintsOneUnit_FromTheLargestTick()
+    {
+        var r = Run().GetProperty("durationAxis");
+        Assert.Equal(new[] { "s" }, Strings(r.GetProperty("s30Units")));
+        Assert.Equal(new[] { "0 s", "10 s", "20 s", "30 s", "40 s" }, Strings(r.GetProperty("s30")));
+        Assert.Equal(new[] { "min" }, Strings(r.GetProperty("m5Units")));
+        Assert.All(Strings(r.GetProperty("m5")), l => Assert.EndsWith("min", l));
+        Assert.All(Strings(r.GetProperty("small")), l => Assert.EndsWith(" ms", l));
+        // a grid cell or tooltip (no axis) still picks its unit from its own value
+        Assert.Equal(new[] { "999 ms", "1.5 s", "1.5 min", "1.5 h" }, Strings(r.GetProperty("cell")));
     }
 
     /// <summary>Across 495 maxima (0.0001 to 9.9 million) and the five formatters the panels use, no two ticks of an axis

@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked } from "../../util.js";
+import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceStrip, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
@@ -1179,7 +1179,7 @@ export function serverTrendPanel(server, ctx, kind) {
         points,
         xKey: "time",
         series: spec.series.map((s, i) => ({ key: s.key, label: s.label, color: CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length] })),
-        formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+        formatValue: fmtPlain,
         unit: spec.unit,
         ...windowFromHours(res.keptHours || ctx.hours),
       }, "server-trend|" + server + "|" + spec.metric, chartZoomScope(ctx.hours)),
@@ -1272,7 +1272,7 @@ export function seriesTrendPanel(server, ctx, kind) {
               points: mergeSeriesRows(drawn, "time", "v"),
               xKey: "time",
               series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
-              formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString() + " " + chart.unit,
+              formatValue: (v, o) => fmtPlain(v, o) + " " + chart.unit,
               unit: chart.unit,
               ...windowFromHours(res.keptHours || ctx.hours),
             }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),

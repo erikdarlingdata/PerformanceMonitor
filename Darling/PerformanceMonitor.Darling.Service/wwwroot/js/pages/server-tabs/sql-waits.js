@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, windowFromHours } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtInt, fmtPlain, windowFromHours } from "../../util.js";
 import { getPanelSignal, setPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -343,7 +343,7 @@ export async function drawNamedTrends(slot, server, ctx, kind, checked) {
       points: mergeSeriesRows(drawn, "time", kind === "latch" ? "wait_time_ms_per_second" : "collisions_per_second"),
       xKey: "time",
       series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
-      formatValue: (v) => (Math.round(v * 100) / 100).toLocaleString(),
+      formatValue: fmtPlain,
       unit: spec.unit,
       ...windowFromHours(trend.keptHours || ctx.hours),
     }, kind + "-trend|" + server, chartZoomScope(ctx.hours)),

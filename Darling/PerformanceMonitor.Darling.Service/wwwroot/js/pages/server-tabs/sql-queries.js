@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, mount, truncate, loadingStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNoteText, trendHeadNote, fmtInt, fmtMs, localTime, windowFromHours, queryWaitFilter, setQueryWaitFilter } from "../../util.js";
 import { setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { activeQueriesSnapshotSlot, SNAPSHOT_ROW_CAP } from "../active-snapshots.js";
 import { activeQueriesLiveBar } from "../active-live.js";
@@ -55,6 +55,8 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     picker
   );
   const signal = getPanelSignal();
+  /* #7586: the History button on a row selects that row in the Query picker under the grid (set once the picker is drawn). */
+  let pickTrendRow = () => {};
   (async () => {
     const res = await readToolWithinKeptHistory(
       "get_top_queries_by_cpu",
@@ -69,7 +71,7 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
     const parts = [
       VIZ.table(res.data, {
         rowsKey: "queries",
-        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w)],
+        columns: [...TOP_QUERY_COLUMNS, planColumn(server), statsHistoryColumn("queries", server, w, (row) => pickTrendRow(row))],
         groups: TOP_QUERY_GROUPS.groups,
         defaultGroups: TOP_QUERY_GROUPS.defaultGroups,
         ...(onRow ? { onRow } : {}),
@@ -107,6 +109,16 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
       const picker = pickerControl("Query", options, (i) => drawQueryTrend(chartSlot, server, ctx, trendable[Number(i)].query, signal));
       parts.push(el("div", { class: "picker-row" }, [picker]), chartSlot);
       drawQueryTrend(chartSlot, server, ctx, trendable[0].query, signal);
+      /* #7586: one route to the chart. A row's History button sets the picker to that row, draws its chart and scrolls to it. */
+      pickTrendRow = (row) => {
+        const at = trendable.findIndex((t) => t.query.query_hash === row.query_hash && t.query.database_name === row.database_name);
+        const select = picker.querySelector ? picker.querySelector("select") : null;
+        if (at < 0 || !select) return;
+        select.value = String(at);
+        /* Scroll first: drawQueryTrend swaps the chart for a loading strip at once, which shortens the page, and a smooth scroll started after that stops short of the picker. */
+        if (picker.scrollIntoView) picker.scrollIntoView({ block: "start", behavior: "smooth" });
+        drawQueryTrend(chartSlot, server, ctx, trendable[at].query, signal);
+      };
     } else if (queries.length) {
       parts.push(
         emptyStrip(
@@ -163,8 +175,9 @@ export async function drawQueryTrend(slot, server, ctx, query, signal) {
         { key: "avg_cpu_ms", label: "Avg CPU", color: SERIES_COLORS[0] },
         { key: "avg_elapsed_ms", label: "Avg Elapsed", color: SERIES_COLORS[1] },
       ],
-      formatValue: (v, o) => fmtInt(v, o) + " ms",
-      unit: "ms",
+      /* #7586: the unit the grid prints (ms, s, min), taken from the largest tick so one axis has one unit, and carried by every tick, not a caption. */
+      formatValue: fmtMs,
+      sizeUnit: "ms",
       /* #2802: axis spans the requested window (ctx.hours ending now). When the read is #2353-truncated the data
          starts later than the window and plots toward the right; the truncation notice above already says so.
          A narrowed read spans the hours it answered for. */
@@ -412,6 +425,8 @@ const QS_REASON_TEXT = {
   storage_near_cap: "Storage near the cap",
   qs_read_only: "Query Store read-only",
   qs_off: "Query Store off",
+  qs_read_only_state: "Query Store read-only (database state)",
+  qs_read_only_operator: "Query Store read-only (set by an operator)",
   qs_read_only_replica: "Query Store read-only (replica)",
   not_measured: "Nothing measured in this window",
 };

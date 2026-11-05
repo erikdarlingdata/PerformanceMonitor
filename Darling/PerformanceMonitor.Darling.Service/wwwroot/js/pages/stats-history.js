@@ -20,7 +20,7 @@
  * An open panel is kept at module scope under its row's key, so the page's 60 s rebuild draws it again without a second read. The
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
-import { el, readTool, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
+import { el, readTool, fmtMs, fmtInt, tickDecimals, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 import { historyWindow } from "../time-slicer.js";
@@ -101,8 +101,16 @@ function chartFor(kind, key, data, hours, axis, metric) {
         points: procedurePoints(data.trend),
         xKey: "time",
         series: [{ key: m.value, label: m.label, color: SERIES_COLORS[0] }],
-        formatValue: (v) => (m.value === "executions_per_second" ? Number(v).toFixed(3) : Math.round(v).toLocaleString() + " " + m.unit),
-        unit: m.unit,
+        /* #7586: a duration reads in the unit of the axis's largest tick, as the grid prints it, with no caption (every tick carries its unit).
+           #7587: the other measures take their decimals from the tick step, so a small range keeps its own gridlines. */
+        formatValue:
+          m.unit === "ms"
+            ? fmtMs
+            : m.value === "executions_per_second"
+              ? (v, o) => Number(v).toFixed(Math.max(3, tickDecimals(o && o.step)))
+              : (v, o) => fmtInt(v, o) + " " + m.unit,
+        unit: m.unit === "ms" ? null : m.unit,
+        sizeUnit: m.unit === "ms" ? "ms" : null,
         ...(axis || {}),
       },
       "stats-history|" + key + "|" + m.value,
@@ -117,8 +125,9 @@ function chartFor(kind, key, data, hours, axis, metric) {
         { key: "avg_cpu_ms", label: "Avg CPU", color: SERIES_COLORS[0] },
         { key: "avg_elapsed_ms", label: "Avg Elapsed", color: SERIES_COLORS[1] },
       ],
-      formatValue: (v) => Math.round(v).toLocaleString() + " ms",
-      unit: "ms",
+      /* #7586: the unit the grid prints (ms, s, min), taken from the largest tick so one axis has one unit, and carried by every tick, not a caption. */
+      formatValue: fmtMs,
+      sizeUnit: "ms",
       ...(axis || {}),
     },
     "stats-history|" + key,
@@ -161,9 +170,10 @@ function panelFor(kind, key, state, hours, onMetric) {
 /**
  * The History column: a button per row, and the panel under it while that row's history is open. A row without the keys the read
  * needs gets a dash. `kind` is "queries" or "procedures". The key is synthetic, so the column is never sorted, filtered, exported
- * or copied.
+ * or copied. #7586: a page that has its own picker and chart for the same history passes `pickRow(row)`; the button then selects the row there and
+ * opens no panel in the row, so the page has one route to the chart and not two copies of it.
  */
-export function statsHistoryColumn(kind, server, w) {
+export function statsHistoryColumn(kind, server, w, pickRow = null) {
   const hours = historyWindow(w).hours;
   return {
     key: kind + "_history",
@@ -171,6 +181,11 @@ export function statsHistoryColumn(kind, server, w) {
     render: (row) => {
       const target = historyTarget(kind, row);
       if (!target) return document.createTextNode("—");
+      if (pickRow) {
+        const go = el("button", { type: "button", class: "btn grid-tool", text: "History", title: "Show this query's history in the chart below the grid" });
+        go.addEventListener("click", () => pickRow(row));
+        return el("div", { class: "plan-cell" }, [go]);
+      }
       const key = keyOf(kind, server, target);
       const host = el("div", { class: "plan-cell" });
       const draw = () => {

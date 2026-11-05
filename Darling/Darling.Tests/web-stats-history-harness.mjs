@@ -108,6 +108,35 @@ const scenarios = {
     out.chart = chartsNow();
     out.selects = cell.all((n) => n.tag === "select").length;
   },
+  /* #7586: a page with its own Query picker passes pickRow: the History button hands the row to it, reads nothing and opens no panel. */
+  async pickerRoute() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] });
+    const picked = [];
+    const cell = mod.statsHistoryColumn("queries", "srv-a", 24, (row) => picked.push(row)).render(queryRow);
+    cell.byText("History").click();
+    await flush();
+    out.picked = picked;
+    out.fetches = fetches.length;
+    out.charts = chartsNow().length;
+    out.hideButton = cell.byText("Hide history") !== null;
+    out.panels = cell.all((n) => String(n.className).includes("stats-history")).length;
+    const dash = mod.statsHistoryColumn("queries", "srv-a", 24, () => {}).render({ database_name: "Orders" });
+    out.noHashStillDash = dash.textContent;
+  },
+  /* #7586: the per-query history chart prints durations in the grid's format, from the largest tick, with no ms caption. */
+  async queryAxis() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 33700, avg_elapsed_ms: 31000 }] });
+    mod.statsHistoryColumn("queries", "srv-a", 24).render(queryRow).byText("History").click();
+    await flush();
+    const spec = globalThis.__charts[0].spec;
+    const util = await import(pathToFileURL(scratch + "/util.js").href);
+    const ticks = [0, 10000, 20000, 30000, 40000];
+    out.axisUnit = spec.unit ?? null;
+    out.sizeUnit = spec.sizeUnit;
+    out.labels = ticks.map((t) => spec.formatValue(t, { step: 10000, axisMax: 40000 }));
+    out.perAtTop = util.sizeAxisPer(spec.sizeUnit, 40000);
+    out.tooltip = spec.formatValue(33700);
+  },
   async rebuild() {
     respond(procTrend());
     mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow).byText("History").click();
