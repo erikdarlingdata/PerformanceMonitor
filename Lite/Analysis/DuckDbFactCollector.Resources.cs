@@ -167,6 +167,7 @@ SELECT
     SUM(forced_grant_count_delta) AS total_forced_grants
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
 AND   collection_time >= $2
 AND   collection_time <= $3";
 

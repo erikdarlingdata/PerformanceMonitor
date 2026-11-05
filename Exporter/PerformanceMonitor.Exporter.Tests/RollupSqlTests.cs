@@ -157,6 +157,47 @@ public class RollupSqlTests
         Assert.Equal(2, Convert.ToInt32(row[columns["sample_count"]]));   // the interval-0 sample is still a sample, only its delta is left out
     }
 
+    // -- #7676: the small-query semaphore (id 1) has no max target. Its rollup row keeps NULL, never a 0 ceiling. --
+
+    [Fact]
+    public void MemoryGrants_rollup_keeps_a_null_max_target_null_for_the_small_query_semaphore()
+    {
+        using var connection = OpenConnection();
+        Exec(connection, ReadFixture("sqlserver-tables.sql"));
+        Exec(connection, "CREATE TABLE raw AS SELECT * FROM collect.memory_grant_stats LIMIT 0");
+        Exec(connection, """
+            INSERT INTO raw
+                (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
+                 max_target_memory_mb, granted_memory_mb, available_memory_mb, timeout_error_count_delta, forced_grant_count_delta,
+                 timeout_error_count, forced_grant_count, sample_interval_seconds)
+            VALUES
+                (1, TIMESTAMP '2026-09-28 10:00:00', 1, 'srv1', 0, 1, 12000.0, 100.0, 1.0, 0, 0, 0, 0, 60),
+                (2, TIMESTAMP '2026-09-28 10:00:00', 1, 'srv1', 1, 1, NULL, 7.0, 1.0, 0, 0, 0, 0, 60)
+            """);
+
+        var sql = RollupSql.Build("memory_grant_stats_hourly");
+        Assert.Equal(2, RowCount(connection, sql));
+
+        foreach (var (id, expected) in new[] { (0, 12000.0), (1, (double?)null) })
+        {
+            var one = $"SELECT * FROM ({sql}) WHERE resource_semaphore_id = {id}";
+            var row = Row1(connection, one);
+            var columns = ColumnsOf(connection, one);
+            foreach (var suffix in new[] { "_avg", "_max", "_last" })
+            {
+                var value = row[columns["max_target_memory_mb" + suffix]];
+                if (expected is null)
+                {
+                    Assert.Null(value);
+                }
+                else
+                {
+                    Assert.Equal(expected.Value, Convert.ToDouble(value), 3);
+                }
+            }
+        }
+    }
+
     // -- A counter reset: 100, 150, 20, 60 -> _delta_in_hour 110, _first 100, _last 60. --
 
     [Fact]
