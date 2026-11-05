@@ -83,7 +83,10 @@ public sealed partial class ViewerDataService
                 return (null, null, 0);
             }
 
-            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
+            /* #7611: each database against its own ages, as the alerts and the tool judge it. */
+            var resolver = await DatabaseProtectionThresholdSettings.ReadAsync(
+                _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc), resolver.ForDatabase);
             return overdue.Count == 0
                 ? (null, null, 0)
                 : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue), overdue.Count);

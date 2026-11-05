@@ -40,6 +40,14 @@ public static class DarlingThresholdKeys
     public const string IdentityCapacityWarning = "identity_capacity.warning_percent";
     public const string IdentityCapacityCritical = "identity_capacity.critical_percent";
 
+    /// <summary>The Database Protection overdue ages (#7611): a full backup older than this many hours (default 168), a log backup older than this many minutes
+    /// (default 60), a good CHECKDB older than this many hours (default 336). Darling's own, so no engine key. A per-server or per-database override (the database
+    /// is the judged database) replaces the global value for that scope. The tops are the ones the collector can still tell apart: a full or log backup is read
+    /// from a 60-day window, so 1440 hours and 86400 minutes are that window, and CHECKDB, which is not read from a window, tops at a year.</summary>
+    public const string BackupOverdueHours = "backup_overdue.threshold_hours";
+    public const string LogBackupOverdueMinutes = "log_backup_overdue.threshold_minutes";
+    public const string CheckDbOverdueHours = "checkdb_overdue.threshold_hours";
+
     private static readonly Entry[] All =
     [
         new("cpu.threshold_percent", AlertThresholdKey.CpuThresholdPercent, AlertThresholdScope.Server, 1, 100, "cpu_threshold_percent", 100),
@@ -67,6 +75,9 @@ public static class DarlingThresholdKeys
         new(PgDeadlockCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_deadlock_count_threshold", int.MaxValue),
         new(IdentityCapacityWarning, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_warning_percent", 100),
         new(IdentityCapacityCritical, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_critical_percent", 100),
+        new(BackupOverdueHours, null, AlertThresholdScope.ServerAndDatabase, 1, 1440, "backup_overdue_threshold_hours", 1440),
+        new(LogBackupOverdueMinutes, null, AlertThresholdScope.ServerAndDatabase, 1, 86400, "log_backup_overdue_threshold_minutes", 86400),
+        new(CheckDbOverdueHours, null, AlertThresholdScope.ServerAndDatabase, 1, 8760, "checkdb_overdue_threshold_hours", 8760),
     ];
 
     private static readonly Dictionary<string, Entry> ByWire = BuildByWire();

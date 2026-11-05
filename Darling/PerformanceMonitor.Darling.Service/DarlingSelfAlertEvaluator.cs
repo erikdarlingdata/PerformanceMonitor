@@ -181,6 +181,8 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly Func<bool> _backupOverdueEnabled;
     private readonly Func<bool> _logBackupOverdueEnabled;
     private readonly Func<bool> _checkDbOverdueEnabled;
+    /// <summary>#7611: the global ages of the three overdue alerts; a database or server override replaces each through <see cref="_resolveThreshold"/>.</summary>
+    private readonly Func<DatabaseProtectionGlobalThresholds> _protectionThresholds;
 
     /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
     /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
@@ -1326,6 +1328,7 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<bool>? backupOverdueEnabled = null,
         Func<bool>? logBackupOverdueEnabled = null,
         Func<bool>? checkDbOverdueEnabled = null,
+        Func<DatabaseProtectionGlobalThresholds>? protectionThresholds = null,
         Func<bool>? identityCapacityEnabled = null,
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
@@ -1352,6 +1355,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _backupOverdueEnabled = backupOverdueEnabled ?? (() => false);
         _logBackupOverdueEnabled = logBackupOverdueEnabled ?? (() => false);
         _checkDbOverdueEnabled = checkDbOverdueEnabled ?? (() => false);
+        _protectionThresholds = protectionThresholds ?? (() => DatabaseProtectionGlobalThresholds.Default);
         /* #6875: an evaluator built without these seams behaves like a store at its shipped defaults: the Identity Capacity alert is off, its bars are 70 and
            90 percent, and no override applies. */
         _identityCapacityEnabled = identityCapacityEnabled ?? (() => false);
@@ -5056,26 +5060,29 @@ internal sealed class DarlingSelfAlertEvaluator
         }
 
         var capturedAt = DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc);
-        var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, capturedAt);
-        var limits = DatabaseProtectionThresholds.Default;
+        /* #7611: each database is judged against its own ages (database override, server override, global value), so the detail names each one's. */
+        var serverKey = Key(serverId);
+        var resolver = new DatabaseProtectionThresholdResolver(
+            _protectionThresholds(), (wire, database, global) => _resolveThreshold(wire, serverKey, database, global));
+        var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, capturedAt, resolver.ForDatabase);
         if (_backupOverdueEnabled())
         {
             await ApplyOverdueMetricAsync(serverId, serverName, BackupOverdueMetric, DatabaseProtectionBands.KindFullBackup, overdue,
-                string.Create(CultureInfo.InvariantCulture, $"{limits.FullBackup.TotalDays} days"), "last full backup",
+                "last full backup",
                 " A database without a recent full backup cannot be restored to a recent point.", sweepGeneration, cancellationToken);
         }
 
         if (_logBackupOverdueEnabled())
         {
             await ApplyOverdueMetricAsync(serverId, serverName, LogBackupOverdueMetric, DatabaseProtectionBands.KindLogBackup, overdue,
-                string.Create(CultureInfo.InvariantCulture, $"{limits.LogBackup.TotalMinutes} minutes"), "last log backup",
+                "last log backup",
                 " Point-in-time recovery stops at the last log backup, and the log cannot be reused until one runs.", sweepGeneration, cancellationToken);
         }
 
         if (_checkDbOverdueEnabled())
         {
             await ApplyOverdueMetricAsync(serverId, serverName, CheckDbOverdueMetric, DatabaseProtectionBands.KindCheckDb, overdue,
-                string.Create(CultureInfo.InvariantCulture, $"{limits.CheckDb.TotalDays} days"), "last good CHECKDB",
+                "last good CHECKDB",
                 " Corruption can sit unnoticed and be copied into every backup taken meanwhile.", sweepGeneration, cancellationToken);
         }
     }
@@ -5085,7 +5092,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private async Task ApplyOverdueMetricAsync(
         int serverId, string serverName, string metric, string kind, IReadOnlyList<DatabaseProtectionOverdue> overdue,
-        string threshold, string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
+        string factName, string consequence, int? sweepGeneration, CancellationToken cancellationToken)
     {
         var key = Key(serverId);
         var stateKey = StateRetryKey(metric, key);
@@ -5103,7 +5110,14 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastDatabaseProtectionAlert[stateKey] = now;
                 /* #7202: capped like Identity Capacity. A server with hundreds of overdue databases would otherwise
                    put every one in the detail, and a Teams card past its ~28 KB ceiling is rejected on every repeat. */
-                var names = string.Join(", ", items.Take(OverdueDetailDatabases).Select(i => i.Text)) +
+                /* #7611: one age for every listed database reads as before ("older than 7 days"). Databases on different ages name their own
+                   ("Sales (90 minutes old, limit 30 minutes)"), and the alert's threshold text says the range. */
+                var limits = items.Select(i => i.Threshold ?? DatabaseProtectionThresholds.Default.FullBackup).Distinct().OrderBy(l => l).ToList();
+                var mixed = limits.Count > 1;
+                string Limit(TimeSpan l) => DatabaseProtectionThresholdResolver.LimitText(kind, l);
+                var threshold = mixed ? $"{Limit(limits[0])} to {Limit(limits[^1])}, set per database" : Limit(limits[0]);
+                var names = string.Join(", ", items.Take(OverdueDetailDatabases).Select(i =>
+                        mixed && i.Threshold is { } own ? i.Text[..^1] + ", limit " + Limit(own) + ")" : i.Text)) +
                     (items.Count > OverdueDetailDatabases
                         ? string.Create(CultureInfo.InvariantCulture, $", and {items.Count - OverdueDetailDatabases} more")
                         : string.Empty);

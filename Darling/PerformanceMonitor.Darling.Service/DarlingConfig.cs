@@ -931,6 +931,19 @@ public sealed class AlertsConfig
     [JsonPropertyName("checkDbOverdueEnabled")]
     public bool CheckDbOverdueEnabled { get; set; }
 
+    /// <summary>The three overdue ages (#7611): a full backup older than this many hours (default 168, 7 days), a log backup older than this many minutes
+    /// (default 60) and a good CHECKDB older than this many hours (default 336, 14 days) is overdue. Store columns <c>backup_overdue_threshold_hours</c>,
+    /// <c>log_backup_overdue_threshold_minutes</c> and <c>checkdb_overdue_threshold_hours</c> (V245). A per-server or per-database threshold override
+    /// (<c>backup_overdue.threshold_hours</c>, <c>log_backup_overdue.threshold_minutes</c>, <c>checkdb_overdue.threshold_hours</c>) replaces each.</summary>
+    [JsonPropertyName("backupOverdueThresholdHours")]
+    public int BackupOverdueThresholdHours { get; set; } = 168;
+
+    [JsonPropertyName("logBackupOverdueThresholdMinutes")]
+    public int LogBackupOverdueThresholdMinutes { get; set; } = 60;
+
+    [JsonPropertyName("checkDbOverdueThresholdHours")]
+    public int CheckDbOverdueThresholdHours { get; set; } = 336;
+
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
 

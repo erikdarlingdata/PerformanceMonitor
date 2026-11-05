@@ -358,6 +358,7 @@ public sealed class DarlingSelfAlertTests
         public bool BackupOverdueEnabled { get; set; }
         public bool LogBackupOverdueEnabled { get; set; }
         public bool CheckDbOverdueEnabled { get; set; }
+        public Func<DatabaseProtectionGlobalThresholds>? ProtectionThresholds { get; set; }
         /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
         public bool AgentAlertSetupEnabled { get; set; }
         /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
@@ -402,6 +403,7 @@ public sealed class DarlingSelfAlertTests
             backupOverdueEnabled: () => BackupOverdueEnabled,
             logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
+            protectionThresholds: ProtectionThresholds,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
             resolveThreshold: ResolveThreshold);
     }

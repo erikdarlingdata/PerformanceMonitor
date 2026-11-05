@@ -209,6 +209,11 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool BackupOverdueEnabled => _config.Alerts.BackupOverdueEnabled;
     public bool LogBackupOverdueEnabled => _config.Alerts.LogBackupOverdueEnabled;
     public bool CheckDbOverdueEnabled => _config.Alerts.CheckDbOverdueEnabled;
+    /// <summary>#7611: the three overdue ages. The bounds are <c>DarlingThresholdKeys</c>' (a full backup 1 to 1440 hours, a log backup 1 to 86400 minutes, CHECKDB 1 to 8760 hours),
+    /// so a hand-edited file cannot give the judgment a zero or a negative age.</summary>
+    public int BackupOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.BackupOverdueThresholdHours, DatabaseProtectionThresholdSettings.BackupHoursKey);
+    public int LogBackupOverdueThresholdMinutes => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.LogBackupOverdueThresholdMinutes, DatabaseProtectionThresholdSettings.LogBackupMinutesKey);
+    public int CheckDbOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey);
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

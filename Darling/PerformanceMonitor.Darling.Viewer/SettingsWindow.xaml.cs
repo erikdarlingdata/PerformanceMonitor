@@ -48,6 +48,10 @@ public partial class SettingsWindow : Window
     /// <summary>#6875: the Identity Capacity bars as loaded. The window shows only the switch, and a Save writes these back.</summary>
     private int _identityCapacityWarningPercent = 70;
     private int _identityCapacityCriticalPercent = 90;
+    /* #7611 (V245): the Database Protection ages. Carried from the loaded row so a save never resets them; the editor for them is added in a later change. */
+    private int _backupOverdueThresholdHours = 168;
+    private int _logBackupOverdueThresholdMinutes = 60;
+    private int _checkDbOverdueThresholdHours = 336;
 
     /// <summary>Branding the shared email/webhook renderers stamp on test messages (mirrors the service's).</summary>
     private static readonly AlertBranding s_branding = new("Performance Monitor Darling", null);
@@ -949,6 +953,9 @@ public partial class SettingsWindow : Window
         /* #6875: the two bars have no box here (update_alert_settings and the threshold overrides set them), so a Save carries the loaded values back unchanged. */
         _identityCapacityWarningPercent = r.IdentityCapacityWarningPercent;
         _identityCapacityCriticalPercent = r.IdentityCapacityCriticalPercent;
+        _backupOverdueThresholdHours = r.BackupOverdueThresholdHours;
+        _logBackupOverdueThresholdMinutes = r.LogBackupOverdueThresholdMinutes;
+        _checkDbOverdueThresholdHours = r.CheckDbOverdueThresholdHours;
         AlertCooldownBox.Text = r.CooldownMinutes.ToString(CultureInfo.InvariantCulture);
         AnalysisEnabledCheckBox.IsChecked = r.AnalysisEnabled;
         AnalysisIntervalBox.Text = r.AnalysisIntervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -1066,6 +1073,9 @@ public partial class SettingsWindow : Window
             IdentityCapacityEnabled = AlertIdentityCapacityCheckBox.IsChecked == true,
             IdentityCapacityWarningPercent = _identityCapacityWarningPercent,
             IdentityCapacityCriticalPercent = _identityCapacityCriticalPercent,
+            BackupOverdueThresholdHours = _backupOverdueThresholdHours,
+            LogBackupOverdueThresholdMinutes = _logBackupOverdueThresholdMinutes,
+            CheckDbOverdueThresholdHours = _checkDbOverdueThresholdHours,
             AnalysisEnabled = AnalysisEnabledCheckBox.IsChecked == true,
             AnalysisNotificationsEnabled = AnalysisNotificationsCheckBox.IsChecked == true,
             /* #3712 (V137): the combo's Tag IS the stored value -- 'digest' / 'page', or empty for NULL ("the file

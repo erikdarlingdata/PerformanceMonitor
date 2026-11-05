@@ -1908,9 +1908,13 @@ AND   {SqlServerCollectedTargetSql}";
         }
 
         var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
+        /* #7611: each database is judged against its own ages, the same resolution the alerts, the tool and the Viewer use. */
+        var resolverFor = captures.Count > 0
+            ? await DatabaseProtectionThresholdSettings.ReadFleetAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            : null;
         foreach (var (serverId, (at, facts)) in captures)
         {
-            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at);
+            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at, resolverFor!(serverId).ForDatabase);
             if (overdue.Count > 0)
             {
                 map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(

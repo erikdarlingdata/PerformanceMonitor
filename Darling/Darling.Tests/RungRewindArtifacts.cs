@@ -687,6 +687,10 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // alone, and the re-run of V243 adds it back. Safe on a store that never had it.
         new(243, "hasWaitingTasksProgramName",
             @"ALTER TABLE IF EXISTS collect.waiting_tasks DROP COLUMN IF EXISTS program_name;"),
+        // V245 (#7611): the three Database Protection thresholds on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
+        new(245, "hasProtectionThresholds",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
     ];
 
     /// <summary>
