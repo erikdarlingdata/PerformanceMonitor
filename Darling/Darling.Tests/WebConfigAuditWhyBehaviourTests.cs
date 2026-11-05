@@ -63,12 +63,14 @@ public sealed class WebConfigAuditWhyBehaviourTests
     public void ThePostgresWhyCells_NameNoToolAndNameTheTabThatShowsTheNumber()
     {
         var why = Why("pg");
-        Assert.Equal(5, why.Length);
+        Assert.Equal(6, why.Length);
         Assert.DoesNotContain(why, w => Regex.IsMatch(w, @"get_[a-z0-9_]+"));
         Assert.Contains("read the I/O tab over a busy window for wal_bytes", why[0], StringComparison.Ordinal);
         Assert.Contains("(the Activity tab) rather than assuming", why[1], StringComparison.Ordinal);
         Assert.Contains("The Activity tab has the statements writing the most temp blocks", why[2], StringComparison.Ordinal);
         Assert.Contains("scanning in the Activity tab", why[3], StringComparison.Ordinal);
+        // The Logging Settings Audit and Deadlock Graphs panels are on the Activity tab, so those two reads are named by it too, not left as tool names.
+        Assert.Equal("Check the log settings with the Activity tab, then read the graphs in the Activity tab.", why[5]);
     }
 
     [Fact]

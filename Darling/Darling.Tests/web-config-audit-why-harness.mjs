@@ -57,6 +57,7 @@ const pgWhy = [
   "work_mem is 4 MB. Counter-objective: set too high, memory multiplies per sort. get_pg_top_queries has the statements writing the most temp blocks.",
   "Find out which statements are scanning in get_pg_predicate_stats, then follow their time in get_pg_query_duration_trend.",
   "get_pg_write_stats over a busy window carries the WAL counters.",
+  "Check the log settings with get_pg_logging_audit, then read the graphs in get_pg_deadlock_detail.",
 ];
 const out = {};
 out.pg = whyOf(PG_AUDIT_COLUMNS, pgWhy.map((recommendation, i) => ({ setting: "s" + i, status: "Warning", current_value: "1", recommendation })));

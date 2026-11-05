@@ -101,7 +101,9 @@ const PAGE_FOR_TOOLS = [
   ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
   ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats",
     /* #7557: the Configuration Audit's advice points at these reads, and the Activity tab shows each (server-tab-reach.js). */
-    "get_pg_column_stats", "get_pg_predicate_stats", "get_pg_query_duration_trend"]],
+    "get_pg_column_stats", "get_pg_predicate_stats", "get_pg_query_duration_trend",
+    /* The Logging Settings Audit and Deadlock Graphs panels are on the Activity tab too; a Vacuum tab message names the audit read. */
+    "get_pg_logging_audit", "get_pg_deadlock_detail"]],
   ["the Overview tab", ["get_pg_cpu_utilization", "get_pg_extensions"]],
   ["the Storage tab", ["get_pg_table_bloat", "get_pg_index_bloat", "get_pg_index_usage"]],
   ["the Configuration tab", ["get_pg_server_config", "get_pg_server_config_changes"]],
