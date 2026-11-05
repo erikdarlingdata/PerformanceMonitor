@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// The per-semaphore reads show both rows; the per-pool reads still sum a pool's semaphores into one row, so the pool panels add up
 /// to the two semaphore rows and show a pool's small-query waiters.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class ResourceSemaphoreSmallQueryRowLiveTests
 {
     private const string ServerName = "darling-small-query-semaphore";
