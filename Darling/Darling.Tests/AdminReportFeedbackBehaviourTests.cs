@@ -147,4 +147,28 @@ public sealed class AdminReportFeedbackBehaviourTests
 
         Assert.Equal("Practice requests opened in the last 30 days.", Assert.Single(Strings(page.GetProperty("practiceWindow"))));
     }
+
+    [Fact]
+    public void APanelThatNamesNoteQuiet_DrawsACaption_AndAPanelThatDoesNot_KeepsTheYellowStrip()
+    {
+        // #7558: Memory Pressure Events per Hour, the System Events intro, Query Store Overhead, Query Store Memory Clerk, PostgreSQL Sampled
+        // Waits and Checkpoints and WAL name noteQuiet because their note only explains the table. Every other panel's note warns about data.
+        var page = AdminServerEditBehaviourTests.Run("noteStrips");
+
+        Assert.Equal("strip source", page.GetProperty("quiet").GetString());
+        Assert.Equal("strip notice", page.GetProperty("loud").GetString());
+        Assert.Equal("strip source plain-note", page.GetProperty("quietWithShort").GetString());
+        Assert.Equal("strip notice plain-note", page.GetProperty("loudWithShort").GetString());
+    }
+
+    [Theory]
+    [InlineData("ok", "strip source")]
+    [InlineData("probeFailed", "strip notice")]
+    public void TheServersSummary_IsACaption_UnlessTheSignInProbeFailed(string kind, string expectedClass)
+    {
+        // #7558: a failed sign-in probe is a real warning, so its summary stays the yellow strip.
+        var page = AdminServerEditBehaviourTests.Run("serversSummary:" + kind);
+
+        Assert.Equal(expectedClass, page.GetProperty("className").GetString());
+    }
 }

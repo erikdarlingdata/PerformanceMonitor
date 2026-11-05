@@ -1397,6 +1397,26 @@ try {
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.
        An export that is not a function (EDIT_FIELDS) is returned as it is. */
+    /* #7558: the strip a panel's note draws. A panel that names `noteQuiet` (its note only explains the table) draws the quiet caption, one
+       that does not keeps the yellow strip, with and without a short sentence behind "More detail". Returns each strip's class. */
+    noteStrips: async () => {
+      const draw = (desc) => util.noteStrip(desc, "A note the read sent.", {}).className;
+      return {
+        quiet: draw({ noteQuiet: true }),
+        loud: draw({}),
+        quietWithShort: draw({ noteQuiet: true, noteShort: "Short." }),
+        loudWithShort: draw({ noteShort: "Short." }),
+      };
+    },
+    /* #7558: the Servers tab's summary line under a signed-in session. The param is "ok" (a quiet caption) or "probeFailed" (the sign-in
+       probe failed: a real warning, the yellow strip). Returns the class of the strip that carries the server count. */
+    serversSummary: async (param) => {
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false, probe_failed: param === "probeFailed" } });
+      await mountPage("servers");
+      const strip = all(main, (n) => n.classList.contains("strip") && /servers?\. /.test(n.textContent))[0];
+      return { className: strip ? strip.className : null, text: strip ? strip.textContent : null };
+    },
     pure: async () => {
       const request = JSON.parse(await readStdin());
       const call = ({ fn, args = [] }) => {
