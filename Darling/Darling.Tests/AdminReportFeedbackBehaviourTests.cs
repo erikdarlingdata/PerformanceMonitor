@@ -84,9 +84,12 @@ public sealed class AdminReportFeedbackBehaviourTests
         var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
 
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
-        var note = Assert.Single(Strings(page.GetProperty("strips")), t => t.Contains("this page is list-only", System.StringComparison.Ordinal));
+        var strips = Strings(page.GetProperty("strips"));
+        // #7558: the switch is named once, under the Admin heading. The tab says only what it lists and where to change it.
+        Assert.Equal("This page is list-only. To record feedback, use the Viewer app.", Assert.Single(strips, t => t.Contains("page is list-only", System.StringComparison.Ordinal)));
+        Assert.Single(strips, t => t.Contains("turned off", System.StringComparison.Ordinal));
+        Assert.Single(strips, t => t.Contains("web.allowAdminWrites", System.StringComparison.Ordinal));
         const string SwitchSentence = " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service.";
-        Assert.Equal("Changes from this page are turned off, so this page is list-only. To record feedback, use the Viewer app." + SwitchSentence, note);
         Assert.EndsWith(SwitchSentence, PerformanceMonitor.Darling.Service.DarlingWebEndpoints.FeedbackRefusedMessage(true, adminWritesOff: true), System.StringComparison.Ordinal);
     }
 
@@ -121,5 +124,27 @@ public sealed class AdminReportFeedbackBehaviourTests
 
         Assert.Equal(0, page.GetProperty("formsBefore").GetInt32());
         Assert.Contains("Report Feedback", Strings(page.GetProperty("tabs")));
+    }
+
+    [Fact]
+    public void AnExplanationIsAQuietCaption_AndOnlyARealWarningIsYellow()
+    {
+        // #7558: the tab's how-it-works text and the list-only line explain the page. Neither warns about anything.
+        var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
+        var strips = Strings(page.GetProperty("strips"));
+        var classes = Strings(page.GetProperty("stripClasses"));
+
+        Assert.Equal(strips.Length, classes.Length);
+        Assert.NotEmpty(strips);
+        Assert.All(classes, c => Assert.Equal("strip source", c));
+    }
+
+    [Fact]
+    public void ThePracticeWindow_IsWrittenInDays_NotRawHours()
+    {
+        // #7558: the read counts 720 hours; the page says 30 days.
+        var page = AdminServerEditBehaviourTests.Run("signedout:practice");
+
+        Assert.Equal("Practice requests opened in the last 30 days.", Assert.Single(Strings(page.GetProperty("practiceWindow"))));
     }
 }

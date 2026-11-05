@@ -13,7 +13,7 @@
    each server's own clock, and the browser's clock cannot be subtracted from it. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 
 const LIMIT = 200;
 // The "Show removed servers" choice, kept here so the tab's periodic rebuild does not untick it.
@@ -99,7 +99,7 @@ export const tab = {
         const legend = data.hardware_note_legend || {};
         const rows = (data.servers || []).map((r) => displayRow(r, legend));
         mount(body, [
-          noticeStrip(noticeText(data, rows.length)),
+          captionStrip(noticeText(data, rows.length), data.truncated === true),
           VIZ.table({ servers: rows }, { rowsKey: "servers", columns: COLUMNS, emptyText: "No server property data collected yet." }),
         ]);
       } catch (e) {

@@ -286,7 +286,7 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
       kept,
       floor,
       typeof note === "string" && note.trim() ? noteStrip(desc, note, res.data) : null,
-      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(null, n) : null)),
+      ...moreNotes.map((n) => (typeof n === "string" && n.trim() ? noteStrip(desc.noteQuiet === true ? { noteQuiet: true } : null, n) : null)),
       rendered,
     ]);
   } catch (e) {

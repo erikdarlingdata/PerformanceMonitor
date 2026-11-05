@@ -159,8 +159,8 @@ export const tab = {
         /* #6653: the notes lead with the uptime caveat only when dedupe-only is not in effect (the tool leaves it out beside the dedupe notice). */
         const lead = (data.uptime_warning && !data.dedupe_only_applied ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
         const notes = data.notes || [];
-        // A plain count stays quiet. A cut list, a cut database list or the overall-workload reason is a caveat and stays yellow.
-        const parts = [captionStrip(noticeText(data, recs.length, choice.db), (recs.length > 0 && data.truncated === true) || data.databases_truncated === true || !!data.overall_workload_reason)];
+        // A plain count stays quiet. A cut list or a cut database list is a caveat and stays yellow. The overall-workload reason is an explanation (#7558), so it is a caption.
+        const parts = [captionStrip(noticeText(data, recs.length, choice.db), (recs.length > 0 && data.truncated === true) || data.databases_truncated === true)];
         notes.slice(0, lead).forEach((t) => parts.push(noticeStrip(t)));
         const more = notes.slice(lead);
         if (more.length) {

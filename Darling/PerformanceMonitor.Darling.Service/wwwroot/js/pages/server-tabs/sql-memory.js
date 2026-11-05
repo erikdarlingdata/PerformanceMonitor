@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, parseUtc, fmtPlain, windowFromHours } from "../../util.js";
+import { el, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, mount, loadingStrip, readErrorStrip, emptyStrip, noticeStrip, captionStrip, chartNote, parseUtc, fmtPlain, windowFromHours } from "../../util.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -303,7 +303,7 @@ export function memoryPressurePanels(server, ctx) {
       const lines = PRESSURE_LINES.filter((l) => points.some((p) => p[l.key] > 0));
       return [
         keptWindowStrip(res),
-        noticeStrip(
+        captionStrip(
           "Samples where an indicator reads 2 or more, counted per hour as stacked bars; an hour with none draws no bar. " + PRESSURE_COVERAGE_CAVEAT
         ),
         zoomableLineChart({

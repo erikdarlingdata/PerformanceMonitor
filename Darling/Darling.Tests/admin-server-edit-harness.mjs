@@ -1169,6 +1169,7 @@ try {
       const result = {
         formsBefore, readsBefore, tabs: all(main, (n) => n.tag === "a").map((n) => n.textContent),
         strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        stripClasses: all(main, (n) => n.classList.contains("strip")).map((n) => n.className),
         reported: all(main, (n) => n.tag === "p" && n.textContent.startsWith("Reported ")).map((n) => n.textContent),
         window: byAttr(main, "data-fb-window", "1").map((n) => n.textContent),
       };
@@ -1246,6 +1247,8 @@ try {
         noteForm: byAttr(main, "data-note-write").length,
         practiceForm: byAttr(main, "data-practice-start").length,
         writes: requests.filter((r) => r.method === "PUT").length,
+        practiceWindow: byAttr(main, "data-practice-window", "1").map((n) => n.textContent),
+        stripClasses: all(main, (n) => n.classList.contains("strip")).map((n) => n.className + "|" + n.textContent.slice(0, 40)),
       };
     },
     /* #6936: the Routes tab on an editing seat. Edit on route 7 (a stored Critical only route), choose `severity` in the Severity box, Save:
