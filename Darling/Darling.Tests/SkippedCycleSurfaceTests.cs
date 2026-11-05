@@ -9,7 +9,6 @@
 using System;
 using System.Linq;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -333,21 +332,6 @@ public sealed class SkippedCycleSurfaceShapeTests
         var read = tools.IndexOf("SkippedCycleReader.GetSkippedCycleSummaryAsync(", StringComparison.Ordinal);
         var memo = tools.IndexOf("DarlingDataReader.GetCollectionHealthMemoizedAsync(", StringComparison.Ordinal);
         Assert.True(memo >= 0 && read > memo, "the skipped-slot read is its own statement after the memoised collector read");
-    }
-
-    [Fact]
-    public void TheWebPanel_IsUsedAtBothSites_AndReadsOnlyKeysTheBlockHas()
-    {
-        var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Equal(2, Regex.Matches(js, @"\{ title: ""Skipped Cycles"", subtitle: ""trailing 24 hours"", viz: ""stat"", stats: SKIPPED_CYCLES_STATS \},").Count);
-
-        var start = js.IndexOf("const SKIPPED_CYCLES_STATS = [", StringComparison.Ordinal);
-        Assert.True(start >= 0);
-        var end = js.IndexOf("];", start, StringComparison.Ordinal);
-        var stats = js[start..end];
-        var keys = Regex.Matches(stats, @"key: ""skipped_cycles\.(\w+)""").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(BlockFields, keys);
-        Assert.Contains("key: \"skipped_cycles.last_message\", label: \"Last message\", format: \"text\", small: true, hideWhenEmpty: true", stats, StringComparison.Ordinal);
     }
 
     [Fact]

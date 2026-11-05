@@ -181,6 +181,9 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// </summary>
     CollectorQuery BuildQuery(CollectorContext context);
 
+    /// <summary><see cref="ICollectorSchemaInfo.BuildQueryUntyped"/>, from <see cref="BuildQuery"/> (#7681).</summary>
+    CollectorQuery? ICollectorSchemaInfo.BuildQueryUntyped(CollectorContext context) => BuildQuery(context);
+
     /// <summary>
     /// Optional second query run best-effort on the same (single-path) connection after
     /// <see cref="ReadAsync"/> — e.g. server_properties' WS5 health probe. Null = none (the

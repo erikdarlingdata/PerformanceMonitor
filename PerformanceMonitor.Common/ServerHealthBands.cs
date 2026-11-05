@@ -694,6 +694,12 @@ namespace PerformanceMonitor.Common
         /// so the dot, the strip counts, the severity sort and the MCP reply agree with the tile.</summary>
         public bool IdentityCapacityCritical { get; init; }
 
+        /// <summary>#7647: true when a database on this server is in a state the Database State alert grades Critical (SUSPECT, RECOVERY_PENDING, EMERGENCY) in both of
+        /// the two newest snapshots. Like <see cref="IdentityCapacityCritical"/> it is not one of the six metrics: it raises
+        /// <see cref="ServerHealthClassifier.OverallMetricSeverity"/> to Critical and counts as one Critical in <see cref="ServerHealthClassifier.FleetHealthScore"/>. A server whose
+        /// database state is not collected leaves it false, which is "no reading", not "healthy": the card says not collected for that part.</summary>
+        public bool DatabaseStateCritical { get; init; }
+
         /// <summary>Worker-thread ceiling (max_workers_count), or null with no scheduler snapshot (e.g. Azure SQL DB).</summary>
         public int? TotalThreads { get; init; }
 
@@ -1548,7 +1554,7 @@ namespace PerformanceMonitor.Common
         public static HealthSeverity OverallMetricSeverity(in ServerHealthMetrics m)
         {
             /* #7561: a column at its critical bar is a failing insert, a Critical whatever the six metrics read (even none). */
-            if (m.IdentityCapacityCritical)
+            if (m.IdentityCapacityCritical || m.DatabaseStateCritical)
             {
                 return HealthSeverity.Critical;
             }
@@ -1580,9 +1586,17 @@ namespace PerformanceMonitor.Common
         /// critical bar bands the server instead, see <see cref="ServerHealthMetrics.IdentityCapacityCritical"/>), an Agent alerts setup gap, and an overdue
         /// backup or CHECKDB (Protection). The ONE rule for the web fleet card, <c>get_fleet_overview</c> and the Viewer's Needs attention list, so none keeps its
         /// own copy. Empty when the server has none.</summary>
-        public static IReadOnlyList<string> AdvisoryTiles(int agentAlertGapCount, int databaseProtectionOverdueCount, int identityColumnsAtBar, bool identityCritical)
+        public static IReadOnlyList<string> AdvisoryTiles(
+            int agentAlertGapCount, int databaseProtectionOverdueCount, int identityColumnsAtBar, bool identityCritical,
+            int databaseStateDeviations = 0, bool databaseStateCritical = false)
         {
-            var tiles = new List<string>(3);
+            var tiles = new List<string>(4);
+            /* #7647: a database whose state deviates (OFFLINE, RESTORING, ...) and that the alert does not grade Critical. A Critical state bands the server instead. */
+            if (databaseStateDeviations > 0 && !databaseStateCritical)
+            {
+                tiles.Add("Database state");
+            }
+
             if (identityColumnsAtBar > 0 && !identityCritical)
             {
                 tiles.Add("Identity capacity");
@@ -1701,7 +1715,7 @@ namespace PerformanceMonitor.Common
                 _ => 0,
             };
 
-            var criticals = m.IdentityCapacityCritical ? 1 : 0;
+            var criticals = (m.IdentityCapacityCritical ? 1 : 0) + (m.DatabaseStateCritical ? 1 : 0);
             var warnings = 0;
             foreach (var sev in MetricSeverities(m))
             {

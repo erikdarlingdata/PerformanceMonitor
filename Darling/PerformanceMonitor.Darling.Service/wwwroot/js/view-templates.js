@@ -403,7 +403,7 @@ export const DASHBOARD_TEMPLATES = [
             rowsKey: "changes",
             emptyText: "No server configuration changed in the last week.",
             columns: [
-              { key: "change_time", label: "Changed", format: "time" },
+              { key: "change_time", label: "First seen", format: "time" },
               { key: "configuration_name", label: "Setting" },
               { key: "old_value_configured", label: "Old" },
               { key: "new_value_configured", label: "New" },
