@@ -49,7 +49,24 @@ class FakeNode {
   getAttribute(name) {
     return name in this.attrs ? this.attrs[name] : null;
   }
-  addEventListener() {}
+  /* Recorded, so a scenario can fire a click or a change (#7586); nothing else in the harness calls them. */
+  addEventListener(type, fn) {
+    (this.listeners ||= {})[type] = (this.listeners[type] || []).concat(fn);
+  }
+  fire(type) {
+    for (const fn of (this.listeners && this.listeners[type]) || []) fn({ preventDefault() {}, target: this });
+  }
+  all(pred, acc = []) {
+    if (pred(this)) acc.push(this);
+    for (const c of this.children) c.all && c.all(pred, acc);
+    return acc;
+  }
+  querySelector(tag) {
+    return this.all((n) => n.tag === tag)[0] || null;
+  }
+  scrollIntoView(opts) {
+    (globalThis.__scrolled ||= []).push(opts);
+  }
   set textContent(value) {
     this.children = [];
     this.text = String(value);
@@ -331,6 +348,30 @@ const scenarios = {
   queryStoreLocal: () => {
     answer = () => data(INPUT);
     return [modules.panels.renderPanel(queryStorePanel)];
+  },
+  // #7586: a row's History button on the Top Queries card selects that row in the Query picker, draws its trend and scrolls to it. The
+  // real closure runs: the click is fired on the second row's button, and the picker's select and the trend read are looked at.
+  historyPicksRow: async () => {
+    answer = (url) =>
+      tool(url) === "get_top_queries_by_cpu"
+        ? data({
+            queries: [
+              { query_hash: "0xAAA", database_name: "db1", query_text: "select 1" },
+              { query_hash: "0xBBB", database_name: "db2", query_text: "select 2" },
+            ],
+          })
+        : data({});
+    const card = modules.tabs.topQueriesPanel("SRV1", RANGE);
+    await settleFast();
+    const buttons = card.all((n) => n.tag === "button" && n.textContent === "History");
+    const select = card.all((n) => n.tag === "select" && n.attrs["aria-label"] === "Query")[0];
+    const trendReads = () => fetches.filter((f) => f.includes("get_query_trend")).map((f) => Object.fromEntries(new URL(f, "http://viewer.test").searchParams));
+    const before = trendReads().length;
+    const startedOn = select.value;
+    buttons[1].fire("click");
+    await settleFast();
+    found = { buttons: buttons.length, startedOn, selected: select.value, before, reads: trendReads().slice(before), scrolled: (globalThis.__scrolled || []).length };
+    return [card];
   },
   topQueriesLocal: () => {
     answer = (url) => (tool(url) === "get_top_queries_by_cpu" ? data(INPUT) : data({}));

@@ -176,6 +176,25 @@ public sealed class WebRangeKeptHistoryBehaviourTests
         Assert.Empty(Strings(r, "errors"));
     }
 
+    /// <summary>#7586: on the Queries tab a row's History button runs the card's own pick closure: the Query picker moves to that row's
+    /// hash and database, the trend is read for that row, and the picker scrolls into view. The closure is the only route to a row's history.</summary>
+    [Fact]
+    public void TheQueriesCardHistoryButton_SelectsThatRowInThePicker_AndReadsItsTrend()
+    {
+        if (!TryRun("historyPicksRow", out var r)) return;
+        var found = r.GetProperty("found");
+        Assert.Equal(2, found.GetProperty("buttons").GetInt32());
+        Assert.Equal("0", found.GetProperty("startedOn").GetString());
+        Assert.Equal("1", found.GetProperty("selected").GetString());
+        var before = found.GetProperty("before").GetInt32();
+        Assert.Equal(1, before);
+        var reads = found.GetProperty("reads").EnumerateArray().ToArray();
+        var read = Assert.Single(reads);
+        Assert.Equal("0xBBB", read.GetProperty("query_hash").GetString());
+        Assert.Equal("db2", read.GetProperty("database_name").GetString());
+        Assert.Equal(1, found.GetProperty("scrolled").GetInt32());
+    }
+
     [Fact]
     public void AHandBuiltComposite_IsAskedAgainTheSameWay()
     {
