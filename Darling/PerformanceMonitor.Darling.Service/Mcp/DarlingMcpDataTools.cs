@@ -1841,7 +1841,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
-    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Each row carries monthly_cost_usd, the cost set on the definition (0 means none is set); get_server_settings shows every field edit_server changes. Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\", or \"Azure SQL Database\" / \"Azure SQL Managed Instance\" with no year for those two Azure platforms; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove. same_machine_as lists the names of the OTHER enabled registrations that last reported the same machine identity as this one (empty when none): an address can start reaching another machine, for example after an availability group listener fails over, and then two registrations watch one machine. Nothing is refused and nothing alerts; the list is worked out when you read it, so it clears when the address moves back. An agent-scoped notification route on one of those registrations does not cover the other.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Each row carries monthly_cost_usd, the cost set on the definition (0 means none is set); get_server_settings shows every field edit_server changes. Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\", or \"Azure SQL Database\" / \"Azure SQL Managed Instance\" with no year for those two Azure platforms; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove. same_machine_as lists the names of the OTHER enabled registrations that last reported the same machine identity as this one (empty when none): an address can start reaching another machine, for example after an availability group listener fails over, and then two registrations watch one machine. Nothing is refused and nothing alerts; the list is worked out when you read it, so it clears when the address moves back. An agent-scoped notification route on one of those registrations does not cover the other. A server the service cannot connect to reads Offline at once instead of waiting out the age rule, and its row then carries reason (Server unreachable since <time> UTC and the last connect error), connect_down_since and last_connect_error; all three are null otherwise.")]
     public static async Task<string> ListServers(
         NpgsqlDataSource postgres,
         CancellationToken cancellationToken = default)
@@ -1909,6 +1909,9 @@ public sealed class DarlingMcpDataTools
             var engineVersion = MonitoredEngineVersion.DescribeEngineVersion(
                 s.EngineKind, s.SqlMajorVersion, s.PostgresMajorVersion, s.SqlEngineEdition);
 
+            /* #7590: a collection newer than the first failure proves the connect works again, so the stored flag no longer counts. */
+            var connectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(s.LastCollection, s.ConnectDownSince);
+
             return new
             {
                 server_name = s.ServerName,
@@ -1924,7 +1927,13 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc),
+                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc, s.ConnectDownSince),
+                /* #7590: a server the service cannot connect to reads Offline at once, and says why here; all three are null otherwise. */
+                reason = connectDownSince.HasValue
+                    ? ServerHealthClassifier.UnreachableReason(connectDownSince.Value, s.LastConnectError)
+                    : null,
+                connect_down_since = connectDownSince?.ToString("o"),
+                last_connect_error = connectDownSince.HasValue ? s.LastConnectError : null,
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
                 last_collection = s.LastCollection?.ToString("o"),
                 /* #6351: the other enabled registrations that last reported this machine's identity. Worked out at read, never stored. */
@@ -2055,6 +2064,51 @@ ORDER BY server_name";
     internal static Task<string> GetCollectionHealthUncut(NpgsqlDataSource postgres, string? server_name, CancellationToken cancellationToken) =>
         GetCollectionHealthCoreAsync(postgres, server_name, full_detail: false, uncutText: true, logger: null, cancellationToken);
 
+    /// <summary>The registry read behind <c>server_connection</c> on <c>get_collection_health</c> (#7590).</summary>
+    internal const string ServerConnectionSql = $"""
+        SELECT s.connect_down_since, s.last_connect_error, s.next_connect_attempt,
+               (SELECT cl.collection_time FROM v_collection_log cl WHERE cl.server_id = s.server_id AND {CollectionCycleRow.NotCycleRowSql}
+                ORDER BY cl.collection_time DESC LIMIT 1) AS last_collection
+        FROM servers s WHERE s.server_id = $1
+        """;
+
+    /// <summary>The server-level connection answer for <c>get_collection_health</c>: null while the last connect succeeded, else an object saying
+    /// collection is waiting on the connection, since when, the last connect error and the next retry time (#7590). A read that fails answers null: this block is
+    /// additive and must not take the collector rows down with it.</summary>
+    internal static async Task<object?> ReadServerConnectionAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime nowUtc, Microsoft.Extensions.Logging.ILogger? logger, CancellationToken cancellationToken,
+        bool hasCollectorRows = true)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand(ServerConnectionSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
+            {
+                return null;
+            }
+
+            var since = DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified);
+            /* A collection newer than the first failure proves a later connect worked: the flag whose clearing write was lost says nothing. */
+            DateTime? lastCollection = reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Unspecified);
+            if (ServerHealthClassifier.EffectiveConnectDownSince(lastCollection, since) is null)
+            {
+                return null;
+            }
+
+            var error = reader.IsDBNull(1) ? null : reader.GetString(1);
+            DateTime? next = reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Unspecified);
+            return ServerHealthClassifier.ServerConnectionBlock(since, error, next, nowUtc, hasCollectorRows);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "get_collection_health: the connection state could not be read; the reply carries none");
+            return null;
+        }
+    }
+
     private static async Task<string> GetCollectionHealthCoreAsync(
         NpgsqlDataSource postgres,
         string? server_name,
@@ -2093,7 +2147,23 @@ ORDER BY server_name";
             var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(
                 postgres, resolved.ServerId, windowStartUtc, nowUtc, cancellationToken);
             if (rows.Count == 0)
-                return McpHelpers.Status("unavailable", "No collection health data available.");
+            {
+                /* #7590: a server whose connect is failing may have no collector rows in the window (the outage outlasted it, or retention
+                   dropped them), and that is exactly when the reason matters most. The word stays unavailable, as it is without a failed
+                   connect, and the connection block and its sentence are there whatever the log holds. */
+                var downConnection = await ReadServerConnectionAsync(postgres, resolved.ServerId, DateTime.UtcNow, logger, cancellationToken, hasCollectorRows: false);
+                if (downConnection is null)
+                    return McpHelpers.Status("unavailable", "No collection health data available.");
+
+                var downMessage = JsonSerializer.SerializeToElement(downConnection, McpHelpers.JsonOptions).GetProperty("message").GetString();
+                return JsonSerializer.Serialize(new
+                {
+                    status = "unavailable",
+                    message = "No collection health data available. " + downMessage,
+                    server = resolved.DisplayName,
+                    server_connection = downConnection,
+                }, McpHelpers.JsonOptions);
+            }
 
             /* #4938: a collector's run time, read fresh and AFTER the memo. The rows above are held for a minute and
                the run time is an operator setting, so a time that was just set shows on the next call. It is never an
@@ -2387,9 +2457,14 @@ ORDER BY server_name";
             /* #6254: the Query Store collector's newest read source, when it has one. Empty with the replica setting off, and then the
                reply is the one it was before. Read after the memo like the run times above: it is a fact about the newest run. */
             var readSources = await DarlingDataReader.ReadCollectionHealthReadSourcesAsync(postgres, resolved.ServerId, windowStartUtc, cancellationToken);
+            /* #7590: the server-level answer. Null (and so absent from the reply) while the last connect succeeded. */
+            var serverConnection = await ReadServerConnectionAsync(postgres, resolved.ServerId, nowUtc, logger, cancellationToken);
             Func<int, string> healthReply = collectorCount => McpHelpers.WithCollectorReadSource(DarlingCollectionCaveatReader.AttachToJson(JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.DisplayName,
+                /* #7590: set only while the service cannot connect to this server. The collector rows below are the last runs from before the
+                   connection failed, so none of them is being run now: this says collection is waiting on the connection and does not relabel them. */
+                server_connection = serverConnection,
                 /* #3453: the build-attribution read. Nothing else on the MCP surface says WHAT build is
                    answering: counting_since moving proves a RESTART (a crash-restart reads identically to
                    an install), and a capability fingerprint identifies a build only when the change in
@@ -2940,10 +3015,11 @@ ORDER BY server_name";
     /// (Offline) from one that has never collected (AwaitingFirstCollection), through the same rule the fleet
     /// card applies to its 48-hour window.</para>
     /// </summary>
-    internal static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc) =>
+    internal static string FreshnessStatus(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc = null) =>
         ServerCollectionStatusRules
             .FromFreshness(ServerHealthClassifier.ClassifyFreshness(
-                lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc))
+                lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc))
             .McpToken();
 
     /// <summary>
