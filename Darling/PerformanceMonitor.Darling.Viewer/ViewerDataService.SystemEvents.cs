@@ -363,13 +363,17 @@ public sealed partial class ViewerDataService
     {
         var xmls = await ReadSystemHealthEventXmlAsync(
             serverId, startUtc, endUtc, SystemHealthParser.SchedulerMonitorEvent, cancellationToken);
+        /* #7688: SQL Server on Linux reports idle as 0, so Other-Process CPU (100 - SQL - idle) would read 100 minus the SQL figure
+           on every minute and pass the significance test. Both figures are cleared before the test and the grid shows a blank. */
+        var hostOs = await GetHostOsVersionAsync(serverId, cancellationToken);
 
         return await Task.Run(() =>
         {
             var rows = new List<SchedulerIssueRow>();
             foreach (var xml in xmls)
             {
-                var record = SystemHealthParser.ParseSchedulerIssue(xml);
+                var parsed = SystemHealthParser.ParseSchedulerIssue(xml);
+                var record = parsed is null ? null : SystemHealthHostCpu.Apply(parsed, hostOs);
                 if (record != null && SystemEventSignificance.IsSignificant(record))
                     rows.Add(new SchedulerIssueRow(record));
             }

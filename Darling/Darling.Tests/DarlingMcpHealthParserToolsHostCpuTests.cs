@@ -88,6 +88,72 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)",
             Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
         });
 
+    /// <summary>#7688: seeds one scheduler-monitor sample (healthy memory) instead of the SYSTEM component, then runs the scheduler read.</summary>
+    private static Task RunSchedulerAsync(string scenario, string? hostOs, int sqlCpu, int idle, Func<JsonElement, Task> body) =>
+        WindowFloorLiveHarness.RunAsync(ConnectionString, ["system_health_events"], [Name(scenario)], Tables, async (c, ds, end) =>
+        {
+            var name = Name(scenario);
+            var serverId = ServerIdHelper.GetDeterministicHashCode(name);
+            await WindowFloorLiveHarness.SeedServerAsync(c, name, end.AddDays(-3), "system_health_events", end.AddDays(-2), 30, end.AddMinutes(-30),
+                Tables, TestContext.Current.CancellationToken);
+            var eventTime = end.AddHours(-2);
+            var xml = $@"<event name=""scheduler_monitor_system_health_ring_buffer_recorded"" package=""sqlos"" timestamp=""{eventTime:yyyy-MM-dd'T'HH:mm:ss.fff}Z"">
+  <data name=""process_utilization""><type name=""uint32"" package=""package0""/><value>{sqlCpu}</value></data>
+  <data name=""system_idle""><type name=""uint32"" package=""package0""/><value>{idle}</value></data>
+  <data name=""page_faults""><type name=""uint32"" package=""package0""/><value>505</value></data>
+  <data name=""working_set_delta""><type name=""int64"" package=""package0""/><value>4096</value></data>
+  <data name=""memory_utilization""><type name=""uint32"" package=""package0""/><value>100</value></data>
+</event>";
+            await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(eventTime), serverId, name,
+                DarlingMcpTestData.Naive(eventTime), SystemHealthParser.SchedulerMonitorEvent, xml);
+            if (hostOs is not null)
+            {
+                await DarlingMcpTestData.ExecAsync(c, TestContext.Current.CancellationToken,
+                    "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, host_os_version) VALUES ($1,$2,$3,$4,$5)",
+                    CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(eventTime), serverId, name, hostOs);
+            }
+
+            await body(JsonDocument.Parse(await DarlingMcpHealthParserTools.GetSchedulerIssues(ds, name, 24, 50, WebDataStartNote.FormatWindowEnd(end))).RootElement);
+        });
+
+    /* #7688: idle reads 0 on Linux, so "100 - SQL CPU - idle" read 100 minus the SQL figure on every quiet minute. */
+    [Fact]
+    public Task OnLinux_QuietSchedulerSamplesAreNotIssues_AndTheAnswerSaysWhy() =>
+        RunSchedulerAsync("sched-linux-quiet", "Ubuntu", sqlCpu: 0, idle: 0, root =>
+        {
+            Assert.False(root.TryGetProperty("issues", out _));
+            Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
+            return Task.CompletedTask;
+        });
+
+    [Fact]
+    public Task OnLinux_ABusySqlSampleIsStillAnIssue_WithNoOtherProcessOrIdleFigure() =>
+        RunSchedulerAsync("sched-linux-busy", "Ubuntu", sqlCpu: 94, idle: 0, root =>
+        {
+            var issue = Assert.Single(root.GetProperty("issues").EnumerateArray());
+            Assert.Equal(94, issue.GetProperty("sql_cpu_utilization").GetInt64());
+            Assert.Equal(JsonValueKind.Null, issue.GetProperty("other_process_cpu").ValueKind);
+            Assert.Equal(JsonValueKind.Null, issue.GetProperty("system_idle").ValueKind);
+            Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote, root.GetProperty("system_cpu_note").GetString());
+            return Task.CompletedTask;
+        });
+
+    [Theory]
+    [InlineData("Windows")]
+    [InlineData(null)]
+    public Task OnWindowsOrAnUnknownPlatform_AHighOtherProcessSampleIsStillAnIssue(string? hostOs) =>
+        RunSchedulerAsync("sched-keep-" + (hostOs ?? "none"), hostOs, sqlCpu: 5, idle: 0, root =>
+        {
+            var issue = Assert.Single(root.GetProperty("issues").EnumerateArray());
+            Assert.Equal(95, issue.GetProperty("other_process_cpu").GetInt64());
+            Assert.Equal(0, issue.GetProperty("system_idle").GetInt64());
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("system_cpu_note").ValueKind);
+            return Task.CompletedTask;
+        });
+
     [Theory]
     [InlineData("Windows")]
     [InlineData(null)]
@@ -118,6 +184,32 @@ public sealed class SystemHealthHostCpuRuleTests
     [InlineData(null, false)]
     public void OnlyANamedNonWindowsPlatformLeavesSystemCpuOut(string? hostOs, bool unreported) =>
         Assert.Equal(unreported, SystemHealthHostCpu.IsHostCpuUnreported(hostOs));
+
+    [Fact]
+    public void ASchedulerSample_KeepsOtherProcessAndIdleOnWindows_AndClearsThemOnLinux()
+    {
+        var sample = new SchedulerIssueRecord { SqlCpuUtilization = 3, OtherProcessCpu = 97, SystemIdle = 0, MemoryUtilization = 100 };
+
+        Assert.Equal(97, SystemHealthHostCpu.Apply(sample, "Windows").OtherProcessCpu);
+        Assert.Equal(97, SystemHealthHostCpu.Apply(sample, null).OtherProcessCpu);
+
+        var linux = SystemHealthHostCpu.Apply(sample, "Ubuntu");
+        Assert.Null(linux.OtherProcessCpu);
+        Assert.Null(linux.SystemIdle);
+        Assert.Equal(3, linux.SqlCpuUtilization);
+        Assert.False(SystemHealthSignificance.IsSignificant(linux));
+    }
+
+    [Fact]
+    public void TheNoteIsAddedToAnEmptyAnswerOnlyOnLinux()
+    {
+        const string empty = "{\"status\":\"empty\",\"message\":\"none\"}";
+
+        Assert.Equal(empty, SystemHealthHostCpu.WithNote(empty, "Windows"));
+        Assert.Equal(empty, SystemHealthHostCpu.WithNote(empty, null));
+        Assert.Equal(SystemHealthHostCpu.SchedulerLinuxNote,
+            JsonDocument.Parse(SystemHealthHostCpu.WithNote(empty, "Ubuntu")!).RootElement.GetProperty("system_cpu_note").GetString());
+    }
 
     [Fact]
     public void ARealHundredPercentOnWindowsIsKept_AndOnLinuxItIsCleared()

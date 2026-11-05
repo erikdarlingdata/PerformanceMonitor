@@ -108,6 +108,21 @@ public sealed class AlertHistoryFilterTests : IDisposable
         Assert.Equal(new[] { "Blocking Detected", "Blocking Detected", "Blocking Detected", "Custom:abc" }, Metrics(performance));
     }
 
+    /// <summary>#7646: each row carries <c>state_only</c>, the same flag Darling's tool emits (AlertMetricClassifier.IsStateOnly), so an agent
+    /// does not read the stored 0 of a Database State row as a measurement while a measured alert stays false.</summary>
+    [Fact]
+    public async Task EachRow_CarriesStateOnly_TrueForDatabaseState_FalseForAMeasuredAlert()
+    {
+        var service = await SeedAsync((1, "Database State"), (2, "High CPU"));
+
+        var answer = Parse(await McpAlertTools.GetAlertHistory(service, 24, 10));
+
+        var byMetric = answer.GetProperty("alerts").EnumerateArray()
+            .ToDictionary(a => a.GetProperty("metric_name").GetString()!, a => a.GetProperty("state_only").GetBoolean());
+        Assert.True(byMetric["Database State"]);
+        Assert.False(byMetric["High CPU"]);
+    }
+
     [Fact]
     public async Task AnUnknownFamilyOrMetric_IsAnEmptyAnswerThatNamesTheFilter_NotAnError()
     {

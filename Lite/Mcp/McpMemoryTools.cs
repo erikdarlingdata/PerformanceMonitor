@@ -327,7 +327,8 @@ public sealed class McpMemoryTools
                 resource_semaphore_id = r.ResourceSemaphoreId,
                 pool_id = r.PoolId,
                 target_memory_mb = Math.Round(r.TargetMemoryMb, 2),
-                max_target_memory_mb = Math.Round(r.MaxTargetMemoryMb, 2),
+                /* #7676: null for the small-query semaphore (id 1): the DMV has no max target for it and the store keeps that NULL. */
+                max_target_memory_mb = r.MaxTargetMemoryMb is double maxTarget ? Math.Round(maxTarget, 2) : (double?)null,
                 total_memory_mb = Math.Round(r.TotalMemoryMb, 2),
                 available_memory_mb = Math.Round(r.AvailableMemoryMb, 2),
                 granted_memory_mb = Math.Round(r.GrantedMemoryMb, 2),

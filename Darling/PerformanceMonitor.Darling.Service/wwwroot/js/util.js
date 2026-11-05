@@ -1193,6 +1193,15 @@ export function fmtMbFit(v) {
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
+/* #7676: sys.dm_exec_query_resource_semaphores keeps two semaphores per pool: id 0 serves ordinary grants and id 1 serves
+   small queries (RESOURCE_SEMAPHORE_SMALL_QUERY waits). The Memory tab's semaphore panels show the name, not the bare id. */
+export function fmtSemaphore(v) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (n === 0) return "Regular";
+  if (n === 1) return "Small query";
+  return String(v);
+}
 /** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
     and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
     starts with a capital, and a word the service already capitalised is left as it is. */
@@ -1222,6 +1231,7 @@ export const FORMATTERS = {
   time: localTime,
   reltime: relTime,
   bool: fmtBool,
+  semaphore: fmtSemaphore,
   text: fmtText,
   status: fmtStatusWord,
 };
