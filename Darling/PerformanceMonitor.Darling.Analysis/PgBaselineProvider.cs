@@ -421,13 +421,59 @@ public class PgBaselineProvider
     public async Task<BaselineBucket> GetBaselineSharedAsync(
         int serverId, string metricName, DateTime lookupTime, DateTime computeTime, CancellationToken cancellationToken = default)
     {
+        var entry = await GetSharedEntryAsync(serverId, metricName, computeTime, cancellationToken);
+        return entry is null ? BaselineBucket.Empty : LookUp(entry, lookupTime);
+    }
+
+    private Task<CachedBaseline?> GetSharedEntryAsync(int serverId, string metricName, DateTime computeTime, CancellationToken cancellationToken)
+    {
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
         var roundedKey = RoundedKeyTime(metricName, computeTime);
-        var entry = await GetOrComputeSharedAsync(
+        return GetOrComputeSharedAsync(
             serverId, cacheKey, roundedKey,
             ct => BuildEntryAsync(serverId, metricName, computeTime, roundedKey, ct),
             SharedComputeTimeout, cancellationToken);
-        return entry is null ? BaselineBucket.Empty : LookUp(entry, lookupTime);
+    }
+
+    /// <summary>#7644: one local hour of a window and the bucket that hour's local hour-of-week key picks. <c>FromUtc</c> is the
+    /// start of the local hour (before the window start for the first step), <c>ToUtc</c> its end.</summary>
+    public sealed record BaselineStep(DateTime FromUtc, DateTime ToUtc, BaselineBucket Bucket);
+
+    /// <summary>
+    /// #7644: the band the web Overview draws, one step per local hour the window crosses, from the same shared entry
+    /// <see cref="GetBaselineSharedAsync"/> reads. Steps include hours whose bucket is empty: the caller decides which are usable.
+    /// </summary>
+    public async Task<IReadOnlyList<BaselineStep>> GetBaselineStepsSharedAsync(
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        var entry = await GetSharedEntryAsync(serverId, metricName, computeTime, cancellationToken);
+        return entry is null ? [] : StepsFor(entry, windowStartUtc, windowEndUtc);
+    }
+
+    /// <summary>The local-hour walk of <see cref="GetBaselineStepsSharedAsync"/>. Hours are the entry's own clock's: the walk goes through
+    /// <see cref="LocalClockWindow.ToLocal"/>, so a +5:30 zone steps at :30 UTC, and a step ends where the clock's offset changes.</summary>
+    internal static List<BaselineStep> StepsFor(CachedBaseline entry, DateTime windowStartUtc, DateTime windowEndUtc)
+    {
+        var steps = new List<BaselineStep>();
+        if (entry.Buckets is null || entry.Buckets.Count == 0)
+            return steps;
+
+        var clock = entry.Clock;
+        var t = windowStartUtc;
+        while (t < windowEndUtc)
+        {
+            var local = clock.ToLocal(t);
+            var intoHour = TimeSpan.FromTicks(local.Ticks % TimeSpan.TicksPerHour);
+            var next = t + (TimeSpan.FromHours(1) - intoHour);
+            var transition = DateTime.SpecifyKind(clock.TransitionAtUtc, t.Kind);
+            if (clock.HasTransition && t < transition && transition < next)
+                next = transition;
+            var from = steps.Count == 0 ? t - intoHour : t;
+            steps.Add(new BaselineStep(from, next, LookUp(entry, t)));
+            t = next;
+        }
+
+        return steps;
     }
 
     /// <summary>The single-flight body of <see cref="GetBaselineSharedAsync"/>, with the compute passed in. A fresh entry
@@ -574,7 +620,7 @@ public class PgBaselineProvider
     /// side is what makes them daily arms. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/> is the
     /// seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.IoLatencyChart or MetricNames.Blocking or MetricNames.Deadlock;
 
     /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
     /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
@@ -1569,6 +1615,19 @@ WITH clean AS (
     FROM file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   (delta_reads > 0 OR delta_writes > 0)
+)," + RobustTierScaffold,
+
+            /* #7644: the Overview strip's unit. The arm above judges each FILE ROW, so a file with ten slow reads weighs as much as the
+               busy file with ten thousand fast ones, and the band sat far from the line the strip draws (reads-weighted per collection:
+               the files' stall summed over their reads summed). Same source, same DOUBLE PRECISION cast, and rows with reads only, so v is
+               never null and sample_count is the number of collections that read. */
+            MetricNames.IoLatencyChart => @"
+WITH clean AS (
+    SELECT collection_time, SUM(delta_stall_read_ms)::DOUBLE PRECISION / SUM(delta_reads) AS v
+    FROM file_io_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+    AND   delta_reads > 0
+    GROUP BY collection_time
 )," + RobustTierScaffold,
 
             /* #6696: the WRITE-latency twin of the arm above, for the ANOMALY_WRITE_LATENCY gate. That gate used to score

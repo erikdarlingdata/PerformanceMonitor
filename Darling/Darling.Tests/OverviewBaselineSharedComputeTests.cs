@@ -36,8 +36,11 @@ public sealed class OverviewBaselineSharedComputeTests
 
     private static readonly string[] DailyArms =
     [
-        MetricNames.Cpu, MetricNames.IoLatency, MetricNames.IoWriteLatency, MetricNames.Blocking, MetricNames.Deadlock,
+        MetricNames.Cpu, MetricNames.IoLatency, MetricNames.IoLatencyChart, MetricNames.IoWriteLatency, MetricNames.Blocking, MetricNames.Deadlock,
     ];
+
+    /// <summary>Every wait on a stand-in compute ends within this, so a compute that is not independent of its caller fails a test instead of hanging the run.</summary>
+    private static readonly TimeSpan TestLimit = TimeSpan.FromSeconds(10);
 
     private static string KindOf(PgBaselineProvider provider) => provider.GetType().FullName!;
 
@@ -62,6 +65,7 @@ public sealed class OverviewBaselineSharedComputeTests
     [Theory]
     [InlineData(MetricNames.Cpu)]
     [InlineData(MetricNames.IoLatency)]
+    [InlineData(MetricNames.IoLatencyChart)]
     [InlineData(MetricNames.IoWriteLatency)]
     [InlineData(MetricNames.Blocking)]
     [InlineData(MetricNames.Deadlock)]
@@ -88,16 +92,24 @@ public sealed class OverviewBaselineSharedComputeTests
         await using var postgres = Unreachable();
         var shared = new BaselineCache();
         var provider = new PgBaselineProvider(postgres, null, shared);
-        foreach (var metric in new[] { MetricNames.Cpu, MetricNames.WaitMsPerSec, MetricNames.IoLatency, MetricNames.BlockingPerMinute })
+        /* The I/O lane reads the chart-unit arm, which the worker's pass does not compute: the entry here is what an earlier web read stored. */
+        foreach (var metric in new[] { MetricNames.Cpu, MetricNames.WaitMsPerSec, MetricNames.IoLatencyChart, MetricNames.BlockingPerMinute })
         {
             shared.Put(KindOf(provider), ServerId, PgBaselineProvider.CacheKeyFor(ServerId, metric, key: null),
                 EntryAt(provider.RoundedKeyTime(metric, WorkerAnalysisTime), mean: 42));
         }
 
-        var buckets = await DarlingWebOverviewBaselines.ReadLaneBucketsAsync(provider, ServerId, WindowStart, Now, CancellationToken.None);
+        var lanes = await DarlingWebOverviewBaselines.ReadLaneStepsAsync(provider, ServerId, WindowStart, Now, CancellationToken.None);
 
-        Assert.Equal(4, buckets.Length);
-        Assert.All(buckets, b => Assert.Equal(42, b.Mean));
+        /* The window's first local hour is Tuesday 06:00, the one bucket the entry holds. */
+        Assert.Equal(4, lanes.Length);
+        Assert.All(lanes, steps =>
+        {
+            var step = steps[0];
+            Assert.Equal(42, step.Bucket.Mean);
+            Assert.Equal(new DateTime(2026, 11, 3, 6, 0, 0), step.FromUtc);
+            Assert.Equal(new DateTime(2026, 11, 3, 7, 0, 0), step.ToUtc);
+        });
     }
 
     [Fact]
@@ -131,7 +143,7 @@ public sealed class OverviewBaselineSharedComputeTests
         var first = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None);
         var second = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None);
         gate.SetResult();
-        var results = await Task.WhenAll(first, second);
+        var results = await Task.WhenAll(first, second).WaitAsync(TestLimit);
 
         Assert.Equal(1, computes);
         Assert.NotNull(results[0]);
@@ -162,12 +174,12 @@ public sealed class OverviewBaselineSharedComputeTests
         var aborted = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), browser.Token);
         await started.Task;
         browser.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => aborted);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => aborted.WaitAsync(TestLimit));
 
         /* The reload joins the compute that is still running. */
         var reload = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None);
         gate.SetResult();
-        var entry = await reload;
+        var entry = await reload.WaitAsync(TestLimit);
         Assert.NotNull(entry);
         Assert.False(ownTokenCancelled, "the browser's abort cancelled the compute");
 
@@ -191,8 +203,9 @@ public sealed class OverviewBaselineSharedComputeTests
             return Computed(key);
         }
 
-        var first = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Hangs, TimeSpan.FromMilliseconds(50), CancellationToken.None);
-        var second = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Hangs, TimeSpan.FromMilliseconds(50), CancellationToken.None);
+        /* The test's own limit: a compute with no timeout of its own would wait here for ever, so the wait fails the test instead of hanging the run. */
+        var first = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Hangs, TimeSpan.FromMilliseconds(50), CancellationToken.None).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Hangs, TimeSpan.FromMilliseconds(50), CancellationToken.None).WaitAsync(TestLimit);
 
         Assert.Null(first);
         Assert.Null(second);

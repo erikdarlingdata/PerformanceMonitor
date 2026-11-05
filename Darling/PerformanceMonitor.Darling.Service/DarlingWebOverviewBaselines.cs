@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -35,7 +37,7 @@ internal static class DarlingWebOverviewBaselines
     [
         ("cpu", MetricNames.Cpu),
         ("waits", MetricNames.WaitMsPerSec),
-        ("io", MetricNames.IoLatency),
+        ("io", MetricNames.IoLatencyChart),
         ("blocking", MetricNames.BlockingPerMinute),
     ];
 
@@ -59,16 +61,15 @@ internal static class DarlingWebOverviewBaselines
         try
         {
             var provider = ProviderFor(postgres, analysis);
-            var buckets = await ReadLaneBucketsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
+            var lanes = await ReadLaneStepsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
 
             var baselines = new JsonObject();
             var any = false;
             for (var i = 0; i < Lanes.Length; i++)
             {
-                var bucket = buckets[i];
-                var usable = Usable(bucket);
+                var usable = lanes[i].Count > 0;
                 any |= usable;
-                baselines[Lanes[i].Key] = usable ? Bucket(bucket) : null;
+                baselines[Lanes[i].Key] = usable ? new JsonObject { ["steps"] = new JsonArray(lanes[i].Select(Step).ToArray<JsonNode?>()) } : null;
             }
 
             /* Not enough history is its own answer, never a band at 0: the page draws no band and no markers and says why. */
@@ -91,29 +92,32 @@ internal static class DarlingWebOverviewBaselines
     }
 
     /// <summary>
-    /// #7644: the four lanes' buckets at the window start, in <see cref="Lanes"/> order. The series is computed and cached
+    /// #7644: the four lanes' usable hourly steps over the window, in <see cref="Lanes"/> order. The series is computed and cached
     /// at <paramref name="nowUtc"/>, not at the window start: the answer holds all 168 hour-of-week buckets, and a
     /// daily-cache arm (I/O latency, CPU, blocking) keys on the UTC day of the instant it is asked at, so a window
     /// start of now minus 24 hours landed on yesterday's key, which the worker's pass never fills. Keyed on now it is the
-    /// key the worker uses and the shared tier holds.
+    /// key the worker uses and the shared tier holds. An hour with no usable bucket has no step.
     /// </summary>
-    internal static async Task<BaselineBucket[]> ReadLaneBucketsAsync(
+    internal static async Task<IReadOnlyList<PgBaselineProvider.BaselineStep>[]> ReadLaneStepsAsync(
         PgBaselineProvider provider, int serverId, DateTime windowStartUtc, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var tasks = new Task<BaselineBucket>[Lanes.Length];
+        var tasks = new Task<IReadOnlyList<PgBaselineProvider.BaselineStep>>[Lanes.Length];
         for (var i = 0; i < Lanes.Length; i++)
-            tasks[i] = provider.GetBaselineSharedAsync(serverId, Lanes[i].Metric, windowStartUtc, nowUtc, cancellationToken);
-        return await Task.WhenAll(tasks);
+            tasks[i] = provider.GetBaselineStepsSharedAsync(serverId, Lanes[i].Metric, windowStartUtc, nowUtc, nowUtc, cancellationToken);
+        var all = await Task.WhenAll(tasks);
+        return all.Select(steps => (IReadOnlyList<PgBaselineProvider.BaselineStep>)steps.Where(s => Usable(s.Bucket)).ToList()).ToArray();
     }
 
     /// <summary>The Viewer's own guard: a bucket with samples and a dispersion above zero draws a band; anything else draws none.</summary>
     internal static bool Usable(BaselineBucket bucket) => bucket.SampleCount > 0 && bucket.EffectiveStdDev > 0;
 
-    internal static JsonObject Bucket(BaselineBucket bucket) => new()
+    internal static JsonObject Step(PgBaselineProvider.BaselineStep step) => new()
     {
-        ["mean"] = bucket.Mean,
-        ["effective_std_dev"] = bucket.EffectiveStdDev,
-        ["sample_count"] = bucket.SampleCount,
-        ["tier"] = bucket.Tier.ToString(),
+        ["from"] = DateTime.SpecifyKind(step.FromUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+        ["to"] = DateTime.SpecifyKind(step.ToUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+        ["mean"] = step.Bucket.Mean,
+        ["effective_std_dev"] = step.Bucket.EffectiveStdDev,
+        ["sample_count"] = step.Bucket.SampleCount,
+        ["tier"] = step.Bucket.Tier.ToString(),
     };
 }

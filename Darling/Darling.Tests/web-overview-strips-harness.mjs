@@ -59,6 +59,8 @@ const find = (node, pred, out = []) => { if (pred(node)) out.push(node); node.ch
 const T0 = Date.UTC(2026, 0, 1, 12, 0, 0);
 const MIN = 60000;
 const iso = (m) => new Date(T0 + m * MIN).toISOString().slice(0, 19);
+/* #7644: the reply carries each lane as hourly steps. A flat bucket is one step that covers the whole harness window. */
+const laneOf = (bk) => (bk ? { steps: [{ from: new Date(T0 - 60 * MIN).toISOString(), to: new Date(T0 + 180 * MIN).toISOString(), ...bk }] } : null);
 
 /* Six reads that each sample on their own clock: CPU every minute, waits every 5, memory every 10, file I/O every 15 (two files),
    blocking at minutes 12 and 47, no deadlocks (an empty envelope). */
@@ -143,7 +145,7 @@ if (scenario === "crosshair") {
   out.stripsDrawnZoomed = find(z.node, (n) => n.attrs["data-strip"]).length;
 } else if (scenario === "baselines") {
   const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
-  const baseline = (cpu, waits, io, blocking) => ({ kind: "data", data: { baselines: { cpu, waits, io, blocking } } });
+  const baseline = (cpu, waits, io, blocking) => ({ kind: "data", data: { baselines: { cpu: laneOf(cpu), waits: laneOf(waits), io: laneOf(io), blocking: laneOf(blocking) } } });
   const b = (mean, sd) => ({ mean, effective_std_dev: sd, sample_count: 40, tier: "Full" });
   const fresh = () => strips.buildStrips(reads);
   const byKey = (list, key) => list.find((s) => s.key === key);
@@ -161,7 +163,7 @@ if (scenario === "crosshair") {
   out.ioMarkerCount = byKey(a, "io").markers.length;
 
   /* The floor: 1.5 ms is above a 0.7 ms band but under the 2 ms floor, so only 2.5 ms is marked (each bucket holds 1000 reads, over the 250 read floor); a point under the band is marked at any value. */
-  const lone = [{ key: "io", series: [{ points: [{ t: 1, v: 1.5, reads: 1000 }, { t: 2, v: 2.5, reads: 1000 }, { t: 3, v: 0.1, reads: 1000 }] }] }];
+  const lone = [{ key: "io", series: [{ points: [{ t: T0 + 1, v: 1.5, reads: 1000 }, { t: T0 + 2, v: 2.5, reads: 1000 }, { t: T0 + 3, v: 0.1, reads: 1000 }] }] }];
   strips.applyBaselines(lone, baseline(null, null, b(0.5, 0.1), null), window, {});
   out.floorMarkedValues = lone[0].markers.map((m) => m.v);
 
@@ -240,7 +242,7 @@ if (scenario === "crosshair") {
     get_memory_trend: { trend: Array.from({ length: 6 }, (_, i) => ({ time: sample(i * 10), buffer_pool_mb: 2000 + i })) },
     get_file_io_trend: { trend: Array.from({ length: 4 }, (_, i) => ({ time: sample(i * 15), database_name: "A", file_type: "ROWS", reads: 10, avg_read_latency_ms: 2 })) },
   };
-  const baselineBody = { status: "ok", baselines: { cpu: { mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" } } };
+  const baselineBody = { status: "ok", baselines: { cpu: laneOf({ mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" }) } };
   let releaseBaseline;
   const baselineGate = new Promise((r) => { releaseBaseline = r; });
   let failBaseline = false;
@@ -287,7 +289,7 @@ if (scenario === "crosshair") {
     { time: iso(45), database_name: "A", file_type: "ROWS", reads: reads45, avg_read_latency_ms: 81 },
   ];
   const window = { windowStart: T0, windowEnd: T0 + 60 * MIN };
-  const baseline = { kind: "data", data: { baselines: { io: { mean: 1, effective_std_dev: 0.5, sample_count: 40, tier: "Full" } } } };
+  const baseline = { kind: "data", data: { baselines: { io: laneOf({ mean: 1, effective_std_dev: 0.5, sample_count: 40, tier: "Full" }) } } };
   const one = (reads45) => {
     const built = strips.applyBaselines(strips.buildStrips({ ...reads, io: data({ bucket_minutes: 15, trend: ioRows(reads45) }) }), baseline, window, {});
     const io = built.find((s) => s.key === "io");
@@ -321,6 +323,26 @@ if (scenario === "crosshair") {
   out.floorOneMinute = { enough: slow(1, 17, 1).markers, short: slow(1, 16, 1).markers };
   out.floorThirtyMinute = { short: slow(30, 499, 30).markers, enough: slow(30, 500, 30).markers };
   out.points = strips.weightedReadLatency(ioRows(1)).map((p) => p.reads);
+} else if (scenario === "steps") {
+  /* #7644: a window across two hour buckets. Hour A (T0 - 30 min to T0 + 30 min) is a band around 10 (mean 10, sigma 1: 8 to 12), hour B
+     (T0 + 30 min to T0 + 90 min) is a band around 50 (48 to 52). A third hour (after T0 + 90 min) has no step. */
+  const hour = (fromMin, toMin, mean) => ({ from: new Date(T0 + fromMin * MIN).toISOString(), to: new Date(T0 + toMin * MIN).toISOString(), mean, effective_std_dev: 1, sample_count: 40, tier: "Full" });
+  const window = { windowStart: T0, windowEnd: T0 + 120 * MIN };
+  const res = { kind: "data", data: { baselines: { cpu: { steps: [hour(-30, 30, 10), hour(30, 90, 50)] } } } };
+  const pt = (m, v) => ({ t: T0 + m * MIN, v });
+  /* 11 at +0 is inside hour A's band; 49 at +10 is above it (marked); 11 at +40 is under hour B's band (marked); 49 at +50 is inside hour B's band;
+     100 at +100 and 0 at +110 are in the hour with no step, so nothing judges them. */
+  const line = [pt(0, 11), pt(10, 49), pt(40, 11), pt(50, 49), pt(100, 100), pt(110, 0)];
+  const cpu = [{ key: "cpu", series: [{ points: line }] }];
+  strips.applyBaselines(cpu, res, window, {});
+  out.steps = cpu[0].band.map((x) => ({ from: (x.from - T0) / MIN, to: (x.to - T0) / MIN, lower: x.lower, upper: x.upper }));
+  out.markedTimes = cpu[0].markers.map((m) => (m.t - T0) / MIN);
+  /* An hour whose step is unusable (no samples, or no spread) is dropped, so its points mark nothing. */
+  const half = { kind: "data", data: { baselines: { cpu: { steps: [hour(-30, 30, 10), { ...hour(30, 90, 50), sample_count: 0 }] } } } };
+  const cpu2 = [{ key: "cpu", series: [{ points: line }] }];
+  strips.applyBaselines(cpu2, half, window, {});
+  out.droppedStepBands = cpu2[0].band.length;
+  out.droppedStepMarked = cpu2[0].markers.map((m) => (m.t - T0) / MIN);
 } else if (scenario === "empty") {
   const none = {
     cpu: { kind: "empty", message: "No CPU samples in this window." },

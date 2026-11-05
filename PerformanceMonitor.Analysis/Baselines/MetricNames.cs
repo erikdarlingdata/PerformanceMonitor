@@ -30,6 +30,10 @@ public static class MetricNames
     // Chart-unit metrics (for UI bands — units match what the chart displays)
     public const string WaitMsPerSec = "wait_ms_per_sec";
     public const string BlockingPerMinute = "blocking_per_minute";
+    /// <summary>#7644: read latency in the unit the Overview's I/O strip draws: per collection, the SUM of the files' read stall over the
+    /// SUM of their reads (<c>SUM(delta_stall_read_ms) / SUM(delta_reads)</c>), so a file with a few slow reads does not count as much as
+    /// the busy file. <see cref="IoLatency"/> stays per file row, which is what the anomaly detector's gate reads.</summary>
+    public const string IoLatencyChart = "io_latency_chart";
 
     /* #3542 lane 9: the PostgreSQL-TARGET baselines, computed by PgTargetBaselineProvider over the pg_* raw
        hypertables. Prefixed so a PostgreSQL bucket can never be served from — or cached under — a SQL Server

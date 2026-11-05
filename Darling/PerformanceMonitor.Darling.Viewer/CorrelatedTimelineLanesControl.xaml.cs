@@ -190,7 +190,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
             var cpuBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime);
             var waitBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime);
-            var ioBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime);
+            var ioBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatencyChart, referenceTime);
             var blockingBaselineTask = _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.BlockingPerMinute, referenceTime);
 
             try
