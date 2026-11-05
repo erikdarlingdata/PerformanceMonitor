@@ -428,11 +428,13 @@ public sealed class PgBaselineProviderKeyedLiveTests
             AssertEmpty(await provider.GetBaselineAsync(ServerId, MetricNames.PgTps, StatementA.ToString(System.Globalization.CultureInfo.InvariantCulture), analysisTime, ct));
             AssertEmpty(await provider.GetBaselineAsync(ServerId, MetricNames.PgStatementShare, "not-a-queryid", analysisTime, ct));
 
-            /* Four keyed series computed (two metrics × two statements); the no-arm call (pg_tps keyed) and the failed
-               cast each cached their empty compute as a keyed entry too, exactly as an unkeyed no-arm or failed compute
-               caches its empty — the note counts entries, not successes, because a consumer asking for a thousand
-               statements that have no arm is as unbounded as one that has. The unkeyed lookups are not keyed entries. */
-            Assert.Equal(6, provider.KeyedEntryCount);
+            /* Four keyed series computed (two metrics × two statements); the no-arm call (pg_tps keyed) cached its empty
+               compute as a keyed entry too, exactly as an unkeyed no-arm compute caches its empty — the note counts
+               entries, not successes, because a consumer asking for a thousand statements that have no arm is as
+               unbounded as one that has. The failed cast is NOT an entry (#7644): a compute that failed is a fault, which
+               the keyed read answers to its caller and does not store, so it is asked again next time instead of reading
+               "no baseline" for the whole CacheTtl. The unkeyed lookups are not keyed entries. */
+            Assert.Equal(5, provider.KeyedEntryCount);
 
             /* The SQL Server provider over the same store: no keyed metric declared, so every keyed call is Empty. */
             var sqlServer = new PgBaselineProvider(postgres);
@@ -443,7 +445,7 @@ public sealed class PgBaselineProviderKeyedLiveTests
             /* And a cache hit is a cache hit: the same key again computes nothing new (the entry count holds). */
             var shareAAgain = await provider.GetBaselineAsync(ServerId, MetricNames.PgStatementShare, StatementA.ToString(System.Globalization.CultureInfo.InvariantCulture), analysisTime, ct);
             Assert.Equal(shareA.Mean, shareAAgain.Mean);
-            Assert.Equal(6, provider.KeyedEntryCount);
+            Assert.Equal(5, provider.KeyedEntryCount);
             provider.InvalidateCache(ServerId);
             Assert.Equal(0, provider.KeyedEntryCount);
 

@@ -33,7 +33,7 @@ public sealed class OverviewBaselineWindowStartTests
     {
         using var doc = JsonDocument.Parse(reply);
         Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
-        Assert.Equal("window_start", doc.RootElement.GetProperty("parameter").GetString());
+        Assert.Equal("window_start", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
     }
 
     [Fact]
