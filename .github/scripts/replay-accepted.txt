@@ -1,0 +1,42 @@
+# Failing classes the map replay (ci-map-replay.py misses) does not count as a miss, because the change did not cause the
+# failure and no selection could have prevented it. Format: <Class> <run id>  # one-line reason. Read from #7728's replay of
+# 65 failed runs against the map of nightly run 42042621511. A class listed here only stops counting for the run named.
+
+# Date-dependent: the result follows the calendar, not the change.
+JobHistoryPageTests 41257887405  # a docs-only push at the 2026-11-01 month change
+JobHistoryPageTests 41253315030  # a CHANGELOG-only push at the 2026-11-01 month change
+NotificationRouteTruthfulnessTests 41257887405  # the log is stamped 2026-11-01, the month change
+QueryStoreWideFleetEligibilityLiveTests 40031691584  # expected 10-17, got 10-18: a day rolled over
+
+# Shared process or store state: another class or a leftover object decides the result.
+DeadlockAndBlockedProcessEnsureLogLevelLiteTests 40085206535  # shared process log level
+DeadlockAndBlockedProcessEnsureLogLevelLiteTests 40080559759  # shared process log level
+DeadlockAndBlockedProcessEnsureLogLevelLiteTests 40079835157  # shared process log level
+NotificationRouteFirstStartTests 40080559759  # shared first-start state
+NotificationRouteFirstStartTests 40079835157  # shared first-start state
+QuietWindowBehaviourTests 39780636618  # already_exists: a leftover object in the store
+QuietWindowBehaviourTests 39773117149  # already_exists: a leftover object in the store
+QueryStoreComposeStampRaceLiveTests 40015830041  # a stamp race with another class on the shared store
+TimeHonestyRungReadTests 41280034116  # another class decides the result
+DiagnosticsBundleStatementFilterTests 41353244581  # another class decides the result
+FleetCollectionHealthRecoveryLiveTests 39700972502  # another class decides the result
+QueryStoreBackgroundIndexesLiveTests 41174737057  # a leftover object in the store
+PgOwnConnectionExclusionLiveTests 42060296252  # another class decides the result
+
+# The store the run built: its size, plan or schema decides the result.
+PhaseCStoreGrantLiveTests 39967189743  # function config.update_notification_route missing in the run's store, on a docs and MCP-setup push
+QueryTagStoreGrantLiveTests 39967189743  # the same missing function in the same run's store
+ExternalAlertGrantLiveTests 39967189743  # the same missing function in the same run's store
+StoreDatabaseSizeEstimateLiveTests 41499725603  # depends on the size of the run's store
+QueryTagRollupHashRouteLiveTests 40578568528  # rows examined 20,542 against 15,336: a plan that depends on the store
+QueryTagRollupHashRouteLiveTests 40561794271  # rows examined 20,542 against 15,336: a plan that depends on the store
+ManagedConfVerdictsLiveTests 40913992095  # operation canceled on the run's store
+
+# A WPF test thread that stalls for 60 seconds.
+CurrentWaitsStackedBarTests 42052646621  # the known STA test thread stall
+
+# The one open case, settled for #7728: StatementFilterBlockingReadsLiveTests failed on the pull request run for #7647 (pull
+# request #7687). It passed on the previous head of the same pull request (run 42040293942, e91a66c12). The three files that
+# differ between the two heads are a Fleet viewer window, one Viewer data service file and a Fleet test, none of which the
+# deadlock reader or the statement host filter reads. The class has no edge to the change, so it is not a map gap.
+StatementFilterBlockingReadsLiveTests 42052646621  # passed on the previous head of the same pull request, which differs in three unrelated Fleet files

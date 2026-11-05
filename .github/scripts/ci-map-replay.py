@@ -15,6 +15,8 @@ the map from a file; it never talks to GitHub (the run and failure lists are inp
   misses --map MAP --tree DIR --runs FILE
           FILE: a JSON list of {id, event, sha, branch, prs, fail_names} (fail_names: full test class names). A miss is a
           failing class the selection for that run's changed files would NOT have run.
+          A failing class listed in replay-accepted.txt (next to this script: class, run id, reason) for that run is
+          counted as accepted, not as a miss: the change did not cause it.
 
 --tree is a directory holding the source tree at the map's commit (`git archive <map sha>`), so the class scan sees the
 tree the map was built from. Standard library only. Run it with `python -I`.
@@ -44,6 +46,21 @@ def _load(name: str, file: str):
 
 CS = _load("ci_select", "ci-select.py")
 PLAN = _load("ci_plan", "ci-plan.py")
+
+
+ACCEPTED = os.path.join(HERE, "replay-accepted.txt")
+
+
+def load_accepted(path: str = ACCEPTED) -> "set[tuple[str, str]]":
+    """{(run id, simple class name)} the replay does not count as a miss. One `<Class> <run id>  # reason` a line (#7728)."""
+    out: "set[tuple[str, str]]" = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split("#", 1)[0].split()
+                if len(parts) >= 2:
+                    out.add((parts[1], parts[0]))
+    return out
 
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # what a root commit is diffed against
@@ -203,6 +220,7 @@ def report(rows: "list[dict]", rp: Replay) -> None:
 def cmd_misses(a) -> int:
     rp = Replay(a.map, a.tree)
     runs = json.load(open(a.runs))
+    accepted = load_accepted()
     out = []
     checked = 0
     for r in runs:
@@ -229,11 +247,14 @@ def cmd_misses(a) -> int:
             picked = sel["full"] or simple in sel["selected"].get(suite, [])
             out.append({"id": r["id"], "event": r["event"], "sha": r["sha"][:10], "prs": r.get("prs"), "class": cls,
                         "files": len(files), "first_file": files[0], "full": sel["full"], "reason": sel["reason"][:100],
-                        "picked": picked, "why": sel["why"].get(suite, {}).get(simple, ""), "status": "ok"})
-    miss = [x for x in out if x.get("status") == "ok" and not x["picked"]]
+                        "picked": picked, "why": sel["why"].get(suite, {}).get(simple, ""), "status": "ok",
+                        "accepted": (str(r["id"]), simple) in accepted})
+    unpicked = [x for x in out if x.get("status") == "ok" and not x["picked"]]
+    miss = [x for x in unpicked if not x["accepted"]]
     print(f"{len(runs)} failed runs read, {sum(1 for r in runs if r.get('fail_names'))} with failing classes, "
           f"{checked} failing classes checked, {sum(1 for x in out if x.get('picked') and not x['full'])} picked by the map, "
-          f"{sum(1 for x in out if x.get('picked') and x['full'])} on a FULL answer, {len(miss)} misses")
+          f"{sum(1 for x in out if x.get('picked') and x['full'])} on a FULL answer, {len(unpicked) - len(miss)} accepted "
+          f"(replay-accepted.txt), {len(miss)} misses")
     for x in miss:
         print("MISS", x["id"], x["event"], x["class"], "files=", x["files"], x["first_file"])
     if a.out:
