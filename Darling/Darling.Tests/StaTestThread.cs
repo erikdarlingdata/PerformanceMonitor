@@ -272,7 +272,7 @@ internal sealed class StaHost
 
                 throw new TimeoutException(
                     $"WPF test body did not return within {(HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s")}: {name}. The shared STA test thread is stuck inside it, "
-                    + "so every later WPF test in this process fails at once naming this test (#5602). "
+                    + "so every WPF test that starts while it is still inside fails at once naming this test (#5602). "
                     + DescribeStuckBody(opsAtStart));
             }
 
