@@ -975,37 +975,41 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
-            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
-
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-
-            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+            /* The baselines below stay server-wide: a server-wide baseline against a filtered count can only
                make a master spike less likely, which is accepted. */
             var separate = PgFactCollector.SeparateDatabases(context);
-            using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
-            if (separate is not null) cmd.Parameters.AddWithValue(separate);
-            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
-
             long currentBlocking, currentDeadlocks;
             bool blockingFromDmv;
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            /* #7588: this connection closes before the baselines are fetched. A baseline compute opens its own connection on a
+               cache miss, so holding this one across the calls put two pooled connections on every blocking pass. */
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-                currentBlocking = Convert.ToInt64(reader.GetValue(0));
-                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
-                blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+                if (separate is not null) cmd.Parameters.AddWithValue(separate);
+                cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
+
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+                {
+                    if (!await reader.ReadAsync(context.CancellationToken)) return;
+                    currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                    currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                    blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                }
+                if (separate is not null)
+                    currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                        connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                        separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
             }
-            if (separate is not null)
-                currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
-                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
+            /* #7588: the baseline follows the arm the window counted. Report rows are judged against report history and
+               snapshot rows against snapshot history, so the ratio never divides one unit by the other. */
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, blockingFromDmv ? MetricNames.BlockingSnapshot : MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),

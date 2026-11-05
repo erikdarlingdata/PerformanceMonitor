@@ -99,7 +99,12 @@ const PAGE_FOR_TOOLS = [
   ["the Vacuum tab", ["get_pg_autovacuum_health", "get_pg_session_states", "get_pg_wraparound_risk", "get_pg_xmin_horizon"]],
   ["the Waits tab", ["get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_kernel_stats"]],
   ["the I/O tab", ["get_pg_io_stats", "get_pg_io_trend", "get_pg_buffer_usage", "get_pg_write_stats"]],
-  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats"]],
+  ["the Activity tab", ["get_pg_blocking", "get_pg_deadlocks", "get_pg_database_stats", "get_pg_database_trend", "get_pg_top_queries", "get_pg_plans", "get_pg_plan_capture_readiness", "get_pg_log_events", "get_pg_lock_stats",
+    /* #7557: the Configuration Audit's advice points at these reads, and the Activity tab shows each (server-tab-reach.js). */
+    "get_pg_column_stats", "get_pg_predicate_stats", "get_pg_query_duration_trend",
+    /* The Logging Settings Audit and Deadlock Graphs panels are on the Activity tab too; a Vacuum tab message names the audit read. */
+    "get_pg_logging_audit", "get_pg_deadlock_detail"]],
+  ["the Overview tab", ["get_pg_cpu_utilization", "get_pg_extensions"]],
   ["the Storage tab", ["get_pg_table_bloat", "get_pg_index_bloat", "get_pg_index_usage"]],
   ["the Configuration tab", ["get_pg_server_config", "get_pg_server_config_changes"]],
 ];
@@ -273,11 +278,16 @@ function withoutToolNames(text) {
   t = t.replace(/(?<![\w.])((?:[Tt]he )?)([a-z][a-z0-9]*(?:_[a-z0-9]+)+) collector(?![\w])/g, (m, the, name) => the + toolWords(name) + " collector");
   t = t.replace(/\bcollector '([a-z][a-z0-9]*(?:_[a-z0-9]+)+)'/g, (m, name) => "collector '" + toolWords(name) + "'");
 
-  /* A read a tab shows. Any other tool name stays here and is dropped below. */
-  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m) => PAGE_FOR_TOOL.get(m) ?? m);
+  /* A read a tab shows. Any other tool name stays here and is dropped below. #7557: a name that opens the text or a sentence ("get_pg_top_queries has the
+     statement's text.") becomes "The Activity tab ...", not "the Activity tab ...". */
+  t = t.replace(/(?<![\w.])get_[a-z0-9]+(?:_[a-z0-9]+)*(?![\w])/g, (m, at, whole) => {
+    const page = PAGE_FOR_TOOL.get(m);
+    if (page === undefined) return m;
+    return /^[a-z]/.test(page) && (at === 0 || /[.!?]\s+$/.test(whole.slice(0, at))) ? page[0].toUpperCase() + page.slice(1) : page;
+  });
 
   /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
-  t = t.replace(/\b(the (?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )\1/g, "$1");
+  t = t.replace(/\b([Tt]he) ((?:[A-Z][\w/]*\s)+\btab)(?:, then | then |, | or | and )the \2/g, "$1 $2");
 
   if (firstToolAt(t) < 0) return t;
 
@@ -349,6 +359,11 @@ export function plainText(text) {
   for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
   t = measurementCountsText(t);
+
+  /* #7548: a service sentence that ends a clause with the issue that explained it, "(#3061)" or "(#4046, #6866)", is written for a reader of
+     the code. The page has no use for the number, so the parenthesis goes with it, and so does a closing ", #4735" inside a longer one. */
+  t = t.replace(/\s*\(#\d+(?:\s*[,;/]\s*#\d+)*\)/g, "");
+  t = t.replace(/,\s*#\d+(?:\s*[,;/]\s*#\d+)*\)/g, ")");
 
   /* The index-bloat "answered only" read says it in the read's own parameter name. The page shows the sentence under the
      answered-ranking panel, so it says why that ranking is empty, in words, and points at the table above that lists each
@@ -497,6 +512,9 @@ const AZURE_SQL_DATABASE_MARK = /runs on Azure SQL Database \(EngineEdition 5\)/
     apply to this kind of server" (release walk, PG18 OS CPU by Query). */
 const ENGINE_GATE_MARK = "This is a permanent engine capability gap";
 
+/** #7548: the grant that lets the monitoring login read pg_stats, said once for the panels that need it. */
+const PG_STATS_GRANT = "Run GRANT pg_read_all_data TO <login> on PostgreSQL 14 and above, or GRANT SELECT on the tables on 13.";
+
 /**
  * #7410: the one plain sentence a panel shows for an empty reply that names a setup step, built from the reply's structured
  * `hints` (`reason`, and for a missing extension its `extensions` and `restart_required`) and never from the message text, which
@@ -514,7 +532,25 @@ export function shortEmptyLine(res, extensionLine) {
     return "No query in this range changed enough between snapshots to attribute CPU to it." +
       (hours > 0 ? " A range of the last " + hours + (hours === 1 ? " hour" : " hours") + " or more reaches one that did." : " A longer range may.");
   }
+  /* #7548: the answered-only Index Bloat ranking when no index has an answer. The list is sorted by bytes and then count, so its first entry
+     is not the commonest cause. The grant is named as THE cause only when it is the one reason there is. When it is one of several, it is one
+     fix among others and the table above says why for the rest. */
+  if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
+    const buckets = h.suppressed_by_reason;
+    const grantBucket = buckets.some((b) => b && b.reason === "ColumnWidthsNotVisible");
+    if (grantBucket && buckets.length === 1) {
+      return "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+    }
+    if (grantBucket) {
+      return "Some indexes have no bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT +
+        " The Not Measured column of the Index Bloat (estimated) table above says why for the rest.";
+    }
+    return "No index has a bloat estimate. The Not Measured column of the Index Bloat (estimated) table above says why.";
+  }
   if (typeof h.reason !== "string") return null;
+  if (h.reason === "pg_stats_unreadable") {
+    return "No column statistics are collected because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
+  }
   if (h.reason === "extension_missing") {
     if (extensionLine) return extensionLine;
     const names = Array.isArray(h.extensions) ? h.extensions.filter((n) => typeof n === "string" && n) : [];
