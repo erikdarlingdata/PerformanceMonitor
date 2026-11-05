@@ -84,13 +84,13 @@ function panelFor(row) {
   const pretty = prettyPrintPgPlan(plan);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
 
-  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  const copy = el("button", { type: "button", class: "btn grid-tool", text: "Copy" });
   copy.addEventListener("click", async () => {
     const out = await copyText(pretty);
     status.textContent = out.message;
   });
 
-  const download = el("button", { type: "button", class: "grid-tool", text: "Download .json" });
+  const download = el("button", { type: "button", class: "btn grid-tool", text: "Download .json" });
   if (unparsed) {
     download.disabled = true;
     download.setAttribute("disabled", "");
@@ -131,7 +131,7 @@ export function pgPlanCell(server, row) {
   const draw = () => {
     while (host.firstChild) host.removeChild(host.firstChild);
     const open = openPlans.has(key);
-    const button = el("button", { type: "button", class: "grid-tool", text: open ? "Hide plan" : "Plan" });
+    const button = el("button", { type: "button", class: "btn grid-tool", text: open ? "Hide plan" : "Plan" });
     button.setAttribute("aria-expanded", open ? "true" : "false");
     button.setAttribute("title", "Show the captured plan JSON");
     button.addEventListener("click", () => {

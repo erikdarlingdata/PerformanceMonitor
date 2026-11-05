@@ -138,7 +138,12 @@ const CLAMP_MIN_CHARS = 60;
  */
 export function clampText(text, opts = {}) {
   const full = String(text == null ? "" : text);
-  const node = el("span", { class: "clamp-text", title: full || null, text: full });
+  /* #7533 review: a file path is told apart by its END (the file name), so a path cell cuts the start: the span runs right to left, which
+     puts the ellipsis at the left, and its text sits in a <bdi> so the drive letter, the backslashes and the colon keep their own order
+     instead of jumping to the other end. The title and the text node still hold the whole path. */
+  const node = opts.path
+    ? el("span", { class: "clamp-text path-text", dir: "rtl", title: full || null }, [el("bdi", { text: full })])
+    : el("span", { class: "clamp-text", title: full || null, text: full });
   const long = full.length > CLAMP_MIN_CHARS || /[\r\n]/.test(full);
   if (opts.expandable === false || !long) return node;
   return makeClampToggle(node);

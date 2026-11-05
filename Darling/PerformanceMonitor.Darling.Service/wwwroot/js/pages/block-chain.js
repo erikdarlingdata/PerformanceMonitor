@@ -128,7 +128,7 @@ export function blockChainCell(server, row) {
     while (host.firstChild) host.removeChild(host.firstChild);
     const button = el("button", {
       type: "button",
-      class: "grid-tool",
+      class: "btn grid-tool",
       text: entry.open ? "Hide block chain" : "Block chain",
       "aria-expanded": entry.open ? "true" : "false",
       title: "Show the lead blocker and the sessions it blocks, for this report",

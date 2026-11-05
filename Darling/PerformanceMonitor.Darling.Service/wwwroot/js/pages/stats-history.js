@@ -178,7 +178,7 @@ export function statsHistoryColumn(kind, server, w) {
         const state = open.get(key);
         const button = el("button", {
           type: "button",
-          class: "grid-tool",
+          class: "btn grid-tool",
           text: state ? "Hide history" : "History",
           "aria-expanded": state ? "true" : "false",
           title: kind === "procedures" ? "Show this procedure's history" : "Show this query's history",

@@ -18,7 +18,7 @@ import { el, readTool, readErrorStrip, emptyStrip, captionStrip, errorStrip, loa
 const TREND_HOURS = 168;
 
 const COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "is_adr_on", label: "ADR on", format: "bool" },
   { key: "pvs_size_mb", label: "PVS off-row MB", format: "num2" },
   { key: "pct_of_database", label: "% of database", format: "num2", nullKey: "pct_of_database_reason", wrap: true },

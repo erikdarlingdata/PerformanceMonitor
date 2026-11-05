@@ -92,7 +92,7 @@ const TREND_COLUMNS = [
 
 /* top-keys:begin */
 const TOP_TOTAL_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },
   { key: "io_share_pct", label: "IO %", format: "num1" },
   { key: "cpu_time_ms", label: "CPU (ms)", format: "int" },
@@ -100,7 +100,7 @@ const TOP_TOTAL_COLUMNS = [
 ];
 
 const TOP_AVG_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "avg_cpu_ms", label: "Avg CPU (ms)", format: "num2" },
   { key: "avg_io_mb", label: "Avg IO (MB)", format: "num2" },
   { key: "execution_count", label: "Execs", format: "int" },

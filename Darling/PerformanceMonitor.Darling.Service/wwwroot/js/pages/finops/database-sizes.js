@@ -29,8 +29,8 @@ function growthSort(row) {
 }
 
 const COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "file_name", label: "File" },
+  { key: "database_name", label: "Database", name: true },
+  { key: "file_name", label: "File", name: true },
   { key: "file_type", label: "Type" },
   { key: "total_size_mb", label: "Total", format: "mb" },
   { key: "used_size_mb", label: "Used", format: "mb" },
