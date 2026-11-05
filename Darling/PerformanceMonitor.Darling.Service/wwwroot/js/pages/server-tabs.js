@@ -162,6 +162,8 @@ export const SERVER_TABS = [
         unit: "%",
         span: 2,
         emptyText: "No CPU samples in this window.",
+        hideEmptySeries: true,
+        footNoteKey: "host_cpu_note",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
       serverTrendPanel(server, ctx, "cpu_scheduler"),
@@ -1523,14 +1525,16 @@ export const POSTGRES_TABS = [
       /* #2661 deadlocks, on Activity beside blocking because they are the same subject at its limit: a
          blocking chain that resolved, and one the server had to break by cancelling somebody. Below
          blocking rather than above it because blocking is the far more common finding. */
-      tablePanel(
+      /* #7548: the tool's empty text is written for an MCP client (issue numbers, key names, how the check works). The page says one sentence that
+         names the panel holding the answer, and the tool's text is behind "More detail". Deadlock Graphs below does the same. */
+      tablePanelPlain(
         "Deadlocks",
         "get_pg_deadlocks",
         { server, hours: ctx.hours },
         "deadlocks",
         PG_DEADLOCK_COLUMNS,
         ctx.label + ", newest first; Sightings counts re-reads of the same report, not repeats",
-        "No deadlock was reported in this window. That is the healthy answer - but it is the same shape as a server whose log cannot be read, which the Plan Capture Readiness panel above reports on because it reads the same file. pg_stat_database's deadlock counter is the independent check."
+        "No deadlock in this window. If you expected one, Plan Capture Readiness above shows whether the server log can be read."
       ),
       /* #3601 the log, classified. Under the deadlocks because the two are the same log read two ways:
          the deadlock grid is one ERROR line's DETAIL graph parsed out whole, this is every classified line
@@ -1554,14 +1558,14 @@ export const POSTGRES_TABS = [
       /* The graphs themselves, under the summary - the same pairing the SQL Server Deadlocks tab makes.
          The read takes an optional hash, so this panel needs no drill-down plumbing: without one it
          answers with the most recent graphs. */
-      tablePanel(
+      tablePanelPlain(
         "Deadlock Graphs",
         "get_pg_deadlock_detail",
         { server, limit: 5 },
         "deadlocks",
         PG_DEADLOCK_GRAPH_COLUMNS,
         "the whole wait graph as the server wrote it, including every participant's statement, SQL normalized",
-        "No deadlock graph stored for this server."
+        "No deadlock graph stored for this server. If you expected one, Plan Capture Readiness above shows whether the server log can be read."
       ),
     ],
   },

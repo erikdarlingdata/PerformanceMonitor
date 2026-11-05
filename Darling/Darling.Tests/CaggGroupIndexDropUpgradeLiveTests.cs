@@ -474,6 +474,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
 WHERE n.nspname = $1 AND c.relname = $2
+-- #7609 (V246): the named (query_hash, bucket DESC) index is built on purpose, not a group index V152 left behind.
+AND NOT EXISTS (SELECT 1 FROM pg_class ic WHERE ic.oid = i.indexrelid AND ic.relname = 'ix_qs_corrected_hourly_hash_bucket')
 GROUP BY i.indexrelid", connection);
         command.Parameters.AddWithValue(schema);
         command.Parameters.AddWithValue(table);
