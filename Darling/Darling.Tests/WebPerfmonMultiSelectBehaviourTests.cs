@@ -93,6 +93,14 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
     }
 
     [Fact]
+    public void ThePickerList_IsInNameOrderWithoutCase_ThenByRawName()
+    {
+        // #7550: a plain ordinal sort put every capitalized name above every lower-case one (Alpha, Beta, Delta, alpha, beta, gamma).
+        var r = Run("nameOrder");
+        Assert.Equal(new[] { "Alpha", "alpha", "Beta", "beta", "Delta", "gamma" }, Strings(r.GetProperty("listed")));
+    }
+
+    [Fact]
     public void CheckingAndUnchecking_RedrawsWithOneReadPerCheckedCounter()
     {
         var r = Run("checkUncheck");

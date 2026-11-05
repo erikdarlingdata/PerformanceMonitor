@@ -191,7 +191,7 @@ FROM (
     AND   v.database_name IS NOT NULL
     AND   v.database_name <> ALL($4){databases.Clause("v.database_name", 3)}
     AND   (cardinality(scope.names) = 0 OR lower(v.database_name) = ANY(scope.names))) AS d
-ORDER BY d.database_name";
+ORDER BY lower(d.database_name), d.database_name";
 
     /// <summary>
     /// The newest scan's columns of every database with a marker in the window, and nothing else (#6875): the read behind the self-alert
@@ -332,7 +332,18 @@ ORDER BY d.database_name";
             columns.OrderByDescending(c => c.PercentUsed ?? -1)
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
-            scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
+            scanned.OrderBy(d => FoldAscii(d.Key), StringComparer.Ordinal).ThenBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
             notYetScanned,
             skipped);
+
+    /// <summary>
+    /// Lower-cases only A-Z (#7550). The SQL lists in the same card sort on <c>lower()</c>, which under a managed store's <c>LC_CTYPE C</c>
+    /// folds only ASCII letters, so the scanned list folds the same way and a name that starts with a non-ASCII capital lands in one place in all three.
+    /// </summary>
+    private static string FoldAscii(string name) =>
+        string.Create(name.Length, name, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+                span[i] = source[i] is >= 'A' and <= 'Z' ? (char)(source[i] + ('a' - 'A')) : source[i];
+        });
 }

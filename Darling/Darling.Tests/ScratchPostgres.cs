@@ -105,15 +105,19 @@ internal sealed class ScratchPostgres : IAsyncDisposable
     /// this process migrated once (see <see cref="GetTemplateAsync"/>), so the test's own <c>MigrateAsync</c> is a no-op:
     /// the same schema, journal and jobs at about half the cost. Pass this when the test applies part of the ladder,
     /// stages a store shape before migrating, asserts what <c>MigrateAsync</c> applied or never migrates at all.</param>
+    /// <param name="cCollation">Create the database with <c>LC_COLLATE</c> and <c>LC_CTYPE</c> <c>C</c>, the collation a managed store is
+    /// initialised with (<c>--locale=C</c>), so a test of text order sees byte order wherever the cluster's own default is a
+    /// locale (#7550). The database is unmigrated, as with <paramref name="emptyStore"/>.</param>
     public static async Task<ScratchPostgres> CreateAsync(
-        string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false, bool emptyStore = false)
+        string baseConnectionString, CancellationToken cancellationToken, bool plainPostgres = false, bool emptyStore = false,
+        bool cCollation = false)
     {
         HookExitDrain();
         await SweepOncePerClusterAsync(baseConnectionString, cancellationToken);
 
-        if (plainPostgres || emptyStore)
+        if (plainPostgres || emptyStore || cCollation)
         {
-            return await CreateEmptyAsync(baseConnectionString, plainPostgres, CurrentTestName(), cancellationToken);
+            return await CreateEmptyAsync(baseConnectionString, plainPostgres, CurrentTestName(), cancellationToken, cCollation);
         }
 
         var template = await GetTemplateAsync(baseConnectionString, cancellationToken);
@@ -160,9 +164,9 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
     /// <summary>An empty database: <c>CREATE DATABASE</c>, then the extension unless <paramref name="plainPostgres"/>.</summary>
     private static async Task<ScratchPostgres> CreateEmptyAsync(
-        string baseConnectionString, bool plainPostgres, string creator, CancellationToken cancellationToken)
+        string baseConnectionString, bool plainPostgres, string creator, CancellationToken cancellationToken, bool cCollation = false)
     {
-        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken);
+        var scratch = await MintAsync(baseConnectionString, template: null, creator, cancellationToken, cCollation);
         var clusterKey = ClusterKey(baseConnectionString);
         if (!plainPostgres && !ClustersWithoutTimescale.ContainsKey(clusterKey))
         {
@@ -187,7 +191,7 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
     /// <summary>Runs <c>CREATE DATABASE</c>, from <paramref name="template"/> when one is named, and returns its handle.</summary>
     private static async Task<ScratchPostgres> MintAsync(
-        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken)
+        string baseConnectionString, string? template, string creator, CancellationToken cancellationToken, bool cCollation = false)
     {
         /* The factory's pattern (prefix, creation stamp, 12 hex): safe to interpolate as a quoted identifier. */
         var databaseName = ScratchDatabaseSweep.NewName(DateTime.UtcNow);
@@ -201,7 +205,9 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             await using var admin = new NpgsqlConnection(UnpooledAdminConnectionString(baseConnectionString));
             await admin.OpenAsync(cancellationToken);
             await using var create = new NpgsqlCommand(
-                template is null ? $"CREATE DATABASE \"{databaseName}\"" : $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\"",
+                template is not null ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE \"{template}\""
+                : cCollation ? $"CREATE DATABASE \"{databaseName}\" TEMPLATE template0 ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'"
+                : $"CREATE DATABASE \"{databaseName}\"",
                 admin);
             await create.ExecuteNonQueryAsync(cancellationToken);
         }
