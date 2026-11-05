@@ -80,9 +80,19 @@ export function scopedConfigPanel(server) {
   return panel;
 }
 
+export function isQsErrorState(state) {
+  return typeof state === "string" && state.trim().toUpperCase() === "ERROR";
+}
+export function qsActualStateText(r) {
+  const state = r.actual_state == null ? "" : String(r.actual_state);
+  return isQsErrorState(state) ? "! " + state : state;
+}
+
 export const QS_HEALTH_COLUMNS = [
   { key: "database_name", label: "Database", name: true },
-  { key: "actual_state", label: "Actual" },
+  /* #7675: a store in ERROR has stopped on an internal error, so its row is marked here. The one-line meaning rides in the Read-only reason cell
+     (the service words it in readonly_reason_decoded). The mark is a "! " in the text and the high band's colour, so it shows without the colour too. */
+  { key: "actual_state", label: "Actual", display: (r) => qsActualStateText(r), cellClass: (r) => (isQsErrorState(r.actual_state) ? "sev-High" : null) },
   { key: "desired_state", label: "Desired" },
   { key: "state_matches_desired", label: "Match", format: "bool" },
   { key: "readonly_reason_decoded", label: "Read-only reason", wrap: true },
@@ -140,13 +150,13 @@ function identityLastScanned(r) {
   const at = r.scanned_at || r.last_scanned_at;
   return at ? localTime(at) : "—";
 }
-const IDENTITY_COLUMNS = [
+export const IDENTITY_COLUMNS = [
   { key: "database", label: "Database", name: true },
   { key: "table", label: "Table", render: (r) => el("span", { text: identityTable(r) }), sortValue: identityTable },
   { key: "column", label: "Column" },
   { key: "data_type", label: "Type", render: (r) => el("span", { text: identityType(r) }), sortValue: identityType },
   { key: "percent_used", label: "Percent used", format: "num1" },
-  { key: "values_remaining", label: "Values remaining", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
+  { key: "values_remaining", label: "Values remaining", align: "right", render: (r) => el("span", { text: identityDigits(r.values_remaining) }), sortValue: (r) => (r.values_remaining == null ? -1 : Number(r.values_remaining)) },
   { key: "rate_per_day", label: "Rate per day", format: "num1" },
   { key: "days_to_exhaustion", label: "Days to exhaustion", format: "num1" },
   { key: "band", label: "Band", format: "text", small: true },

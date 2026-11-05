@@ -7,6 +7,7 @@
  */
 
 import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter, parseUtc } from "../../util.js";
+import { estimatedPlotPx } from "../../trend-points.js";
 import { getPanelSignal } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
 import { bucketMsOf } from "../../chart-gaps.js";
@@ -34,7 +35,7 @@ export function fileIoPanel(server, ctx) {
   const { panel, body } = panelShell("File I/O Latency", "avg read and write latency " + fileIoGrain(server) + ", " + ctx.label, 2, "get_file_io_trend");
   const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours }, signal);
+    const res = await readToolWithinKeptHistory("get_file_io_trend", { server, hours: ctx.hours }, signal, { plotPx: estimatedPlotPx() });
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(res.message)]);

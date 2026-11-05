@@ -140,7 +140,7 @@ public sealed class ServerPageTabsTests
         var end = js.IndexOf("\n      ),", at, StringComparison.Ordinal);
         var call = js[at..end];
         Assert.Contains("\"truncation_note\",", call, StringComparison.Ordinal);
-        Assert.Contains("[\"approximation_note\"]", call, StringComparison.Ordinal);
+        Assert.Contains("[\"approximation_note\", \"query_store_error_note\"]", call, StringComparison.Ordinal);
     }
 
     [Fact]

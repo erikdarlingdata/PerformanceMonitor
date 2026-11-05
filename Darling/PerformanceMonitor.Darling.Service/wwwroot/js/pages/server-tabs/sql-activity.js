@@ -7,6 +7,7 @@
  */
 
 import { el, readTool, readToolWithinKeptHistory, keptWindowStrip, mount, loadingStrip, errorStrip, readErrorStrip, emptyStrip, noticeStrip, chartNote, fmtRate, fmtInt, fmtNum, fmtPlain, windowFromHours, clampText } from "../../util.js";
+import { estimatedPlotPx } from "../../trend-points.js";
 import { getPanelSignal, VIZ } from "../../panels.js";
 import { zoomableLineChart, chartZoomScope, CATEGORICAL_COLORS } from "../../charts.js";
 import { multiPicker, mergeSeriesRows } from "../../multi-picker.js";
@@ -107,7 +108,7 @@ export async function drawPerfmonTrends(slot, server, ctx, checked) {
   }
   mount(slot, loadingStrip());
   const results = await Promise.all(
-    counters.map((counter) => readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counter, hours: ctx.hours }, mine.signal))
+    counters.map((counter) => readToolWithinKeptHistory("get_perfmon_trend", { server, counter_name: counter, hours: ctx.hours }, mine.signal, { plotPx: estimatedPlotPx() }))
   );
   if (perfmonDraws.get(server) !== mine || mine.signal.aborted) return;
 

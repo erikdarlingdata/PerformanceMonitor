@@ -94,6 +94,10 @@ public static class QueryStoreClutter
     public const string ReasonQueryStoreReadOnly = "qs_read_only";
     public const string ReasonQueryStoreOff = "qs_off";
 
+    /// <summary>#7675: the store stopped on an internal error. A reason with no band, as <see cref="ReasonQueryStoreOff"/> is: its
+    /// rows have stopped changing, so a clutter grade from them would describe a store that is no longer recording.</summary>
+    public const string ReasonQueryStoreError = "qs_error";
+
     /// <summary>#7454: READ_ONLY because the database is in a state Query Store cannot record in (read-only,
     /// single-user, emergency). A reason with no band, as <see cref="ReasonQueryStoreOff"/> is.</summary>
     public const string ReasonReadOnlyDatabaseState = "qs_read_only_state";
@@ -122,6 +126,7 @@ public static class QueryStoreClutter
         ReasonStorageNearCap => "Storage near the cap",
         ReasonQueryStoreReadOnly => "Query Store read-only",
         ReasonQueryStoreOff => "Query Store off",
+        ReasonQueryStoreError => "Query Store stopped on an error",
         ReasonReadOnlyDatabaseState => "Query Store read-only (database state)",
         ReasonReadOnlyOperator => "Query Store read-only (set by an operator)",
         ReasonReplica => "Query Store read-only (replica)",
@@ -209,6 +214,13 @@ public static class QueryStoreClutter
         if (config is { IsSecondaryReplica: true })
         {
             return (HealthSeverity.Unknown, [ReasonReplica]);
+        }
+
+        /* #7675: an ERROR store is not recording, so the rows the other two arms read are old and stop changing. State it as a
+           reason with no band and grade nothing, the way a replica is handled above. */
+        if (config is not null && QueryStoreReadonlyReason.IsErrorState(config.ActualState))
+        {
+            return (HealthSeverity.Unknown, [ReasonQueryStoreError]);
         }
 
         var reasons = new List<string>();
@@ -548,6 +560,9 @@ public static class QueryStoreClutter
                     break;
                 case ReasonQueryStoreOff:
                     lines.Add("Query Store is OFF on this database: there is nothing here to be cluttered, and this view does not grade the choice.");
+                    break;
+                case ReasonQueryStoreError:
+                    lines.Add("Query Store is in the ERROR state on this database: " + QueryStoreReadonlyReason.ErrorStateNote + " The rows it holds are old, so this view does not grade them.");
                     break;
                 case ReasonNotMeasured:
                     lines.Add("No query_store_stats rows, no fan-out run naming this database, and no configuration capture inside the window: nothing was measured. Widen hours_back before reading this as quiet.");

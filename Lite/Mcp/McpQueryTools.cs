@@ -586,8 +586,16 @@ public sealed class McpQueryTools
             /* #6131: the page is capped under the shared response budget (top 200 measured 177 KB on the Darling twin, which
                has the same shape), and `truncated` says when it was. It is the budget cut only; the window floor keeps
                window_truncated and its own note. */
-            return McpResponseBudget.CapPage(
-                System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject(), "queries", "heaviest first", "queries");
+            var topPayload = System.Text.Json.Nodes.JsonNode.Parse(topJson)!.AsObject();
+
+            /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
+            if (await McpRuntimePrecondition.QueryStoreErrorNoteAsync(
+                    dataService, resolved.ServerId, database_name, rows.Select(r => r.DatabaseName)) is { } storeErrorNote)
+            {
+                topPayload[McpRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
+            }
+
+            return McpResponseBudget.CapPage(topPayload, "queries", "heaviest first", "queries");
         }
         catch (Exception ex)
         {

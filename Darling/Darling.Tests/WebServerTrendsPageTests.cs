@@ -46,7 +46,7 @@ public sealed class WebServerTrendsPageTests
     {
         var js = Js();
         var panel = Between(js, "export function serverTrendPanel(", "const MAX_CLERKS_CHARTED");
-        Assert.Contains("readToolWithinKeptHistory(\"get_server_trend\", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal)", panel);
+        Assert.Contains("readToolWithinKeptHistory(\"get_server_trend\", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal, { plotPx: estimatedPlotPx() })", panel);
         var clerks = Between(js, "export function memoryClerksTrendPanel(", "export async function drawClerkTrends(");
         Assert.Contains("readToolWithinKeptHistory(\"get_memory_clerks\", { server }, ctx && ctx.signal)", clerks);
         var draw = Between(js, "export async function drawClerkTrends(", "export function memoryPressurePanels(");
