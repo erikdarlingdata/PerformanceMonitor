@@ -38,6 +38,7 @@ export const PG_AUDIT_COLUMNS = [
   { key: "status", label: "Status", statusSev: true },
   { key: "current_value", label: "Current" },
   { key: "object_name", label: "Table", small: true },
-  { key: "recommendation", label: "Why", wrap: true },
+  /* #7557: the sentence is worded for an MCP client and names the reads that carry the number. plain says the tab that shows each. */
+  { key: "recommendation", label: "Why", wrap: true, plain: true },
 ];
 
