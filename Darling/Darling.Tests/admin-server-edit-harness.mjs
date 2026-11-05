@@ -1230,6 +1230,18 @@ try {
         status: byAttr(main, "data-note-status").map((n) => n.textContent),
       };
     },
+    /* #7558: the Feedback tab with no reports in the window (param is the read's hours_back): returns the text the empty family table draws. */
+    feedbackEmpty: async (hours) => {
+      state.canEdit = false;
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/investigation-feedback") {
+          return { status: 200, body: { hours_back: Number(hours), can_record: false, requests_returned: 0, truncated: false, families: [], requests: [] } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("feedback");
+      return { text: main.textContent };
+    },
     /* #6265: a seat that can edit but holds no sign-in (a dashboard with no web token) sees the Pending Notes and Practice Scores lists,
        the sign-in sentence, and none of the write forms or the Approve and Reject buttons. */
     signedout: async (tab) => {

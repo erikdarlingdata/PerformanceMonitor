@@ -148,10 +148,22 @@ public sealed class AdminReportFeedbackBehaviourTests
         Assert.Equal("Practice requests opened in the last 30 days.", Assert.Single(Strings(page.GetProperty("practiceWindow"))));
     }
 
+    [Theory]
+    [InlineData("168", "No investigation reports in the last 7 days.")]
+    [InlineData("24", "No investigation reports in the last 1 day.")]
+    [InlineData("36", "No investigation reports in the last 36 hours.")]
+    public void TheFeedbackEmptyText_IsWrittenInDays_WhenTheWindowIsWholeDays_AndInHoursOtherwise(string hoursBack, string expected)
+    {
+        // #7558: the family table's empty text counted raw hours ("168 hours"); a whole-day window reads in days, any other stays in hours.
+        var page = AdminServerEditBehaviourTests.Run("feedbackEmpty:" + hoursBack);
+
+        Assert.Contains(expected, page.GetProperty("text").GetString());
+    }
+
     [Fact]
     public void APanelThatNamesNoteQuiet_DrawsACaption_AndAPanelThatDoesNot_KeepsTheYellowStrip()
     {
-        // #7558: four panels name noteQuiet because their note only explains the table: Query Store Overhead waits, Query Store Memory Clerk,
+        // #7558: four panels name noteQuiet because their note explains why the table is blank: Query Store Overhead waits, Query Store Memory Clerk,
         // PostgreSQL Sampled Waits and Checkpoints and WAL. Every other panel's note warns about data. (Memory Pressure Events per Hour and the
         // System Events intro are captions too, but through captionStrip directly, not this flag.)
         var page = AdminServerEditBehaviourTests.Run("noteStrips");
