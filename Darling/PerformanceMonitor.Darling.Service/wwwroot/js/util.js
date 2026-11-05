@@ -1113,12 +1113,19 @@ export function fmtBytes(v, o) {
   if (top != null && n === 0) return "0 " + unit;
   return (stepOf(o) == null ? fmtNum(n / per, 1) : fixed(n / per, placesFor(o, wholeStepMin(o, per), per))) + " " + unit;
 }
-/* A size given in megabytes, written in the unit that fits it (#7410): a table that holds 140 KB read "0 MB" under fmtMb, which prints whole
-   megabytes. Null is the dash and 0 is a real 0 B, as fmtBytes. */
+/* A size given in megabytes, written in the unit that fits it (#7410, #7564): a table that holds 140 KB read "0 MB" under fmtMb, which
+   prints whole megabytes. From 1 MB up it steps through fmtBytes (1.5 MB, 2.0 GB). Under 1 MB it stays in MB and prints as many decimals
+   as the input has, up to six: a service that rounded an index of 456 KB to 0.45 MB sends 0.45, and 0.45 MB x 1,048,576 is "460.8 KB",
+   digits nobody measured. Where the reply has the bytes, use the "bytes" format instead. A zero reads "0 MB" and never "0 B": a rounded
+   MB of 0 stands for any size under about half the input's last place (16 KB rounds to 0 at either precision), and "0 B" would claim
+   an empty object. Null is the dash. */
 export function fmtMbFit(v) {
   if (v == null) return "—";
   const n = Number(v);
-  return isFinite(n) ? fmtBytes(n * 1024 * 1024) : "—";
+  if (!isFinite(n)) return "—";
+  if (Math.abs(n) >= 1) return fmtBytes(n * 1024 * 1024);
+  const places = n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "").split(".")[1];
+  return fmtNum(n, places ? places.length : 0) + " MB";
 }
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);

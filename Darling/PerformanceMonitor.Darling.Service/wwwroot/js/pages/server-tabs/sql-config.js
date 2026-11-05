@@ -86,7 +86,7 @@ export const QS_HEALTH_COLUMNS = [
   { key: "desired_state", label: "Desired" },
   { key: "state_matches_desired", label: "Match", format: "bool" },
   { key: "readonly_reason_decoded", label: "Read-only reason", wrap: true },
-  { key: "current_storage_size_mb", label: "Used", format: "mb" },
+  { key: "current_storage_size_mb", label: "Used", format: "mbfit" },
   { key: "max_storage_size_mb", label: "Cap", format: "mb" },
   { key: "pct_of_cap", label: "% of cap", format: "num1" },
   { key: "size_based_cleanup_mode", label: "Cleanup" },

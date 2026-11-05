@@ -586,8 +586,8 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         {
             Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Physical\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
             Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Memory limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
-            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
-            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available under limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available\", format: \"mbfit\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available under limit\", format: \"mbfit\", showWhen: {condition} }}", source, StringComparison.Ordinal);
         }
         Assert.Contains("const AZURE_SQL_DATABASE = { key: \"engine_edition\", equals: 5 };", tabs, StringComparison.Ordinal);
     }

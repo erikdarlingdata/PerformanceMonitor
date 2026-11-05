@@ -1313,7 +1313,7 @@ export function visibleColumns(cols, rows) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "bytes", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
 }
 
 /* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging

@@ -59,7 +59,7 @@ import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS, PG_AUDIT_COLUMNS } 
 import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, pgWriteStatsBlankNote, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
 import { momentStat, PG_CPU_SERIES, PG_EXTENSION_CENSUS_COLUMNS, PG_EXTENSION_COLUMNS } from "./server-tabs/pg-overview.js";
 import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-replication.js";
-import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
+import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_BLOAT_ROWS, PG_INDEX_USAGE_COLUMNS, PG_INDEX_USAGE_ROWS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, pgWaitSamplingBackendsNote, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
 import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, findingsPanel, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
@@ -1884,6 +1884,7 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "tables",
           columns: PG_BLOAT_COLUMNS,
+          orderRows: PG_BLOAT_ROWS,
           emptyText:
             "No tables to list.",
         },
@@ -1905,6 +1906,7 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "indexes",
           columns: PG_INDEX_USAGE_COLUMNS,
+          orderRows: PG_INDEX_USAGE_ROWS,
           emptyText:
             "No indexes to list.",
         },

@@ -188,7 +188,7 @@ export const DEFAULT_TRACE_COLUMNS = [
   { key: "application_name", label: "Application" },
   { key: "spid", label: "SPID", format: "int" },
   { key: "duration_ms", label: "Duration ms", format: "ms" },
-  { key: "growth_mb", label: "Growth MB", format: "mb" },
+  { key: "growth_mb", label: "Growth MB", format: "mbfit" },
   { key: "severity", label: "Severity", format: "int" },
   { key: "error_number", label: "Error #", format: "int" },
   { key: "text_data", label: "Details", wrap: true },
