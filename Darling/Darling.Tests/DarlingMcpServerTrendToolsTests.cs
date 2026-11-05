@@ -212,7 +212,7 @@ public sealed class DarlingMcpServerTrendToolsTests
         var web = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains("[\"get_server_trend\"] = R(CatTrends,", web, StringComparison.Ordinal);
         Assert.Contains("[\"get_server_trend\"] = (c, pg, an) => RequireText(c, \"metric\"", web, StringComparison.Ordinal);
-        Assert.Contains("DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, \"clerk_types\"), Str(c, \"names\"), TrendBudget.Chart", web, StringComparison.Ordinal);
+        Assert.Contains("DarlingMcpServerTrendTools.GetServerTrend(pg, serverTrendMetric, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, \"clerk_types\"), Str(c, \"names\"), ChartBudget(c), cancellationToken: c.RequestAborted)", web, StringComparison.Ordinal);
     }
 
     [Fact]

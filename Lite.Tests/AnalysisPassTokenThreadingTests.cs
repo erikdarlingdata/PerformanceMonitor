@@ -217,8 +217,10 @@ public sealed class AnalysisPassTokenThreadingTests
            30 since #6267: the failure read of the plan-regression pass is one more; it lets the abandonment through and
            records any other fault as a collection caveat.
            31 since #6640: the spill ranking read that names the queries behind QUERY_SPILLS is one more; it lets the
-           abandonment through and drops the names on any other fault, so the fact stays without them. */
-        Assert.Equal(31, AnalysisSources()
+           abandonment through and drops the names on any other fault, so the fact stays without them.
+           32 since #7675: the QUERY_STORE_ERROR read of the newest query_store_health capture is one more; it lets the
+           abandonment through and reports any other fault as a collection failure, as the DB_CONFIG read beside it does. */
+        Assert.Equal(32, AnalysisSources()
             .Where(s => Path.GetFileName(s.File).StartsWith("DuckDbFactCollector.", StringComparison.Ordinal))
             .SelectMany(s => s.Code)
             .Count(line => classified.IsMatch(line)));

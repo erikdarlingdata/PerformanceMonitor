@@ -755,8 +755,9 @@ export function formatComposedValue(v, unit, o) {
   return fmtNum(n, tickPlaces(o, 1));
 }
 
+/* #7552: an axis tick keeps only the decimals its step needs (a 200 step reads 800 s, not 800.0 s); a tooltip or table cell (no step) keeps `min`. */
 function tickPlaces(o, min) {
-  return o && typeof o === "object" && o.step > 0 ? Math.max(min, tickDecimals(o.step)) : min;
+  return o && typeof o === "object" && o.step > 0 ? tickDecimals(o.step) : min;
 }
 
 /** The short y-axis unit caption: "%" for percent, the bare unit for a real unit, null for count/ratio (unitless-ish). */
