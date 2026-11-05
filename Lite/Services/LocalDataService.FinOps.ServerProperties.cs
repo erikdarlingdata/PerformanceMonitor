@@ -331,6 +331,7 @@ grants AS (
         MAX(100.0 * granted_memory_mb / NULLIF(target_memory_mb, 0)) AS grant_utilization_pct
     FROM v_memory_grant_stats
     WHERE collection_time >= $1
+    AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before the small-query row (id 1) was collected */
     GROUP BY server_id
 ),
 /* The latest size-snapshot TIME per server, shared by storage_totals (sums every database at that instant)

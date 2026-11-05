@@ -15,11 +15,12 @@ using Npgsql;
 namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One resource semaphore at the latest snapshot — the workspace-memory ceiling lens.</summary>
+/// <param name="MaxTargetMemoryMb">#7676: <c>null</c> for the small-query semaphore (id 1), the DMV's own NULL, kept as NULL.</param>
 /// <param name="SampleIntervalSeconds">#3540 (V128): the measured seconds the two deltas accrued over;
 /// <c>0</c> is the calculator's "no delta knowable" marker (first sighting, counter reset, a gap past the
 /// policy — a restart, not a quiet semaphore); <c>null</c> is a pre-V128 row that never recorded one.</param>
 public sealed record ResourceSemaphoreRow(
-    DateTime CollectionTime, short ResourceSemaphoreId, int PoolId, double TargetMemoryMb, double MaxTargetMemoryMb,
+    DateTime CollectionTime, short ResourceSemaphoreId, int PoolId, double TargetMemoryMb, double? MaxTargetMemoryMb,
     double TotalMemoryMb, double AvailableMemoryMb, double GrantedMemoryMb, double UsedMemoryMb,
     int GranteeCount, int WaiterCount, long TimeoutErrorCount, long ForcedGrantCount,
     long TimeoutErrorCountDelta, long ForcedGrantCountDelta, int? SampleIntervalSeconds)
@@ -113,7 +114,7 @@ public static class DarlingResourceSemaphoreReader
                 reader.IsDBNull(1) ? (short)0 : reader.GetInt16(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
                 reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
                 reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
