@@ -8,6 +8,7 @@
 
 import { fmtMs, el, disclosure, trendSubject } from "../../util.js";
 import { detailColumn, firstSentence, spillWord, cacheWord, rollbackWord } from "../../pg-grid-text.js";
+import { plainText } from "../../plain-text.js";
 import { codeDisclosure, listCell, pgQueryIdText } from "./shared.js";
 
 /**
@@ -268,6 +269,7 @@ const PLAN_CAPTURE_FACET_LABELS = {
   plan_text_setting: "Plans are logged as JSON",
   plan_attribution: "Plans carry a query id",
   message_locale: "Log messages are in English",
+  log_line_prefix_readable: "Log line prefix is readable",
 };
 const planFacetUnconfirmed = (row) => row.facet === "extension_available" && row.is_satisfied !== true;
 
@@ -293,8 +295,7 @@ export const PG_PLAN_CAPTURE_READINESS_COLUMNS = [
 export const PG_LOGGING_AUDIT_COLUMNS = [
   { key: "setting", label: "Setting", mono: true },
   { key: "verdict", label: "Verdict", hint: "Describes the log lines each setting writes. Partial means a threshold is filtering, which is the recommended state for log_min_duration_statement." },
-  /* #7410: the unit sits with its value and the source is its tooltip, so the long-text columns have the width. Unlocks and Recommended
-     wrap to the width the page has (`flow-cell`), and the cost and the remedy open on a click under one cell. */
+  /* #7410: the unit sits with its value and the source is its tooltip, so the long-text columns have the width. */
   {
     key: "value",
     label: "Value",
@@ -302,9 +303,15 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
     render: (row) => el("span", { title: row.source ? "From " + row.source : null }, [row.value == null || row.value === "" ? "—" : String(row.value) + (row.unit ? " " + row.unit : "")]),
     sortValue: (row) => row.value,
   },
-  { key: "change_needs", label: "Change needs", small: true },
-  { key: "recommended", label: "Recommended", wrap: true, cellClass: () => "flow-cell flow-narrow" },
-  { key: "unlocks", label: "Unlocks", wrap: true, cellClass: () => "flow-cell flow-narrow" },
+  /* #7539: reload or restart is one word, so it takes the width of that word and wraps the rest ("reload; applies to connections opened after it")
+     instead of holding the widest column; the width goes to the three text columns. */
+  { key: "change_needs", label: "Change needs", small: true, cellClass: () => "change-cell" },
+  /* #7539: Recommended and Unlocks show their first sentence and open the whole text on a click, as Cost and remedy does, and all three run the text
+     through plainText: the service words these for an MCP client ("through get_pg_top_queries"), and a web reader has no tool to call. */
+  detailColumn("recommended", "Recommended", (text) => firstSentence(plainText(text), 70) || null,
+    "The first sentence of what to set. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell flow-narrow" }),
+  detailColumn("unlocks", "Unlocks", (text) => firstSentence(plainText(text), 70) || null,
+    "The first sentence of what this setting makes visible. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell flow-narrow" }),
   {
     key: "remedy",
     label: "Cost and remedy",
@@ -313,10 +320,10 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
     copyValue: (row) => row.remedy ?? "",
     render: (row) => {
       const parts = [];
-      if (row.remedy) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Remedy. "]), row.remedy]));
-      if (row.cost_note) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Cost. "]), row.cost_note]));
+      if (row.remedy) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Remedy. "]), plainText(String(row.remedy))]));
+      if (row.cost_note) parts.push(el("p", { class: "cell-detail-text" }, [el("strong", {}, ["Cost. "]), plainText(String(row.cost_note))]));
       if (!parts.length) return document.createTextNode("—");
-      return disclosure(firstSentence(row.remedy || row.cost_note, 70), parts, { max: 70, cell: true });
+      return disclosure(firstSentence(plainText(String(row.remedy || row.cost_note)), 70), parts, { max: 70, cell: true });
     },
   },
   /* #7410: not drawn, still in Copy and the CSV: the fields the Value cell and the remedy cell fold in. */
