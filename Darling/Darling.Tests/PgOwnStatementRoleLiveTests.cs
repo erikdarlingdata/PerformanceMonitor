@@ -129,6 +129,7 @@ public sealed class PgOwnStatementRoleLiveTests
                     upsert.Parameters.AddWithValue(texts.ToArray());
                     upsert.Parameters.AddWithValue(stamp);
                     upsert.Parameters.AddWithValue(ownEntries.ToArray());
+                    upsert.Parameters.AddWithValue(new string?[queryIds.Count]);
                     await upsert.ExecuteNonQueryAsync(ct);
                 }
 

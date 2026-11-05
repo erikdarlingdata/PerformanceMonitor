@@ -50,6 +50,9 @@ public sealed partial class DarlingWorker
         DarlingSecretSource.ReportFileAccessTo(message => _logger.LogWarning("{Warning}", message));
 
         _executeStartedUtc = DateTime.UtcNow;
+        /* #7681: the statements the service sends to a PostgreSQL target, known before any collector has run, so the first
+           hourly text fetch after a restart still recognizes a daily collector's pre-marker entry. Cheap, and logs nothing. */
+        PgServiceStatements.Register();
         /* #5477: build the statement filter's first-call costs off the startup path, so the first alert with a
            large report does not pay them. Never throws, logs nothing. */
         _ = PerformanceMonitor.Alerting.AlertStatementFilter.WarmUpAsync();
