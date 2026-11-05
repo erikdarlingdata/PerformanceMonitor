@@ -238,7 +238,7 @@ SELECT capture_time, database_name,
 FROM v_database_config
 WHERE server_id = $1
 AND   capture_time <= $2" + dbClause + @"
-ORDER BY database_name, capture_time";
+ORDER BY lower(database_name), database_name, capture_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });

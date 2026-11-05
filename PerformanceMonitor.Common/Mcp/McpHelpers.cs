@@ -742,12 +742,19 @@ internal static class McpHelpers
     /// (<c>hints.parameter</c> is <paramref name="paramName"/>, so a tool that calls this for <c>top</c> refuses
     /// <c>top</c> by name).
     /// </summary>
-    public static string? ValidateTop(int top, string paramName = "limit")
+    public static string? ValidateTop(int top, string paramName = "limit") => ValidateTop(top, MaxTop, paramName);
+
+    /// <summary>
+    /// <see cref="ValidateTop(int, string)"/> against a tool's own ceiling, for a read whose page is smaller than
+    /// <see cref="MaxTop"/> (#7610: <c>find_queries_by_text</c> returns text excerpts, so its ceiling is 50). The
+    /// refusal reads the same, with <paramref name="max"/> where the shared ceiling would be.
+    /// </summary>
+    public static string? ValidateTop(int top, int max, string paramName = "limit")
     {
         if (top <= 0)
-            return Refusal(paramName, $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{MaxTop}).");
-        if (top > MaxTop)
-            return Refusal(paramName, $"{paramName} value '{top}' exceeds maximum of {MaxTop}. Use a smaller value.");
+            return Refusal(paramName, $"Invalid {paramName} value '{top}'. Must be a positive integer (1-{max}).");
+        if (top > max)
+            return Refusal(paramName, $"{paramName} value '{top}' exceeds maximum of {max}. Use a smaller value.");
         return null;
     }
 
