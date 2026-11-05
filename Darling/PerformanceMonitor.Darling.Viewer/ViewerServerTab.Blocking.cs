@@ -622,6 +622,7 @@ public partial class ViewerServerTab
             BlockingTrendChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(BlockingTrendChart);
             BlockingTrendChart.Plot.YLabel(BlockingTrendAxisTitle);
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(BlockingTrendChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, 1);
             ShowChartLegend(BlockingTrendChart);
             BlockingTrendChart.Refresh();
@@ -667,6 +668,7 @@ public partial class ViewerServerTab
         BlockingTrendChart.Plot.Axes.SetLimitsX(ChartXStart(BlockingTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(BlockingTrendChart);
         BlockingTrendChart.Plot.YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisTitleFor(sources));
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(BlockingTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(BlockingTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(BlockingTrendChart);
         BlockingTrendChart.Refresh();
@@ -696,6 +698,7 @@ public partial class ViewerServerTab
             DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(DeadlockTrendChart);
             DeadlockTrendChart.Plot.YLabel("Deadlocks");
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, 1);
             ShowChartLegend(DeadlockTrendChart);
             DeadlockTrendChart.Refresh();
@@ -738,6 +741,7 @@ public partial class ViewerServerTab
         DeadlockTrendChart.Plot.Axes.SetLimitsX(ChartXStart(DeadlockTrendChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(DeadlockTrendChart);
         DeadlockTrendChart.Plot.YLabel("Deadlocks");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(DeadlockTrendChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(DeadlockTrendChart, 0, data.Max(d => d.Count));
         ShowChartLegend(DeadlockTrendChart);
         DeadlockTrendChart.Refresh();
@@ -1099,6 +1103,7 @@ public partial class ViewerServerTab
             CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
             ReapplyAxisColors(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+            PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
             SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, 1);
             ShowChartLegend(CurrentWaitsBlockedChart);
             CurrentWaitsBlockedChart.Refresh();
@@ -1112,6 +1117,7 @@ public partial class ViewerServerTab
         CurrentWaitsBlockedChart.Plot.Axes.SetLimitsX(ChartXStart(CurrentWaitsBlockedChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Plot.YLabel("Blocked Sessions");
+        PerformanceMonitor.Ui.ChartStyle.UseCountAxis(CurrentWaitsBlockedChart); // #7606: a count, whole-number ticks
         SetChartYLimitsWithLegendPadding(CurrentWaitsBlockedChart, 0, globalMax > 0 ? globalMax : 1);
         ShowChartLegend(CurrentWaitsBlockedChart);
         CurrentWaitsBlockedChart.Refresh();
