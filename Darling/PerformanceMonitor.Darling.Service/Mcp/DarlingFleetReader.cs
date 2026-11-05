@@ -1584,6 +1584,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             {
                 parts.Add($"CPU {c.TotalCpuPercent.Value:F0}%");
             }
+            else if (c.CpuPercent.HasValue && c.CpuSource == FleetCpuSource.RingBuffer)
+            {
+                /* #7682: no host figure (SQL Server on Linux before 2025 CU1), so the reason names the SQL figure the band used. */
+                parts.Add($"SQL CPU {c.CpuPercent.Value:F0}%");
+            }
         }
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)

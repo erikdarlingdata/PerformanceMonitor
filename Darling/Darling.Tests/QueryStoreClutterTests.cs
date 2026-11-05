@@ -104,6 +104,23 @@ public sealed class QueryStoreClutterTests
         Assert.Equal(new[] { QueryStoreClutter.ReasonQueryStoreOff }, reasons);
     }
 
+    /* #7675: a store in ERROR has stopped recording, so the rows the other arms read are old and unchanging. It gets its own reason
+       and no band, even when those rows would grade Critical (before, plan churn graded it as a recording store). */
+    [Theory]
+    [InlineData("ERROR")]
+    [InlineData("error")]
+    public void QueryStoreError_IsUnknownWithTheReason_EvenWhenTheOtherArmsWouldGradeIt(string state)
+    {
+        var (verdict, reasons) = QueryStoreClutter.Judge(
+            ReadCost("db", 10, 10, 95), Churn("db", QueryStoreClutter.PlansPerQueryP95Critical), Config("db", state, desired: "OFF"));
+        Assert.Equal(HealthSeverity.Unknown, verdict);
+        Assert.Equal(new[] { QueryStoreClutter.ReasonQueryStoreError }, reasons);
+
+        var row = Assert.Single(QueryStoreClutter.Compose([ReadCost("db", 10, 10, 95)], [Churn("db", QueryStoreClutter.PlansPerQueryP95Critical)], [Config("db", state, desired: "OFF")]));
+        Assert.Equal(HealthSeverity.Unknown, row.Verdict);
+        Assert.Contains(QueryStoreClutter.Recommendations(row), line => line.Contains("ERROR state", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void MeasuredAndQuiet_IsHealthy_WithNoReasons()
     {

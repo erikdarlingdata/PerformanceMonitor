@@ -1066,7 +1066,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
+            if (IsOffline || (!TotalCpuPercent.HasValue && !CpuPercent.HasValue)) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
@@ -1078,7 +1078,10 @@ public sealed class ServerSummaryItem
                 return $"{TotalCpuPercent:F0}% (ACU {AcuUtilizationPercent:F0}%)";
             }
 
-            if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
+            /* #7682: a ring-buffer reading with no other-process share (SQL Server on Linux before 2025 CU1 cannot report
+               host CPU) has no known total, so the figure is the SQL Server's own and the headline says so. */
+            if (CpuPercent.HasValue && !OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
+            if (!CpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }

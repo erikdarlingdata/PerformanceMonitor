@@ -3,13 +3,15 @@ name: PR CI
 # #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, one build job builds
 # both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
 # result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
-# as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
+# as passing, so a skipped run could leave a green on a SHA nobody tested. The status stays pending until the
 # verdict sets it, so a run that is cancelled or dies early never passes.
 #
-# Every pull request that is ready for review runs (PR 2 of the rollout removed the `ci-next` label gate); a draft costs
-# the plan job and sets no status. Whether it is a draft is read live from the pull request API at plan time, not from the
-# event payload: a push to a draft and `gh pr ready` seconds apart start the push run last, it cancels the ready run, and
-# its payload still says draft, which would leave the final head with no `CI result` (#6656).
+# Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
+# pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag does not
+# gate the run, it narrows the scope (#7727): a draft that changes product files runs the build, the test classes of the test
+# files it changed and the Darling Stage=Guard classes, not the full suite. The full suite runs when the pull request is
+# marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
+# Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 
 on:
@@ -70,8 +72,8 @@ jobs:
           set -euo pipefail
 
           # The payload's draft flag is as old as the event. A push to a draft and `gh pr ready` seconds apart start the push run
-          # last: it cancels the ready run and its payload still says draft, so it would skip and the head would get no `CI result`.
-          # Read the live state instead; if the call fails, keep the payload's value.
+          # last: it cancels the ready run and its payload still says draft, so it would run the narrow draft scope and the ready
+          # head would get a `CI result` without the full suite. Read the live state instead; if the call fails, keep the payload's value.
           if [ "${EVENT_NAME}" = "pull_request" ]; then
             if live_draft=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null) && [[ "${live_draft}" =~ ^(true|false)$ ]]; then
               if [ "${live_draft}" != "${IS_DRAFT}" ]; then
@@ -136,7 +138,7 @@ jobs:
           PY
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
-      # says so in one notice), and a draft sets nothing.
+      # says so in one notice).
       - name: Set CI result to pending
         if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
@@ -622,7 +624,7 @@ jobs:
   verdict:
     name: CI verdict
     needs: [plan, build, test, pg-old-targets, exporter]
-    # Nothing to say for a draft, which sets no status: skip the runner too.
+    # A run that does not go and is not train-blocked has nothing to say, so skip the runner; a failed plan job still reports.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

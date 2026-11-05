@@ -817,7 +817,7 @@ public sealed class FleetRollup
                per-process split. */
             parts.Add(
                 FleetCpuProvenance.CapacityBandClause(s.AcuUtilizationPercent, s.CpuSource)
-                ?? $"CPU {s.CpuDisplay}");
+                ?? (s.CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? s.CpuDisplay : $"CPU {s.CpuDisplay}"));
         }
         if (s.ThreadsSeverity >= HealthSeverity.Warning)
         {

@@ -186,6 +186,27 @@ try {
     closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
   };
 
+  /* #7700: the same seat on a store with web.allowAdminWrites off. The cached session is edited in place: the service refuses a close,
+     so no Close form is drawn and the section says why. */
+  const { getSession } = await import(pathToFileURL(path.join(scratch, "views-api.js")).href);
+  const session = await getSession();
+  Object.assign(session, { signed_in_admin: true, managed_store: true, admin_writes_off: true });
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  const closeParts = () => ({
+    offLines: all(main, "div").filter((d) => d.attrs["data-close-off"] === "1").map((d) => d.textContent),
+    signInLines: all(main, "div").filter((d) => d.attrs["data-close-sign-in"] === "1").length,
+    closeInputs: all(main, "input").filter((i) => i.attrs["data-close-reason"] === "1").length,
+    closeButtons: all(main, "button").filter((b) => b.attrs["data-close-request"] != null).length,
+  });
+  out.writesOff = closeParts();
+  session.admin_writes_off = false;
+  rowsOf(main)[0].handlers.click({ type: "click" });
+  await settle();
+  out.writesOn = closeParts();
+  session.signed_in_admin = false;
+  session.managed_store = false;
+
   // A poll rebuild keeps the open request.
   fetches.length = 0;
   renderInvestigations(main);
@@ -246,6 +267,18 @@ try {
     links: all(main, "a").map((a) => a.attrs.href),
     closeButtons: all(main, "button").filter((b) => b.textContent === "Close").length,
   };
+  /* #7700: the single-request view passes the switch sentence too. A signed-in admin on a store with the switch off, then a seat that is
+     not signed in on the same store: both get the switch sentence (signing in would not help) and neither gets the sign-in sentence,
+     the reason box or the Close button. */
+  Object.assign(session, { signed_in_admin: true, managed_store: true, admin_writes_off: true });
+  renderInvestigations(main, A);
+  await settle();
+  out.oneWritesOff = closeParts();
+  session.signed_in_admin = false;
+  renderInvestigations(main, A);
+  await settle();
+  out.oneWritesOffSignedOut = closeParts();
+  Object.assign(session, { managed_store: false, admin_writes_off: false });
   // An id that is not a request says so plainly, and draws no report.
   bodies.get_investigation_reports = { status: "not_found", message: "No investigation request has id 99999999-9999-9999-9999-999999999999." };
   renderInvestigations(main, "99999999-9999-9999-9999-999999999999");

@@ -939,7 +939,8 @@ export function metricBands(c, store) {
   return el("div", { class: "metric-bands" }, [
     /* W19 (#5644): total_cpu_percent is the whole box (SQL Server plus other processes); FinOps reads the SQL Server
        process alone, so this chip says which one it shows. The cpu_percent fallback (a PostgreSQL target) stays "CPU". */
-    chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
+    /* #7682: a server that cannot report host CPU (SQL Server on Linux before 2025 CU1) has a SQL figure and no total, and the chip says so. */
+    chip(c.total_cpu_percent != null ? "Total CPU" : c.cpu_percent != null && c.other_process_cpu_percent == null ? "SQL CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
     chip("Threads", threadsValue, sevOf(c.threads_severity), known(threadsDetail)),
     chip("Memory", memValue, sevOf(c.memory_severity), known(memDetail)),
     /* #7616 / #7654: a PostgreSQL target's Blocking is how many of its per-minute blocking captures saw any blocking, so the value names that unit.

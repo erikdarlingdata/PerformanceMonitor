@@ -101,11 +101,12 @@ public sealed class PlanNavigationController
     /// <param name="fetchPlanXml">Reads the stored plan the data-modification check judges, BEFORE the prompt (a
     /// read of collected data or a read-only plan fetch; nothing runs). Null, a null result, or a failed read all
     /// count as "no plan", which shows the warning.</param>
+    /// <param name="databaseCount">How many databases the row's figures cover (FinOps High Impact, #7695); above 1, the prompt says the query also ran in the others.</param>
     /// <param name="target">The server this one click was made against, when the host can change its server
     /// between clicks (the shared FinOps tab). The prompt and the run use it, and the run stops if the host's
     /// selection moved off it.</param>
     public async Task GetActualPlanAsync(string? queryText, string databaseName, string label,
-        Func<Task<string?>>? fetchPlanXml = null, string? isolationLevel = null, ActualPlanRunTarget? target = null)
+        Func<Task<string?>>? fetchPlanXml = null, string? isolationLevel = null, ActualPlanRunTarget? target = null, int databaseCount = 1)
     {
         if (string.IsNullOrWhiteSpace(queryText))
         {
@@ -155,6 +156,9 @@ public sealed class PlanNavigationController
             }
             prompt.AppendLine("You are about to execute this query on " +
                 QueryModificationDetector.BuildConsentTarget(target?.ServerName ?? _serverName, databaseName) + ".");
+            /* #7695: a FinOps High Impact row summed across several databases runs in the one with the most CPU. */
+            var otherDatabases = QueryModificationDetector.BuildOtherDatabasesNote(databaseCount);
+            if (otherDatabases.Length > 0) prompt.AppendLine(otherDatabases);
             prompt.AppendLine();
             prompt.AppendLine(QueryModificationDetector.BuildConsentQueryText(queryText));
             prompt.AppendLine("Make sure you understand what the query does before proceeding.");
