@@ -1727,7 +1727,7 @@ public sealed class McpQueryTools
     internal static async Task<string> WithWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), requestedStart);
         if (status.IsOffline)
         {
             return answer;
@@ -1757,8 +1757,9 @@ public sealed class McpQueryTools
     /// (<see cref="LocalDataService.ServerDisplayNameLookup"/>), as Darling's does. The original answer's wording and hints are dropped with its
     /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
-    internal static async Task<string> OfflineInsteadOfEmptyAsync(LocalDataService dataService, int serverId, DateTime windowEnd, string answer) =>
-        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer))).Answer;
+    internal static async Task<string> OfflineInsteadOfEmptyAsync(
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart)).Answer;
 
     /// <summary>
     /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
@@ -1766,19 +1767,19 @@ public sealed class McpQueryTools
     /// (read again only when the answer changed, which only an <c>empty</c> one does).
     /// </summary>
     private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status)
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null)
     {
         if (!status.IsEmpty)
         {
             return (answer, status);
         }
 
-        var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd);
+        var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd, windowStart);
         return offline is null ? (answer, status) : (offline, ReadStatus(offline));
     }
 
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
-    private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd)
+    private static async Task<string?> OfflineAnswerOrNullAsync(LocalDataService dataService, int serverId, DateTime windowEnd, DateTime? windowStart = null)
     {
         DateTime? last;
         try
@@ -1815,6 +1816,13 @@ public sealed class McpQueryTools
             return null;
         }
 
+        /* #7724: the window holds a collection (the server went quiet partway through it), so say what was collected through, as Darling does.
+           A caller that does not pass its window start keeps the offline sentence. */
+        if (windowStart is { } start && newest >= start)
+        {
+            return McpHelpers.CollectedThroughStatus(newest);
+        }
+
         return McpHelpers.Status(
             "unavailable",
             $"{OfflineSubject(dataService, serverId)} is offline: the store has had no successful collection from it since {newest.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)} UTC, "
@@ -1836,7 +1844,8 @@ public sealed class McpQueryTools
 
         /// <summary>The answer <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> builds.</summary>
         public bool IsOffline => Word == "unavailable" && Message is { } text
-            && text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal);
+            && ((text.Contains(" is offline: ", StringComparison.Ordinal) && text.EndsWith(OfflineAnswerEnd, StringComparison.Ordinal))
+                || text.StartsWith(McpHelpers.CollectedThroughOpening, StringComparison.Ordinal));
     }
 
     private static AnswerStatus ReadStatus(string answer)
@@ -1873,7 +1882,7 @@ public sealed class McpQueryTools
     internal static async Task<string> WithEmptyWindowNoticeAsync(
         string answer, LocalDataService dataService, QueryWindowRelation relation, int serverId, DateTime requestedStart, DateTime windowEnd, string table)
     {
-        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer));
+        (answer, var status) = await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), requestedStart);
         if (status.IsOffline)
         {
             return answer;

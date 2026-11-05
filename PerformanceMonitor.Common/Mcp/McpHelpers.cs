@@ -1115,6 +1115,30 @@ internal static class McpHelpers
             : JsonSerializer.Serialize(new { status, message, hints }, JsonOptions);
     }
 
+    /// <summary>The first words of <see cref="CollectedThroughSentence"/>; a client or a product's own check can tell the answer by them.</summary>
+    public const string CollectedThroughOpening = "Nothing was recorded through the last collection at ";
+
+    /// <summary>
+    /// #7724: what an offline server's empty window says when part of it was collected: the newest collection, and that nothing after it is
+    /// known. The time is ISO-8601 UTC, which the web page shows in the viewer's local time.
+    /// </summary>
+    public static string CollectedThroughSentence(DateTime newestCollectionUtc) =>
+        CollectedThroughOpening
+        + DateTime.SpecifyKind(newestCollectionUtc, DateTimeKind.Utc).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)
+        + ". Nothing after that is known.";
+
+    /// <summary>
+    /// #7724: the answer for an offline server whose window holds collected history up to <paramref name="newestCollectionUtc"/>. The word stays
+    /// <c>unavailable</c>, so no client reads it as an all-clear, and <c>collected_through</c> carries the newest collection. Shared by Lite and Darling.
+    /// </summary>
+    public static string CollectedThroughStatus(DateTime newestCollectionUtc) =>
+        JsonSerializer.Serialize(new
+        {
+            status = "unavailable",
+            message = CollectedThroughSentence(newestCollectionUtc),
+            collected_through = FormatEffectiveStart(newestCollectionUtc),
+        }, JsonOptions);
+
     /// <summary>True when <paramref name="answerJson"/> is a status envelope whose <c>status</c> is <c>empty</c> or <c>unavailable</c> (#6074).</summary>
     public static bool IsEmptyOrUnavailableStatus(string answerJson)
     {
