@@ -13,6 +13,7 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -54,6 +55,12 @@ public sealed class CollectionStateToolsLiveTests
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
         var statements = new List<string>();
         var uncommented = string.Join('\n', provisioning.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
+        /* A grant the batch guards on a column (DO $$ ... IF EXISTS (...) THEN EXECUTE $tag$ GRANT ...; $tag$; END IF; END $$) is replayed bare: the scratch store is fully migrated, so every guard holds, and splitting on ';' would otherwise drop the grant (#7639 xe_session_databases). */
+        uncommented = Regex.Replace(
+            uncommented,
+            @"DO \$\$\s*BEGIN\s*IF EXISTS \([^$]*\) THEN\s*EXECUTE \$(?<tag>\w+)\$\s*(?<grant>(?:GRANT|REVOKE) [^;]*;)\s*\$\k<tag>\$;\s*END IF;\s*END \$\$;",
+            "${grant}",
+            RegexOptions.Singleline);
         foreach (var raw in uncommented.Split(';'))
         {
             var statement = raw.Trim();

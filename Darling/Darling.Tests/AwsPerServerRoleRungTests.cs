@@ -242,7 +242,8 @@ public sealed class AwsPerServerRoleRungTests
         Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO mcp;", script, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", script, StringComparison.Ordinal);
 
-        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerUpdateColumns}) ON", batch, StringComparison.Ordinal);
+        Assert.Contains($"GRANT UPDATE ({DarlingManagedRoles.McpMonitoredServerBaseUpdateColumns}) ON", batch, StringComparison.Ordinal);
+        Assert.Contains("GRANT UPDATE (xe_session_databases) ON config.config_monitored_servers TO mcp;", batch, StringComparison.Ordinal);
         Assert.Contains("REVOKE UPDATE ON", batch, StringComparison.Ordinal);
         Assert.Contains("GRANT INSERT, DELETE ON config.config_monitored_servers TO", batch, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT INSERT, UPDATE, DELETE ON config.config_monitored_servers", batch, StringComparison.Ordinal);
