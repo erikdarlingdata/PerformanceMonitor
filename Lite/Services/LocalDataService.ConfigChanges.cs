@@ -46,6 +46,11 @@ namespace PerformanceMonitorLite.Services;
 internal static class ConfigChangeRowFormat
 {
     public static string Local(DateTime utc) => ServerTimeHelper.FormatServerTime(utc, "yyyy-MM-dd HH:mm:ss");
+
+    /// <summary>#7662: a server or database config change's time is the first capture that held the new value (Lite captures on connect only,
+    /// so that can be days after the change). With the capture before it, the cell says the change happened between the two.</summary>
+    public static string FirstSeen(DateTime changeTime, DateTime? previousCaptureTime) =>
+        previousCaptureTime is null ? Local(changeTime) : "between " + Local(previousCaptureTime.Value) + " and " + Local(changeTime);
 }
 
 /// <summary>One server-configuration change (Server Config Changes sub-tab). Thin display wrapper over the
@@ -54,7 +59,9 @@ internal static class ConfigChangeRowFormat
 /// shared record).</summary>
 public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange change)
 {
-    public string ChangeTimeLocal => ConfigChangeRowFormat.Local(change.ChangeTime);
+    public string ChangeTimeLocal => ConfigChangeRowFormat.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
+    /// <summary>#7662: the capture before the first one that held the new value; null for the first capture of a setting.</summary>
+    public DateTime? PreviousCaptureTime => change.PreviousCaptureTime;
     /// <summary>Raw naive-UTC change time (capture_time) for the MCP layer's ISO output.</summary>
     public DateTime ChangeTime => change.ChangeTime;
     public string ConfigurationName => change.ConfigurationName;
@@ -73,7 +80,9 @@ public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange ch
 /// WIDE store has no setting_type).</summary>
 public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChange change)
 {
-    public string ChangeTimeLocal => ConfigChangeRowFormat.Local(change.ChangeTime);
+    public string ChangeTimeLocal => ConfigChangeRowFormat.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
+    /// <summary>#7662: the capture before the first one that held the new value; null for the first capture of a setting.</summary>
+    public DateTime? PreviousCaptureTime => change.PreviousCaptureTime;
     /// <summary>Raw naive-UTC change time (capture_time) for the MCP layer's ISO output.</summary>
     public DateTime ChangeTime => change.ChangeTime;
     public string DatabaseName => change.DatabaseName;
