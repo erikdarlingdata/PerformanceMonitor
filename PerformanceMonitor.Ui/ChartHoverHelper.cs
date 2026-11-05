@@ -269,6 +269,16 @@ internal sealed class ChartHoverHelper
                 double dx = Math.Abs(topPixel.X - pixel.X);
                 if (dx > halfWidthPx.Value + 4) continue;
                 double dy = Math.Abs(topPixel.Y - pixel.Y);
+
+                /* #7571: in a stack, a cursor inside a segment belongs to that segment. Measured to the top alone, the
+                   lower half of every segment above the first sits nearer the top of the segment below it and named
+                   that one. Inside the segment the distance is a tiny share of the top distance, so overlapping bars
+                   that all start at the axis still go to the nearest top, as before; outside, the nearer edge counts. */
+                var basePixel = _chart.Plot.GetPixel(new ScottPlot.Coordinates(bar.Position, bar.ValueBase));
+                var low = Math.Min(topPixel.Y, basePixel.Y);
+                var high = Math.Max(topPixel.Y, basePixel.Y);
+                dy = pixel.Y >= low && pixel.Y <= high ? dy * 1e-6 : Math.Min(dy, Math.Abs(basePixel.Y - pixel.Y));
+
                 if (dy < bestYDistance)
                 {
                     bestYDistance = dy;
