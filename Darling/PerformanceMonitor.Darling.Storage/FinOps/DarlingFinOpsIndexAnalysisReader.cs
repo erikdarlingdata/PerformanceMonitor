@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -25,19 +26,60 @@ namespace PerformanceMonitor.Darling.Storage.FinOps;
  * Shared by the viewer and any other reader of the store. SQL kept in public const so tests pin it.
  */
 
-/// <summary>An index analysis and, per database name (case-insensitive), the naive-UTC instant its snapshot was collected.</summary>
+/// <summary>
+/// An index analysis and, per database id, the naive-UTC instant its snapshot was collected. <paramref name="LeftOverDatabaseIds"/> names
+/// the ids whose snapshot is left over (see <see cref="DarlingFinOpsIndexAnalysisReader.LeftOverAfter"/>): their rollups are in
+/// <c>Result.DatabaseRollups</c>, but <c>Result.OverallRollup</c> and <c>Result.Recommendations</c> do not count them (#7701).
+/// </summary>
 public sealed record IndexAnalysisWithSnapshotTimes(
-    IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes, IReadOnlyList<string>? OmittedDatabases = null);
+    IndexCleanupAnalysisResult Result, IReadOnlyDictionary<int, DateTime> SnapshotTimes, IReadOnlyList<string>? OmittedDatabases = null,
+    IReadOnlySet<int>? LeftOverDatabaseIds = null);
 
 public static class DarlingFinOpsIndexAnalysisReader
 {
+    /// <summary>
+    /// #7701: the one rule for a left-over database. Its newest index snapshot is older than the server's newest index-stats cycle by more
+    /// than this. The collector runs daily, and a day of room keeps a live database that a partial cycle left one day behind in the totals.
+    /// </summary>
+    public static readonly TimeSpan LeftOverAfter = TimeSpan.FromDays(2);
+
+    /// <summary>
+    /// The database ids whose newest snapshot (rows are already each id's newest) trails the server's newest snapshot by more than
+    /// <see cref="LeftOverAfter"/>: a dropped database, or an old id that shares a name with its re-created twin. Empty when nothing is that old.
+    /// </summary>
+    public static HashSet<int> LeftOverDatabaseIds(IEnumerable<IndexObjectStatsDto> rows)
+    {
+        var newestById = new Dictionary<int, DateTime>();
+        foreach (var row in rows)
+        {
+            newestById[row.DatabaseId] = newestById.TryGetValue(row.DatabaseId, out var t) && t > row.CollectionTime ? t : row.CollectionTime;
+        }
+
+        var leftOver = new HashSet<int>();
+        if (newestById.Count == 0)
+        {
+            return leftOver;
+        }
+
+        var cycle = newestById.Values.Max();
+        foreach (var (id, at) in newestById)
+        {
+            if (cycle - at > LeftOverAfter)
+            {
+                leftOver.Add(id);
+            }
+        }
+
+        return leftOver;
+    }
+
     /// <summary>
     /// Each database's newest collected snapshot of its indexes for one server: for every database the read
     /// anchors on that database's own max(collection_time) and returns the index rows stamped at exactly that
     /// instant, so the analyzer sees each index once. An index that is missing from its database's newest
     /// snapshot was dropped: the collector reads every user index of each database it sweeps, so a row that
     /// only an older cycle carries describes an index that no longer exists and is not shown. A database that
-    /// left collection scope still shows its last snapshot, and a server that stopped collecting still shows
+    /// left collection scope still shows its last snapshot (marked left over past <see cref="LeftOverAfter"/>, #7701), and a server that stopped collecting still shows
     /// its last cycle. The lower bound (the oldest per-database anchor) exists to keep the join on the newest
     /// chunks instead of every retained one. DISTINCT ON still dedupes on the index identity, and two rows for
     /// one index can share a collection_time (a re-run in the same instant), so the final ORDER BY key is
@@ -355,7 +397,9 @@ LIMIT 1";
     public static async Task<List<IndexCleanupIndexInput>> GetIndexCleanupInputsAsync(NpgsqlDataSource dataSource, int serverId, int commandTimeoutSeconds, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var rows = await ReadIndexObjectStatsAsync(dataSource, serverId, commandTimeoutSeconds, cancellationToken, logger: logger);
-        return rows.ConvertAll(MapToIndexInput);
+        /* #7701: a left-over database's last snapshot is not counted by the analysis or the compression recommendation. */
+        var leftOver = LeftOverDatabaseIds(rows);
+        return rows.Where(r => !leftOver.Contains(r.DatabaseId)).Select(MapToIndexInput).ToList();
     }
 
     /// <summary>Runs <see cref="IndexObjectStatsLatestSql"/> and returns its rows with their snapshot stamps.</summary>
@@ -439,9 +483,19 @@ LIMIT 1";
             times[row.DatabaseId] = row.CollectionTime;
         }
 
-        var inputs = rows.ConvertAll(MapToIndexInput);
-        var result = await Task.Run(() => IndexCleanupAnalyzer.Analyze(inputs, options), cancellationToken);
-        return new IndexAnalysisWithSnapshotTimes(result, times, DatabasesLeftOut.Distinct(omitted));
+        /* #7701: the overall rollup and the recommendations come from the current databases only. A left-over database is analyzed on
+           its own, and only its rollup is kept, so the grid still shows what was collected last without adding it to any total. */
+        var leftOver = LeftOverDatabaseIds(rows);
+        var current = rows.Where(r => !leftOver.Contains(r.DatabaseId)).Select(MapToIndexInput).ToList();
+        var old = rows.Where(r => leftOver.Contains(r.DatabaseId)).Select(MapToIndexInput).ToList();
+        var result = await Task.Run(() =>
+        {
+            var main = IndexCleanupAnalyzer.Analyze(current, options);
+            return old.Count == 0
+                ? main
+                : main with { DatabaseRollups = main.DatabaseRollups.Concat(IndexCleanupAnalyzer.Analyze(old, options).DatabaseRollups).ToList() };
+        }, cancellationToken);
+        return new IndexAnalysisWithSnapshotTimes(result, times, DatabasesLeftOut.Distinct(omitted), leftOver);
     }
 
     /// <summary>The single filterable operation label mirroring sp_IndexCleanup's script buckets: MAKE UNIQUE wins over its MERGE bucket; otherwise the result kind names the bucket.</summary>

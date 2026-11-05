@@ -118,4 +118,19 @@ public sealed class FinOpsIndexAnalysisLimitBehaviourTests
         Assert.Equal(new[] { "Gamma" }, step.GetProperty("typedUnknown").EnumerateArray().Select(e => e.GetString()!).ToArray());
         Assert.Equal("Gamma", step.GetProperty("shown").GetString());
     }
+
+    /* #7702 item 1: a 0.002 GB figure printed 0.00. It now prints in the unit that fits (2.0 MB). #7701: a left-over database says since when,
+       and Collected sits right after Database in the roll-up. */
+    [Fact]
+    public void ASmallSizePrintsNonZero_ALeftOverDatabaseCarriesItsMark_AndCollectedFollowsDatabase()
+    {
+        var step = Run().GetProperty("sizes");
+        var text = step.GetProperty("text").GetString()!;
+        Assert.Contains("2.0 MB", text, StringComparison.Ordinal);
+        Assert.Contains("0.4096 MB", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0.00", text, StringComparison.Ordinal);
+        Assert.Contains("Not collected since", text, StringComparison.Ordinal);
+        var header = step.GetProperty("header").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Equal("Collected", header[header.ToList().IndexOf("Database") + 1]);
+    }
 }

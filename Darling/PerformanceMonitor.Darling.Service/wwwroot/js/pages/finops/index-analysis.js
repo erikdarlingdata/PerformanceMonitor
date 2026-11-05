@@ -19,37 +19,44 @@
 
 import { VIZ } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
-import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtMbFit, localTime } from "../../util.js";
 import { plainText } from "../../plain-text.js";
 import { gatedEmptyStrip } from "./gate.js";
 
 // The most recommendations the view lists (#5238). The desktop grid shows every finding, so the tab asks for the ceiling, as the
 // Database Sizes tab asks for its 500 files; the view's own default of 10 and the 50 of its other top-N views are not for this tab.
 const LIMIT = 500;
-const DERIVED_KEYS = ["reads_breakdown", "index_size_gb_text", "captured_at"];
+// The roll-up's GB figures arrive to six places (#7702: three places printed a 2 MB index as 0.00). They print in the unit that fits
+// (mbfit, #7556), so each has a derived text key beside its raw number, which stays the sort value.
+const GB_KEYS = ["total_size_gb", "unused_size_gb", "compression_min_savings_gb", "compression_max_savings_gb", "total_min_savings_gb", "total_max_savings_gb"];
+const gbText = (k) => k + "_text";
+const gbColumn = (key, label) => ({ key: gbText(key), label, align: "right", sortValue: (r) => r[key] });
+const DERIVED_KEYS = ["reads_breakdown", "index_size_gb_text", "captured_at", "status_text", ...GB_KEYS.map(gbText)];
 
 const ROLLUP_COLUMNS = [
   { key: "database_name", label: "Database", name: true },
+  // #7701: next to the database name, with the mark for a database whose snapshot is left over (in no total).
+  { key: "captured_at", label: "Collected", format: "time" },
+  { key: "status_text", label: "Status" },
   { key: "tables_analyzed", label: "Tables", format: "int" },
   { key: "index_count", label: "Indexes", format: "int" },
-  { key: "total_size_gb", label: "Size GB", format: "num2" },
+  gbColumn("total_size_gb", "Size"),
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "indexes_to_disable", label: "To Disable", format: "int" },
   { key: "indexes_to_merge", label: "To Merge", format: "int" },
   { key: "compressable_indexes", label: "Compressable", format: "int" },
   { key: "unused_indexes", label: "Unused", format: "int" },
-  { key: "unused_size_gb", label: "Disable GB", format: "num2" },
-  { key: "compression_min_savings_gb", label: "Compress Min GB", format: "num2" },
-  { key: "compression_max_savings_gb", label: "Compress Max GB", format: "num2" },
-  { key: "total_min_savings_gb", label: "Total Min GB", format: "num2" },
-  { key: "total_max_savings_gb", label: "Total Max GB", format: "num2" },
+  gbColumn("unused_size_gb", "Disable"),
+  gbColumn("compression_min_savings_gb", "Compress Min"),
+  gbColumn("compression_max_savings_gb", "Compress Max"),
+  gbColumn("total_min_savings_gb", "Total Min"),
+  gbColumn("total_max_savings_gb", "Total Max"),
   { key: "reads_breakdown", label: "Reads" },
   { key: "writes", label: "Writes", format: "int" },
   { key: "lock_wait_count", label: "Lock Waits", format: "int" },
   { key: "avg_lock_wait_ms", label: "Avg Lock Wait ms", format: "num2" },
   { key: "latch_wait_count", label: "Latch Waits", format: "int" },
   { key: "avg_latch_wait_ms", label: "Avg Latch Wait ms", format: "num2" },
-  { key: "captured_at", label: "Collected", format: "time" },
 ];
 
 const RECOMMENDATION_COLUMNS = [
@@ -57,10 +64,11 @@ const RECOMMENDATION_COLUMNS = [
   { key: "result_kind", label: "Result Kind" },
   { key: "consolidation_rule", label: "Rule" },
   { key: "database_name", label: "Database", name: true },
+  { key: "captured_at", label: "Collected", format: "time" },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
-  { key: "index_size_gb_text", label: "Size GB", align: "right", sortValue: (r) => r.index_size_gb },
+  { key: "index_size_gb_text", label: "Size", align: "right", sortValue: (r) => r.index_size_gb },
   { key: "index_rows", label: "Rows", format: "int" },
   { key: "index_reads", label: "Reads", format: "int" },
   { key: "index_writes", label: "Writes", format: "int" },
@@ -69,12 +77,15 @@ const RECOMMENDATION_COLUMNS = [
   { key: "additional_info", label: "Info", wrap: true },
   { key: "original_index_definition", label: "Original Definition", wrap: true, mono: true, pre: true },
   { key: "script", label: "Script", wrap: true, mono: true, pre: true },
-  { key: "captured_at", label: "Collected", format: "time" },
 ];
 
 // The reads cell as the desktop writes it. The overall row carries no counters, so its cell stays missing.
 function rollupRow(r) {
-  return { ...r, reads_breakdown: r.total_reads == null ? null : fmtInt(r.total_reads) + " (" + fmtInt(r.user_seeks) + " seeks, " + fmtInt(r.user_scans) + " scans, " + fmtInt(r.user_lookups) + " lookups)" };
+  const gbs = {};
+  for (const k of GB_KEYS) gbs[gbText(k)] = r[k] == null ? null : fmtMbFit(r[k] * 1024);
+  // #7701: a database whose snapshot is left over (left_over, set by the read) is in no total; the mark says since when.
+  const status = r.left_over ? "Not collected since " + localTime(r.captured_at) : "";
+  return { ...r, ...gbs, status_text: status, reads_breakdown: r.total_reads == null ? null : fmtInt(r.total_reads) + " (" + fmtInt(r.user_seeks) + " seeks, " + fmtInt(r.user_scans) + " scans, " + fmtInt(r.user_lookups) + " lookups)" };
 }
 
 // A recommendation carries no snapshot time of its own; its database's roll-up does (captured_at). The time is set only
@@ -82,12 +93,13 @@ function rollupRow(r) {
 // roll-up list does not hold (the web sees only the databases shown, not every roll-up), leave the cell missing.
 function capturedByName(databases) {
   const seen = new Map();
-  for (const d of databases) seen.set(d.database_name, seen.has(d.database_name) ? null : (d.captured_at ?? null));
+  // A left-over database has no recommendations, so it does not blank the time of a current database that shares its name (#7701).
+  for (const d of databases) if (!d.left_over) seen.set(d.database_name, seen.has(d.database_name) ? null : (d.captured_at ?? null));
   return seen;
 }
 
 function recommendationRow(r, captured) {
-  return { ...r, index_size_gb_text: fmtNum(r.index_size_gb, 3), captured_at: captured.get(r.database_name) ?? null };
+  return { ...r, index_size_gb_text: fmtMbFit(r.index_size_gb * 1024), captured_at: captured.get(r.database_name) ?? null };
 }
 
 // The latest choice per server: the Database box's fields (db, draft, caret, focused; names are the databases of the last unfiltered

@@ -168,6 +168,24 @@ try {
   stored.handlers.change();
   await settle();
   out.storedSpelling = { typedLower: lower, typedUnknown: seen().map((r) => r.database_name), shown: stored.value };
+
+  // #7701 / #7702: a 2 MB size reads in MB (not 0.00), a left-over database carries its mark, and Collected sits right after Database.
+  body = JSON.stringify({
+    ...payload(1, 1, 500),
+    overall: { total_size_gb: 0.0021, total_max_savings_gb: 0.001 },
+    databases: [
+      { database_name: "Alpha", total_size_gb: 0.002, unused_size_gb: 0.0004, captured_at: "2026-01-15T12:00:00.0000000Z" },
+      { database_name: "Alpha", total_size_gb: 0.5, left_over: true, captured_at: "2026-01-05T12:00:00.0000000Z" },
+    ],
+    recommendations: [{ ...rec(1), index_size_gb: 0.0004 }],
+  });
+  root = tab.build("srv-f", {});
+  await settle();
+  const headerRow = findAll(root, byTag("tr"))[0];
+  out.sizes = {
+    text: root.textContent,
+    header: findAll(headerRow, byTag("th")).map((n) => n.textContent),
+  };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });

@@ -52,8 +52,8 @@ public partial class FinOpsTab
             return;
         }
 
-        var recs = ViewerDataService.ProjectRecommendations(result, read.SnapshotTimes);
-        var rollups = ViewerDataService.ProjectRollups(result, read.SnapshotTimes);
+        var recs = ViewerDataService.ProjectRecommendations(result, read.SnapshotTimes, read.LeftOverDatabaseIds);
+        var rollups = ViewerDataService.ProjectRollups(result, read.SnapshotTimes, read.LeftOverDatabaseIds);
 
         _finopsIndexAnalysisRollupFilterMgr!.UpdateData(rollups);
         _finopsIndexAnalysisFilterMgr!.UpdateData(recs);

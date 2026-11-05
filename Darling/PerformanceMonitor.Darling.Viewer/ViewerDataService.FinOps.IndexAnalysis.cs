@@ -174,7 +174,7 @@ public sealed partial class ViewerDataService
             _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken: cancellationToken);
 
     /// <summary>Projects the analyzer recommendations into the detail-grid view-models; <paramref name="snapshotTimes"/> (when given) dates each row by its database's snapshot.</summary>
-    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
+    public static List<IndexCleanupRecommendationRow> ProjectRecommendations(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null, IReadOnlySet<int>? leftOverIds = null)
     {
         /* A recommendation carries only the database NAME, and names can repeat across ids. Resolve it through this read's
            rollups (which carry the id): the time is used only when exactly one id owns the name (Ordinal), else null. */
@@ -207,13 +207,14 @@ public sealed partial class ViewerDataService
     /// Projects the analyzer rollups into the summary-grid view-models: the overall "ALL DATABASES" total first,
     /// then one row per database.
     /// </summary>
-    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null)
+    public static List<IndexCleanupRollupRow> ProjectRollups(IndexCleanupAnalysisResult result, IReadOnlyDictionary<int, DateTime>? snapshotTimes = null, IReadOnlySet<int>? leftOverIds = null)
     {
         var rows = new List<IndexCleanupRollupRow>
         {
             new(result.OverallRollup, "ALL DATABASES"),
         };
-        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "", SnapshotTimeOf(snapshotTimes, r.DatabaseId))));
+        rows.AddRange(result.DatabaseRollups.Select(r => new IndexCleanupRollupRow(r, r.DatabaseName ?? "", SnapshotTimeOf(snapshotTimes, r.DatabaseId),
+            leftOver: r.DatabaseId is { } id && leftOverIds?.Contains(id) == true)));
         return rows;
     }
 }
@@ -277,12 +278,19 @@ public sealed class IndexCleanupRollupRow
 {
     private readonly IndexCleanupRollup _rollup;
 
-    public IndexCleanupRollupRow(IndexCleanupRollup rollup, string scope, DateTime? collectionTimeUtc = null)
+    public IndexCleanupRollupRow(IndexCleanupRollup rollup, string scope, DateTime? collectionTimeUtc = null, bool leftOver = false)
     {
         _rollup = rollup;
         Scope = scope;
         CollectionTimeUtc = collectionTimeUtc;
+        LeftOver = leftOver;
     }
+
+    /// <summary>#7701: this database's snapshot is left over (older than the server's newest cycle by more than the reader's rule), so its figures are in no total.</summary>
+    public bool LeftOver { get; }
+
+    /// <summary>The plain mark for a left-over row ("Not collected since 11/4/2026 3:02:11 AM"); blank for a current database and the overall row.</summary>
+    public string Status => LeftOver ? "Not collected since " + CollectionTime : "";
 
     /// <summary>When this database's newest snapshot was collected, naive UTC (kind Utc); null on the overall row, which spans databases. The Collected column sorts by it.</summary>
     public DateTime? CollectionTimeUtc { get; }
