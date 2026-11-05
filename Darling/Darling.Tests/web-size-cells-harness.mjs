@@ -41,6 +41,9 @@ const mem = await imp("pages/server-tabs/sql-memory.js");
 const { READ_FIELDS } = await imp("read-fields.js");
 const dbSizes = await imp("pages/finops/database-sizes.js");
 const versionStore = await imp("pages/finops/version-store.js");
+const utilization = await imp("pages/finops/utilization.js");
+const { DASHBOARD_TEMPLATES } = await imp("view-templates.js");
+const { VIZ } = await imp("panels.js");
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const norm = (t) => t.replace(/[▲▼▾ ]/g, "");
@@ -93,6 +96,8 @@ out.r2 = {
   semaphoreAvailable: cells(rf("get_resource_semaphore"), [{ available_memory_mb: 0.25 }], "Available MB"),
   grantsUsed: cells(rf("get_memory_grants"), [{ used_memory_mb: 0.5 }], "Used MB"),
   tempdbVersionStore: cells(rf("get_tempdb_trend"), [{ version_store_mb: 0.25 }], "Version store"),
+  tempdbReserved: cells(rf("get_tempdb_trend"), [{ total_reserved_mb: 0.75 }], "Reserved"),
+  tempdbInternal: cells(rf("get_tempdb_trend"), [{ internal_objects_mb: 0.5 }], "Internal objects"),
   tempdbUser: cells(rf("get_tempdb_trend"), [{ user_objects_mb: 0.5 }], "User objects"),
   dbTotal: cells(rf("get_database_sizes"), [{ total_size_mb: 0.5 }], "Total"),
   dbUsed: cells(rf("get_database_sizes"), [{ used_size_mb: 2.5 }], "Used"),
@@ -105,5 +110,18 @@ out.r2 = {
   finopsFree: cells(dbSizes.COLUMNS, [{ free_space_mb: 0.25 }], "Free MB"),
   finopsVolumeFree: cells(dbSizes.COLUMNS, [{ volume_free_mb: 0.5 }], "Volume free"),
   versionStoreData: cells(versionStore.COLUMNS, [{ database_data_size_mb: 4.5 }], "Database data size"),
+};
+/* The Available tiles of the two memory stat sets (the Utilization page and the Memory pressure dashboard template), each drawn through the stat viz.
+   engine_edition 5 is an Azure SQL Database, where the same field is captioned "Available under limit". */
+const tiles = (stats, data) => {
+  const grid = VIZ.stat(data, { stats });
+  return Object.fromEntries(all(grid).filter((n) => n.className && /(^| )stat( |$)/.test(n.className)).map((t) => [t.children[1].textContent, t.children[0].textContent]));
+};
+const templateStats = DASHBOARD_TEMPLATES.find((t) => t.key === "memory-pressure").make("a").definition.panels.find((p) => p.title === "Memory").stats;
+out.r3 = {
+  utilizationBox: tiles(utilization.MEMORY_STATS, { available_physical_memory_mb: 0.5, engine_edition: 3 }),
+  utilizationAzure: tiles(utilization.MEMORY_STATS, { available_physical_memory_mb: 0.25, engine_edition: 5 }),
+  templateBox: tiles(templateStats, { available_physical_memory_mb: 0.5, engine_edition: 3 }),
+  templateAzure: tiles(templateStats, { available_physical_memory_mb: 0.25, engine_edition: 5 }),
 };
 console.log(JSON.stringify(out));

@@ -39,7 +39,7 @@ const SIZE_COLUMNS = READ_FIELDS.get_database_sizes.table.columns;
    the host's RAM, so they are named that way and the read's own memory_note is shown. */
 const AZURE_SQL_DATABASE = { key: "engine_edition", equals: 5 };
 
-const MEMORY_STATS = [
+export const MEMORY_STATS = [
   { key: "captured_at", label: "Collected", format: "reltime", small: true },
   { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: AZURE_SQL_DATABASE },
   { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: AZURE_SQL_DATABASE },

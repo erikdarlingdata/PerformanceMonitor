@@ -132,6 +132,8 @@ public sealed class WebSizeCellsBehaviourTests
         Assert.Equal(new[] { "0.25 MB" }, One("semaphoreAvailable"));
         Assert.Equal(new[] { "0.5 MB" }, One("grantsUsed"));
         Assert.Equal(new[] { "0.25 MB" }, One("tempdbVersionStore"));
+        Assert.Equal(new[] { "0.75 MB" }, One("tempdbReserved"));
+        Assert.Equal(new[] { "0.5 MB" }, One("tempdbInternal"));
         Assert.Equal(new[] { "0.5 MB" }, One("tempdbUser"));
         Assert.Equal(new[] { "0.5 MB" }, One("dbTotal"));
         Assert.Equal(new[] { "2.5 MB" }, One("dbUsed"));
@@ -144,5 +146,17 @@ public sealed class WebSizeCellsBehaviourTests
         Assert.Equal(new[] { "0.25 MB" }, One("finopsFree"));
         Assert.Equal(new[] { "0.5 MB" }, One("finopsVolumeFree"));
         Assert.Equal(new[] { "4.5 MB" }, One("versionStoreData"));
+    }
+
+    [Fact]
+    public void TheAvailableMemoryTiles_OfTheUtilizationPageAndTheMemoryPressureTemplate_KeepASmallValue()
+    {
+        var r = Run().GetProperty("r3");
+        string Tile(string set, string label) => r.GetProperty(set).GetProperty(label).GetString()!;
+        // 0.5 used to round up to "1 MB" and 0.25 to "0 MB". On an Azure SQL Database the same field carries the other caption.
+        Assert.Equal("0.5 MB", Tile("utilizationBox", "Available"));
+        Assert.Equal("0.25 MB", Tile("utilizationAzure", "Available under limit"));
+        Assert.Equal("0.5 MB", Tile("templateBox", "Available"));
+        Assert.Equal("0.25 MB", Tile("templateAzure", "Available under limit"));
     }
 }
