@@ -208,6 +208,29 @@ public sealed class WebTileTruthsTests
         Assert.Equal("Unavailable", sweep.GetProperty("Read").GetString());
     }
 
+    /// <summary>#7660: the Skipped Cycles sentence is a note under the tiles, not a tile; its gap is in the browser's zone; the Cause tile
+    /// says what the sentence says.</summary>
+    [Fact]
+    public void TheSkippedCyclesSentence_IsANoteUnderTheTiles_WithItsGapInLocalTime()
+    {
+        var r = Run().GetProperty("skippedCycles");
+        var tiles = r.GetProperty("tiles");
+
+        Assert.False(tiles.TryGetProperty("Last message", out _), "the sentence is not a tile");
+        Assert.Equal("running jobs", tiles.GetProperty("Cause").GetString());
+        foreach (var tile in tiles.EnumerateObject())
+        {
+            Assert.DoesNotContain("Collection fell behind", tile.Value.GetString()!, StringComparison.Ordinal);
+        }
+
+        var note = r.GetProperty("note").GetString()!;
+        Assert.Contains("Collection fell behind", note, StringComparison.Ordinal);
+        Assert.Contains("was still running when the next one was due", note, StringComparison.Ordinal);
+        Assert.Contains("The gap ran from " + r.GetProperty("localGap").GetString() + " to ", note, StringComparison.Ordinal);
+        Assert.DoesNotContain(" UTC", note, StringComparison.Ordinal);
+        Assert.Contains("Read OK: the check ran and found 1 skipped cycle", note, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheRecommendationTiles_AreSentencesAcrossThePanel_NotStatTiles()
     {

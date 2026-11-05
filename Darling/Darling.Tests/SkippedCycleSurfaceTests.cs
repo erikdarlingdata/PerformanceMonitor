@@ -339,15 +339,16 @@ public sealed class SkippedCycleSurfaceShapeTests
     public void TheWebPanel_IsUsedAtBothSites_AndReadsOnlyKeysTheBlockHas()
     {
         var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Equal(2, Regex.Matches(js, @"\{ title: ""Skipped Cycles"", subtitle: ""trailing 24 hours"", viz: ""stat"", stats: SKIPPED_CYCLES_STATS \},").Count);
+        Assert.Equal(2, Regex.Matches(js, @"^\s+SKIPPED_CYCLES_PANEL,\s*$", RegexOptions.Multiline).Count);
 
-        var start = js.IndexOf("const SKIPPED_CYCLES_STATS = [", StringComparison.Ordinal);
+        /* #7660: last_message is the note under the tiles, not a tile, so the tiles read every other key of the block. */
+        var shared = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs", "shared.js");
+        var start = shared.IndexOf("const SKIPPED_CYCLES_STATS = [", StringComparison.Ordinal);
         Assert.True(start >= 0);
-        var end = js.IndexOf("];", start, StringComparison.Ordinal);
-        var stats = js[start..end];
+        var end = shared.IndexOf("];", start, StringComparison.Ordinal);
+        var stats = shared[start..end];
         var keys = Regex.Matches(stats, @"key: ""skipped_cycles\.(\w+)""").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(BlockFields, keys);
-        Assert.Contains("key: \"skipped_cycles.last_message\", label: \"Last message\", format: \"text\", small: true, hideWhenEmpty: true", stats, StringComparison.Ordinal);
+        Assert.Equal(BlockFields.Where(f => f != "last_message").ToArray(), keys);
     }
 
     [Fact]
