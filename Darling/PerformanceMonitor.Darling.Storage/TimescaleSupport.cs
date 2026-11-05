@@ -3507,6 +3507,39 @@ WITH NO DATA";
     public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
         KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
 
+    /// <summary>The name of the (query_hash, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#7609, V246).</summary>
+    public const string QueryStoreCorrectedHourlyHashIndexName = "ix_qs_corrected_hourly_hash_bucket";
+
+    /// <summary>
+    /// #7609 (V246): the index <c>get_query_fleet_summary</c>'s Query Store source reads, <c>(query_hash, bucket DESC)</c> on the corrected hourly
+    /// rollup's materialization hypertable. V152 dropped the auto-created <c>query_hash</c> group index there for zero scans, because no reader
+    /// filtered on the hash; this read filters on the hash alone across every server, so without it the statement scans the whole rollup. A named
+    /// index with IF NOT EXISTS: V246 runs it on an upgraded store and <see cref="QueryStoreRollupKeptIndexesSql"/> runs it after the view is created
+    /// on a fresh one, so both land the same index, and the Viewer's schema probe finds it by name. A store without TimescaleDB, or without the view,
+    /// returns before touching anything. The lock timeout is V152's: the build waits out one refresh and then fails retryably.
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedHourlyHashIndexSql = @"
+SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_mat_oid regclass;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT format(''%I.%I'', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+             FROM timescaledb_information.continuous_aggregates
+             WHERE view_schema = ''collect'' AND view_name = ''" + QueryStoreStatsCorrectedHourlyView + @"'''
+    INTO v_mat_oid;
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
+END $$;";
+
     /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
     /// <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> at a 1-day bucket, sourced from L1 DIRECTLY.
@@ -13406,7 +13439,7 @@ END $$;";
     public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
-        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
         [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
