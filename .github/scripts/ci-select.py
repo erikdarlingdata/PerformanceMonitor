@@ -895,6 +895,68 @@ def reads_classes(root: str = ROOT, suites: "tuple[str, ...]" = ("darling", "lit
     return out
 
 
+# #7734: a draft runs the test classes whose source names a changed product file, by path or by file name, so a pin that reads
+# the file as text (a path or file-name pin) fails on the draft's own run, not one round late when it is marked ready. A
+# file name that more than NAME_COMMON_CLASSES test classes name (Program.cs and the like) is matched by path only: the
+# directory the file sits in and its name, both among the string literals of the class's file.
+NAME_COMMON_CLASSES = 100
+_LITERAL_SPLIT = re.compile(r"[/\s\"'`,;()<>|]+")
+
+
+def literal_tokens(text: str) -> "set[str]":
+    """The words of every string literal of a C# source, split at slashes (either kind), blanks, quotes and brackets: a path
+    `"Lite/Services/X.cs"`, an interpolated `$"{root}/X.cs"` and a path built from literals each give their file names and
+    directory names. Comments are not literals, so a comment that mentions a file does not name it."""
+    _code, bodies = cs_code_and_literals(text)
+    out: set[str] = set()
+    for _start, body in bodies:
+        out.update(t for t in _LITERAL_SPLIT.split(body.replace("\\", "/")) if t)
+    return out
+
+
+def classes_naming_files(changed: "list[str]", root: str = ROOT, common: int = NAME_COMMON_CLASSES,
+                         suites: "tuple[str, ...]" = ("darling", "lite"),
+                         doc_patterns: "tuple[str, ...] | list[str] | None" = None) -> "tuple[dict[str, list[str]], list[str]]":
+    """({suite: simple names of the test classes whose source names a changed product file}, the file names matched by path only).
+    A product file is a changed file outside the test projects and the documentation allowlist. A test source (one with a
+    [Fact] or [Theory]) names it when a string literal of it holds the file's name; for a file name that more than
+    `common` test classes name, when it holds the name and the name of the directory the file sits in. All the classes of
+    that source are named, the way reads_classes() names them (#7734)."""
+    docs = DOC_PATTERNS if doc_patterns is None else doc_patterns
+    product = [f for f in changed if not _TEST_PROJECT_FILE.search(f) and not any(matches(p, f) for p in docs)]
+    picks: dict[str, set[str]] = {s: set() for s in suites}
+    if not product:
+        return {s: [] for s in suites}, []
+    bases = {f: f.rsplit("/", 1)[-1] for f in product}
+    hits: list[tuple[str, list[str], set[str]]] = []
+    for suite in suites:
+        paths = _rc_suite_files(root, suite)
+        prefetch_sources(paths)
+        for path in paths:
+            try:
+                text = read_source(path).replace("\r\n", "\n")
+            except OSError:
+                continue
+            if not _RC_TEST_ATTR.search(text) or not any(b in text for b in bases.values()):
+                continue
+            tokens = literal_tokens(text)
+            if any(b in tokens for b in bases.values()):
+                hits.append((suite, [re.split(r"[.+/]", c)[-1] for c in test_classes_of_text(text)], tokens))
+    by_name: dict[str, set[str]] = {}
+    for _suite, classes, tokens in hits:
+        for b in set(bases.values()) & tokens:
+            by_name.setdefault(b, set()).update(classes)
+    common_names = sorted(b for b, c in by_name.items() if len(c) > common)
+    for suite, classes, tokens in hits:
+        for f, b in bases.items():
+            if b not in tokens:
+                continue
+            parent = f.rsplit("/", 2)[-2] if f.count("/") else ""
+            if b not in common_names or (parent and parent in tokens):
+                picks[suite].update(classes)
+    return {s: sorted(v) for s, v in picks.items()}, common_names
+
+
 def with_reads_traits(classes: "dict[str, dict[str, set[str]]]", root: str = ROOT) -> None:
     """Put Reads=Lite / Reads=Darling on the scanned classes the source scan names, in place (the rules in class_selected())."""
     reads = reads_classes(root)
@@ -1126,16 +1188,29 @@ KEEP_FULL = (
     "Darling/Darling.Tests/ScratchPostgres.cs",
 )
 
-# The shared projects (#5951). A change under one of them used to run everything, because both are referenced by
-# every product and a compiled `const` or `enum` value is copied into the caller at build time, so the map's call
-# edges cannot see the caller change. The measured price was 182 merged dev pull requests in four weeks, all FULL, 71
-# of which a map selection would have narrowed to a median 1,180 classes. The rule now reads the diff: FULL only for
-# a change to a constant or an enum, or to a registration file below; any other change selects by the map's edges.
-SHARED_PROJECT_DIRS = ("PerformanceMonitor.Common/", "PerformanceMonitor.PlanAnalysis/")
+# The shared projects (#5951, and the other five in #7734). A change under one of them used to run everything, because
+# every one is referenced by more than one product and a compiled `const` or `enum` value is copied into the caller at
+# build time, so the map's call edges cannot see the caller change. The measured price for Common and PlanAnalysis was
+# 182 merged dev pull requests in four weeks, all FULL, 71 of which a map selection would have narrowed to a median
+# 1,180 classes. The rule now reads the diff: FULL only for a change to a constant or an enum, or to a registration
+# file below; any other change selects by the map's edges. Collectors, Analysis, Ui, Notifications and Alerting were
+# kept FULL wholesale by build.yml's `core` filter until #7734 replayed them under the map (142 of 637 dev commits, 22%).
+SHARED_PROJECT_DIRS = (
+    "PerformanceMonitor.Common/",
+    "PerformanceMonitor.PlanAnalysis/",
+    "PerformanceMonitor.Collectors/",
+    "PerformanceMonitor.Analysis/",
+    "PerformanceMonitor.Ui/",
+    "PerformanceMonitor.Notifications/",
+    "PerformanceMonitor.Alerting/",
+)
 
 # The files of the shared projects that register or discover types, or load a resource by name, so a census class
 # sees the change without any edge to the file: a change to one of them is FULL (#5951). Each has the one-line reason.
-# Found with: grep -rnE "AddSingleton|AddScoped|AddTransient|GetTypes\(\)|Assembly\." under the two projects.
+# Found with: grep -rnE "AddSingleton|AddScoped|AddTransient|GetTypes\(\)|Assembly\." under the projects.
+# #7734 ran it under the five more: only the two Ui files below match. A wider grep (GetMethods, GetCustomAttribute,
+# Enum.GetValues, ManifestResource) adds AnalysisContext.CountFamilies, which reflects over a type its caller hands in, so
+# the test that calls it has the edge, and enums, which the enum rule below already keeps FULL.
 REGISTRATION_FILES = {
     "PerformanceMonitor.Common/Mcp/McpSchemaCompat.cs":
         "registers the MCP tool catalog and parameter types in the service collection (AddSingleton) and discovers "
@@ -1146,6 +1221,10 @@ REGISTRATION_FILES = {
         "reads the running build's version from the entry assembly (Assembly.GetEntryAssembly)",
     "PerformanceMonitor.PlanAnalysis/WaitStatsConfig.cs":
         "loads the embedded Resources/WaitStats.json by manifest resource name (Assembly.GetManifestResourceNames)",
+    "PerformanceMonitor.Ui/ThemeManager.cs":
+        "loads the embedded Themes/*.xaml text by manifest resource name (Assembly.GetManifestResourceStream)",
+    "PerformanceMonitor.Ui/SingleInstanceCoordinator.cs":
+        "reads the running build's version from the entry assembly (Assembly.GetEntryAssembly)",
 }
 
 # A `const` declaration on a diff line (modifiers and attributes allowed before it), and an `enum` declaration.

@@ -13,6 +13,10 @@ changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT whe
                    classes: only the test classes the pull request changed (#6734), named in darling_classes and lite_classes
   darling_classes  comma list of simple class names, set when darling_scope is classes
   lite_classes     comma list of simple class names, set when lite_scope is classes
+                   plan() returns both lists. The command line writes each as a file of one name a line when it is given
+                   --class-lists-dir (#7734): darling-classes.txt and lite-classes.txt, and the outputs say class_lists=true
+                   and the two counts instead of the lists. A Windows environment variable holds 32,767 characters, so a
+                   list as an output and an environment variable stopped at about 980 Darling classes; a file has no limit.
   build            true when the shared test build is needed (any run that is not docs-only)
   test_minutes     estimated test time of the selected classes, in minutes
   legs             a pull request: N = ceil(test_minutes / MINUTES_PER_LEG), at most MAX_LEGS; a dev push: the same, at least DEV_PUSH_MIN_LEGS and at most DEV_PUSH_MAX_LEGS;
@@ -111,9 +115,6 @@ PG_OLD_TARGET_PATHS = (
 # #7728: a ready pull request picks its classes from the newest nightly test map, and only while the map is at most this old.
 # The nightly builds one at 06:00 and one at 14:00 UTC, so a healthy map is at most about 16 hours old.
 MAP_MAX_AGE_HOURS = 48
-# A class list goes to the test legs in an environment variable, and a Windows variable holds 32,767 characters. A list longer
-# than this runs FULL instead.
-MAX_CLASS_LIST_CHARS = 30000
 # The test trees a changed class file may sit in for the changed-classes plan (#6734).
 TEST_TREES = {"darling": "Darling/Darling.Tests/", "lite": "Lite.Tests/"}
 
@@ -179,10 +180,12 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
     return picks if any(picks.values()) else None
 
 
-def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, lite_scope: str
-                ) -> "tuple[dict[str, list[str]] | None, str]":
+def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, lite_scope: str,
+                named: "dict[str, list[str]] | None" = None) -> "tuple[dict[str, list[str]] | None, str]":
     """(picks, why) for a draft that changed product files (#7727): the test classes of the changed test files, plus the
-    Darling Stage=Guard classes. picks is None when a changed test file is not safe in the file table (its suite then
+    Darling Stage=Guard classes, plus (#7734) `named`: the classes whose source names a changed product file by path or file
+    name (ci-select.py classes_naming_files). A named class runs whatever the suite's scope is: a pin that reads the file
+    as text is what the rule is for. picks is None when a changed test file is not safe in the file table (its suite then
     runs as today, and so does the whole pull request: areas classes cannot mix a narrowed suite with a full one)."""
     table = (catalog or {}).get("files") or {}
     classes = (catalog or {}).get("classes") or {}
@@ -200,6 +203,9 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
     guard = [c for c, t in classes["darling"].items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t]
     picks = {"darling": (changed["darling"] + [c for c in guard if c not in changed["darling"]]) if darling_scope != "none" else [],
              "lite": changed["lite"] if lite_scope != "none" else []}
+    for suite in ("darling", "lite"):
+        runs = {c for c, t in classes.get(suite, {}).items() if _CS.NO_TESTS_TRAIT not in t}
+        picks[suite] += [c for c in dict.fromkeys((named or {}).get(suite, [])) if c in runs and c not in picks[suite]]
     return (picks, "") if any(picks.values()) else (None, "no class is selected")
 
 
@@ -246,10 +252,6 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
             picks[suite] = list(dict.fromkeys(names))
         if not any(picks.values()):
             return None, f"the map selected no class ({age})"
-        for suite, names in picks.items():
-            if len(",".join(names)) > MAX_CLASS_LIST_CHARS:
-                return None, (f"the {suite} class list is {len(','.join(names))} characters, over the {MAX_CLASS_LIST_CHARS} "
-                              f"the runner's environment holds ({len(names)} classes, {age})")
         return picks, (f"a ready pull request runs the classes the nightly test map selects, {len(picks['darling'])} Darling "
                        f"and {len(picks['lite'])} Lite, with the Darling Guard classes and the classes of its changed test files "
                        f"({age}).")
@@ -258,7 +260,7 @@ def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: 
 
 
 def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None, draft: bool = False,
-             selection: "dict | None" = None) -> dict:
+             selection: "dict | None" = None, named: "dict[str, list[str]] | None" = None, named_error: str = "") -> dict:
     """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727).
     selection: the nightly map and what the pick reads (#7728, see ready_picks); None leaves that rule off."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
@@ -308,13 +310,16 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
         areas = "none" if darling_scope == "none" and lite_mode == "none" else "darling"
     reason = f"Darling scope {darling_scope}, Lite scope {lite_mode}."
     if draft and areas != "none":
-        picks, why = draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode)
+        picks, why = ((None, named_error) if named_error else
+                      draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode, named))
         if picks:
+            extra = sum(len(v) for v in (named or {}).values())
             return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
                     "lite_scope": "classes" if picks["lite"] else "none",
                     "darling_classes": picks["darling"], "lite_classes": picks["lite"],
-                    "reason": "a draft runs only its own test classes and the Guard classes; "
-                              "the full suite runs when it is marked ready for review."}
+                    "reason": "a draft runs only its own test classes and the Guard classes"
+                              + (f", and the {extra} classes whose source names a changed file (#7734)" if extra else "")
+                              + "; the full suite runs when it is marked ready for review."}
         reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
     if not draft and selection is not None and areas != "none":
         picks, why = ready_picks(rules, files, base, catalog if catalog is not None else load_catalog(), selection)
@@ -425,7 +430,8 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
 # The plan.
 # ---------------------------------------------------------------------------------------------------------
 def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
-         rules, catalog: "dict | None" = None, draft: bool = False, selection: "dict | None" = None) -> "dict[str, str]":
+         rules, catalog: "dict | None" = None, draft: bool = False, selection: "dict | None" = None,
+         named: "dict[str, list[str]] | None" = None, named_error: str = "") -> "dict[str, str]":
     outcome, why = gate(event, head_ref, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
@@ -436,7 +442,7 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
 
     picks_from_map = selection is not None and event == "pull_request" and not draft and not _all_docs(rules, files)
     catalog = catalog if catalog is not None else (load_catalog() if draft or picks_from_map or _may_narrow(files) else None)
-    c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection)
+    c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection, named, named_error)
     out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
@@ -520,6 +526,26 @@ def build_selection(map_path: str, map_error: str, root: str = ROOT) -> dict:
     return out
 
 
+CLASS_LIST_KEYS = ("darling_classes", "lite_classes")
+
+
+def write_class_lists(directory: str, out: "dict[str, str]") -> "list[str]":
+    """Write each non-empty class list of a plan as `<suite>-classes.txt`, one simple name a line, and return the `key=value`
+    lines that say so: class_lists and the two counts (#7734). A list as an output and an environment variable stopped at
+    about 980 Darling classes (a Windows variable holds 32,767 characters); the legs read the file instead. An empty list
+    writes no file, so a leg finds only the suites the plan runs."""
+    counts = {}
+    for suite in ("darling", "lite"):
+        names = [x for x in out.get(f"{suite}_classes", "").split(",") if x]
+        counts[suite] = len(names)
+        if names:
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, f"{suite}-classes.txt"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(names) + "\n")
+    return [f"class_lists={_bool(any(counts.values()))}", f"darling_class_count={counts['darling']}",
+            f"lite_class_count={counts['lite']}"]
+
+
 def main(argv: "list[str]") -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--event", required=True, choices=["pull_request", "push"])
@@ -532,6 +558,9 @@ def main(argv: "list[str]") -> int:
     ap.add_argument("--labels", default="", help="a JSON array or a comma list")
     ap.add_argument("--files-file", help="changed files, one a line (default: stdin)")
     ap.add_argument("--github-output", help="also append the outputs to this file ($GITHUB_OUTPUT)")
+    ap.add_argument("--class-lists-dir", default=None,
+                    help="write the selected class lists here, one name a line, as darling-classes.txt and lite-classes.txt (#7734), "
+                         "and leave the lists out of the outputs; without it the outputs carry the comma lists")
     args = ap.parse_args(argv)
 
     if args.files_file:
@@ -545,9 +574,20 @@ def main(argv: "list[str]") -> int:
     selection = None
     if args.event == "pull_request" and args.map is not None and not draft:
         selection = build_selection(args.map, args.map_error)
+    named, named_error = None, ""
+    if args.event == "pull_request" and draft:
+        # #7734: a draft also runs the classes whose source names a changed product file. A scan that fails runs the pull request as
+        # one that is ready for review (every class its areas select), never red.
+        try:
+            named, _path_only = _CS.classes_naming_files(files)
+        except Exception as exc:
+            named_error = f"the scan for test classes that name a changed file failed ({type(exc).__name__}: {str(exc)[:80]})"
     out = plan(args.event, args.base, args.head_ref, parse_labels(args.labels), files,
-               _CS.Rules(), draft=draft, selection=selection)
+               _CS.Rules(), draft=draft, selection=selection, named=named, named_error=named_error)
     lines = [f"{k}={v}" for k, v in out.items()]
+    if args.class_lists_dir is not None:
+        lines = [f"{k}={v}" for k, v in out.items() if k not in CLASS_LIST_KEYS]
+        lines += write_class_lists(args.class_lists_dir, out)
     print("\n".join(lines))
     if out["legs"] != "0":
         print(f"legs: {out['legs']} chosen ({out['test_minutes']} weighted test minutes)")

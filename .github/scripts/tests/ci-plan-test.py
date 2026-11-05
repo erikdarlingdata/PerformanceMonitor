@@ -464,17 +464,59 @@ check("map: a missing map: the why line", "no nightly run has a test-map artifac
 check("map: a map that is not a map is FULL", ready_run([SERVICE], selection={"map": ["x"], "error": "", "now": NOW}).get("darling_scope"), "full")
 check("map: a broken map never raises", ready_run([SERVICE], selection=sel(map={"schema": 1, "files": 5, "classes": 7})).get("darling_scope"), "full")
 check("map: no selection input leaves the rule off", cp.plan("pull_request", "dev", "x", [], [SERVICE], rules, cc_cat)["darling_scope"], "full")
-# A class list longer than the runner's environment variable holds is FULL.
-saved_cap = getattr(cp, "MAX_CLASS_LIST_CHARS", None)
-cp.MAX_CLASS_LIST_CHARS = 4
-try:
-    r = ready_run([SERVICE])
-finally:
-    if saved_cap is None:
-        del cp.MAX_CLASS_LIST_CHARS
-    else:
-        cp.MAX_CLASS_LIST_CHARS = saved_cap
-check("map: a class list over the environment limit is FULL", (r.get("darling_scope"), "over the 4" in r.get("why", "")), ("full", True))
+# #7734: a class list no longer has a length cap, because the legs read it from a file. 1,200 classes stay a selection.
+big_map = make_map()
+for i in range(1200):
+    big_map["classes"]["darling"][f"Big{i}Tests"] = {"own": fid(DT + "D3Tests.cs"), "files": [fid(SERVICE)], "seconds": 1.0}
+big_sel_cat = {**cc_cat, "classes": {"darling": {**d_cls, **{f"Big{i}Tests": set() for i in range(1200)}}, "lite": l_cls}}
+r = ready_run([SERVICE], selection=sel(map=big_map), cat=big_sel_cat)
+check("map: a 1,200 class selection stays a selection", (r.get("areas"), len(r.get("darling_classes", "").split(","))), ("classes", 1202))
+check("map: no cap is named in the why line", "characters" in r.get("why", ""), False)
+class_dir = os.path.join(tmp, "lists")
+lines = cp.write_class_lists(class_dir, {"darling_classes": r["darling_classes"], "lite_classes": ""})
+with open(os.path.join(class_dir, "darling-classes.txt"), encoding="utf-8") as fh:
+    written_names = fh.read().splitlines()
+check("class lists: the Darling file holds one name a line", (len(written_names), written_names[0]), (1202, r["darling_classes"].split(",")[0]))
+check("class lists: an empty Lite list writes no file", os.path.exists(os.path.join(class_dir, "lite-classes.txt")), False)
+check("class lists: the output lines say so", lines, ["class_lists=true", "darling_class_count=1202", "lite_class_count=0"])
+check("class lists: nothing selected says false", cp.write_class_lists(os.path.join(tmp, "none"), {"darling_classes": "", "lite_classes": ""})[0], "class_lists=false")
+# --- a draft also runs the classes whose source names a changed product file (#7734) --------------------------------
+r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named={"darling": ["D3", "Gone"], "lite": ["L2"]})
+check("draft named: the named class joins the Guard class, a class the tree lacks is dropped", r.get("darling_classes"), "D1,D3")
+check("draft named: a named Lite class runs although no Lite file changed", (r.get("lite_scope"), r.get("lite_classes")), ("classes", "L2"))
+check("draft named: the why line counts them", "3 classes whose source names a changed file" in r.get("why", ""), True)
+r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named=None)
+check("draft named: no named classes is the #7727 rule", (r.get("darling_classes"), "names a changed file" in r.get("why", "")), ("D1", False))
+r = cp.plan("pull_request", "dev", "feature/x", [], [SERVICE], rules, cc_cat, draft=True, named_error="the scan failed")
+check("draft named: a failed scan runs the pull request as a ready one", (r.get("areas"), r.get("darling_scope"), "the scan failed" in r.get("why", "")), ("darling", "full", True))
+# classes_naming_files over a small tree: a path built from literals names the file, a comment does not, and a file name that
+# too many classes name is matched by path only.
+tree = os.path.join(tmp, "namedtree")
+dt_dir = os.path.join(tree, "Darling", "Darling.Tests")
+os.makedirs(dt_dir, exist_ok=True)
+for fname, body in (("OneTests.cs", 'Path.Combine(root, "A", "Program.cs")'), ("TwoTests.cs", 'Path.Combine(root, "B", "Program.cs")'),
+                    ("CommentTests.cs", "// reads A/Program.cs\n var x = 1;"), ("PathTests.cs", 'File.ReadAllText("PerformanceMonitor.Collectors/Foo.cs")')):
+    with open(os.path.join(dt_dir, fname), "w", encoding="utf-8") as fh:
+        fh.write("namespace Darling.Tests;\npublic class " + fname[:-3] + " {\n [Fact] public void T() { " + body + "; }\n}\n")
+got, common = cs.classes_naming_files(["A/Program.cs"], tree, common=100)
+check("naming: a file name names the classes that hold it in a literal, not a comment", (got["darling"], common), (["OneTests", "TwoTests"], []))
+got, common = cs.classes_naming_files(["A/Program.cs"], tree, common=1)
+check("naming: a common file name is matched by path", (got["darling"], common), (["OneTests"], ["Program.cs"]))
+got, _ = cs.classes_naming_files(["PerformanceMonitor.Collectors/Foo.cs", "Darling/Darling.Tests/OneTests.cs", "README.md"], tree)
+check("naming: a full path in a literal names the file, a test file and a document name nothing", got["darling"], ["PathTests"])
+# --- the five shared projects are judged by the diff, like Common and PlanAnalysis (#7734) ------------------------
+check("shared: all seven projects are shared projects", len(cs.SHARED_PROJECT_DIRS), 7)
+live_args = cs.selection_args(cs.Rules())
+check("shared: none of the core filter's projects is keep-full wholesale",
+      [p for p in live_args["keep_full"] if p.startswith(cs.SHARED_PROJECT_DIRS)], [])
+COLL = "PerformanceMonitor.Collectors/Foo.cs"
+plain = "diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +1,1 @@ class Foo\n-    var a = 1;\n+    var a = 2;\n" % (COLL, COLL, COLL, COLL)
+const_diff = plain.replace("var a = 2;", "public const int Limit = 2;")
+check("shared: an ordinary change in Collectors selects by the map", cs.shared_change_reason([COLL], plain), None)
+check("shared: a const change in Collectors is FULL", "const" in (cs.shared_change_reason([COLL], const_diff) or ""), True)
+check("shared: a Collectors change with no diff is FULL", cs.shared_change_reason([COLL], None) is not None, True)
+check("shared: the Ui theme loader is a registration file",
+      cs.shared_change_reason(["PerformanceMonitor.Ui/ThemeManager.cs"], plain) is not None, True)
 # A draft keeps the #7727 rule, a dev push and a base other than dev run everything, docs-only and test-only are as before.
 r = ready_run([SERVICE], draft=True)
 check("map: a draft keeps its rule", (r.get("areas"), r.get("darling_classes"), "a draft runs only" in r.get("why", "")), ("classes", "D1", True))

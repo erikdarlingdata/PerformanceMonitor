@@ -47,8 +47,7 @@ jobs:
       outcome: ${{ steps.plan.outputs.outcome }}
       areas: ${{ steps.plan.outputs.areas }}
       darling_scope: ${{ steps.plan.outputs.darling_scope }}
-      darling_classes: ${{ steps.plan.outputs.darling_classes }}
-      lite_classes: ${{ steps.plan.outputs.lite_classes }}
+      class_lists: ${{ steps.plan.outputs.class_lists }}
       build: ${{ steps.plan.outputs.build }}
       pg_old_targets: ${{ steps.plan.outputs.pg_old_targets }}
       legs: ${{ steps.plan.outputs.legs }}
@@ -143,7 +142,19 @@ jobs:
           # its parse or its age, makes the plan run every class its areas select, and `why` says so.
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
             --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}" \
-            --map "${MAP_FILE}" --map-error "${MAP_ERROR}"
+            --map "${MAP_FILE}" --map-error "${MAP_ERROR}" --class-lists-dir ci-class-lists
+
+      # #7734: the selected class lists go to the test legs as files, not as environment variables (a Windows variable holds
+      # 32,767 characters, which stopped a selection at about 980 Darling classes). Written by the plan step; three days of retention.
+      - name: Upload the class lists
+        if: steps.plan.outputs.class_lists == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ci-class-lists
+          path: ci-class-lists
+          retention-days: 3
+          overwrite: true
+          if-no-files-found: error
 
       # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
       # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
@@ -421,6 +432,13 @@ jobs:
       # run 39996992603 it took 12.7 minutes (36,832 tests), not the half minute the design assumed, and it timed leg 1
       # out. The legs already run every Darling class (and for a Lite-only change the Guard and Lite-reads classes), with
       # the store. The step has its own timeout, so a hang still reaches the upload steps below.
+      - name: Fetch the class lists
+        if: needs.plan.outputs.class_lists == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-class-lists
+          path: ci-class-lists
+
       - name: Run test leg ${{ matrix.leg }}
         timeout-minutes: 25
         shell: pwsh
@@ -428,9 +446,14 @@ jobs:
           LEG: ${{ matrix.leg }}
           LEG_COUNT: ${{ needs.plan.outputs.legs }}
           AREAS: ${{ needs.plan.outputs.areas }}
-          DARLING_CLASSES: ${{ needs.plan.outputs.darling_classes }}
-          LITE_CLASSES: ${{ needs.plan.outputs.lite_classes }}
-        run: ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS -OnlyDarlingClasses $env:DARLING_CLASSES -OnlyLiteClasses $env:LITE_CLASSES -NoTreeGuards
+          CLASS_LISTS: ${{ needs.plan.outputs.class_lists }}
+        run: |
+          $listArgs = @{}
+          if ($env:CLASS_LISTS -eq 'true') {
+            if (Test-Path -LiteralPath ci-class-lists/darling-classes.txt) { $listArgs.OnlyDarlingClassesFile = 'ci-class-lists/darling-classes.txt' }
+            if (Test-Path -LiteralPath ci-class-lists/lite-classes.txt) { $listArgs.OnlyLiteClassesFile = 'ci-class-lists/lite-classes.txt' }
+          }
+          ./.github/scripts/run-ci-leg.ps1 -Leg $env:LEG -LegCount $env:LEG_COUNT -Areas $env:AREAS @listArgs -NoTreeGuards
 
       - name: Stop PostgreSQL
         if: always() && (needs.plan.outputs.darling_scope != 'none' || needs.plan.outputs.areas == 'lite')
