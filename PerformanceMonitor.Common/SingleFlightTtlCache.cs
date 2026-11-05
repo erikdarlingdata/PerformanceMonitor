@@ -27,9 +27,9 @@ namespace PerformanceMonitor.Common;
 /// it sits, unraced, until the TTL. <see cref="GetOrStartAsync"/> avoids the whole race by never running
 /// the fetch inline under the lock: it starts the fetch with <see cref="Task.Run(Func{Task})"/> so the
 /// delegate cannot complete before <see cref="GetOrStartAsync"/> has returned the assigned task to its
-/// caller, and the fetch's own completion callback (registered via <c>ContinueWith</c>, itself gated by
-/// the same lock) is what clears the field — so the clear can only ever race the assignment as
-/// "assignment happens strictly first", never the reverse.</para>
+/// caller, and the clear runs in a <c>finally</c> inside that same task, gated by the same lock — so the
+/// clear can only ever race the assignment as "assignment happens strictly first", never the reverse, and
+/// it has finished before any caller's await of the task resumes.</para>
 ///
 /// <para><b>Defect (b), a waiter that cannot cancel.</b> A caller's own
 /// <see cref="CancellationToken"/> must be honored for THAT caller without cancelling the shared fetch
@@ -85,15 +85,25 @@ public sealed class SingleFlightTtlCache<T>
             {
                 /* Task.Run, not an inline call: the delegate cannot finish (successfully, by fault, or by a
                    synchronous throw before its first await) before this method has finished assigning
-                   _inFlight below — closing defect (a). The completion callback that clears _inFlight and
-                   writes the cache is registered with ContinueWith, still under _gate, so it can only run
-                   AFTER the assignment, never race ahead of it. */
-                var started = Task.Run(fetch);
-                _inFlight = started;
-                sharedTask = started;
-
-                started.ContinueWith(
-                    completed =>
+                   _inFlight below — closing defect (a). The delegate's own finally clears _inFlight and
+                   writes the cache under _gate, so it can only run AFTER the assignment, never race ahead
+                   of it. */
+                /* The clear and the cache write run INSIDE the task callers wait on (the lock below cannot be
+                   taken until this block has assigned _inFlight), so a caller that sees the fetch fault and
+                   calls again at once finds _inFlight already cleared and starts a fresh fetch. A separate
+                   ContinueWith could run after the caller's own continuation and hand it the faulted task. */
+                Task<T>? started = null;
+                started = Task.Run(async () =>
+                {
+                    var succeeded = false;
+                    T result = default!;
+                    try
+                    {
+                        result = await fetch().ConfigureAwait(false);
+                        succeeded = true;
+                        return result;
+                    }
+                    finally
                     {
                         lock (_gate)
                         {
@@ -102,17 +112,17 @@ public sealed class SingleFlightTtlCache<T>
                                 _inFlight = null;
                             }
 
-                            if (completed.Status == TaskStatus.RanToCompletion && (shouldCache is null || shouldCache(completed.Result)))
+                            if (succeeded && (shouldCache is null || shouldCache(result)))
                             {
-                                _value = completed.Result;
+                                _value = result;
                                 _hasValue = true;
                                 _valueAtUtc = DateTime.UtcNow;
                             }
                         }
-                    },
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
+                    }
+                });
+                _inFlight = started;
+                sharedTask = started;
             }
         }
 
