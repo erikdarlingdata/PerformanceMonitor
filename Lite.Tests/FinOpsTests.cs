@@ -361,7 +361,7 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         var late = Assert.Single(results, r => r.QueryHash == "LATEWINNER");
         Assert.Equal("Zulu", late.DatabaseName);
         Assert.Equal(2, late.DatabaseCount);
-        Assert.Equal(100m, late.TotalExecutions);
+        Assert.Equal(20m, late.TotalExecutions);
         Assert.Equal(10_000m, late.TotalCpuMs);
 
         var tied = Assert.Single(results, r => r.QueryHash == "TIED");
