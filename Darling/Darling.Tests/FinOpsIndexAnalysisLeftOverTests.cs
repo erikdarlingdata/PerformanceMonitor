@@ -114,12 +114,15 @@ public sealed class FinOpsIndexAnalysisLeftOverTests
         Assert.Equal(2, root.GetProperty("overall").GetProperty("index_count").GetInt32());
         var dbs = root.GetProperty("databases").EnumerateArray().ToList();
         Assert.Equal(4, dbs.Count);
-        var leftOver = dbs.Where(d => d.TryGetProperty("left_over", out var l) && l.GetBoolean()).Select(d => d.GetProperty("database_name").GetString()).OrderBy(s => s, StringComparer.Ordinal).ToArray();
+        var leftOver = dbs.Where(IsMarked).Select(d => d.GetProperty("database_name").GetString()).OrderBy(s => s, StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { "Shared", "tempdb" }, leftOver);
         /* Left-over rows sort after the current ones. */
-        Assert.True(dbs.Take(2).All(d => !d.TryGetProperty("left_over", out _)), payload);
+        Assert.True(dbs.Take(2).All(d => !IsMarked(d)), payload);
         Assert.Equal(read.Result.Recommendations.Count, root.GetProperty("recommendation_count").GetInt32());
     }
+
+    /* An unmarked database carries left_over as null, so only a true value marks one. */
+    private static bool IsMarked(JsonElement d) => d.TryGetProperty("left_over", out var l) && l.ValueKind == JsonValueKind.True;
 
     private static async Task Insert(NpgsqlConnection c, int dbId, string databaseName, DateTime at, long collectionId, CancellationToken ct)
     {
