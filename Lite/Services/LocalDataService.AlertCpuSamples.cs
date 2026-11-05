@@ -32,7 +32,7 @@ public partial class LocalDataService
     /// <para>The newest <paramref name="limit"/> rows are kept, then reversed: bounding the OLDEST end would drop
     /// the latest readings, the ones that matter. Hot table first, then the archive view, as every latest-row
     /// read here does (#3895). <c>total</c> is SQL CPU plus other-process CPU, the same sum
-    /// <see cref="ServerSummaryItem.TotalCpuPercent"/> reports; a row without SQL CPU has neither value.</para>
+    /// <see cref="ServerSummaryItem.TotalCpuPercent"/> reports; a row without SQL CPU has neither value, and a row without other-process CPU (SQL Server on Linux, #7682) has no total.</para>
     /// </summary>
     public async Task<List<AlertCpuSample>> GetRecentCpuSamplesAsync(
         int serverId, DateTime nowUtc, int limit = AlertCpuSampleLimit)
@@ -62,7 +62,7 @@ LIMIT $3";
                 samples.Add(new AlertCpuSample(
                     DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
                     sql,
-                    sql.HasValue ? sql.Value + (other ?? 0) : null));
+                    sql.HasValue && other.HasValue ? sql.Value + other.Value : null));
             }
 
             if (samples.Count > 0)

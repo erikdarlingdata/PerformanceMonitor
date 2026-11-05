@@ -313,6 +313,34 @@ VALUES ($1, $2, $3, 'S52', $2, $4, $5, 3)";
         Assert.Equal(98.0, list[^1].TotalCpuPercent); /* SQL 95 + other 3 */
     }
 
+    /* #7682: a Linux row (SQL Server older than 2025 CU1) has no other-process figure, so it has no total. */
+    [Fact]
+    public async Task ARowWithNoOtherProcessFigureHasNoTotal_AndAMeasuredRowStillTotals()
+    {
+        await SeedAsync(new (DateTime?, int)[] { (Now.AddMinutes(-3), 90) });
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sample_time_utc,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES (-7000100, $1, $2, 'S52', $1, $3, 70, NULL)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = Now.AddMinutes(-1).AddHours(-5) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = Now.AddMinutes(-1) });
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var list = await new LocalDataService(_duckDb).GetRecentCpuSamplesAsync(ServerId, Now);
+
+        Assert.Equal(2, list.Count);
+        Assert.Equal(93.0, list[0].TotalCpuPercent); /* SQL 90 + other 3 */
+        Assert.Equal(70.0, list[1].SqlCpuPercent);
+        Assert.Null(list[1].TotalCpuPercent);
+    }
+
     [Fact]
     public async Task MoreThanThirtyTwoKeepTheNewestThirtyTwo()
     {
