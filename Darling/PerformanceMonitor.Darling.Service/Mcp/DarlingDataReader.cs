@@ -1113,6 +1113,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
             /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
@@ -1371,6 +1372,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
             /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -1610,6 +1612,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+            AND   ($7::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($7))
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
@@ -1944,6 +1947,8 @@ internal static class DarlingDataReader
         AddDatabases(command, databases);
         AddInt(command, minMaxDop);
         AddInt(command, candidates);
+        /* #7725: $8, the databases this ranking leaves out (NULL = none), in the ranking pass of both raw statements. */
+        command.Parameters.Add(databases.ExcludeParameter());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -2056,7 +2061,7 @@ internal static class DarlingDataReader
         var sql = TopRankings.Apply(TopQueriesHourlySql, ranking, hourly: true, io: io)
             .Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal)
             .Replace(TopQueriesHourlyIoSumsPlaceholder, io ? TopRankings.HourlyIoSums : TopRankings.HourlyNoIoSums, StringComparison.Ordinal)
-            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(7), StringComparison.Ordinal);
+            .Replace(CeilingPlaceholder, ceiling is null ? "" : CeilingClause(8), StringComparison.Ordinal);
         sql = QueryTagReadJoin.Apply(sql, serverId, tags);
 
         var firstBucketTask = coverage.GetHourlyFirstBucketAsync(
@@ -2077,6 +2082,8 @@ internal static class DarlingDataReader
             AddInt(command, top);
             AddDatabases(command, databases);
             AddInt(command, candidates);
+            /* #7725: $7, the databases this ranking leaves out (NULL = none); the ceiling, when there is one, is $8. */
+            command.Parameters.Add(databases.ExcludeParameter());
             if (ceiling is not null)
             {
                 AddTimestamp(command, ceiling.Value);

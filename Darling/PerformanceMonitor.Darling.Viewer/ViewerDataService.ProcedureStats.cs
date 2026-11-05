@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
@@ -27,6 +28,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class ViewerProcedureStatsRow : QueryTagRowBase
 {
     public string DatabaseName { get; set; } = "";
+    /// <summary>#7725: true for a row from a database the server no longer lists. The ranking puts the databases the server still lists
+    /// first and fills what the limit leaves from the dropped ones, which carry this mark.</summary>
+    public bool IsDropped { get; set; }
+    /// <summary>#7725: what the grid's database cell shows: the name, with " (dropped)" after a database the server no longer lists.</summary>
+    public string DatabaseDisplay => IsDropped ? DatabaseName + " (dropped)" : DatabaseName;
     public string SchemaName { get; set; } = "";
     public string ObjectName { get; set; } = "";
     public string ObjectType { get; set; } = "";
@@ -207,15 +213,46 @@ public sealed partial class ViewerDataService
             routedTier = RetentionTier.Hourly;
         }
 
+        ViewerRoutedRead<ViewerProcedureStatsRow> read;
         if (routedTier == RetentionTier.Hourly)
         {
             var hourly = await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken);
-            return hourly with { LeftOutDatabases = leftOut };
+            read = hourly with { LeftOutDatabases = leftOut };
+        }
+        else
+        {
+            read = new ViewerRoutedRead<ViewerProcedureStatsRow>(
+                await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null,
+                LeftOutDatabases: leftOut);
         }
 
-        return new ViewerRoutedRead<ViewerProcedureStatsRow>(
-            await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, top, databaseNames, databases, tags, cancellationToken), "raw", null,
-            LeftOutDatabases: leftOut);
+        /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
+           ranked the same way and marked IsDropped (the grid shows "(dropped)"), so a dropped database's rows never push out a listed row
+           and the grid is not empty while the work is on record. The banner then names only the databases with no row in the grid. */
+        if (leftOut is { Count: > 0 } && read.Rows.Count < top)
+        {
+            var fillTop = top - read.Rows.Count;
+            var leftOutNames = leftOut.ToList();
+            var fill = routedTier == RetentionTier.Hourly
+                ? (await GetTopProceduresByCpuHourlyAsync(rollups, coverage, serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken)).Rows
+                : await GetTopProceduresByCpuRawAsync(serverId, startUtc, endUtc, fillTop, leftOutNames, DatabaseFilter.All, tags, cancellationToken);
+            if (fill.Count > 0)
+            {
+                foreach (var row in fill)
+                {
+                    row.IsDropped = true;
+                }
+
+                var withRows = new HashSet<string>(fill.Select(row => row.DatabaseName), StringComparer.Ordinal);
+                read = read with
+                {
+                    Rows = [.. read.Rows, .. fill],
+                    LeftOutDatabases = DatabasesLeftOut.Distinct(leftOut.Where(name => !withRows.Contains(name))),
+                };
+            }
+        }
+
+        return read;
     }
 
     /// <summary>#4231 stage 3b: the hourly-rollup arm — builds its FROM clause ONLY through

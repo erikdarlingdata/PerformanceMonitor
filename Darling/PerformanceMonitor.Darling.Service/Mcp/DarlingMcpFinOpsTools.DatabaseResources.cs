@@ -68,7 +68,9 @@ public sealed partial class DarlingMcpFinOpsTools
             postgres, resolved.ServerId, rollups, coverage, cutoff, McpCommandDeadlines.ReadSeconds, limit, ct);
 
         var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", false, ct);
-        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+        /* #7725: a database the server no longer lists keeps its row (the figures are real) and is marked database_dropped, so the page can say so. */
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: cutoff, cancellationToken: ct);
+        var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,
             view = DatabaseResourcesView,
@@ -81,7 +83,9 @@ public sealed partial class DarlingMcpFinOpsTools
             rows = ordered.Take(MaxDatabaseRows).Select(DatabaseResourcesRow).ToList(),
             top_by_total = byTotal.Select(TopByTotalRow).ToList(),
             top_by_avg = byAvg.Select(TopByAvgRow).ToList(),
-        }, McpHelpers.JsonOptions), notice);
+        }, McpHelpers.JsonOptions)!.AsObject();
+        DroppedDatabaseRows.MarkByName(payload, dropped, "rows", "top_by_total", "top_by_avg");
+        return DarlingMcpWindowNotice.Finish(payload.ToJsonString(McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One database-resources row in the wire shape: snake_case keys, no cost fields.</summary>

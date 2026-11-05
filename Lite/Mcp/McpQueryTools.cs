@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Collectors;
@@ -284,6 +285,15 @@ public sealed class McpQueryTools
                 ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
                 : null;
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, excludeDatabaseNames: droppedDatabases, tags: tagScope);
+            /* #7725: the databases the server still lists rank first, as above. What the limit leaves is filled from the left-out databases,
+               ranked the same way and marked database_dropped (Darling twin does the same), so a dropped database rows never push out a
+               listed row and the grid is not empty while the work is on record. databases_left_out then names only the databases with no row. */
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            {
+                var fill = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, tags: tagScope);
+                rows = [.. rows, .. fill];
+            }
+
             /* #5633 review (finding D): the narrowing is disclosed, never silent (Darling's twin does the same, in the same words). The names
                it left out ride the envelope of an empty page and of a page with rows, and an empty page's sentence claims only the databases
                the server still has, so "the collector recorded nothing" is never said over a window with rows in a dropped database. */
@@ -352,6 +362,7 @@ public sealed class McpQueryTools
                 total_spills = r.TotalSpills
             });
 
+            var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             return WithTagFilter(new
             {
                 server = resolved.DisplayName,
@@ -373,10 +384,16 @@ public sealed class McpQueryTools
                     note = attribution.Note
                 },
                 /* #5633 review (finding D): null when the read left no database out. */
-                databases_left_out = DatabasesLeftOut.Named(leftOut),
-                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
+                databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
-            }, tagScope.Named);
+            }, tagScope.Named, node =>
+            {
+                if (node["procedures"] is JsonArray procedureRows)
+                {
+                    DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -388,15 +405,21 @@ public sealed class McpQueryTools
     /// Serializes a payload and, only when a tag shaped the read, adds a <c>tag_filter</c> member naming it: the tag as the caller gave it,
     /// or <c>untagged</c> (the twin of Darling's #5984 payload member). A call without a tag is unchanged.
     /// </summary>
-    internal static string WithTagFilter(object payload, string? tagName)
+    internal static string WithTagFilter(object payload, string? tagName, Action<JsonObject>? shape = null)
     {
-        if (tagName is null)
+        if (tagName is null && shape is null)
         {
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }
 
         var node = JsonSerializer.SerializeToNode(payload, McpHelpers.JsonOptions)!.AsObject();
-        node["tag_filter"] = tagName;
+        /* #7725: a caller shaping of the object (the dropped-database mark on the rows) before the tag member is added. */
+        shape?.Invoke(node);
+        if (tagName is not null)
+        {
+            node["tag_filter"] = tagName;
+        }
+
         return node.ToJsonString(McpHelpers.JsonOptions);
     }
 

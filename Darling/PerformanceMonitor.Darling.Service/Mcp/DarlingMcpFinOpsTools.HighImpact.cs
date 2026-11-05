@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Storage.FinOps;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -51,7 +52,9 @@ public sealed partial class DarlingMcpFinOpsTools
         }
 
         var notice = await NoticeAsync(emptyAnswer: false);
-        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+        /* #7725: a row in a database the server no longer lists is marked database_dropped, so the page can say so. */
+        var dropped = await CurrentDatabaseScope.ReadDroppedAsync(postgres, resolved.ServerId, windowStartUtc: start, cancellationToken: ct);
+        var payload = JsonSerializer.SerializeToNode(new
         {
             server = resolved.DisplayName,
             view = HighImpactView,
@@ -60,7 +63,9 @@ public sealed partial class DarlingMcpFinOpsTools
             window_truncated = notice.WindowTruncated,
             truncation_note = notice.TruncationNote,
             rows = rows.Select(HighImpactRow).ToList(),
-        }, McpHelpers.JsonOptions), notice);
+        }, McpHelpers.JsonOptions)!.AsObject();
+        DroppedDatabaseRows.MarkByName(payload, dropped, "rows");
+        return DarlingMcpWindowNotice.Finish(payload.ToJsonString(McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One high-impact row in the wire shape: snake_case keys, the band decided here, no query text beyond

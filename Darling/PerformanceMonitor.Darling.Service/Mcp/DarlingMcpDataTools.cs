@@ -846,9 +846,17 @@ public sealed class DarlingMcpDataTools
 
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
+            /* #7725: as get_top_procedures_by_cpu: the databases the server still lists rank first (the narrowing is the one #5633 item 4 made),
+               and what the limit leaves is filled from the dropped databases, ranked the same way and marked database_dropped. `databases`
+               itself stays the caller's choice for the empty-page probes below. */
+            var rankedDatabases = await CurrentDatabaseScope.NarrowAsync(postgres, resolved.ServerId, databases,
+                asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : windowEnd, windowStartUtc: requestedStart, cancellationToken: cancellationToken);
+            var droppedDatabases = DatabasesLeftOut.Distinct(rankedDatabases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, databases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
-            var rows = routed.Rows;
+                postgres, resolved.ServerId, requestedStart, now, top, rankedDatabases, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter);
+            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, droppedDatabases,
+                async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
+                    postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, ranking: ranking, cancellationToken: cancellationToken, tags: tagFilter)).Rows);
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
             /* #4231 stage 3: hourly-routed rows have no host_object split and no per-row text dimension —
@@ -1128,6 +1136,7 @@ public sealed class DarlingMcpDataTools
             /* #5984: the row's query tag, by its query_hash; an unmapped hash carries no `tag` member. */
             if (queriesPayload["queries"] is JsonArray queryRows)
             {
+                DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
                 await QueryTagReadJoin.AttachAsync(postgres, resolved.ServerId, QueryTagReadJoin.HashKind, queryRows.OfType<JsonObject>(),
                     row => row["query_hash"]?.GetValue<string>(), cancellationToken);
             }
@@ -1302,7 +1311,13 @@ public sealed class DarlingMcpDataTools
                still has, so "the collector recorded nothing" is never said over a window where it recorded rows in a dropped database. */
             var leftOut = DatabasesLeftOut.Distinct(databases.ExcludedNames);
             var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, databases, ranking, cancellationToken, tagFilter);
-            var rows = routed.Rows;
+            /* #7725: the databases the server still lists rank first; what the limit leaves is filled from the left-out databases, ranked the same
+               way and marked database_dropped, so a dropped database's rows never push out a listed row and the grid is not empty while the work is
+               on record. databases_left_out below then names only the databases with no row in the reply. */
+            var rows = await DroppedDatabaseRows.FillAsync(routed.Rows, top, leftOut,
+                async (leftOutFilter, fillTop) => (await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(
+                    postgres, resolved.ServerId, requestedStart, now, fillTop, leftOutFilter, ranking, cancellationToken, tagFilter)).Rows);
+            var leftOutWithoutRows = DroppedDatabaseMark.WithoutRows(leftOut, rows.Select(r => (string?)r.DatabaseName));
             var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
 
             /* #4231 stage 3b: hourly-routed rows have no object_type, sql_handle or plan_handle — stated once
@@ -1451,14 +1466,15 @@ public sealed class DarlingMcpDataTools
                 /* #5226: as on get_top_queries_by_cpu: the raw route's retention notice for a reads ranking past raw's reach. */
                 retention_notice = routed.RetentionNotice,
                 /* #5633 review (finding D): null when the read left no database out. */
-                databases_left_out = DatabasesLeftOut.Named(leftOut),
-                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
+                databases_left_out = DatabasesLeftOut.Named(leftOutWithoutRows),
+                databases_left_out_note = DatabasesLeftOut.Note(leftOutWithoutRows),
                 procedures = result
             }, McpHelpers.JsonOptions)!.AsObject();
 
             /* #5984: the row's query tag, by its (database, schema, object) key; an unmapped procedure carries no `tag` member. */
             if (proceduresPayload["procedures"] is JsonArray procedureRows)
             {
+                DroppedDatabaseMark.Mark(procedureRows, rows.Select(r => (string?)r.DatabaseName).ToList(), leftOut);
                 await QueryTagReadJoin.AttachByKeysAsync(postgres, resolved.ServerId, QueryTagReadJoin.ObjectKind, procedureRows.OfType<JsonObject>().ToList(),
                     rows.Select(r => (string?)QueryTagReadJoin.ObjectKey(r.DatabaseName, r.SchemaName, r.ObjectName)).ToList(), cancellationToken);
             }
