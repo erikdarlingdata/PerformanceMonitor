@@ -60,8 +60,11 @@ public sealed partial class ViewerDataService
         if (read.HasCapture)
         {
             var capturedAt = DateTime.SpecifyKind(read.NewestCapture!.Value, DateTimeKind.Utc);
+            /* #7611: each database against its own ages (database override, server override, global value), the resolution the alerts and the tool use. */
+            var resolver = await DatabaseProtectionThresholdSettings.ReadAsync(
+                _dataSource, server.ServerId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
             var banded = read.Databases
-                .Select(d => (Fact: d, Band: DatabaseProtectionBands.Evaluate(d, capturedAt, DatabaseProtectionThresholds.Default)))
+                .Select(d => (Fact: d, Band: DatabaseProtectionBands.Evaluate(d, capturedAt, resolver.For(d.DatabaseName))))
                 .ToList();
             var summary = DatabaseProtectionBands.Summarize(banded);
             return new ViewerDatabaseProtectionRead(

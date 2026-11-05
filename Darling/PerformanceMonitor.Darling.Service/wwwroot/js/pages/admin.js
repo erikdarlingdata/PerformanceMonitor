@@ -32,6 +32,7 @@ import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyS
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { dailyReportEditor } from "./admin-daily-report.js";
+import { databaseProtectionEditor } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
@@ -145,6 +146,7 @@ const GROUP_LABELS = {
 const KEY_UNITS = [
   ["_seconds", "seconds"],
   ["_minutes", "minutes"],
+  ["_hours", "hours"],
   ["_percent", "%"],
   ["_ms", "ms"],
   ["_gb", "GB"],
@@ -220,9 +222,9 @@ export const GROUP_FIELDS = {
   long_running_job: ["enabled", "multiplier"],
   failed_job: ["enabled", "lookback_minutes"],
   database_state: ["enabled"],
-  backup_overdue: ["enabled"],
-  log_backup_overdue: ["enabled"],
-  checkdb_overdue: ["enabled"],
+  backup_overdue: ["enabled", "threshold_hours"],
+  log_backup_overdue: ["enabled", "threshold_minutes"],
+  checkdb_overdue: ["enabled", "threshold_hours"],
   agent_alert_gaps: ["enabled"],
   ag: ["enabled", "lag_threshold_seconds", "redo_queue_threshold_kb", "disconnect_refire_minutes"],
   delivery: ["mode", "per_event_max", "cooldown_minutes", "send_resolutions"],
@@ -1347,6 +1349,10 @@ async function buildSettings(body, generation) {
     nodes.push(el("h3", { class: "section-title", text: s.title }));
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
     /* #7041: the Daily Health Report is the one setting group the web edits; a signed-in admin gets the form under its rows. */
+    /* #7611: the three Database Protection overdue ages are editable under the alert thresholds, the same way. */
+    if (s.title === "Alert thresholds" && session && session.can_edit === true && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
+      nodes.push(databaseProtectionEditor(res.data, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
+    }
     if (s.title === "Daily Health Report" && session && session.can_edit === true) {
       nodes.push(dailyReportEditor(res.data.daily_report, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }

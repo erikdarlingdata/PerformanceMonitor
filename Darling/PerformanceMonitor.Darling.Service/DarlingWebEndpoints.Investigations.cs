@@ -307,6 +307,18 @@ public static partial class DarlingWebEndpoints
                 run.Body, "/api/alert-settings/daily-report", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
         });
 
+        /* #7611: the three Database Protection overdue ages. The body is the age fields of the backup_overdue, log_backup_overdue and
+           checkdb_overdue groups of get_alert_settings; update_alert_settings' own body validates and writes it. A signed-in admin only. */
+        app.MapPut("/api/alert-settings/database-protection", async Task<IResult> (HttpContext context) =>
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var run = await AgentSetupRunAsync(context, logger, "/api/alert-settings/database-protection",
+                (body, editor, ct) => DarlingWebAlertSettings.SaveDatabaseProtectionAsync(
+                    WebAdminArm.SourceFor(adminArm, context, postgres), body, managedStore, adminWritesOff));
+            return DarlingWebStatementSweep.JsonText(
+                run.Body, "/api/alert-settings/database-protection", logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, run.Status);
+        });
+
         app.MapDelete("/api/notification-routes/{id:int}", async (HttpContext context, int id) =>
         {
             var stopwatch = Stopwatch.StartNew();

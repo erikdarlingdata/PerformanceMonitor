@@ -909,6 +909,7 @@ public sealed partial class DarlingWorker
             backupOverdueEnabled: () => alertSettings.BackupOverdueEnabled,
             logBackupOverdueEnabled: () => alertSettings.LogBackupOverdueEnabled,
             checkDbOverdueEnabled: () => alertSettings.CheckDbOverdueEnabled,
+            protectionThresholds: () => ProtectionThresholdsOf(alertSettings),
             agLagAlertSeconds: () => alertSettings.AgLagAlertSeconds,
             agRedoQueueAlertKb: () => alertSettings.AgRedoQueueAlertKb,
             agDisconnectRefireMinutes: () => alertSettings.AgDisconnectRefireMinutes,

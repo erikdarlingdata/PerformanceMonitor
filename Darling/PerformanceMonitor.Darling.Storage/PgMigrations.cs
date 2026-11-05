@@ -2586,6 +2586,18 @@ ALTER TABLE collect.servers
     ADD COLUMN IF NOT EXISTS next_connect_attempt timestamp;";
 
     /// <summary>
+    /// V245 (#7611): the three Database Protection overdue thresholds on <c>config.config_alert_settings</c>, each <c>integer NOT NULL DEFAULT</c>
+    /// its built-in value so an existing store keeps its behavior: <c>backup_overdue_threshold_hours</c> 168 (7 days), <c>log_backup_overdue_threshold_minutes</c> 60
+    /// and <c>checkdb_overdue_threshold_hours</c> 336 (14 days). Catalog-only adds, idempotent, no backfill (the DEFAULT fills the singleton row). The column
+    /// checkdb_overdue_threshold_hours is the probe's sentinel and is added LAST. An older build never reads the columns and keeps judging against its constants.
+    /// </summary>
+    private const string V245Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_threshold_hours integer NOT NULL DEFAULT 168,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_threshold_minutes integer NOT NULL DEFAULT 60,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_threshold_hours integer NOT NULL DEFAULT 336;";
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -3087,6 +3099,7 @@ $rung$;";
         new Migration(242, "pg-statement-text-own-entries", V242Sql),
         new Migration(243, "waiting-tasks-program-name", V243Sql),
         new Migration(244, "server-connect-down-state", V244Sql),
+        new Migration(245, "database-protection-thresholds", V245Sql),
     };
 
     /// <summary>
