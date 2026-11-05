@@ -103,6 +103,15 @@ public sealed class WebSizeCellsBehaviourTests
     }
 
     [Fact]
+    public void AnUnmeasuredSize_SortsLastLikeAnEmptyCell_NotAboveZero()
+    {
+        var r = Run();
+        // The -1 the reads publish was a null in the old MB field: ascending, it sorts after every measured size, "0 B" included.
+        Assert.Equal(new[] { "0 B", "456.0 KB", "21.4 MB", "—" }, Texts(r, "indexSizeSortedAsc"));
+        Assert.Equal(new[] { "0 B", "456.0 KB", "—" }, Texts(r, "heapSortedAsc"));
+    }
+
+    [Fact]
     public void BufferPoolResidencyAndDeviceIo_ShowSmallValuesInTheirOwnUnit_NotZeroOrOneMegabyte()
     {
         var r = Run();

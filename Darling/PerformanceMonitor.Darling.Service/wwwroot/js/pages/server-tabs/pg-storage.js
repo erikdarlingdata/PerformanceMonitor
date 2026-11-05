@@ -10,8 +10,13 @@ import { fmtBytes } from "../../util.js";
 import { detailColumn, bloatVerdict, droppabilityVerdict, costFigure, lastScanNoteWord, fillfactorNoteWord, toastNoteWord, indexSkipWord } from "../../pg-grid-text.js";
 
 /* #7564: a size column reads the reply's exact byte count and prints it with fmtBytes, never a rounded MB turned back into KB (0.45 MB of an index of
-   456 KB read "460.8 KB"). The reads publish -1 for a size they could not measure, which is a dash and not "-1 B". */
-const sizeOrDash = (key) => (row) => (row[key] != null && Number(row[key]) >= 0 ? fmtBytes(row[key]) : "—");
+   456 KB read "460.8 KB"). The reads publish -1 for a size they could not measure. The old MB field was null for that row, and a null is what the grid
+   treats as empty: the cell is a dash, the Is empty filter counts it, a sort puts it last, and Copy and CSV leave it blank. So the rows go to the
+   grid with those -1 values turned back into null, and the plain "bytes" format prints the dash. */
+const unmeasuredAsNull = (...keys) => (rows) =>
+  rows.map((r) => (keys.some((k) => r[k] != null && Number(r[k]) < 0) ? { ...r, ...Object.fromEntries(keys.map((k) => [k, r[k] != null && Number(r[k]) < 0 ? null : r[k]])) } : r));
+export const PG_BLOAT_ROWS = unmeasuredAsNull("heap_bytes");
+export const PG_INDEX_USAGE_ROWS = unmeasuredAsNull("index_bytes");
 
 /* The sentence under a panel whose grid was cut at its row limit (#7551). It names the count when the read gave one, and falls back to the plain sentence when it did not. */
 function pageCutLine(noun, shown, total, tilesNote) {
@@ -72,7 +77,7 @@ export const PG_BLOAT_COLUMNS = [
      "Unknown" rather than a severity, so it renders neutral - colouring it would assert the very thing the
      suppression denies. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "heap_bytes", label: "Heap", format: "bytes", display: sizeOrDash("heap_bytes") },
+  { key: "heap_bytes", label: "Heap", format: "bytes" },
   { key: "bloat_bytes_estimate", label: "Bloat (est.)", format: "bytes" },
   { key: "bloat_pct_estimate", label: "Bloat % (est.)", format: "num2" },
   { key: "estimate_suppressed", label: "Suppressed", format: "bool" },
@@ -109,7 +114,7 @@ export const PG_INDEX_USAGE_COLUMNS = [
      blocker is Warning, and an index we have not watched for two samples is Healthy rather than Warning -
      too-early-to-say must not look like a finding. */
   { key: "severity", label: "Severity", sevKey: "severity" },
-  { key: "index_bytes", label: "Size", format: "bytes", display: sizeOrDash("index_bytes") },
+  { key: "index_bytes", label: "Size", format: "bytes" },
   { key: "scans_in_window", label: "Scans in Window", format: "int" },
   { key: "total_scans_since_stats_reset", label: "Lifetime Scans", format: "int" },
   { key: "last_scan", label: "Last Scan", format: "time" },

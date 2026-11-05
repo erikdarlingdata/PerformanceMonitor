@@ -69,7 +69,7 @@ const sizes = [
   { index_bytes: -1, index_mb: null, estimated_reclaimable_bytes: 0, estimated_reclaimable_mb: 0 },
   { index_bytes: 22487040, index_mb: 21.45, estimated_reclaimable_bytes: 4194304, estimated_reclaimable_mb: 4 },
 ];
-out.byIndexSize = cells(storage.PG_INDEX_USAGE_COLUMNS, sizes, "Size");
+out.byIndexSize = cells(storage.PG_INDEX_USAGE_COLUMNS, storage.PG_INDEX_USAGE_ROWS(sizes), "Size");
 out.bloatSize = cells(storage.PG_INDEX_BLOAT_COLUMNS, sizes, "Size");
 out.bloatReclaimable = cells(storage.PG_INDEX_BLOAT_COLUMNS, sizes, "Reclaimable");
 
@@ -77,8 +77,23 @@ const tables = [
   { heap_bytes: 466944, heap_mb: 0.45, bloat_bytes_estimate: 8192, bloat_mb_estimate: 0.01 },
   { heap_bytes: -1, heap_mb: null, bloat_bytes_estimate: null, bloat_mb_estimate: null },
 ];
-out.tableHeap = cells(storage.PG_BLOAT_COLUMNS, tables, "Heap");
+out.tableHeap = cells(storage.PG_BLOAT_COLUMNS, storage.PG_BLOAT_ROWS(tables), "Heap");
 out.tableBloat = cells(storage.PG_BLOAT_COLUMNS, tables, "Bloat (est.)");
+
+/* #7564 review: the same -1 rows drawn through the panel path (VIZ.table with the page's row step), then sorted ascending by the Size header. An unmeasured
+   row is a null to the grid, so it sorts last and its cell is a dash; as a raw -1 it sorted above "0 B". */
+const sortedSizes = (columns, orderRows, rowsKey, rows, label) => {
+  const grid = VIZ.table({ [rowsKey]: rows }, { rowsKey, columns, orderRows });
+  const table = all(grid).find((n) => n.tag === "table");
+  const heads = table.find("thead").find("tr").children;
+  const at = heads.findIndex((h) => norm(h.textContent) === norm(label));
+  heads[at].click();
+  return { texts: table.children[1].children.map((tr) => tr.children[at].textContent) };
+};
+out.indexSizeSortedAsc = sortedSizes(storage.PG_INDEX_USAGE_COLUMNS, storage.PG_INDEX_USAGE_ROWS, "indexes",
+  [{ index_bytes: 22487040 }, { index_bytes: -1 }, { index_bytes: 0 }, { index_bytes: 466944 }], "Size");
+out.heapSortedAsc = sortedSizes(storage.PG_BLOAT_COLUMNS, storage.PG_BLOAT_ROWS, "tables",
+  [{ heap_bytes: 466944 }, { heap_bytes: -1 }, { heap_bytes: 0 }], "Heap");
 
 /* 29 buffers of 8 KB is 0.2% of a small pool and 232 KB; the reply rounds it to 0.2 MB. */
 out.resident = cells(io.PG_BUFFER_USAGE_COLUMNS, [{ buffer_bytes: 29 * 8192, buffer_mb: 0.2 }, { buffer_bytes: 0, buffer_mb: 0 }], "Resident");
