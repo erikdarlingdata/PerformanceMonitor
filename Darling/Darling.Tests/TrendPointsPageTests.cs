@@ -69,8 +69,60 @@ public sealed class TrendPointsPageTests
         // One point per 2 px of the plot: the plot is the window less the sidebar and the card, so well under half the window's pixels.
         Assert.InRange(narrow, 200, 640);
         Assert.InRange(wide, 600, 1280);
-        Assert.Equal(narrow, run.GetProperty("cpu1280").GetInt32());
         Assert.True(run.GetProperty("halfWidth2560").GetInt32() < wide, "a half-width panel has a narrower plot");
+    }
+
+    [Fact]
+    public void ALevelRead_KeepsTheOldBudget_SoAShortSpikeKeepsItsHeight()
+    {
+        // The CPU chart draws only each bucket's mean: at a plot-sized ask a one-minute 100% spike over 0% would draw as about 20%.
+        var run = Result.Value;
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("cpu1280").ValueKind);
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("pgCpu1280").ValueKind);
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("serverLevel").ValueKind);
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("perfmonGauge").ValueKind);
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("readToolCpuLinePlot").ValueKind);
+        // A rate keeps the ask: the bucket's mean is its honest value.
+        Assert.Equal(run.GetProperty("p1280").GetInt32(), run.GetProperty("serverRate").GetInt32());
+        Assert.Equal(run.GetProperty("p1280").GetInt32(), run.GetProperty("perfmonRate").GetInt32());
+    }
+
+    [Fact]
+    public void ATableOrStatPanel_AndACallerThatNamesNoPlot_SendNoPoints_ButALinePanelStillDoes()
+    {
+        var run = Result.Value;
+        // A saved-view panel measures a plot only when it draws a line.
+        Assert.Equal(1114, run.GetProperty("panelLine").GetInt32());
+        Assert.Equal(0, run.GetProperty("panelTable").GetInt32());
+        Assert.Equal(0, run.GetProperty("panelStat").GetInt32());
+        Assert.Equal(0, run.GetProperty("panelBandlist").GetInt32());
+        // The real readTool on a 1280 px page: no plot named, no points (it used to estimate one from the window).
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("readToolNoPlot").ValueKind);
+        Assert.Equal(JsonValueKind.Null, run.GetProperty("readToolNoPlotCaller").ValueKind);
+        Assert.Equal(557, run.GetProperty("readToolLinePlot").GetInt32());
+    }
+
+    /// <summary>
+    /// The page's two sets of reads (the rate reads that take a plot-sized ask, and the level reads that do not) are exactly the routes of
+    /// <c>/api/read</c> that take the chart budget, so a route added to WebReads.cs and not classified in trend-points.js fails here. There is no
+    /// behavioural way to list the routes (the table holds delegates over a database), so the route names are read from the table's text.
+    /// </summary>
+    [Fact]
+    public void TheClassifiedReads_AreExactlyTheRoutesThatTakeTheChartBudget()
+    {
+        var web = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.WebReads.cs");
+        var entries = System.Text.RegularExpressions.Regex.Split(web, @"(?=\[""get_[a-z_]+""\] = )");
+        var routes = entries
+            .Where(e => e.Contains("ChartBudget(c)", StringComparison.Ordinal))
+            .Select(e => System.Text.RegularExpressions.Regex.Match(e, @"^\[""(get_[a-z_]+)""\]").Groups[1].Value)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        var run = Result.Value;
+        var kept = run.GetProperty("keptReads").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        var meanOnly = run.GetProperty("meanOnlyReads").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        Assert.Empty(kept.Intersect(meanOnly));
+        Assert.Equal(routes, kept.Concat(meanOnly).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal(16, routes.Length);
     }
 
     [Fact]

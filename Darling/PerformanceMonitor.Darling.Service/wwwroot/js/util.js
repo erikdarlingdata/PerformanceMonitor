@@ -20,7 +20,7 @@
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
 import { plainText, shortEmptyLine } from "./plain-text.js";
-import { plotWidthFor, withPlotPoints } from "./trend-points.js";
+import { withPlotPoints } from "./trend-points.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -1841,9 +1841,10 @@ export function alertDeliveryState(a) {
 export function readTool(tool, params, signal, options) {
   const plan = planCustomRange(tool, params, !!(options && options.wholeWindow));
   const selection = params ? params[TRIM_TO] : undefined;
-  /* #7661: a trend chart asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute buckets the plot
-     cannot show. `options.plotPx` is the measured plot of the panel asking; without it the width is estimated from the window (a full-width panel's). */
-  const plotPx = options && options.plotPx > 0 ? options.plotPx : plotWidthFor(0, typeof window !== "undefined" ? window.innerWidth : 0, 2);
+  /* #7661: a line chart over a rate read asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute
+     buckets the plot cannot show. Only a caller that draws that line says so, with `options.plotPx` (the measured or estimated plot of the panel);
+     a table, a stat or any other caller passes none and its read keeps the old budget, and so does a read of a level (withPlotPoints). */
+  const plotPx = options && options.plotPx > 0 ? options.plotPx : 0;
   const sized = withPlotPoints(tool, plan.params, plotPx);
   return apiGetJoined("/api/read/" + tool + buildQuery(withDatabaseFilter(tool, sized)), signal)
     .then(localizeWindowNote)

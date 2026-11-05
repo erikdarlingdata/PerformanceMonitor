@@ -8,8 +8,8 @@
 
 import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
-import { plotWidthFor } from "../../trend-points.js";
-import { SNAPSHOT_LIST_CAP,snapshotTruncatedNote } from "../active-snapshots.js";
+import { estimatedPlotPx } from "../../trend-points.js";
+import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
@@ -136,9 +136,11 @@ export function fanout(read, params, specs, intro = null) {
   /* #6793: the batch's signal, captured while the tab is built (setPanelSignal holds it then), so leaving the page or a redraw cancels this read. */
   const signal = getPanelSignal();
   (async () => {
-    /* #7661: the plot of the widest panel over this read sets how many points it asks for (readTool, trend-points.js). */
-    const plotPx = plotWidthFor(0, typeof window !== "undefined" ? window.innerWidth : 0, specs.some((s) => (s.span ?? 2) === 2) ? 2 : 1);
-    const res = await readToolWithinKeptHistory(read, params, signal, { plotPx });
+    /* #7661: the plot of the widest line panel over this read sets how many points it asks for (readTool, trend-points.js). A fan-out with no line
+       panel (tables, stats) sends none and keeps the old budget. */
+    const lineSpecs = specs.filter((s) => s.viz === "line");
+    const plotPx = lineSpecs.length ? estimatedPlotPx(lineSpecs.some((s) => (s.span ?? 2) === 2) ? 2 : 1) : 0;
+    const res = await readToolWithinKeptHistory(read, params, signal, plotPx > 0 ? { plotPx } : undefined);
     if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [noticeStrip(intro.text)]);
@@ -569,7 +571,7 @@ function overlayOf(kind, server, ctx) {
       key: (row) => row.database_name + "|" + row.full_name,
       read: async (row, ranking, signal) => {
         const metric = PROCEDURE_OVERLAY_METRICS[ranking] || PROCEDURE_OVERLAY_METRICS.cpu;
-        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal);
+        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal, { plotPx: estimatedPlotPx() });
         if (trend.kind !== "data" || !trend.data) return null;
         const points = procedurePoints(trend.data.trend).map((p) => ({ t: timeOf(p.time), v: p[metric.key] == null ? NaN : Number(p[metric.key]) }));
         return { points, label: row.database_name + " · " + truncate(row.full_name, 40) + " (" + metric.label + ")" };
@@ -1172,7 +1174,7 @@ export function serverTrendPanel(server, ctx, kind) {
   const spec = SERVER_TRENDS[kind];
   const { panel, body } = panelShell(spec.title + " Trend", ctx.label, 2, "get_server_trend");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal, { plotPx: estimatedPlotPx() });
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
@@ -1257,7 +1259,7 @@ export function seriesTrendPanel(server, ctx, kind) {
   const spec = SERIES_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, spec.subtitle + ", " + ctx.label, 2, "get_server_trend");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal);
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal, { plotPx: estimatedPlotPx() });
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);

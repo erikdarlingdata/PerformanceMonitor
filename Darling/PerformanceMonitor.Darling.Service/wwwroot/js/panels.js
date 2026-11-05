@@ -66,7 +66,7 @@ import {
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
-import { plotWidthFor } from "./trend-points.js";
+import { panelPlotPx } from "./trend-points.js";
 import { withheldDisplayText } from "./mute-context.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
@@ -203,10 +203,12 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
   /* #7257: a panel of a saved view (it has onRetry) sends a read the service refused busy (429) once more after its Retry-After. */
   /* #7661: a trend chart asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute buckets the
      plot cannot show. Measured here, when the panel loads: from its body when it is on the page, else estimated from the window. */
-  const plotPx = plotWidthFor(body.clientWidth, typeof window !== "undefined" ? window.innerWidth : 0, desc.span);
+  /* Only a panel that draws a line has a plot: a table, a stat or a band list sends no `plotPx`, so its read keeps the old budget and its rows. */
+  const plotPx = panelPlotPx(desc, body.clientWidth, typeof window !== "undefined" ? window.innerWidth : 0);
+  const readOptions = plotPx > 0 ? { plotPx } : undefined;
   const readOnce = (tool, params) => onRetry
-    ? retryOnceWhenBusy(() => readTool(tool, params, signal, { plotPx }), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
-    : readTool(tool, params, signal, { plotPx });
+    ? retryOnceWhenBusy(() => readTool(tool, params, signal, readOptions), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
+    : readTool(tool, params, signal, readOptions);
   const res = await readWithinKeptHistory(
     (params) => (desc.read ? readOnce(desc.read, params) : apiGet(desc.path + buildQuery(params), signal)),
     desc.params
