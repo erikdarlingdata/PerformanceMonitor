@@ -46,19 +46,35 @@ CS = _load("ci_select", "ci-select.py")
 PLAN = _load("ci_plan", "ci-plan.py")
 
 
-def git(*args: str) -> str:
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # what a root commit is diffed against
+
+
+def git(*args: str, ok: "tuple[int, ...]" = (0,)) -> str:
+    """git's stdout. A failure stops the run with the command and git's stderr: an empty answer must never stand in
+    for an error, or a window quietly shrinks (#7728). `ok` lists the exit codes that are an answer, not a failure."""
     out = subprocess.run(["git", "-C", ROOT, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return out.stdout if out.returncode == 0 else ""
+    if out.returncode not in ok:
+        raise SystemExit(f"git {' '.join(args)} failed (exit {out.returncode}): {out.stderr.strip() or 'no error text'}")
+    return out.stdout
+
+
+def parent_of(sha: str) -> str:
+    """`sha^`, or the empty tree for a root commit, so a root commit's files are its whole tree."""
+    return sha + "^" if len(git("rev-list", "--parents", "-n", "1", sha).split()) > 1 else EMPTY_TREE
+
+
+def merge_base(base: str, sha: str) -> str:
+    mb = git("merge-base", base, sha, ok=(0, 1)).strip()
+    if not mb:
+        raise SystemExit(f"{sha} has no merge base with {base}")
+    return mb
 
 
 def files_of(sha: str, base: "str | None" = None) -> "list[str]":
-    """The files a commit changes against its first parent, or the merge base with `base` when one is given."""
-    if base:
-        mb = git("merge-base", base, sha).strip()
-        if not mb:
-            return []
-        return [x for x in git("diff", "--no-renames", "--name-only", mb, sha).split("\n") if x]
-    return [x for x in git("diff", "--no-renames", "--name-only", sha + "^", sha).split("\n") if x]
+    """The files a commit changes against its first parent (the empty tree for a root commit), or against the merge
+    base with `base` when one is given. A git failure raises; an empty list means the commit changes no files."""
+    since = merge_base(base, sha) if base else parent_of(sha)
+    return [x for x in git("diff", "--no-renames", "--name-only", since, sha).split("\n") if x]
 
 
 def _pct(values: "list[float]", q: float) -> float:
@@ -129,10 +145,11 @@ def cmd_merged(a) -> int:
     rows = []
     for line in log:
         sha, when, subject = line.split("\t", 2)
+        parent = parent_of(sha)
         files = files_of(sha)
         m = re.search(r"\(#(\d+)\)\s*$", subject)
-        sel = rp.select(files, sha, with_named=True)
-        bare = rp.select(files, sha)
+        sel = rp.select(files, sha, base_sha=parent, with_named=True)
+        bare = rp.select(files, sha, base_sha=parent)
         n, nb = rp.count(sel), rp.count(bare)
         row = {"sha": sha, "when": when, "pr": int(m.group(1)) if m else None, "files": len(files), "full": sel["full"],
                "reason": sel["reason"], "darling": n.get("darling", 0), "lite": n.get("lite", 0),
@@ -142,7 +159,7 @@ def cmd_merged(a) -> int:
             before = [x for x in maps if x["built_at"] <= when]
             if before:
                 row["map_sha"] = before[-1]["sha"]
-                row["drift"] = len([x for x in git("diff", "--no-renames", "--name-only", before[-1]["sha"], sha + "^").split("\n") if x])
+                row["drift"] = len([x for x in git("diff", "--no-renames", "--name-only", before[-1]["sha"], parent).split("\n") if x])
         rows.append(row)
     if a.out:
         with open(a.out, "w", encoding="utf-8", newline="\n") as fh:
@@ -156,6 +173,8 @@ def cmd_merged(a) -> int:
 def report(rows: "list[dict]", rp: Replay) -> None:
     total = sum(rp.size.values())
     prod = [r for r in rows if r["files"]]
+    print(f"{len(rows)} commits: {len(prod)} change files and are replayed below, {len(rows) - len(prod)} change no files"
+          f" (empty commits: counted here, left out of every figure below)")
     full = [r for r in prod if r["full"]]
     part = [r for r in prod if not r["full"]]
     print(f"FULL: {len(full)} of {len(prod)} ({100 * len(full) / max(1, len(prod)):.0f}%)")
@@ -190,12 +209,16 @@ def cmd_misses(a) -> int:
         names = r.get("fail_names") or []
         if not names:
             continue
-        files = r.get("files") or (files_of(r["sha"]) if r["event"] == "push" else files_of(r["sha"], a.base))
-        if not files:
-            out.append({**r, "status": "no changed files found"})
-            continue
-        sel = rp.select(files, r["sha"], base_sha=None if r["event"] == "push" else git("merge-base", a.base, r["sha"]).strip() or None,
-                        with_named=True)
+        try:  # a head that was never fetched must stop the run, not read as a run with no files
+            base_sha = None if r["event"] == "push" else merge_base(a.base, r["sha"])
+            files = r.get("files") or files_of(r["sha"], None if r["event"] == "push" else a.base)
+            if not files:
+                out.append({**r, "status": "no changed files found"})
+                continue
+            base_sha = base_sha or parent_of(r["sha"])
+        except SystemExit as e:
+            raise SystemExit(f"run {r['id']}: cannot read commit {r['sha']} (fetch it first): {e}")
+        sel = rp.select(files, r["sha"], base_sha=base_sha, with_named=True)
         for cls in names:
             prefix, simple = CS.split_failed_class(cls)
             suite = CS.SUITE_BY_PREFIX.get(prefix)
