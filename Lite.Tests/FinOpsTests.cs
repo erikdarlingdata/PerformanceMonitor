@@ -350,6 +350,29 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
             $"The 50 GB grant must out-share the 1 GB one, got {oneOff.MemoryShare} vs {steady.MemoryShare}");
     }
 
+    /// <summary>#7695: a hash that ran in two databases is named for the one that did the most CPU, not the alphabetically
+    /// first, and carries how many databases are in the total. A tie goes to the name, ignoring case. A one-database hash
+    /// reports 1.</summary>
+    [Fact]
+    public async Task HighImpact_NamesTheDatabaseWithTheMostCpu_AndCountsTheDatabasesInTheTotal()
+    {
+        var results = await RunHighImpactAsync(s => s.SeedQueryStatsAcrossDatabasesAsync());
+
+        var late = Assert.Single(results, r => r.QueryHash == "LATEWINNER");
+        Assert.Equal("Zulu", late.DatabaseName);
+        Assert.Equal(2, late.DatabaseCount);
+        Assert.Equal(100m, late.TotalExecutions);
+        Assert.Equal(10_000m, late.TotalCpuMs);
+
+        var tied = Assert.Single(results, r => r.QueryHash == "TIED");
+        Assert.Equal("alpha", tied.DatabaseName);
+        Assert.Equal(2, tied.DatabaseCount);
+
+        var solo = Assert.Single(results, r => r.QueryHash == "SOLO");
+        Assert.Equal("Mid", solo.DatabaseName);
+        Assert.Equal(1, solo.DatabaseCount);
+    }
+
     [Fact]
     public async Task HighImpactSkew_DominantQueryHighScore()
     {

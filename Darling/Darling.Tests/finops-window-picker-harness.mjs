@@ -145,6 +145,14 @@ try {
     solo: stamp("2026-03-02T12:00:00Z"),
     lower: stamp("2026-03-03T13:00:00Z"),
   };
+  // #7695: a High Impact row whose figures span several databases names the busiest one, then "+ N more" with a tooltip.
+  const { tab: highImpact } = await import(pathToFileURL(path.join(scratch, "pages", "finops", "high-impact.js")).href);
+  const titles = (node) => [node.attrs.title, ...node.children.flatMap(titles)].filter(Boolean);
+  const hiRow = (name, count) => ({ query_hash: "0xAA", database_name: name, database_count: count, total_executions: 5, sample_query_text: "select 1" });
+  body = JSON.stringify({ rows: [hiRow("Zeta", 2), { ...hiRow("Solo", 1), query_hash: "0xBB" }, { ...hiRow("Old", undefined), query_hash: "0xCC" }], hours_back: 24 });
+  const rootHi = highImpact.build("srv-hi", {});
+  await new Promise((r) => setTimeout(r, 20));
+  out.highImpactDatabases = { text: rootHi.textContent, titles: titles(rootHi) };
   console.log(JSON.stringify(out));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
