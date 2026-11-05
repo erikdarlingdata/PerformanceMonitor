@@ -7,10 +7,20 @@
  */
 
 import { configValueCell } from "./config-values.js";
+import { localTime } from "../../util.js";
+
+/* #7662: change_time is the first capture that held the new value, and the config snapshots run on connect and once a day,
+   so it can trail the change by a day. The grid says so: the column is "First seen", and a row that has the capture before
+   it gives the span the change happened in. A state_desc row dated from database_states has no earlier capture and shows
+   its one time. Both times are shown in the browser's zone. */
+export function firstSeenCell(r) {
+  const seen = localTime(r.change_time);
+  return r.previous_capture_time ? "between " + localTime(r.previous_capture_time) + " and " + seen : seen;
+}
 
 
 export const SERVER_CHANGE_COLUMNS = [
-  { key: "change_time", label: "Changed", format: "time" },
+  { key: "change_time", label: "First seen", display: firstSeenCell },
   { key: "configuration_name", label: "Setting" },
   { key: "old_value_configured", label: "Old (configured)" },
   { key: "new_value_configured", label: "New (configured)" },
@@ -19,7 +29,7 @@ export const SERVER_CHANGE_COLUMNS = [
 ];
 
 export const DB_CHANGE_COLUMNS = [
-  { key: "change_time", label: "Changed", format: "time" },
+  { key: "change_time", label: "First seen", display: firstSeenCell },
   { key: "database_name", label: "Database", name: true },
   { key: "setting_name", label: "Setting" },
   /* #7416 item 3: a value that only gained or lost whitespace shows it, so Old and New never read the same. */

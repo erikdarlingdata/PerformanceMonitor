@@ -153,10 +153,51 @@ public sealed partial class ViewerDataService
         var snapshots = await ReadDatabaseConfigSnapshotsAsync(serverId, endUtc, databaseNames, cancellationToken);
         /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting an operator changed.
            The grid lists settings only (Change Watch and the analysis engine drop it the same way). */
-        return ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc)
+        var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc);
+        /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. */
+        var dated = ConfigChangeDiff.ApplyDatabaseStateTimes(diffed, await ReadDatabaseStateReadingsAsync(serverId, diffed, cancellationToken));
+        return dated
             .Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
+    }
+
+    /// <summary>#7662: the database_states readings (collected every minute) of the databases whose <c>state_desc</c> changed, between the
+    /// snapshot before the earliest such change and the latest. $1 server_id, $2 database names, $3 and $4 naive UTC.</summary>
+    public const string DatabaseStateReadingsSql = """
+        SELECT collection_time, database_name, state_desc
+        FROM database_states
+        WHERE server_id = $1
+        AND   database_name = ANY($2)
+        AND   collection_time > $3
+        AND   collection_time <= $4
+        AND   state_desc IS NOT NULL
+        ORDER BY collection_time
+        """;
+
+    private async Task<List<ConfigChangeDiff.DatabaseStateObservation>> ReadDatabaseStateReadingsAsync(
+        int serverId, IReadOnlyList<ConfigChangeDiff.DatabaseConfigChange> changes, CancellationToken cancellationToken)
+    {
+        var rows = new List<ConfigChangeDiff.DatabaseStateObservation>();
+        var stateChanges = changes.Where(c => c.SettingName == "state_desc").ToList();
+        if (stateChanges.Count == 0)
+        {
+            return rows;
+        }
+
+        await using var command = _dataSource.CreateCommand(DatabaseStateReadingsSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = stateChanges.Select(c => c.DatabaseName).Distinct(StringComparer.Ordinal).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(stateChanges.Min(c => c.PreviousCaptureTime ?? c.ChangeTime.AddDays(-1)), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(stateChanges.Max(c => c.ChangeTime), DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new ConfigChangeDiff.DatabaseStateObservation(reader.GetDateTime(0), reader.GetString(1), reader.GetString(2)));
+        }
+
+        return rows;
     }
 
     /// <summary>Trace-flag changes in the window [startUtc, endUtc]. Reads every snapshot up to endUtc then
@@ -313,7 +354,8 @@ public sealed class ServerConfigChangeRow(ConfigChangeDiff.ServerConfigChange ch
     public bool? IsDynamic => change.IsDynamic;
     public bool? IsAdvanced => change.IsAdvanced;
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
+    /// <summary>#7662: the first capture that held the new value, with the capture before it when there is one (the change happened between the two).</summary>
+    public string ChangeTimeDisplay => ConfigChangeRowText.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
     public string DynamicDisplay => change.DynamicDisplay;
     public string AdvancedDisplay => change.AdvancedDisplay;
     public bool RequiresRestart => change.RequiresRestart;
@@ -332,8 +374,21 @@ public sealed class DatabaseConfigChangeRow(ConfigChangeDiff.DatabaseConfigChang
     public string? OldValue => ConfigValueText.Shown(change.OldValue, change.NewValue);
     public string? NewValue => ConfigValueText.Shown(change.NewValue, change.OldValue);
 
-    public string ChangeTimeDisplay => ViewerTimeHelper.FormatForDisplay(change.ChangeTime, "yyyy-MM-dd HH:mm:ss");
+    /// <summary>#7662: as the server grid: a state_desc row dated from database_states has no earlier capture and shows its one time.</summary>
+    public string ChangeTimeDisplay => ConfigChangeRowText.FirstSeen(change.ChangeTime, change.PreviousCaptureTime);
     public string ChangeDescription => change.ChangeDescription;
+}
+
+/// <summary>#7662: the Config Changes time column's text.</summary>
+public static class ConfigChangeRowText
+{
+    public static string FirstSeen(DateTime changeTime, DateTime? previousCaptureTime)
+    {
+        var seen = ViewerTimeHelper.FormatForDisplay(changeTime, "yyyy-MM-dd HH:mm:ss");
+        return previousCaptureTime is null
+            ? seen
+            : "between " + ViewerTimeHelper.FormatForDisplay(previousCaptureTime.Value, "yyyy-MM-dd HH:mm:ss") + " and " + seen;
+    }
 }
 
 /// <summary>One trace-flag change (Trace Flag Changes grid). Wraps

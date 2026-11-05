@@ -92,7 +92,9 @@ public sealed class DarlingMcpConfigHistoryTools
                 old_value_in_use = c.OldValueInUse,
                 new_value_in_use = c.NewValueInUse,
                 is_dynamic = c.IsDynamic,
-                is_advanced = c.IsAdvanced
+                is_advanced = c.IsAdvanced,
+                /* #7662: change_time is the first capture that held the new value; the change happened after this one. */
+                previous_capture_time = c.PreviousCaptureTime?.ToString("o")
             });
 
             var json = JsonSerializer.Serialize(new
@@ -154,7 +156,10 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, databases, cancellationToken);
-            var allChanges = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. */
+            var allChanges = ConfigChangeDiff.ApplyDatabaseStateTimes(
+                diffed, await DarlingConfigHistoryReader.GetDatabaseStateReadingsAsync(postgres, resolved.ServerId, diffed, cancellationToken));
             /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
                status_changes so the history is kept without calling it a configuration change. */
             var changes = allChanges.Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();
@@ -183,7 +188,8 @@ public sealed class DarlingMcpConfigHistoryTools
                 database_name = c.DatabaseName,
                 setting_name = c.SettingName,
                 old_value = c.OldValue,
-                new_value = c.NewValue
+                new_value = c.NewValue,
+                previous_capture_time = c.PreviousCaptureTime?.ToString("o")
             });
 
             var json = JsonSerializer.Serialize(new
@@ -204,7 +210,8 @@ public sealed class DarlingMcpConfigHistoryTools
                     database_name = c.DatabaseName,
                     setting_name = c.SettingName,
                     old_value = c.OldValue,
-                    new_value = c.NewValue
+                    new_value = c.NewValue,
+                    previous_capture_time = c.PreviousCaptureTime?.ToString("o")
                 })
             }, McpHelpers.JsonOptions);
 

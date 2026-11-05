@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -209,6 +210,46 @@ internal static class DarlingConfigHistoryReader
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? "" : reader.GetString(1),
                 values));
+        }
+
+        return rows;
+    }
+
+    /// <summary>#7662: the database_states readings (collected every minute) of the databases named in $2 between $3 and $4, which
+    /// is how a <c>state_desc</c> change gets the minute the state was seen instead of the next config snapshot. $1 server_id,
+    /// $2 database names, $3 and $4 naive UTC.</summary>
+    public const string DatabaseStateReadingsSql = """
+        SELECT collection_time, database_name, state_desc
+        FROM database_states
+        WHERE server_id = $1
+        AND   database_name = ANY($2)
+        AND   collection_time > $3
+        AND   collection_time <= $4
+        AND   state_desc IS NOT NULL
+        ORDER BY collection_time
+        """;
+
+    /// <summary>The readings that can date the <c>state_desc</c> rows of <paramref name="changes"/> (none when there are no such rows).</summary>
+    public static async Task<List<ConfigChangeDiff.DatabaseStateObservation>> GetDatabaseStateReadingsAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyList<ConfigChangeDiff.DatabaseConfigChange> changes, CancellationToken cancellationToken = default)
+    {
+        var rows = new List<ConfigChangeDiff.DatabaseStateObservation>();
+        var stateChanges = changes.Where(c => c.SettingName == "state_desc").ToList();
+        if (stateChanges.Count == 0)
+        {
+            return rows;
+        }
+
+        await using var command = postgres.CreateCommand(DatabaseStateReadingsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = stateChanges.Select(c => c.DatabaseName).Distinct(StringComparer.Ordinal).ToArray() });
+        DarlingMcpReadParameters.AddTimestamp(command, stateChanges.Min(c => c.PreviousCaptureTime ?? c.ChangeTime.AddDays(-1)));
+        DarlingMcpReadParameters.AddTimestamp(command, stateChanges.Max(c => c.ChangeTime));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new ConfigChangeDiff.DatabaseStateObservation(reader.GetDateTime(0), reader.GetString(1), reader.GetString(2)));
         }
 
         return rows;
