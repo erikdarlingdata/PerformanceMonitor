@@ -131,7 +131,7 @@ FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
 AND   ($2::text[] IS NULL OR database_name = ANY($2))
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
     /// <summary>
     /// The <c>precondition</c> envelope when the collector serving this read recorded one on its most recent
