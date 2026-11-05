@@ -220,6 +220,9 @@ function sweepDocument(d) {
     whp ? tile(fmtInt(whp.length), "would have paged", whp.length ? "sweep-tile-band-Critical" : null) : null,
   ]));
 
+  /* #7669: the two pages answer different questions, and a reader who sees one server in two bands needs to be told which is which. */
+  nodes.push(el("div", { class: "sweep-line meta", text: "A band covers what happened in the sweep's span. Fleet Overview shows the state now." }));
+
   /* Changes since the previous sweep — the diff is the feature's acceptance test, so it leads. */
   const changes = report.changes || {};
   const transitions = asArray(changes.band_transitions);
