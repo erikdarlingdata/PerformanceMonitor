@@ -1347,7 +1347,7 @@ function cell(row, c) {
   const raw = getPath(row, c.key);
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
-  if (c.name) cls.push("name-cell");
+  if (c.name) cls.push(c.path ? "name-cell path-cell" : "name-cell");
   else if (c.clamp) cls.push("clamp");
   else if (c.wrap) cls.push("wrap");
   if (c.follow) cls.push("wrap-follow");
@@ -1386,8 +1386,9 @@ function cell(row, c) {
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
     : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
   /* #7533: `name: true` is a name column (Database, File, Path, Job, Instance): one line under the stylesheet's window-following cap, an ellipsis, and the whole name in the cell's title.
+     `path: true` (a file path) cuts the START instead, so the file name at the end stays visible (#7533 review): see clampText.
      It does not open on a click, because a name is read and copied, not expanded. Copy cell and the CSV read the row, so they carry the whole name too. */
-  if (c.name) return el("td", { class: cls.join(" ") || null }, [clampText(text, { expandable: false })]);
+  if (c.name) return el("td", { class: cls.join(" ") || null }, [clampText(text, { expandable: false, path: c.path === true })]);
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   /* #6154: `detailKey` names a field of the same row that holds the long explanation. The cell shows only its short value and the
      explanation opens under it on a click (a <details>, so the keyboard works), so a row stays one line tall. Text that is the same

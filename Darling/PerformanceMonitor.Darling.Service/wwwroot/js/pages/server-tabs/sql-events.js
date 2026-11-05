@@ -55,7 +55,7 @@ export const IO_ISSUE_COLUMNS = [
   { key: "interval_long_ios", label: "Interval Long IOs", format: "int" },
   { key: "total_long_ios", label: "Total Long IOs", format: "int" },
   { key: "longest_pending_requests_duration_ms", label: "Pending Duration ms", format: "ms" },
-  { key: "longest_pending_requests_file_path", label: "File Path", name: true },
+  { key: "longest_pending_requests_file_path", label: "File Path", name: true, path: true },
 ];
 
 export const CPU_TASK_COLUMNS = [

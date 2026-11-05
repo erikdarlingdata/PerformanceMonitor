@@ -200,4 +200,32 @@ out.nameCol = {
   followRenderTdClass: nmr[0].children[4].className,
 };
 
+/* #7533 review: a path column (`path: true`) keeps the file name visible. The cell is cut at its START (the span runs right to left, so the ellipsis is at the left), and the path's own
+   order lives in a <bdi> child so the drive letter and backslashes do not jump to the other end. Title, text and the bdi all hold the whole path. */
+const longPath = "D:\\MSSQL\\Data\\MSSQL16.MSSQLSERVER\\MSSQL\\DATA\\Sales_log.ldf";
+const pc = VIZ.table({ rows: [{ file_name: "Sales_log", physical_name: longPath }] }, {
+  rowsKey: "rows", title: "Paths", tools: false,
+  columns: [
+    { key: "file_name", label: "File", name: true },
+    { key: "physical_name", label: "Path", name: true, path: true },
+  ],
+});
+const pcr = pc.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody")[0];
+const pathSpan = pcr.children[1].findAll((n) => String(n.className).includes("clamp-text"))[0];
+const nameSpanOfName = pcr.children[0].findAll((n) => String(n.className).includes("clamp-text"))[0];
+out.pathCol = {
+  tdClass: pcr.children[1].className,
+  nameTdClass: pcr.children[0].className,
+  spanClass: pathSpan.className,
+  dir: pathSpan.attrs.dir,
+  title: pathSpan.attrs.title === longPath,
+  text: pathSpan.textContent === longPath,
+  bdiTags: pathSpan.children.map((c) => c.tag),
+  bdiText: !!pathSpan.children[0] && pathSpan.children[0].textContent === longPath,
+  role: pathSpan.attrs.role || null,
+  nameSpanDir: nameSpanOfName.attrs.dir || null,
+  nameSpanChildren: nameSpanOfName.children.map((c) => c.tag),
+  fileName: longPath.split("\\").pop(),
+};
+
 console.log(JSON.stringify(out));

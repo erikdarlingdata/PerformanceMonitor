@@ -90,6 +90,27 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void APathColumn_CutsTheStart_SoTheFileNameStaysVisible_AndKeepsTheWholePathInTitleAndText()
+    {
+        // #7533 review: a path cut at its end (D:\MSSQL\Data\MSSQL16.MSSQLS...) looks the same on every row of a volume. A path cell runs right to left so the
+        // ellipsis is at the left, with the text in a <bdi> so the path keeps its own order (no drive letter or backslash jumping to the other end).
+        var p = Run().GetProperty("pathCol");
+        Assert.Equal("name-cell path-cell", p.GetProperty("tdClass").GetString());
+        Assert.Equal("clamp-text path-text", p.GetProperty("spanClass").GetString());
+        Assert.Equal("rtl", p.GetProperty("dir").GetString());
+        Assert.True(p.GetProperty("title").GetBoolean());
+        Assert.True(p.GetProperty("text").GetBoolean());
+        Assert.Equal(new[] { "bdi" }, p.GetProperty("bdiTags").EnumerateArray().Select(t => t.GetString()).ToArray());
+        Assert.True(p.GetProperty("bdiText").GetBoolean());
+        Assert.EndsWith("Sales_log.ldf", p.GetProperty("fileName").GetString());
+        Assert.Equal(JsonValueKind.Null, p.GetProperty("role").ValueKind);
+        // A name column that is not a path is untouched: end-cut, no direction, no inner element.
+        Assert.Equal("name-cell", p.GetProperty("nameTdClass").GetString());
+        Assert.Equal(JsonValueKind.Null, p.GetProperty("nameSpanDir").ValueKind);
+        Assert.Empty(p.GetProperty("nameSpanChildren").EnumerateArray());
+    }
+
+    [Fact]
     public void ALongCell_OpensAndClosesOnAClick_WithoutActivatingTheRow()
     {
         var r = Run();

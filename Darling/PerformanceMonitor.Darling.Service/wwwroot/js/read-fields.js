@@ -464,7 +464,7 @@ export const READ_FIELDS = {
         { key: "avg_write_latency_ms", label: "Write latency", format: "num1" },
         { key: "delta_reads", label: "Reads", format: "int" },
         { key: "delta_writes", label: "Writes", format: "int" },
-        { key: "physical_name", label: "Path", name: true },
+        { key: "physical_name", label: "Path", name: true, path: true },
       ],
     },
   },
