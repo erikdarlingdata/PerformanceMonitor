@@ -82,6 +82,44 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
         Assert.Equal(35, row.IdleCpu);
     }
 
+    /* The app reads the UTC frame only (ServerTab.Refresh), whose statement carries the total as a seventh column. */
+    [Fact]
+    public async Task ChartRead_UtcFrame_AllNullOtherProcessCpu_ReturnsNullOtherAndTotal()
+    {
+        var t1 = Hour().AddHours(-2);
+        await SeedCpuAsync(t1, 40, null, withUtcInstant: true);
+        await SeedCpuAsync(t1.AddMinutes(5), 50, null, withUtcInstant: true);
+
+        var rows = await _dataService.GetCpuUtilizationAsync(
+            ServerId, hoursBack: 4, serverClock: ServerClock.Utc, frame: CpuTimeFrame.Utc);
+
+        Assert.Equal(new[] { 40, 50 }, rows.Select(r => r.SqlServerCpu).ToArray());
+        Assert.All(rows, r =>
+        {
+            Assert.Null(r.OtherProcessCpu);
+            Assert.Null(r.TotalCpu);
+            Assert.Null(r.IdleCpu);
+        });
+    }
+
+    [Fact]
+    public async Task ChartRead_UtcFrame_MixedBucket_AveragesOnlyTheMeasuredSamples()
+    {
+        var t1 = Hour().AddHours(-2);
+        await SeedCpuAsync(t1, 20, null, withUtcInstant: true);
+        await SeedCpuAsync(t1.AddMinutes(1), 40, 10, withUtcInstant: true);
+        await SeedCpuAsync(t1.AddMinutes(2), 60, 20, withUtcInstant: true);
+
+        var rows = await _dataService.GetCpuUtilizationAsync(
+            ServerId, hoursBack: 24 * 30, serverClock: ServerClock.Utc, frame: CpuTimeFrame.Utc);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(40, row.SqlServerCpu);
+        Assert.Equal(15, row.OtherProcessCpu);
+        Assert.Equal(65, row.TotalCpu);
+        Assert.Equal(35, row.IdleCpu);
+    }
+
     [Fact]
     public async Task McpBucketRead_AllNullBucket_ReturnsNullHostFigures_AndMixedBucketAveragesMeasuredRows()
     {
@@ -135,7 +173,7 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
         Assert.DoesNotContain("CPU SQL CPU", card.StatusReason, StringComparison.Ordinal);
     }
 
-    private async Task SeedCpuAsync(DateTime sampleTime, int sqlCpu, int? otherCpu)
+    private async Task SeedCpuAsync(DateTime sampleTime, int sqlCpu, int? otherCpu, bool withUtcInstant = false)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -147,9 +185,9 @@ public sealed class LinuxNullOtherProcessCpuTests : IClassFixture<SharedDuckDbFi
         using var cmd = _seedConn.CreateCommand();
         cmd.CommandText = @"INSERT INTO cpu_utilization_stats
             (collection_id, collection_time, server_id, server_name, sample_time,
-             sqlserver_cpu_utilization, other_process_cpu_utilization)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)";
-        foreach (var v in new object?[] { _nextId--, DateTime.UtcNow, ServerId, ServerName, sampleTime, sqlCpu, otherCpu })
+             sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time_utc)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
+        foreach (var v in new object?[] { _nextId--, DateTime.UtcNow, ServerId, ServerName, sampleTime, sqlCpu, otherCpu, withUtcInstant ? sampleTime : null })
         {
             cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
         }
