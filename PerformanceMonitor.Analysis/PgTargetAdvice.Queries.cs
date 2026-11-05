@@ -103,7 +103,7 @@ public static partial class PgTargetAdvice
             $"Statement queryid {queryId} held {share * 100:0.#}% of the window's total statement execution time ({FormatMs(totalMs)} of {FormatMs(fact.Metadata.GetValueOrDefault("window_total_exec_ms"))}), across ");
         inv.Append(CultureInfo.InvariantCulture, $"{calls:N0} {(calls == 1 ? "call" : "calls")}");
         if (hasRate)
-            inv.Append(CultureInfo.InvariantCulture, $" ({callsPerSec:0.##}/s over the span its deltas accrued)");
+            inv.Append(CultureInfo.InvariantCulture, $" ({callsPerSec:0.##}/s over the time the collector's runs covered)");
         if (hasMean)
             inv.Append(CultureInfo.InvariantCulture, $", averaging {meanMs:0.#} ms per call");
         if (hasMax)
