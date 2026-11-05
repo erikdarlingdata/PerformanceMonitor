@@ -861,6 +861,12 @@ public sealed class FleetRollup
             parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
         }
 
+        if (s.DatabaseStateReason is { Length: > 0 } databaseStateReason)
+        {
+            /* #7647: in the service's words (DarlingDatabaseStateDeviations.Reason). */
+            parts.Add(databaseStateReason);
+        }
+
         if (s.AgentAlertGaps.Count > 0)
         {
             parts.Add($"Agent alerts {s.AgentAlertGaps.Count} gap{(s.AgentAlertGaps.Count == 1 ? "" : "s")}");

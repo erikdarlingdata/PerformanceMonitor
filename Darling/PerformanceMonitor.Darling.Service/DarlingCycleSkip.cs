@@ -219,7 +219,7 @@ internal static class DarlingCycleSkip
             var slowestMs = causes.PrevBodySlowestMs > 0 ? causes.PrevBodySlowestMs : causes.PrevBodyMs;
             candidates.Add((
                 string.Create(CultureInfo.InvariantCulture,
-                    $"the previous collection pass took {Format(causes.PrevBodyMs)} and no body relaunches while one is running (slowest: {slowestName.Replace('_', ' ')} {Format(slowestMs)})"),
+                    $"the previous collection pass took {Format(causes.PrevBodyMs)} and was still running when the next one was due (slowest: {slowestName.Replace('_', ' ')} {Format(slowestMs)})"),
                 causes.PrevBodyMs, slowestName, slowestMs));
         }
 

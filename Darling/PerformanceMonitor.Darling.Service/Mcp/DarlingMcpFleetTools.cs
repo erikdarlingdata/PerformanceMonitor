@@ -50,8 +50,9 @@ public sealed class DarlingMcpFleetTools
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
         "attention' ranking (worst_servers: a server whose band is Warning or worse, or whose band is Healthy but " +
-        "carries a Warning-level Identity capacity, Agent alerts or Protection tile; advisory_tiles on the row names " +
-        "those tiles and the band stays Healthy). Use this first to decide which server to drill into, then call the per-server tools. " +
+        "carries a Warning-level Identity capacity, Agent alerts, Database state or Protection tile; advisory_tiles on the row names " +
+        "those tiles and the band stays Healthy). database_states on the card lists the databases not in their expected state (the Database State alert's " +
+        "own two-sample read): one in SUSPECT, RECOVERY_PENDING or EMERGENCY bands the server Critical, and collected false means database state is not collected, not that it is healthy. Use this first to decide which server to drill into, then call the per-server tools. " +
         "This cross-server view is unique to the central store. " +
         "Blocking counts are blocked waits, chosen hour by hour between blocked-process reports and DMV snapshots; " +
         "max_snapshot_wait_ms is the largest total blocked wait of one DMV snapshot after the Blocking Wait Time " +

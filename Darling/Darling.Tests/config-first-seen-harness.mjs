@@ -1,0 +1,34 @@
+/* #7662: runs the shipped sql-changes.js and util.js and prints as one line of JSON the "First seen" column's label and cells, the
+   "latest snapshot" subtitle with its age, and what applyDataSubtitle writes into a panel heading for each kind of descriptor. ConfigFirstSeenTests starts it as
+       node config-first-seen-harness.mjs <path to wwwroot/js> */
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const jsDir = process.argv[process.argv.length - 1];
+const changes = await import(pathToFileURL(path.join(jsDir, "pages", "server-tabs", "sql-changes.js")).href);
+const util = await import(pathToFileURL(path.join(jsDir, "util.js")).href);
+
+const col = changes.SERVER_CHANGE_COLUMNS.find((c) => c.key === "change_time");
+const dbCol = changes.DB_CHANGE_COLUMNS.find((c) => c.key === "change_time");
+const threeHoursAgo = new Date(Date.now() - 3 * 3600 * 1000 - 60 * 1000).toISOString();
+
+/* A panel the way the page builds one: a heading whose `.panel-sub` span applyDataSubtitle rewrites. */
+const panel = (text) => ({ children: [{ children: [{ className: "panel-sub", textContent: text, children: [] }] }] });
+const heading = (p) => p.children[0].children[0].textContent;
+const applied = (desc, data) => {
+  const p = panel(" " + desc.subtitle);
+  util.applyDataSubtitle(p, data, desc);
+  return heading(p);
+};
+const snapshot = { captured_at: threeHoursAgo };
+console.log(JSON.stringify({
+  label: col.label === dbCol.label ? col.label : "labels differ: " + col.label + " / " + dbCol.label,
+  span: col.display({ change_time: "2026-11-05T12:50:45", previous_capture_time: "2026-11-04T18:38:00" }),
+  single: dbCol.display({ change_time: "2026-11-05T12:50:45", previous_capture_time: null }),
+  subtitle: util.snapshotAgeSubtitle("latest snapshot", { captured_at: threeHoursAgo }),
+  otherSubtitle: util.snapshotAgeSubtitle("hourly collection", { captured_at: threeHoursAgo }),
+  appliedSnapshot: applied({ subtitle: "latest snapshot" }, snapshot),
+  appliedNoCapturedAt: applied({ subtitle: "latest snapshot" }, { rows: [] }),
+  appliedOtherSubtitle: applied({ subtitle: "hourly collection" }, snapshot),
+  appliedSubtitleFrom: applied({ subtitle: "latest snapshot", subtitleFrom: () => "from the answer" }, snapshot),
+}));
