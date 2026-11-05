@@ -66,12 +66,15 @@ const COUNTERS = [
 ];
 let counters = COUNTERS;
 let fleetReply = {};
+let healthReply = {};
 globalThis.fetch = async (url) => {
   const u = new URL(String(url), "http://viewer.test");
   const body = u.pathname === "/api/fleet"
     ? fleetReply
     : u.pathname.endsWith("/get_memory_pressure_events")
     ? { events: EVENTS }
+    : u.pathname.endsWith("/get_collection_health")
+    ? healthReply
     : u.pathname.endsWith("/get_perfmon_stats")
     ? { server: "srv", captured_at: "2026-11-01T10:00:00", counters }
     : u.pathname === "/api/session"
@@ -100,6 +103,7 @@ try {
   const grant = await imp("pages/memory-grant-charts.js");
   const cpu = await imp("pages/server-tabs/sql-cpu.js");
   const queries = await imp("pages/server-tabs/sql-queries.js");
+  const tabs = await imp("pages/server-tabs.js");
 
   const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
   const findAll = (n, pred) => { const out = []; walk(n, (x) => { if (pred(x)) out.push(x); }); return out; };
@@ -210,6 +214,37 @@ try {
   windowChips.noWindow = detailsOf(fleet.metricBands((await util.apiGetFleet()).data.cards[0], null));
   const sweepTiles = tiles(panels.VIZ.stat({ sweep_pressure: { verdict: "ok" }, skipped_cycles: { status: "unavailable" } }, { stats: [...shared.SWEEP_STATS, ...shared.SKIPPED_CYCLES_STATS] }));
 
+  /* #7660: the Skipped Cycles panel drawn the way the page draws it (the Collection Health tab of both products, through the real fanout): the last
+     skip's sentence is a note under the tiles (never a tile), its gap in the browser's zone, the Cause tile in the sentence's words, and a server
+     that skipped nothing has no note at all. */
+  const skippedBlock = (extra) => ({ skipped_cycles: { status: "ok", count_24h: 1, slots_skipped_24h: 21, last_at: "2026-11-04T18:41:26Z", last_slowest_step: "running_jobs", last_slowest_step_ms: 15000,
+    last_message: "Collection fell behind on this server: 21 slot(s) skipped. Cause: the previous collection pass took 73s and was still running when the next one was due (slowest: running jobs 15s). The gap ran from 2026-11-04 18:40:00 UTC to 2026-11-04 18:41:26 UTC.", ...extra } });
+  const healthyBlock = { skipped_cycles: { status: "ok", count_24h: 0, slots_skipped_24h: 0, last_at: null, last_slowest_step: null, last_slowest_step_ms: null, last_message: null } };
+  const drawSkipped = async (tabList, reply, tabId = "health") => {
+    healthReply = reply;
+    const root = new FakeNode("main");
+    util.mount(root, tabList.find((t) => t.id === tabId).build("srv", { hours: 24, label: "last 24 hours" }));
+    for (let i = 0; i < 25; i++) await wait(0);
+    const panel = findAll(root, (n) => hasClass(n, "panel") && findAll(n, (c) => c.tag === "h3").some((h) => h.textContent.startsWith("Skipped Cycles")))[0];
+    if (!panel) return { panel: false };
+    const strips = findAll(panel, (n) => hasClass(n, "strip") && hasClass(n, "notice")).map((n) => n.textContent);
+    const order = findAll(panel, (n) => hasClass(n, "stat") || (hasClass(n, "strip") && hasClass(n, "notice"))).map((n) => (hasClass(n, "stat") ? "stat" : "strip"));
+    return { panel: true, strips, tiles: tiles(panel), order, localGap: new Date("2026-11-04T18:40:00Z").toLocaleString() };
+  };
+  const skippedCycles = {
+    sql: await drawSkipped(tabs.SERVER_TABS, skippedBlock()),
+    pg: await drawSkipped(tabs.POSTGRES_TABS, skippedBlock(), "overview"),
+    healthy: await drawSkipped(tabs.SERVER_TABS, healthyBlock),
+    healthyPg: await drawSkipped(tabs.POSTGRES_TABS, healthyBlock, "overview"),
+    analysis: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "analysis_pass" })),
+    unmeasured: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 0 })),
+    /* #7660 review: the other side of the `collectors` branch, a measured time above 0 reads the step's own name, never "none measured". */
+    measured: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 15000 })),
+    measuredPg: await drawSkipped(tabs.POSTGRES_TABS, skippedBlock({ last_slowest_step: "collectors", last_slowest_step_ms: 15000 }), "overview"),
+    gate: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "gate_wait", last_slowest_step_ms: 40000 })),
+    guard: await drawSkipped(tabs.SERVER_TABS, skippedBlock({ last_slowest_step: "launch_guard_hold", last_slowest_step_ms: 40000 })),
+  };
+
   /* Item 30: a sentence is text across the panel, never a stat tile. */
   const sentenceOf = (stats, key, text) => {
     const root = panels.VIZ.stat(key.split(".").reduceRight((v, k) => ({ [k]: v }), text), { stats });
@@ -266,7 +301,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, fileIoHeaders, runnable, platform, unrateable,
+    alertSetup, quietChips, engineChips, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, fileIoHeaders, runnable, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,
