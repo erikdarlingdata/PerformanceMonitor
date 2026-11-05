@@ -33,6 +33,14 @@ public interface ICollectorSchemaInfo
     /// </summary>
     CollectorTargetEngine TargetEngine => CollectorTargetEngine.SqlServer;
 
+    /// <summary>
+    /// The query this definition builds for <paramref name="context"/>, reachable without its row type (#7681): the service
+    /// registers the shape of every PostgreSQL collector's statement at startup from the catalog. Null for a definition that
+    /// does not build one. A default interface implementation, so a test double needs no change; <see cref="ICollectorDefinition{TRow}"/>
+    /// supplies it from <c>BuildQuery</c>.
+    /// </summary>
+    CollectorQuery? BuildQueryUntyped(CollectorContext context) => null;
+
     /// <summary>Destination table; hosts prepend their standard prefix columns when writing.</summary>
     string TargetTable { get; }
 

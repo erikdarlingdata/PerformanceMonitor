@@ -51,7 +51,8 @@ public sealed class CycleSkipAccumulatorTests
         Assert.Equal("query_store", report.SlowestItem);
         Assert.Equal(170_000, report.SlowestItemMs);
         Assert.Contains("3 slot(s) skipped across 2 collector(s) (top: query_stats 2, wait_stats 1)", report.Message, StringComparison.Ordinal);
-        Assert.Contains("the previous collection pass took 185s", report.Message, StringComparison.Ordinal);
+        Assert.Contains("the previous collection pass took 185s and was still running when the next one was due (slowest: query store 170s)", report.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("relaunch", report.Message, StringComparison.Ordinal);
         Assert.Contains("The gap ran from 2026-10-12 11:57:00 UTC to 2026-10-12 12:00:00 UTC.", report.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("=", report.Message, StringComparison.Ordinal);
     }

@@ -94,6 +94,12 @@ try {
   const writes = () => calls.filter((c) => c.method !== "GET");
 
   const scenarios = {
+    /* #7647: the card exactly as the service serialized it (FLEET_CARD_JSON), so a renamed wire key reads as "undefined" here. */
+    dbstate: async () => {
+      extraCards = [{ ...card(10, "srv-a", false), ...JSON.parse(process.env.FLEET_CARD_JSON) }];
+      await draw();
+      return { chips: all(main, (n) => n.className.startsWith("metric-chip") && n.textContent.startsWith("Database state")).map((n) => n.textContent) };
+    },
     gate: async () => {
       canEdit = false;
       await draw();

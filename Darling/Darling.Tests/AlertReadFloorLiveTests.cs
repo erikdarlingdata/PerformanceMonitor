@@ -324,6 +324,66 @@ VALUES ($1, $2, $3, 'sentinel', 'AG1', $4, 'NODE2', $5, false)",
         }
     }
 
+    /// <summary>
+    /// #7647: the fleet card reads database state through the alert's own statement (<see cref="DarlingDatabaseStateDeviations.ReadAsync"/>). Two samples at
+    /// RECOVERY_PENDING are a Critical deviation, an OFFLINE database whose expected state is ONLINE is a non-critical one, a state seen in one sample only
+    /// is a blip and moves nothing, and a server with no snapshot that fresh reads as not collected rather than as no deviations.
+    /// </summary>
+    [Fact]
+    public async Task FleetDatabaseStateRead_UsesTheAlertsTwoSampleRule_AndReadsAStaleOrEmptyServerAsNotCollected()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        using var connection = (await OpenAsync(connectionString, ct))!;
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+            var now = DateTime.UtcNow;
+            var t0 = now.AddMinutes(-10);
+            var t1 = now.AddMinutes(-5);
+            await ExecAsync(connection,
+                "INSERT INTO config.database_state_expected (server_id, database_name, expected_state, is_user_override, updated_at) VALUES ($1, 'OffDb', 'ONLINE', false, now())", ct, States);
+            await InsertStateAsync(connection, t0, "CritDb", "RECOVERY_PENDING", ct);
+            await InsertStateAsync(connection, t1, "CritDb", "RECOVERY_PENDING", ct);
+            await InsertStateAsync(connection, t0, "OffDb", "OFFLINE", ct);
+            await InsertStateAsync(connection, t1, "OffDb", "OFFLINE", ct);
+            await InsertStateAsync(connection, t0, "BlipDb", "ONLINE", ct);
+            await InsertStateAsync(connection, t1, "BlipDb", "SUSPECT", ct);
+            await InsertStateAsync(connection, t0, "OkDb", "ONLINE", ct);
+            await InsertStateAsync(connection, t1, "OkDb", "ONLINE", ct);
+
+            var read = await DarlingDatabaseStateDeviations.ReadAsync(connection, States, now, LiveTimeoutSeconds, ct);
+            Assert.True(read.Collected);
+            Assert.Equal(new[] { "CritDb|RECOVERY_PENDING", "OffDb|OFFLINE" }, read.Deviations.Select(d => d.Database + "|" + d.State).ToArray());
+            Assert.Single(DarlingDatabaseStateDeviations.Critical(read.Deviations));
+
+            Assert.Equal(t1, read.NewestCollectionUtc!.Value, TimeSpan.FromMilliseconds(1));
+
+            /* Only the newest snapshot is inside the window (the floor falls between the two): the two-sample rule has nothing to compare, so the join drops
+               CritDb and the read finds no deviation. That is "could not judge", not "healthy": a RECOVERY_PENDING server must not read as collected. */
+            var single = await DarlingDatabaseStateDeviations.ReadAsync(connection, States, now.AddMinutes(112), LiveTimeoutSeconds, ct);
+            Assert.False(single.Collected);
+            Assert.Empty(single.Deviations);
+            Assert.Null(single.NewestCollectionUtc);
+
+            /* The newest snapshot is older than the freshness window: the databases' state is unknown, which is not "no deviations". */
+            var stale = await DarlingDatabaseStateDeviations.ReadAsync(connection, States, now.AddHours(3), LiveTimeoutSeconds, ct);
+            Assert.False(stale.Collected);
+            Assert.Empty(stale.Deviations);
+
+            /* A server that never wrote one. */
+            var none = await DarlingDatabaseStateDeviations.ReadAsync(connection, Pvs, now, LiveTimeoutSeconds, ct);
+            Assert.False(none.Collected);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (c, token) => DeleteSentinelsAsync(c, token));
+        }
+    }
+
     /// <summary>The deviation rows (not the row that carries the times) the bounded statement returns for a floor.</summary>
     private static async Task<int> DeviationRowsAsync(NpgsqlConnection connection, DateTime floor, CancellationToken ct)
     {
