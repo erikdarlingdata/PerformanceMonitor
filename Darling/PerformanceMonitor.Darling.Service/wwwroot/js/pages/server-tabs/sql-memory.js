@@ -62,13 +62,6 @@ export const CLERK_COLUMNS = [
 /* #7416: 1 and 2 are the internal and default pools, named as the grant charts name them. Any other pool keeps its number. */
 const POOL_COLUMN = { key: "pool_id", label: "Pool", display: (r) => (r.pool_id == null ? "" : poolName(r.pool_id)) };
 
-/* #7578: resource_semaphore_id 0 is the regular semaphore and 1 the small-query semaphore (sys.dm_exec_query_resource_semaphores). The words print, the number sorts. */
-export function semaphoreName(id) {
-  if (id === 0) return "Regular";
-  if (id === 1) return "Small query";
-  return id == null ? "" : String(id);
-}
-const SEMAPHORE_COLUMN = { key: "resource_semaphore_id", label: "Semaphore", display: (r) => semaphoreName(r.resource_semaphore_id), sortValue: (r) => r.resource_semaphore_id };
 
 /* #7578: the four date-time columns of the window grid wrap at their space ("11/5/2026," over "3:16:21 PM") with a floor that holds a date over its time (flow-tight), and every header wraps at its spaces (wrapHead), so the grid fits the panel at 1280 px with no sideways scroll and no width is set for one screen. */
 const WRAPPING_TIME = { wrap: true, cellClass: () => "flow-cell flow-tight" };
@@ -89,7 +82,7 @@ export const GRANT_WINDOW_COLUMNS = [
 
 /* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
    semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
-export const SEMAPHORE_WINDOW_COLUMNS = [{ ...SEMAPHORE_COLUMN, wrapHead: true }, ...GRANT_WINDOW_COLUMNS];
+export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "semaphore", wrapHead: true }, ...GRANT_WINDOW_COLUMNS];
 
 /* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
    Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
@@ -106,10 +99,11 @@ export const GRANT_COLUMNS = [
   { key: "forced_grant_count_delta", label: "Forced grants", format: "int" },
 ];
 
+/* #7676: one row per pool AND semaphore (id 0 regular, id 1 small query), so the Semaphore column names which. */
 export const SEMAPHORE_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
-  SEMAPHORE_COLUMN,
   POOL_COLUMN,
+  { key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" },
   { key: "target_memory_mb", label: "Target", format: "mb" },
   { key: "total_memory_mb", label: "Total", format: "mb" },
   { key: "granted_memory_mb", label: "Granted", format: "mbfit" },

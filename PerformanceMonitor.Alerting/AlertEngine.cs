@@ -4452,7 +4452,10 @@ public sealed class AlertEngine
                     $"{dbName}: {stateText}",
                     expectedText,
                     Context: stateContext, DetailText: detailText,
-                    NumericCurrentValue: null, NumericThresholdValue: null,
+                    /* #7646: an explicit 0 for both, as the other state alerts pass (#1881). A null here let
+                       AlertValueParser read the first digit out of "{dbName}: {stateText}", so a database named
+                       Sales2024 stored 2024 as its current value. 0 is the state-only sentinel. */
+                    NumericCurrentValue: 0, NumericThresholdValue: 0,
                     Muted: mute.Muted, Hold: mute.Hold, Severity: severity,
                     ShortMessage: shortMessage), ct);
                 AfterFire(DatabaseStateTokens.MetricName, _lastDatabaseStateAlert, cooldownKey, now, alertCooldown, delivery);

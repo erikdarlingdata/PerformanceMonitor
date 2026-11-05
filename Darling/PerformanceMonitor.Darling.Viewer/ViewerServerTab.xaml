@@ -2407,7 +2407,7 @@
                         <DataGrid Grid.Row="1" x:Name="ResourceSemaphorePressureGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
-                                <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
+                                <DataGridTextColumn Header="Semaphore" Binding="{Binding SemaphoreName}" SortMemberPath="ResourceSemaphoreId" Width="85"/>
                                 <DataGridTextColumn Header="Snapshots" Binding="{Binding Snapshots, StringFormat=N0}" Width="85"/>
                                 <DataGridTextColumn Header="Peak Waiters" Binding="{Binding PeakWaiters, StringFormat=N0}" Width="100"/>
                                 <DataGridTextColumn Header="Peak Waiters At" Binding="{Binding PeakWaitersAtLocal, TargetNullValue=—}" Width="140" SortMemberPath="PeakWaitersAt"/>
@@ -2429,9 +2429,9 @@
                         <DataGrid Grid.Row="3" x:Name="ResourceSemaphoreGrid" Style="{StaticResource DarkGrid}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
-                                <DataGridTextColumn Header="Semaphore" Binding="{Binding ResourceSemaphoreId}" Width="85"/>
+                                <DataGridTextColumn Header="Semaphore" Binding="{Binding SemaphoreName}" SortMemberPath="ResourceSemaphoreId" Width="85"/>
                                 <DataGridTextColumn Header="Target MB" Binding="{Binding TargetMemoryMb, StringFormat=N1}" Width="95"/>
-                                <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1}" Width="110"/>
+                                <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1, TargetNullValue='-'}" Width="110"/>
                                 <DataGridTextColumn Header="Total MB" Binding="{Binding TotalMemoryMb, StringFormat=N1}" Width="95"/>
                                 <DataGridTextColumn Header="Available MB" Binding="{Binding AvailableMemoryMb, StringFormat=N1}" Width="105"/>
                                 <DataGridTextColumn Header="Granted MB" Binding="{Binding GrantedMemoryMb, StringFormat=N1}" Width="100"/>
