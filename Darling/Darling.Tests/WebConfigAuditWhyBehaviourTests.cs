@@ -63,20 +63,33 @@ public sealed class WebConfigAuditWhyBehaviourTests
     public void ThePostgresWhyCells_NameNoToolAndNameTheTabThatShowsTheNumber()
     {
         var why = Why("pg");
-        Assert.Equal(6, why.Length);
+        Assert.Equal(7, why.Length);
         Assert.DoesNotContain(why, w => Regex.IsMatch(w, @"get_[a-z0-9_]+"));
         Assert.Contains("read the I/O tab over a busy window for wal_bytes", why[0], StringComparison.Ordinal);
         Assert.Contains("(the Activity tab) rather than assuming", why[1], StringComparison.Ordinal);
         Assert.Contains("The Activity tab has the statements writing the most temp blocks", why[2], StringComparison.Ordinal);
         Assert.Contains("scanning in the Activity tab", why[3], StringComparison.Ordinal);
-        // The Logging Settings Audit and Deadlock Graphs panels are on the Activity tab, so those two reads are named by it too, not left as tool names.
-        Assert.Equal("Check the log settings with the Activity tab, then read the graphs in the Activity tab.", why[5]);
+        // The Deadlock Graphs and Logging Settings Audit panels are on the Activity tab, so those reads are named by it too, not left as tool names.
+        // Two reads on that one tab ("get_pg_deadlocks, then get_pg_deadlock_detail for one") name the tab once.
+        Assert.Equal("Read the captured graphs (the Activity tab for one) for the lock modes and the statements on each side.", why[5]);
+        Assert.Equal("Check the log settings with the Activity tab before changing anything.", why[6]);
     }
 
     [Fact]
-    public void TheSqlServerWhyCell_IsPlainToo()
+    public void TheSqlServerWhyCell_ForTheRealMaxdopMessage_IsUnchangedByPlain()
     {
-        var why = Why("sql").Single();
+        // No SQL Server audit_config message names a get_ tool today, so plain: true leaves the real MAXDOP-0 sentence exactly as the service wrote it.
+        const string real = "MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, leading to CXPACKET waits and thread exhaustion under load. " +
+            "Microsoft's guidance is topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
+            "Start with 8 (8 logical processors in one NUMA node, capped at 8) and adjust to the workload.";
+        Assert.Equal(real, Why("sql").Single());
+    }
+
+    [Fact]
+    public void TheSqlServerWhyCell_IsPlainToo_IfAMessageEverNamesARead()
+    {
+        // Synthetic: no SQL Server message names a read today. This guards the SQL grid keeping the same rule as the PostgreSQL grid if one ever does.
+        var why = Why("sqlSynthetic").Single();
         Assert.DoesNotMatch(new Regex(@"get_[a-z0-9_]+"), why);
         Assert.Contains("the Wait Stats tab", why, StringComparison.Ordinal);
         Assert.Contains("the Queries tab", why, StringComparison.Ordinal);

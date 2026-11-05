@@ -1,5 +1,5 @@
 /* #7557: runs the shipped Configuration Audit grids (wwwroot/js/pages/server-tabs/pg-config.js and sql-config.js through panels.js VIZ.table) on a small fake DOM
-   and prints one line of JSON: the Why text each grid drew for sentences worded as the audit_config reads write them, tool names and all.
+   and prints one line of JSON: the Why text each grid drew for the PostgreSQL sentences as PgTargetAdvice words them (tool names and all) and for the real SQL Server MAXDOP sentence.
    WebConfigAuditWhyBehaviourTests starts it as
        node web-config-audit-why-harness.mjs <path to the js folder>
    Only the DOM is a stand-in. */
@@ -57,10 +57,16 @@ const pgWhy = [
   "work_mem is 4 MB. Counter-objective: set too high, memory multiplies per sort. get_pg_top_queries has the statements writing the most temp blocks.",
   "Find out which statements are scanning in get_pg_predicate_stats, then follow their time in get_pg_query_duration_trend.",
   "get_pg_write_stats over a busy window carries the WAL counters.",
-  "Check the log settings with get_pg_logging_audit, then read the graphs in get_pg_deadlock_detail.",
+  "Read the captured graphs (get_pg_deadlocks, then get_pg_deadlock_detail for one) for the lock modes and the statements on each side.",
+  "Check the log settings with get_pg_logging_audit before changing anything.",
 ];
 const out = {};
 out.pg = whyOf(PG_AUDIT_COLUMNS, pgWhy.map((recommendation, i) => ({ setting: "s" + i, status: "Warning", current_value: "1", recommendation })));
+/* SQL Server: the real MAXDOP-0 message, as ConfigAuditGuidance.MaxdopUnlimitedMessage writes it. No SQL Server audit_config message names a get_ tool today,
+   so plain: true changes nothing about it. */
 out.sql = whyOf(AUDIT_COLUMNS, [{ setting: "max degree of parallelism", status: "Warning", current_value: "0", suggested_value: "8",
+  recommendation: "MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. Start with 8 (8 logical processors in one NUMA node, capped at 8) and adjust to the workload." }]);
+/* SYNTHETIC: no SQL Server message writes this today. It guards the case where one ever names a read, so the SQL grid keeps the same plain rule as the PostgreSQL grid. */
+out.sqlSynthetic = whyOf(AUDIT_COLUMNS, [{ setting: "max degree of parallelism", status: "Warning", current_value: "0", suggested_value: "8",
   recommendation: "MAXDOP is 0. Read get_wait_stats for CXPACKET and get_top_queries_by_cpu for the statements that fan out, then set it." }]);
 console.log(JSON.stringify(out));

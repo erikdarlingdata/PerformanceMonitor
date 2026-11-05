@@ -287,7 +287,7 @@ function withoutToolNames(text) {
   });
 
   /* Two reads on one tab, named one after the other, are that tab once: "try the Queries tab or the Queries tab". */
-  t = t.replace(/\b([Tt]he) ((?:[A-Z][\w/]*\s)+\btab)(?:, | or | and )the \2/g, "$1 $2");
+  t = t.replace(/\b([Tt]he) ((?:[A-Z][\w/]*\s)+\btab)(?:, then | then |, | or | and )the \2/g, "$1 $2");
 
   if (firstToolAt(t) < 0) return t;
 
