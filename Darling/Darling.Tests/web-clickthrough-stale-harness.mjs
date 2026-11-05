@@ -217,6 +217,17 @@ const scenarios = {
     const afterAnotherServer = detailOf(another, "Protection");
     return { closedAtFirst, openedByClick, clsAfterClick, labelsAfterClick, afterPoll, labelsAfterPoll, afterShort, labelsAfterShort, afterRegrown, afterAnotherServer };
   },
+  /* #7590: a server the service cannot connect to (connect_down_since) keeps its last collected values greyed and labelled "last known", and its Collectors chip says
+     collection is waiting on the connection with the connect error. A server that is only stale (no connect_down_since) keeps the n/a stale tiles. */
+  unreachable: async () => ({
+    down: chips(modules.fleet.metricBands(card({
+      is_online: false, band: "Offline", connect_down_since: iso(3600000), last_connect_error: "Login failed for user 'pm'.", last_collection: iso(7200000),
+    }))),
+    downNeverCollected: chips(modules.fleet.metricBands(card({
+      is_online: false, band: "Offline", connect_down_since: iso(3600000), last_connect_error: null, last_collection: null,
+    }))),
+    stale: chips(modules.fleet.metricBands(card({ is_online: false }))),
+  }),
   /* #6828: a server whose collectors are 39 HEALTHY, 3 WARNING and 2 not collected: the Collectors chip shows the warning count and does not call them healthy. */
   collectorsWarning: async () => ({
     chips: chips(modules.fleet.metricBands(card({

@@ -464,6 +464,10 @@ public class ServerSummaryItem
 
     public bool? IsOnline { get; set; }
 
+    /// <summary>While the connection check says this server is down, the sentence naming since when and the last connect error
+    /// (#7590), from <see cref="ServerConnectionStatus.UnreachableReason"/>; null otherwise. The Offline card's tooltip quotes it.</summary>
+    public string? UnreachableReason { get; set; }
+
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
     /// muted-bell, mirroring the sidebar row. Stamped by the Overview loader and the silence-indicator
     /// refresh; the card rebinds on a real flip.</summary>
@@ -826,6 +830,11 @@ public class ServerSummaryItem
         get
         {
             var lines = new List<string> { StatusHeadline };
+
+            if (CardStatus == ServerCardStatus.Offline && UnreachableReason is { Length: > 0 } unreachable)
+            {
+                lines.Add(unreachable);
+            }
 
             if (CardStatus != ServerCardStatus.Offline)
             {

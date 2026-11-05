@@ -863,7 +863,9 @@ public partial class MainWindow : Window
         var servers = _serverManager.GetAllServers();
         foreach (var server in servers)
         {
-            server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            var connectionStatus = _serverManager.GetConnectionStatus(server.Id);
+            server.IsOnline = connectionStatus.IsOnline;
+            server.UnreachableReason = connectionStatus.UnreachableReason;
             server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
                 && server.IsOnline == true
@@ -1076,6 +1078,7 @@ public partial class MainWindow : Window
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
+                        summary.UnreachableReason = connStatus.UnreachableReason;
                         if (_collectorService != null && connStatus.IsOnline == true)
                             summary.HasCollectorErrors = _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
                         summaries.Add(summary);
@@ -2538,6 +2541,7 @@ public partial class MainWindow : Window
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
                 server.IsOnline = status?.IsOnline;
+                server.UnreachableReason = status?.UnreachableReason;
                 server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
                 if (status?.IsOnline == null) continue;
 

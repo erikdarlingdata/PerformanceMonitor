@@ -845,6 +845,108 @@ namespace PerformanceMonitor.Common
                 : ClassifyFreshness(lastCollectionUtc, nowUtc);
 
         /// <summary>
+        /// The freshness ladder with the service's own connection answer folded in (#7590). A server whose connect has failed
+        /// (<paramref name="connectDownSinceUtc"/> is the first failure of the current outage, stored on the registry) is
+        /// <see cref="ServerFreshness.Offline"/> at once: the service has no connection to it, so no collector can run, and waiting out
+        /// <see cref="ServerHealthThresholds.OfflineThreshold"/> only shows green tiles for up to 30 minutes. A server with no failed
+        /// connect keeps the age rule untouched, including the 30 minute wait #2794 measured, because a quiet server with nothing failed is
+        /// a different thing from one that cannot be reached. Every surface that bands from the registry calls this one function.
+        /// </summary>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc,
+            DateTime? connectDownSinceUtc) =>
+            EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc).HasValue
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, registeredAtUtc, searchedFromUtc, nowUtc);
+
+        /// <summary>
+        /// The stored failed-connect flag, or null once a collection newer than it proves a later connect worked (#7590). The flag is cleared by
+        /// one write per connect that is allowed to fail, and a server that is collecting again must not read Offline for the rest of the session
+        /// because that write was lost: the age rule heals itself, so this does too. Every reader that takes <c>connect_down_since</c> from the
+        /// registry passes it through here with the newest collection it holds, and a surface with no collection time of its own is sent the
+        /// resolved value (the web reads the fleet card).
+        /// </summary>
+        public static DateTime? EffectiveConnectDownSince(DateTime? lastCollectionUtc, DateTime? connectDownSinceUtc) =>
+            connectDownSinceUtc.HasValue && lastCollectionUtc.HasValue && lastCollectionUtc.Value > connectDownSinceUtc.Value
+                ? null
+                : connectDownSinceUtc;
+
+        /// <summary>
+        /// The reason a failed connect puts on a card, in place of "collection stale" or "no recent collection" (#7590):
+        /// <c>Server unreachable since 2026-11-04 14:03 UTC</c>, then the last connect error when one is stored. The time is UTC
+        /// because the store is, and a surface that wants local time formats the stored instant itself.
+        /// </summary>
+        public static string UnreachableReason(DateTime sinceUtc, string? lastError)
+        {
+            var text = "Server unreachable since " + sinceUtc.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture) + " UTC";
+            return string.IsNullOrWhiteSpace(lastError) ? text : text + ": " + lastError.Trim();
+        }
+
+        /// <summary>
+        /// What Collection Health says while a server's connect has failed (#7590): collection is waiting on the connection, since when,
+        /// the last error (<see cref="UnreachableReason"/>), and when the service tries the connect next. A retry time already past reads
+        /// <c>due now</c>: the service has not stored the next attempt yet. No stored time says nothing about the retry.
+        /// </summary>
+        public static string WaitingOnConnectionText(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc)
+        {
+            /* A SQL Server error text usually ends with its own period ("Login failed for user 'x'."): a second one reads as a typo. */
+            var reason = UnreachableReason(sinceUtc, lastError);
+            var text = "Collection is waiting on the connection: the service cannot connect to this server, so no collector is running. " + reason + (reason.EndsWith('.') ? string.Empty : ".");
+            if (!nextAttemptUtc.HasValue)
+            {
+                return text;
+            }
+
+            return text + " Next retry " + (nextAttemptUtc.Value <= nowUtc
+                ? "is due now."
+                : "at " + nextAttemptUtc.Value.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + " UTC.");
+        }
+
+        /// <summary>
+        /// The <c>server_connection</c> block <c>get_collection_health</c> carries while a server is unreachable (#7590), the one shape for both
+        /// SKUs: Darling builds it from the stored failed connect, Lite from its in-process connection check. <paramref name="nextAttemptUtc"/> is
+        /// null where no retry time exists (Lite re-checks on its own interval and stores none). The collector rows beside it are the last runs from
+        /// before the connection failed, and the sentence says so when there are any.
+        /// </summary>
+        public static object ServerConnectionBlock(DateTime sinceUtc, string? lastError, DateTime? nextAttemptUtc, DateTime nowUtc, bool hasCollectorRows) => new
+        {
+            status = "waiting_on_connection",
+            since = sinceUtc.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            last_connect_error = lastError,
+            /* The retry decision, UTC; null when none is stored. */
+            next_connect_attempt = nextAttemptUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+            message = WaitingOnConnectionText(sinceUtc, lastError, nextAttemptUtc, nowUtc)
+                + (hasCollectorRows ? " The collector rows are the last runs from before the connection failed." : ""),
+        };
+
+        /// <summary>
+        /// How a tile reads while its server is unreachable: the values are the last collected ones, and this says so with their age
+        /// (<c>last known, 12 min ago</c>).
+        /// </summary>
+        public static string LastKnownLabel(DateTime? lastCollectionUtc, DateTime nowUtc)
+        {
+            if (!lastCollectionUtc.HasValue)
+            {
+                return "no last known value";
+            }
+
+            var age = nowUtc - lastCollectionUtc.Value;
+            if (age < TimeSpan.Zero)
+            {
+                age = TimeSpan.Zero;
+            }
+
+            var words = age.TotalMinutes < 1 ? "under a minute"
+                : age.TotalHours < 1 ? ((int)age.TotalMinutes).ToString(System.Globalization.CultureInfo.InvariantCulture) + " min"
+                : age.TotalDays < 1 ? ((int)age.TotalHours).ToString(System.Globalization.CultureInfo.InvariantCulture) + " h"
+                : ((int)age.TotalDays).ToString(System.Globalization.CultureInfo.InvariantCulture) + " d";
+            return "last known, " + words + " ago";
+        }
+
+        /// <summary>
         /// CPU band: &gt;= 95% Critical, &gt;= 80% Warning; nothing bandable Unknown. One ladder, applied to
         /// whichever percentage is a fraction of a capacity that does not move.
         ///

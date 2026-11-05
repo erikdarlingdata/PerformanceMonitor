@@ -762,14 +762,16 @@ function serverCard(c, store, own = true) {
   /* #3935: an Offline card's last collection can be days old, or absent (nothing in the fleet read's
      window), so it reads as an age, never as a bare time of day that implies today. */
   const lastCollect =
-    c.is_online === false
+    c.connect_down_since
+      ? " · unreachable since " + relTime(c.connect_down_since) + (c.last_collection ? " · last collect " + relTime(c.last_collection) : "")
+      : c.is_online === false
       ? c.last_collection
         ? " · last collect " + relTime(c.last_collection)
         : " · " + DARK_PAST_WINDOW
       : " · last collect " + localClock(c.last_collection);
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
-    : el("div", { class: "status-line", text: c.status + lastCollect + coverage });
+    : el("div", { class: "status-line", text: c.status + lastCollect + coverage, ...(c.connect_down_since && c.last_connect_error ? { title: c.last_connect_error } : {}) });
 
   return el(
     "div",
@@ -880,27 +882,38 @@ export function metricBands(c, store) {
      with collector_severity "Unknown" from the shared band, and its value reads "n/a" — the chip's word for a
      metric with no reading (the Threads chip's) — rather than "OK". R1: the severity is read off the card, not
      re-derived here; only the WORD keys on the count, and only so a green word never sits under a grey chip. */
+  /* #7590: the service's own connect to this server has failed, so no collector can run. The Collectors chip does not say OK (or Stale, which
+     reads as a slow server): it says collection is waiting on the connection. The other chips keep the last collected values, greyed and
+     labelled with their age, because those values are all that is known. */
+  const unreachable = !!c.connect_down_since;
+  const lastKnown = unreachable ? "last known, " + (c.last_collection ? relTime(c.last_collection) : "no value") : null;
+  const known = (detail) => (unreachable ? [lastKnown, detail].filter(Boolean).join(" · ") : detail);
+  const sevOf = (sev) => (unreachable ? "Unknown" : sev);
   const collectorsStale = c.is_online === false;
-  const collectorsValue = collectorsStale
+  const collectorsValue = unreachable
+    ? "Waiting"
+    : collectorsStale
     ? "Stale"
     : c.failed_collector_count > 0
     ? fmtInt(c.failed_collector_count) + " failing"
     : c.collector_count > 0
     ? "OK"
     : "n/a";
-  const collectorsDetail = collectorsStale
+  const collectorsDetail = unreachable
+    ? "waiting on the connection · " + (c.last_connect_error ? c.last_connect_error : "server unreachable")
+    : collectorsStale
     ? "no recent collection · " + (c.last_collection ? "last " + relTime(c.last_collection) : DARK_PAST_WINDOW)
     : c.collector_count > 0
     ? fmtInt(c.healthy_collector_count) + " healthy · " + (c.warning_collector_count > 0 ? fmtInt(c.warning_collector_count) + " warning · " : "") + fmtInt(c.failed_collector_count) + " failing" + (c.not_collected_collector_count > 0 ? " · " + fmtInt(c.not_collected_collector_count) + " not collected" : "") + (c.no_permission_collector_count > 0 ? " · " + fmtInt(c.no_permission_collector_count) + " need setup" : "")
     : "no collector banded yet";
-  const collectorsSeverity = collectorsStale ? "Unknown" : c.collector_severity;
+  const collectorsSeverity = collectorsStale || unreachable ? "Unknown" : c.collector_severity;
 
   /* #5489: a server whose newest collection is past the fleet's offline mark (is_online === false, the same
      signal the Collectors chip above and the card's status line read) has no CURRENT reading. The values the
      read still holds are the last ones collected, days ago: a 0% CPU, "ok" memory and 77 free threads off a
      12-day-old row read as live health beside a CPU chart that says it has no data. So the five measurement
      chips read "n/a" in the neutral Unknown tone, and each says when the last collection was. */
-  if (c.is_online === false) {
+  if (c.is_online === false && !unreachable) {
     const staleDetail = c.last_collection ? "last collected " + relTime(c.last_collection) : DARK_PAST_WINDOW;
     return el("div", { class: "metric-bands stale" }, [
       chip("CPU", "n/a", "Unknown", staleDetail),
@@ -915,13 +928,13 @@ export function metricBands(c, store) {
   return el("div", { class: "metric-bands" }, [
     /* W19 (#5644): total_cpu_percent is the whole box (SQL Server plus other processes); FinOps reads the SQL Server
        process alone, so this chip says which one it shows. The cpu_percent fallback (a PostgreSQL target) stays "CPU". */
-    chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, c.cpu_severity, cpuDetail),
-    chip("Threads", threadsValue, c.threads_severity, threadsDetail),
-    chip("Memory", memValue, c.memory_severity, memDetail),
+    chip(c.total_cpu_percent != null ? "Total CPU" : "CPU", cpuValue, sevOf(c.cpu_severity), known(cpuDetail)),
+    chip("Threads", threadsValue, sevOf(c.threads_severity), known(threadsDetail)),
+    chip("Memory", memValue, sevOf(c.memory_severity), known(memDetail)),
     /* #7560: blocking_count is a structural 0 on PostgreSQL (nothing in the fleet read counts its blocking), and blocking_severity reads Unknown
        there, so the chip says "n/a" instead of a 0 that looks measured. get_pg_blocking has the PostgreSQL blocking captures. */
-    chip("Blocking", c.is_postgres === true ? "n/a" : fmtInt(c.blocking_count), c.blocking_severity, c.is_postgres === true ? null : blockingDetail),
-    chip("Deadlocks", fmtInt(c.deadlock_count), c.deadlock_severity, deadlockDetail),
+    chip("Blocking", c.is_postgres === true ? "n/a" : fmtInt(c.blocking_count), sevOf(c.blocking_severity), c.is_postgres === true ? null : known(blockingDetail)),
+    chip("Deadlocks", fmtInt(c.deadlock_count), sevOf(c.deadlock_severity), known(deadlockDetail)),
     chip("Collectors", collectorsValue, collectorsSeverity, collectorsDetail, true),
     /* #6875: a chip only when a column is at the warning bar or past it. It is not a band: nothing above reads it, and a server without one shows no extra chip. */
     ...identityCapacityChip(c, store),

@@ -62,7 +62,7 @@ import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-
 import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_BLOAT_ROWS, PG_INDEX_USAGE_COLUMNS, PG_INDEX_USAGE_ROWS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, pgWaitSamplingBackendsNote, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
-import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, findingsPanel, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
+import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, SERVER_CONNECTION_PANEL, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, findingsPanel, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
 import { perfmonPanel, SESSION_STATS, sessionStatsTrendPanel, APPLICATION_COLUMNS, JOB_COLUMNS, JOB_HISTORY_COLUMNS, INDEX_COLUMNS } from "./server-tabs/sql-activity.js";
 import { slicedPanel, DEADLOCKS_EMPTY_TEXT, COUNT_SERIES, BLOCKING_REPORT_SERIES, BLOCKING_BY_SOURCE, LOCK_WAIT_SERIES, WAITING_TASK_SERIES, BLOCKED_SESSION_SERIES, BLOCKING_SEVERITY_SERIES, DEADLOCK_SEVERITY_SERIES, BLOCKING_GROUPS, BLOCKING_COLUMNS, DEADLOCK_COLUMNS, deadlockGraphsPanel, BPR_COLUMNS, OBJECT_LOCK_COLUMNS } from "./server-tabs/sql-blocking.js";
 import { SERVER_CHANGE_COLUMNS, DB_CHANGE_COLUMNS, TRACE_FLAG_CHANGE_COLUMNS } from "./server-tabs/sql-changes.js";
@@ -1098,6 +1098,7 @@ export const SERVER_TABS = [
          pressure; these are three slices of that single payload, so three descriptors meant running the tab's
          heaviest query three times to open it. */
       ...fanout("get_collection_health", { server }, [
+        SERVER_CONNECTION_PANEL,
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
         /* #5735: the collection loop's skipped slots, from the same get_collection_health read (its `skipped_cycles`
            block, always present: count 0 is a real answer). Its own panel because its window is 24 hours, not the 7 days
@@ -1259,6 +1260,7 @@ export const POSTGRES_TABS = [
          three panels, for the reason fanout exists. */
       collectorRunBar(server),
       ...fanout("get_collection_health", { server }, [
+        SERVER_CONNECTION_PANEL,
         { title: "Sweep Pressure", subtitle: "trailing 7 days", viz: "stat", stats: SWEEP_STATS },
         /* #5735: the collection loop's skipped slots, from the same get_collection_health read (its `skipped_cycles`
            block, always present: count 0 is a real answer). Its own panel because its window is 24 hours, not the 7 days

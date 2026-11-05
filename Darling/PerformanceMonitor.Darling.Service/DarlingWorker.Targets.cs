@@ -665,6 +665,15 @@ public sealed partial class DarlingWorker
                because Runtime is null here by definition -- and post-#2218 the config carries the STORED id,
                so an alert on a server that has never once connected keys on the same identity its collected
                history does. */
+            /* #7590: the same fact on the registry, so the web pages, the viewer and MCP read an unreachable server as Offline with the
+               reason instead of waiting out the 30 minute collection age. Written before the alert call, which can wait on a slow send. */
+            await DarlingObservability.MarkConnectFailedAsync(_postgres!, server.Config, failure, _logger, cancellationToken, server.NextConnectAttempt);
+            /* The registry write above awaits, and a removal can land in it: re-check right before the alert so a removed server never raises one. */
+            if (server.Retired)
+            {
+                return;
+            }
+
             await _selfAlerts!.ApplyConnectionOutcomeAsync(
                 server.Config.ServerId,
                 server.Config.DisplayName, online: false, error: failure, cancellationToken);

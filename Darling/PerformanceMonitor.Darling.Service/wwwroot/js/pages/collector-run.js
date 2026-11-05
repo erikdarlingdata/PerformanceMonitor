@@ -60,7 +60,8 @@ async function markOffline(server, button, note) {
   const res = await apiGetFleet();
   if (res.kind !== "data") return;
   const card = (res.data.cards || []).find((c) => c.server_name === server || c.display_name === server);
-  if (!card || card.band !== "Offline") {
+  /* #7590: a card that carries the stored failed connect is unreachable whatever its band says: no collector can run. */
+  if (!card || (card.band !== "Offline" && !card.connect_down_since)) {
     offline.delete(server);
     return;
   }
