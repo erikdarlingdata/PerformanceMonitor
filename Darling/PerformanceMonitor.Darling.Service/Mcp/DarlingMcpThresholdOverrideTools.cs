@@ -514,6 +514,9 @@ public sealed class DarlingMcpThresholdOverrideTools
         DarlingThresholdKeys.PgBlockingCount => s.PgBlockingCountThreshold,
         DarlingThresholdKeys.PgDeadlockCount => s.PgDeadlockCountThreshold,
         DarlingThresholdKeys.IdentityCapacityWarning => s.IdentityCapacityWarningPercent,
+        DarlingThresholdKeys.BackupOverdueHours => s.BackupOverdueThresholdHours,
+        DarlingThresholdKeys.LogBackupOverdueMinutes => s.LogBackupOverdueThresholdMinutes,
+        DarlingThresholdKeys.CheckDbOverdueHours => s.CheckDbOverdueThresholdHours,
         DarlingThresholdKeys.IdentityCapacityCritical => s.IdentityCapacityCriticalPercent,
         _ => throw new ArgumentOutOfRangeException(nameof(wire), wire, "Not a tunable threshold."),
     };

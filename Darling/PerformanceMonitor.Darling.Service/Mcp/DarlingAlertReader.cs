@@ -595,7 +595,11 @@ LIMIT 1";
         bool DailyReportEnabled,
         string DailyReportSendAt,
         string? DailyReportTimeZone,
-        string? DailyReportTitle);
+        string? DailyReportTitle,
+        /* #7611 (V245): the three Database Protection ages (integer NOT NULL: 168 hours, 60 minutes, 336 hours). APPENDED, same reason. */
+        int BackupOverdueThresholdHours,
+        int LogBackupOverdueThresholdMinutes,
+        int CheckDbOverdueThresholdHours);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -638,7 +642,8 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
-       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title
+       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -718,7 +723,9 @@ WHERE id = 1";
             reader.GetBoolean(92),
             PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
             reader.IsDBNull(94) ? null : reader.GetString(94),
-            reader.IsDBNull(95) ? null : reader.GetString(95));
+            reader.IsDBNull(95) ? null : reader.GetString(95),
+            /* #7611 (V245): the three Database Protection ages at 96-98. */
+            reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */
