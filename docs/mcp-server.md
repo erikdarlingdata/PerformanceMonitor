@@ -185,7 +185,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 
 | Category | Tools |
 |---|---|
-| Discovery | `list_servers`, `find_database` |
+| Discovery | `list_servers`, `find_database`, `find_queries_by_text` |
 | Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
