@@ -22,6 +22,7 @@
 import { el } from "../util.js";
 import { copyText, downloadText } from "../grid-tools.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { isWithheldMarker, WITHHELD_PLAN_WORDS } from "../mute-context.js";
 
 const UNPARSED_NOTE = "This stored plan is not valid JSON (the log line may have been cut), so it is shown as stored and Download is off.";
 const CAPTURE_NOTE = "This capture's figures; other captures of the same shape may differ.";
@@ -80,6 +81,8 @@ export function pgPlanFileName(row) {
 
 function panelFor(row) {
   const plan = row.plan;
+  /* #7548: a plan the statement filter withheld whole is stored as the marker, which is not a plan. The page says so in words. */
+  if (isWithheldMarker(plan)) return el("div", { class: "plan-panel" }, [el("div", { class: "strip empty", text: WITHHELD_PLAN_WORDS })]);
   const unparsed = typeof plan === "string";
   const pretty = prettyPrintPgPlan(plan);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
