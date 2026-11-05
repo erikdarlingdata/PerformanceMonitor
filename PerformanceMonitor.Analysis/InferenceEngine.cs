@@ -41,6 +41,7 @@ public class InferenceEngine
     private static readonly HashSet<string> ConfigAdvisoryRootKeys = new(StringComparer.Ordinal)
     {
         "DB_CONFIG",
+        "QUERY_STORE_ERROR",
         "SERVER_CONFIG",
         "FILE_AUTOGROWTH_PERCENT",
         // WS3: bad server-level config. Each per-setting CONFIG_* fact scores 0.4 ONLY when

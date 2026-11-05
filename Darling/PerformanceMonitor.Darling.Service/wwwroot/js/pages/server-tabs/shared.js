@@ -8,6 +8,7 @@
 
 import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
+import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
@@ -15,12 +16,14 @@ import { mergeSeriesRows } from "../../multi-picker.js";
 import { findingTitle, severityLabel, mergeBySentence, chainLine } from "../analysis-findings.js";
 import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams, stripValue, stripGap } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
+import { withheldDisplayText } from "../../mute-context.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
 /** Query-text cell: a truncated one-liner that expands to the full statement (mono) — the B2 disclosure. */
-export function codeDisclosure(text) {
-  if (text == null || text === "") return document.createTextNode("—");
+export function codeDisclosure(rawText) {
+  if (rawText == null || rawText === "") return document.createTextNode("—");
+  const text = withheldDisplayText(rawText); /* #7548: the stored marker reads as words; every other text is shown as stored. */
   return disclosure(text, el("pre", { class: "code" }, [text]), { max: 100 });
 }
 
@@ -133,7 +136,11 @@ export function fanout(read, params, specs, intro = null) {
   /* #6793: the batch's signal, captured while the tab is built (setPanelSignal holds it then), so leaving the page or a redraw cancels this read. */
   const signal = getPanelSignal();
   (async () => {
-    const res = await readToolWithinKeptHistory(read, params, signal);
+    /* #7661: the plot of the widest line panel over this read sets how many points it asks for (readTool, trend-points.js). A fan-out with no line
+       panel (tables, stats) sends none and keeps the old budget. */
+    const lineSpecs = specs.filter((s) => s.viz === "line");
+    const plotPx = lineSpecs.length ? estimatedPlotPx(lineSpecs.some((s) => (s.span ?? 2) === 2) ? 2 : 1) : 0;
+    const res = await readToolWithinKeptHistory(read, params, signal, plotPx > 0 ? { plotPx } : undefined);
     if (res.kind === "aborted") return;
     if (introNode && res.kind === "data" && intro.when(res.data)) {
       mount(introNode, [captionStrip(intro.text)]);
@@ -142,14 +149,17 @@ export function fanout(read, params, specs, intro = null) {
        first one may be to the left rather than above. A panel that shows its own emptyWins sentence does not say the message, so it neither
        claims it nor gets the pointer. */
     let saidEmpty = false;
+    let saidBy = "";
     specs.forEach((spec, i) => {
       const body = shells[i].body;
       if (hidesPanel(spec, res, shells[i], keys[i])) return;
       if (res.kind === "error") return mount(body, readErrorStrip(res.message));
       if (res.kind === "empty") {
         const repeats = saidEmpty && emptyHeadline(spec, res) === res.message;
+        if (!saidEmpty && emptyHeadline(spec, res) === res.message) saidBy = spec.title;
         saidEmpty = saidEmpty || emptyHeadline(spec, res) === res.message;
-        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as the panel that says why.") : panelEmptyStrip(spec, res)]);
+        /* #7552: the pointer names the panel that says why. */
+        return mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), repeats ? emptyStrip("Empty for the same reason as " + (saidBy || "the panel that says why") + ".") : panelEmptyStrip(spec, res)]);
       }
       try {
         /* #2802: a fanout spec carries no `params` of its own (the window lives on the shared fetch above), so
@@ -564,7 +574,7 @@ function overlayOf(kind, server, ctx) {
       key: (row) => row.database_name + "|" + row.full_name,
       read: async (row, ranking, signal) => {
         const metric = PROCEDURE_OVERLAY_METRICS[ranking] || PROCEDURE_OVERLAY_METRICS.cpu;
-        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal);
+        const trend = await readToolWithinKeptHistory("get_procedure_duration_trend", { server, hours: ctx.hours, ...historyTarget("procedures", row) }, signal, { plotPx: estimatedPlotPx() });
         if (trend.kind !== "data" || !trend.data) return null;
         const points = procedurePoints(trend.data.trend).map((p) => ({ t: timeOf(p.time), v: p[metric.key] == null ? NaN : Number(p[metric.key]) }));
         return { points, label: row.database_name + " · " + truncate(row.full_name, 40) + " (" + metric.label + ")" };
@@ -812,6 +822,9 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     format: opts.format,
     unit: opts.unit,
     emptyText: opts.emptyText,
+    /* #7682: a series with no measured value is left out (CPU's Other and Total on a Linux server), and the reply's footNoteKey field says why under the chart. */
+    hideEmptySeries: opts.hideEmptySeries === true,
+    footNoteKey: opts.footNoteKey,
     /* #5644 W16: the page's one sentence replaces the read's own empty message. */
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
@@ -1167,7 +1180,7 @@ export function serverTrendPanel(server, ctx, kind) {
   const spec = SERVER_TRENDS[kind];
   const { panel, body } = panelShell(spec.title + " Trend", ctx.label, 2, "get_server_trend");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal);
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: spec.metric, hours: ctx.hours }, ctx && ctx.signal, { plotPx: estimatedPlotPx() });
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);
@@ -1252,7 +1265,7 @@ export function seriesTrendPanel(server, ctx, kind) {
   const spec = SERIES_TRENDS[kind];
   const { panel, body } = panelShell(spec.title, spec.subtitle + ", " + ctx.label, 2, "get_server_trend");
   (async () => {
-    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal);
+    const res = await readToolWithinKeptHistory("get_server_trend", { server, metric: kind, hours: ctx.hours }, ctx && ctx.signal, { plotPx: estimatedPlotPx() });
     if (res.kind === "aborted") return;
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, [keptWindowStrip(res), emptyStrip(emptyHeadline(spec, res) || spec.emptyText)]);

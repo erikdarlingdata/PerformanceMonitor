@@ -98,6 +98,7 @@ public static class ProvisioningVerdict
     public static string StatusLabel(string? status, long? samples = null) =>
         string.IsNullOrEmpty(status) ? "No Data"
         : status == NotApplicable ? NotApplicableLabel
+        : status == NotJudgedSecondary ? NotJudgedSecondaryLabel
         : status == NotEnoughData ? (samples is long n ? NotEnoughDataLabel(n) : NotEnoughDataShortLabel)
         : status.Replace("_", " ");
 
@@ -135,6 +136,23 @@ public static class ProvisioningVerdict
     /// <summary>The sentence shown beside <see cref="NotApplicable"/>.</summary>
     public const string NotApplicableExplanation = "A logical server's master database has no service objective to resize.";
 
+    /// <summary>An Availability Group secondary replica (#7705): its own load shows only its work as a secondary, so it is not judged from it.</summary>
+    public const string NotJudgedSecondary = "NOT_JUDGED_SECONDARY";
+
+    /// <summary>What the verdict badge and grid cell show for <see cref="NotJudgedSecondary"/>.</summary>
+    public const string NotJudgedSecondaryLabel = "Not judged (secondary replica)";
+
+    /// <summary>The sentence shown beside <see cref="NotJudgedSecondary"/>.</summary>
+    public const string NotJudgedSecondaryExplanation =
+        "This server is a secondary replica, so its load shows only its work as a secondary. Size it with the primary, for the load it must carry after a failover.";
+
+    /// <summary>The headline of the one informational recommendation row a secondary replica gets in place of the CPU and memory right-sizing rows.</summary>
+    public const string NotJudgedSecondaryFinding = "Availability Group secondary replica: not right-sized from its own load";
+
+    /// <summary>The Availability Group replica role the collector stores for a secondary replica.</summary>
+    public static bool IsSecondaryReplicaRole(string? agReplicaRole) =>
+        string.Equals(agReplicaRole?.Trim(), "Secondary", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// The verdict for one server from one window's measurements. A logical server's <c>master</c>
     /// (<see cref="ServerHardwareScope.IsLogicalServerMaster"/>) gets <see cref="NotApplicable"/> whatever it measured.
@@ -153,6 +171,7 @@ public static class ProvisioningVerdict
     /// Azure SQL Database), which is unknown: it never counts as zero in use and it cannot imply saturation.</param>
     /// <param name="engineEdition">The target's engine edition, when known.</param>
     /// <param name="edition">The target's stored edition, when known.</param>
+    /// <param name="isAgSecondary">The server is an Availability Group secondary replica (#7705): it gets <see cref="NotJudgedSecondary"/>.</param>
     public static string Evaluate(
         decimal avgCpuPercent,
         decimal maxCpuPercent,
@@ -166,11 +185,19 @@ public static class ProvisioningVerdict
         int? engineEdition = null,
         string? edition = null,
         long? cpuSamples = null,
-        decimal? stolenMemoryPercent = null)
+        decimal? stolenMemoryPercent = null,
+        bool isAgSecondary = false)
     {
         if (ServerHardwareScope.IsLogicalServerMaster(engineEdition, edition))
         {
             return NotApplicable;
+        }
+
+        /* #7705: a secondary replica's load is only what it does as a secondary, not what it must carry after a failover, so neither
+           OVER_PROVISIONED nor UNDER_PROVISIONED from that load is true. The same role rule as the edition advice (#980). */
+        if (isAgSecondary)
+        {
+            return NotJudgedSecondary;
         }
 
         /* #6139: a window with too few samples says nothing. Null is a caller that does not count samples (a unit test of the

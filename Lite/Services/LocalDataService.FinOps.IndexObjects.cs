@@ -437,6 +437,7 @@ AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE serv
         /* #5312: only databases inside the saved filter are offered, so the box cannot pick a database the filter hides. */
         var dbClause = BuildDbInClause(databaseNames, "ios.database_name", 2, out var dbValues);
         command.CommandText = $@"
+SELECT * FROM (
 SELECT DISTINCT ios.database_name
 FROM v_index_object_stats ios
 WHERE ios.server_id = $1
@@ -448,7 +449,8 @@ AND (
     OR COALESCE(ios.page_io_latch_wait_in_ms, 0) > 0
     OR COALESCE(ios.index_lock_promotion_count, 0) > 0
 )
-ORDER BY ios.database_name";
+) AS d
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)

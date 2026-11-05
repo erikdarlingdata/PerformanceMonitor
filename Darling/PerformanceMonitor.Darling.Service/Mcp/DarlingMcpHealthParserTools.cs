@@ -136,19 +136,20 @@ public sealed class DarlingMcpHealthParserTools
     /// <summary>The web page's CPU chart (#6158): the same parsed SYSTEM snapshots, but the answer is one row per time bucket
     /// (the mean of each CPU reading) across the whole window, instead of the newest <c>limit</c> rows. A day of snapshots used
     /// to stop at the limit and draw only its newest hours. The width is <paramref name="bucket_minutes"/>, or sized so the
-    /// answer fits <see cref="TrendBudget.Chart"/>'s point budget. Not an MCP tool: the agent read keeps its shape.</summary>
+    /// answer fits <paramref name="budget"/> (the web page's plot-sized ask, #7661) or <see cref="TrendBudget.Chart"/>'s point budget. Not an MCP tool: the agent read keeps its shape.</summary>
     internal static async Task<string> GetSystemHealthChart(
         NpgsqlDataSource postgres,
         string? server_name,
         int hours_back,
         int? bucket_minutes,
         string? as_of,
+        TrendBudget? budget = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 2, TrendBudget.Chart, out var bucketMinutes);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 2, budget ?? TrendBudget.Chart, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
             var c = await CollectAsync(postgres, server_name, hours_back, 50, as_of,

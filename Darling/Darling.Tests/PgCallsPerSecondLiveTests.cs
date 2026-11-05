@@ -188,6 +188,57 @@ public sealed class PgCallsPerSecondLiveTests
         });
     }
 
+    /// <summary>
+    /// #7661: the web chart asks for about one point per 2 px of its plot. A day asked for 300 points comes back as 5-minute buckets
+    /// (289 points) instead of the 1-minute ones the full chart budget gives (1,440); a bucket's rate is still its calls over its seconds,
+    /// and one slow minute still shows in the bucket's peak while its mean is far lower.
+    /// </summary>
+    [Fact]
+    public async Task APlotSizedAsk_ForADay_GivesWiderBuckets_WithATrueRate_AndAPeakThatKeepsAOneMinuteSpike()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            for (var t = T0; t < T0.AddHours(24); t = t.AddMinutes(1))
+            {
+                await SeedRunAsync(connection, ct, t);
+            }
+
+            for (var t = T0; t < T0.AddHours(24); t = t.AddMinutes(5))
+            {
+                await SeedStatementAsync(connection, ct, t, deltaCalls: 29, deltaMs: 290.0);
+            }
+
+            // The spike: one minute, one call, 5 s, between two of the batches.
+            var spikeAt = T0.AddHours(12).AddMinutes(1);
+            await SeedStatementAsync(connection, ct, spikeAt, deltaCalls: 1, deltaMs: 5000.0);
+
+            async Task<(JsonElement[] Points, int BucketMinutes)> ReadAsync(TrendBudget budget)
+            {
+                var root = JsonDocument.Parse(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(
+                    postgres, ServerName, QueryId.ToString(CultureInfo.InvariantCulture), 24, "2026-03-07T10:00:00Z", null, budget, cancellationToken: ct)).RootElement;
+                return (root.GetProperty("points").EnumerateArray().ToArray(), root.GetProperty("bucket_minutes").GetInt32());
+            }
+
+            var (full, fullMinutes) = await ReadAsync(TrendBudget.Chart);
+            var (sized, sizedMinutes) = await ReadAsync(TrendBudget.ChartFor(300));
+
+            Assert.Equal(1, fullMinutes);
+            Assert.Equal(5, sizedMinutes);
+            Assert.InRange(sized.Length, 250, 300);
+            Assert.True(full.Length > 1000, $"the full chart budget gave {full.Length} points");
+
+            // A bucket with one batch: 29 calls over the 300 s the runs covered.
+            var midday = sized.First(p => p.GetProperty("collection_time").GetDateTime().TimeOfDay == TimeSpan.FromHours(14));
+            Assert.Equal(29, midday.GetProperty("calls").GetInt64());
+            Assert.Equal(Math.Round(29.0 / 300.0, 4), midday.GetProperty("calls_per_second").GetDouble(), 9);
+
+            // The bucket with the spike: peak is the 5 s call, mean is the bucket's total over its calls.
+            var spike = sized.First(p => p.GetProperty("collection_time").GetDateTime().TimeOfDay == TimeSpan.FromHours(22));
+            Assert.Equal(5000.0, spike.GetProperty("peak_mean_exec_ms").GetDouble(), 3);
+            Assert.True(spike.GetProperty("mean_exec_ms").GetDouble() < 300.0, "the spike is not the mean");
+        });
+    }
+
     private static async Task<(long Calls, double CallsPerSecond, long Intervals)> ReadBucketAsync(
         NpgsqlDataSource postgres, CancellationToken ct, string start)
     {

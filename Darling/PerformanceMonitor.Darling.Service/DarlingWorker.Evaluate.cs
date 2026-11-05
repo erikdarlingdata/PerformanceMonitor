@@ -2988,8 +2988,8 @@ LIMIT 1";
     /// <summary>
     /// Runs <see cref="LatestCpuSql"/> and shapes it for the snapshot — Lite's overview read
     /// (LocalDataService.Overview.cs:37-51) against the raw PG table, and the
-    /// ServerSummaryItem.TotalCpuPercent derivation (:140-141): total = SQL + (other ?? 0),
-    /// null when there is no SQL sample (Azure SQL DB stores other as 0; Linux stores NULL).
+    /// ServerSummaryItem.TotalCpuPercent derivation: total = SQL + other, null when either is
+    /// unknown (see <see cref="AlertTotalCpu"/>; Azure SQL DB stores other as 0, SQL Server on Linux stores NULL).
     /// </summary>
     private Task<(double? SqlCpu, double? TotalCpu, DateTime? SampleTime, DateTime? SampleUtcOnly)> ReadLatestCpuAsync(
         int serverId, CancellationToken cancellationToken)
@@ -3060,9 +3060,18 @@ LIMIT 1";
             return newestCollection;
         });
 
-        double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;
+        double? totalCpu = AlertTotalCpu(sqlCpu, otherCpu);
         return (sqlCpu, totalCpu, sampleTime, sampleUtcOnly);
     }
+
+    /// <summary>
+    /// The total CPU an alert reads from one sample (#7682): SQL + other-process, null when either is unknown. A NULL
+    /// other-process figure (SQL Server on Linux before 2025 CU1 cannot report host CPU) is not zero, so the total is not
+    /// known either: the alert card then prints the SQL figure and no "Total CPU" line, and the Total CPU alert mode
+    /// falls back to the SQL figure. Lite's <c>LocalDataService.GetRecentCpuSamplesAsync</c> follows the same rule.
+    /// </summary>
+    internal static double? AlertTotalCpu(double? sqlCpu, double? otherCpu)
+        => sqlCpu.HasValue && otherCpu.HasValue ? sqlCpu.Value + otherCpu.Value : null;
 
     /// <summary>The counter's name for the recent-samples read (#5642), beside <see cref="LatestCpuReadName"/>.</summary>
     internal const string RecentCpuReadName = "recent-CPU read";
@@ -3117,7 +3126,7 @@ LIMIT $3";
         {
             var sqlCpu = reader.IsDBNull(1) ? (double?)null : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
             var otherCpu = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2), CultureInfo.InvariantCulture);
-            double? totalCpu = sqlCpu.HasValue ? sqlCpu.Value + (otherCpu ?? 0) : null;
+            double? totalCpu = AlertTotalCpu(sqlCpu, otherCpu);
             samples.Add(new AlertCpuSample(reader.GetDateTime(0), sqlCpu, totalCpu));
         }
 

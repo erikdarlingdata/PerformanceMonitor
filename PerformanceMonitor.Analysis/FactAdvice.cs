@@ -295,6 +295,7 @@ public static class FactAdvice
             "LCK" => ComposeLck(factsByKey),
             // Configuration, capacity, and server-health blocks: state the counts/values collected.
             "DB_CONFIG" => ComposeDbConfig(factsByKey),
+            "QUERY_STORE_ERROR" => ComposeQueryStoreError(factsByKey),
             "FILE_AUTOGROWTH_PERCENT" => ComposeFileAutogrowth(factsByKey),
             "MISSING_INDEX" => ComposeMissingIndex(factsByKey),
             "PLAN_WARNING" => ComposePlanWarning(factsByKey),
@@ -2155,16 +2156,15 @@ public static class FactAdvice
 
     /// <summary>
     /// #7537: the same figure when the detector took its DMV arm (the window holds no blocked process reports, as on
-    /// RDS and Azure), so the rows are blocking snapshots. The baseline is still built from report rows, so the
-    /// note says the two are different units instead of claiming they match.
+    /// RDS and Azure), so the rows are blocking snapshots. The baseline is built from snapshot rows too (#7588), so the
+    /// note names the source it counted and says the baseline counts the same thing.
     /// </summary>
     private const string BlockingSpikeDmvUnitNote =
         " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports for the " +
         "databases this target covers, and " +
         "the snapshot job adds a row at every sample a session keeps waiting, so one long wait adds several. It is not " +
         "the blocking event count, which counts each wait once; the two figures for the same window will differ. " +
-        "The baseline it is compared with is built from blocked process report rows, not snapshot rows, so it does " +
-        "not measure the same thing as this window's count.";
+        "The baseline it is compared with is built from snapshot rows too.";
 
     /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
@@ -2184,7 +2184,7 @@ public static class FactAdvice
         var fallback = _byKey[key];
         // #7537: what the number counts. The remediation still names the regular finding's threshold by `noun`.
         var counted = countNoun ?? noun;
-        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and the baseline is.
+        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and (#7588) the baseline is built from snapshot rows too.
         if (dmvCountNoun is not null && (FactMeta(facts, key, CountFamilyMetadata.FromDmvSnapshotsKey) ?? 0) >= 1)
         {
             counted = dmvCountNoun;
@@ -2362,6 +2362,34 @@ public static class FactAdvice
             "Total server memory fell relative to its target — the OS may be reclaiming memory from SQL Server, or the buffer pool grew unusually fast.", "avg_memory_pressure_pct");
         var mem = MaxMemorySentence(facts);
         return mem.Length == 0 ? a : a with { Remediation = a.Remediation + " " + mem };
+    }
+
+    /// <summary>
+    /// QUERY_STORE_ERROR composed (#7675): names the databases (the fact's <see cref="Fact.ObjectName"/>) and says whether any of them is meant to
+    /// be recording. Falls back to the static block when the fact carries no name.
+    /// </summary>
+    private static AdviceBlock ComposeQueryStoreError(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["QUERY_STORE_ERROR"];
+        if (!facts.TryGetValue("QUERY_STORE_ERROR", out var f) || string.IsNullOrEmpty(f.ObjectName))
+            return fallback;
+
+        var count = (long)f.Value;
+        var wantRecording = (long)f.Metadata.GetValueOrDefault("read_write_count");
+        /* Three names and "and N more", as the row note does: many databases erroring together (a storage event) must not
+           make the headline a paragraph. The names are split back out of the comma-joined ObjectName; when a database name
+           itself holds ", " the split does not match the count, and the whole list is shown rather than a wrong cut. */
+        var names = f.ObjectName.Split(", ");
+        var shown = names.Length > 3 && names.Length == count
+            ? string.Join(", ", names.Take(3)) + $" and {names.Length - 3:N0} more"
+            : f.ObjectName;
+        var headline = count == 1
+            ? $"Query Store stopped on an internal error in {f.ObjectName}"
+            : $"Query Store stopped on an internal error in {count:N0} databases ({shown})";
+        var inv = fallback.Investigation + (wantRecording > 0
+            ? $" {wantRecording:N0} of them {(wantRecording == 1 ? "is" : "are")} set to READ_WRITE, so Query Store should be recording there and is not."
+            : " Each is set to OFF, so this is a store that was turned off and then stopped on an error: its old rows are still there, and nothing new is being recorded.");
+        return fallback with { Headline = headline, Investigation = inv };
     }
 
     /// <summary>DB_CONFIG composed: lists which per-database settings drifted, with counts.</summary>
@@ -3337,6 +3365,14 @@ public static class FactAdvice
                 "The per-database breakdown is attached, naming the specific problems on each (auto_shrink ON, auto_close ON, RCSI off, page verify below CHECKSUM). Each issue has a different cost: AUTO_SHRINK causes catastrophic fragmentation by repeatedly shrinking and re-growing; AUTO_CLOSE adds connection-time overhead on every first query against an idle database; page verify below CHECKSUM weakens torn-page detection on modern storage; RCSI off makes reader/writer blocking unavoidable. Open Configuration → Database Configuration in-app for the full per-database state.",
             Remediation:
                 "Mechanical fixes for the unambiguous ones: `ALTER DATABASE <db> SET AUTO_SHRINK OFF` — always. `ALTER DATABASE <db> SET AUTO_CLOSE OFF` — always for any database with real workload. `ALTER DATABASE <db> SET PAGE_VERIFY CHECKSUM` — always on modern storage. RCSI is the only nuanced one: enabling it eliminates reader/writer blocking but adds version-store overhead to writes — test on a copy first if the application uses NOLOCK hints or relies on default isolation semantics in surprising ways. The amplifier on this finding boosts severity when LCK_M_S/LCK_M_IS are also high; that combination is the strong signal RCSI would actually help.");
+
+        t["QUERY_STORE_ERROR"] = new AdviceBlock(
+            Headline:
+                "Query Store stopped on an internal error",
+            Investigation:
+                "A database whose Query Store actual state is ERROR has stopped recording: Query Store hit an internal error and left the store in a state it cannot write to. Its newest rows are old, so every Query Store read of that database (top queries, regressions, plan history, clutter) shows data that has stopped changing. get_query_store_health shows the actual state, the desired state and the storage used for each database.",
+            Remediation:
+                "Turn Query Store off and on again for the database (`ALTER DATABASE <db> SET QUERY_STORE = OFF; ALTER DATABASE <db> SET QUERY_STORE = ON;`). If it returns to ERROR, run `EXEC sp_query_store_consistency_check` in that database, which repairs or reports the damaged store, then turn it on again. Clearing the store (`ALTER DATABASE <db> SET QUERY_STORE CLEAR`) is the last resort because it deletes the history.");
 
         t["FILE_AUTOGROWTH_PERCENT"] = new AdviceBlock(
             Headline:

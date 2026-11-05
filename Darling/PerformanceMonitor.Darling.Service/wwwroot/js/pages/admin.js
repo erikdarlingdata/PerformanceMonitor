@@ -31,7 +31,7 @@ import { VIZ } from "../panels.js";
 import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, captionStrip, adminListOnlyNote, ADMIN_WRITES_OFF_NOTE, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
-import { dailyReportEditor } from "./admin-daily-report.js";
+import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
 import { databaseProtectionEditor } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
@@ -1330,7 +1330,7 @@ const buildProfilesTab = (body, generation) => buildProfiles(body, generation, {
 });
 
 const SETTINGS_NOTE =
-  "Read only, except the Daily Health Report, which a signed-in admin can change here. Delivery credentials (SMTP, webhooks) are not shown on this page. The data-collection flags " +
+  "Read only, except the Database Protection overdue ages and the Daily Health Report, which a signed-in admin can change here. When changes from the web are turned off, this page is read only. Delivery credentials (SMTP, webhooks) are not shown on this page. The data-collection flags " +
   "(plan capture and similar) are not carried by it either; they stay in the desktop Settings window.";
 
 /** #7410: a store with no saved alert settings yet says so in one plain sentence; the tool's text (it talks of rows and the store)
@@ -1348,15 +1348,21 @@ async function buildSettings(body, generation) {
   const sections = settingSections(res.data);
   if (!sections.length) return mount(body, emptyStrip("The service reported no alert settings."));
   const nodes = [captionStrip(SETTINGS_NOTE)];
+  /* #7700: with web.allowAdminWrites off the service refuses both forms, so they are not drawn and the page says why. */
+  const writesOff = !!session && session.can_edit === true && session.admin_writes_off === true;
+  const canEditSettings = !!session && session.can_edit === true && !writesOff;
+  if (writesOff) nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the settings only", "To change one", true)));
   for (const s of sections) {
     nodes.push(el("h3", { class: "section-title", text: s.title }));
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
     /* #7041: the Daily Health Report is the one setting group the web edits; a signed-in admin gets the form under its rows. */
     /* #7611: the three Database Protection overdue ages are editable under the alert thresholds, the same way. */
-    if (s.title === "Alert thresholds" && session && session.can_edit === true && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
+    if (s.title === "Alert thresholds" && canEditSettings && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
       nodes.push(databaseProtectionEditor(res.data, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }
-    if (s.title === "Daily Health Report" && session && session.can_edit === true) {
+    /* #7700: Preview only reads, so with writes off the Preview button is still drawn (no Save, no inputs). */
+    if (s.title === "Daily Health Report" && writesOff) nodes.push(dailyReportPreviewOnly());
+    if (s.title === "Daily Health Report" && canEditSettings) {
       nodes.push(dailyReportEditor(res.data.daily_report, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }
   }
@@ -1622,6 +1628,7 @@ async function buildPractice(body, generation) {
   const nodes = [captionStrip(PRACTICE_NOTE)];
   const practiceAccess = writeAccess(session);
   if (practiceAccess === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (practiceAccess === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the scores only", "To start a practice request", true)));
   if (practiceAccess === "yes") {
     const feedback = await apiGet("/api/investigation-feedback");
     if (generation !== renderGeneration) return;
@@ -1654,6 +1661,7 @@ export const NOTE_COLUMNS = [
 const NOTES_NOTE_EDITING =
   "Notes an agent proposed that nobody has decided. An approved note goes into the briefs for its server; a rejected note " +
   "is kept, marked rejected, and never goes into a brief. The text cannot be edited here.";
+const NOTES_NOTE_LISTED = "Notes an agent proposed that nobody has decided.";
 const NOTES_NOTE_READ_ONLY = "Notes an agent proposed that nobody has decided. This sign-in is read-only, so it cannot approve or reject them.";
 const NOTES_NOTE_EXPIRY =
   " A note stops reaching briefs when it expires (the Expires column), and an expired note is not listed.";
@@ -1840,8 +1848,9 @@ async function buildPending(body, generation) {
      not signed in sees the list and the sentence that says what to do. */
   const access = writeAccess(session);
   const canEdit = access === "yes";
-  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
+  nodes.push(captionStrip((canEdit ? NOTES_NOTE_EDITING : access === "off" ? NOTES_NOTE_LISTED : NOTES_NOTE_READ_ONLY) + NOTES_NOTE_EXPIRY));
   if (access === "sign-in") nodes.push(captionStrip(SIGN_IN_SENTENCE));
+  if (access === "off") nodes.push(captionStrip(adminListOnlyNote(session.managed_store === true, "this page lists the notes only", "To approve, reject or write a note", true)));
   if (canEdit) {
     const serverList = await apiGet("/api/admin/servers");
     if (generation !== renderGeneration) return;

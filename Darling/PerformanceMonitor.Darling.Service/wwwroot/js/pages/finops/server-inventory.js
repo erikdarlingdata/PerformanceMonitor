@@ -24,6 +24,8 @@ const PROVISIONING = {
   OVER_PROVISIONED: ["OVER PROVISIONED", "Warning"],
   UNDER_PROVISIONED: ["UNDER PROVISIONED", "Critical"],
   NOT_APPLICABLE: ["N/A", null],
+  /* ProvisioningVerdict.NotJudgedSecondaryLabel (#7705): a secondary replica's own load does not size it. */
+  NOT_JUDGED_SECONDARY: ["Not judged (secondary replica)", null],
   /* The Viewer's grid words (ProvisioningVerdict.NotEnoughDataShortLabel): too few CPU samples in the window for a verdict. */
   NOT_ENOUGH_DATA: ["not enough data yet", null],
 };

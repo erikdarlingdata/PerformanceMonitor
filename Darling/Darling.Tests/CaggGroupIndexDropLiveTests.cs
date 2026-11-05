@@ -578,7 +578,9 @@ JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
 JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
 WHERE i.indrelid = format('%I.%I', $1, $2)::regclass
 AND   i.indnatts = 2
-AND   a2.attname = 'bucket'", connection);
+AND   a2.attname = 'bucket'
+-- #7609 (V246): the named (query_hash, bucket DESC) index is built on purpose, not an auto-created group index.
+AND   NOT EXISTS (SELECT 1 FROM pg_class ic WHERE ic.oid = i.indexrelid AND ic.relname = 'ix_qs_corrected_hourly_hash_bucket')", connection);
         command.Parameters.AddWithValue(schema);
         command.Parameters.AddWithValue(table);
         await using var reader = await command.ExecuteReaderAsync(ct);
