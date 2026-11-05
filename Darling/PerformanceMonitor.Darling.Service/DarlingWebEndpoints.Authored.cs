@@ -166,7 +166,7 @@ public static partial class DarlingWebEndpoints
                 cancellationToken: context.RequestAborted);
             return result switch
             {
-                CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
+                CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", WithValidationWarnings(BuildFullViewNode(ok.View), validation)),
                 CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
                 CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
                 _ => ErrorResult("Could not create the view.", StatusCodes.Status500InternalServerError),
@@ -227,7 +227,7 @@ public static partial class DarlingWebEndpoints
                 actorKey: seat.OwnerKey, cancellationToken: context.RequestAborted);
             return result switch
             {
-                CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
+                CustomViewResult.Ok ok => JsonNodeResult(WithValidationWarnings(BuildFullViewNode(ok.View!), validation)),
                 CustomViewResult.NotFound => NotFoundResult(),
                 CustomViewResult.Forbidden forbidden => ErrorResult(forbidden.Message, StatusCodes.Status403Forbidden),
                 CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),

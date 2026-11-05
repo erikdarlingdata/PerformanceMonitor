@@ -11,7 +11,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -118,6 +120,114 @@ public sealed class DarlingCustomViewsTests
         var ok = DarlingWebEndpoints.ValidateDefinition(
             "{\"panels\":[{\"read\":\"get_cpu_utilization\",\"viz\":\"line\",\"series\":[{\"key\":\"x\",\"label\":\"X\"}]}]}");
         Assert.True(ok.IsValid, ok.Error);
+    }
+
+    /* ── #7565: perfmon_value on a counter ending in /sec is a running total, not a rate ── */
+
+    private static string PerfmonPanel(string measureProperty, string? filters) =>
+        "{\"source\":\"perfmon_stats\"," + measureProperty + ",\"timeBucket\":\"hour\",\"viz\":\"line\"" +
+        (filters is null ? "" : ",\"filters\":[" + filters + "]") + "}";
+
+    private static string CounterFilter(string op, string value) =>
+        "{\"dimension\":\"counter_name\",\"op\":\"" + op + "\",\"value\":\"" + value + "\"}";
+
+    private static string Dashboard(string panel) => "{\"panels\":[" + panel + "]}";
+
+    private const string CleanDashboard = "{\"panels\":[{\"read\":\"get_cpu_utilization\",\"viz\":\"line\"}]}";
+
+    private const string PerfmonValue = "\"measure\":\"perfmon_value\",\"aggregate\":\"avg\"";
+
+    [Theory]
+    [InlineData("eq", "Transactions/sec")]
+    [InlineData("eq", "Batch Requests/sec")]
+    [InlineData("like", "%/sec")]
+    public void ValidateDefinition_WarnsWhenPerfmonValueChartsASlashSecCounter(string op, string counter)
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonValue, CounterFilter(op, counter))));
+
+        /* A warning, never an error: the definition still saves and runs. */
+        Assert.True(result.IsValid, result.Error);
+        var warning = Assert.Single(result.Warnings!);
+        Assert.StartsWith("panel 0:", warning, StringComparison.Ordinal);
+        Assert.Contains("perfmon_value_per_second", warning, StringComparison.Ordinal);
+        Assert.Contains("running total", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_WarnsWhenPerfmonValueHasNoCounterFilter()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonValue, null)));
+
+        Assert.True(result.IsValid, result.Error);
+        var warning = Assert.Single(result.Warnings!);
+        Assert.Contains("no counter_name filter", warning, StringComparison.Ordinal);
+        Assert.Contains("perfmon_value_per_second", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateDefinition_WarnsOnTheNotebookCell_NamingTheCell()
+    {
+        var cell = PerfmonPanel(PerfmonValue, CounterFilter("eq", "Transactions/sec")).Replace("{\"source\"", "{\"type\":\"panel\",\"source\"", StringComparison.Ordinal);
+        var result = DarlingWebEndpoints.ValidateDefinition("{\"kind\":\"notebook\",\"cells\":[" + cell + "]}");
+
+        Assert.True(result.IsValid, result.Error);
+        Assert.StartsWith("cell 0:", Assert.Single(result.Warnings!), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("\"ratio\":\"perfmon_value_per_second\"", "Transactions/sec")]
+    [InlineData("\"measure\":\"perfmon_value_delta\",\"aggregate\":\"sum\"", "Transactions/sec")]
+    [InlineData("\"measure\":\"perfmon_value\",\"aggregate\":\"avg\"", "Total Server Memory (KB)")]
+    public void ValidateDefinition_DoesNotWarn_ForTheRateMeasureOrAPointInTimeCounter(string measureProperty, string counter)
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(measureProperty, CounterFilter("eq", counter))));
+
+        Assert.True(result.IsValid, result.Error);
+        Assert.Null(result.Warnings);
+    }
+
+    [Fact]
+    public async Task ValidateCustomView_ReturnsTheWarnings_AndOmitsThemWhenThereAreNone()
+    {
+        var warned = await DarlingMcpCustomViewTools.ValidateCustomView(
+            Dashboard(PerfmonPanel(PerfmonValue, CounterFilter("eq", "Transactions/sec"))));
+        var warnedNode = JsonNode.Parse(warned)!;
+        Assert.True(warnedNode["valid"]!.GetValue<bool>());
+        Assert.Contains("perfmon_value_per_second", warnedNode["warnings"]![0]!.GetValue<string>(), StringComparison.Ordinal);
+
+        var clean = JsonNode.Parse(await DarlingMcpCustomViewTools.ValidateCustomView(CleanDashboard))!;
+        Assert.True(clean["valid"]!.GetValue<bool>());
+        Assert.Null(clean["warnings"]);
+    }
+
+    [Fact]
+    public void WithValidationWarnings_AddsTheValidatorsTextToTheSavedViewReply_OnlyWhenThereIsSome()
+    {
+        var warned = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonValue, CounterFilter("eq", "Transactions/sec"))));
+        var withWarnings = DarlingWebEndpoints.WithValidationWarnings(new JsonObject { ["id"] = 7 }, warned);
+        Assert.Equal(warned.Warnings![0], withWarnings["warnings"]![0]!.GetValue<string>());
+
+        var without = DarlingWebEndpoints.WithValidationWarnings(new JsonObject { ["id"] = 7 }, DarlingWebEndpoints.ValidateDefinition(CleanDashboard));
+        Assert.False(without.ContainsKey("warnings"));
+    }
+
+    [Fact]
+    public void TheCatalog_SaysPerfmonValueIsARunningTotal_AndOffersTheRateMeasure()
+    {
+        var measures = DarlingWebEndpoints.BuildComposeCatalogNode()["measures"]!.AsArray()
+            .Select(m => m!.AsObject()).Where(m => m["source"]!.GetValue<string>() == "perfmon_stats")
+            .ToDictionary(m => m["key"]!.GetValue<string>(), m => m, StringComparer.Ordinal);
+
+        var note = measures["perfmon_value"]["note"]!.GetValue<string>();
+        Assert.Contains("running total", note, StringComparison.Ordinal);
+        Assert.Contains("/sec", note, StringComparison.Ordinal);
+        Assert.Contains("perfmon_value_per_second", note, StringComparison.Ordinal);
+
+        var rate = measures["perfmon_value_per_second"];
+        Assert.Equal("ratio", rate["kind"]!.GetValue<string>());
+        Assert.Contains("per second", rate["displayName"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("not a rate", measures["perfmon_value_delta"]["displayName"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Contains("running total", measures["perfmon_value"]["displayName"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
     [Theory]

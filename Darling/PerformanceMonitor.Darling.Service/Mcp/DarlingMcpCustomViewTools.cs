@@ -101,7 +101,10 @@ public sealed class DarlingMcpCustomViewTools
         "overlay), never silently dropped. A notebook cell is FLAT (carries the panel's own keys directly); only " +
         "run_custom_view_panel's spec nests under 'panel'. <<GUIDE>> Dry-run: validates a custom-view definition " +
         "against the measure catalog and the composer rules WITHOUT persisting anything. Returns {valid:true} or " +
-        "{valid:false, error:\"...\"} naming the first problem. This is the exact authority create_custom_view / " +
+        "{valid:false, error:\"...\"} naming the first problem. A valid definition that will not draw what it " +
+        "means carries a 'warnings' list (it still saves and runs): a panel that charts perfmon_value on a counter " +
+        "ending in /sec draws SQL Server's running total, which only climbs; use the ratio perfmon_value_per_second. " +
+        "This is the exact authority create_custom_view / " +
         "update_custom_view run before saving, so use it to iterate on a generated definition until it is valid. " +
         "The definition is a dashboard {\"panels\":[...]} or a notebook {\"kind\":\"notebook\",\"cells\":[...]}; " +
         "a composed panel names a catalog 'source' + 'measure'|'ratio', an 'aggregate', an optional 'timeBucket' " +
@@ -122,8 +125,10 @@ public sealed class DarlingMcpCustomViewTools
         try
         {
             var validation = DarlingWebEndpoints.ValidateDefinition(definition);
-            return Task.FromResult(JsonSerializer.Serialize(
-                new { valid = validation.IsValid, error = validation.Error }, McpHelpers.JsonOptions));
+            /* #7565: warnings ride only a valid definition and only when there are some, so a clean reply keeps its old shape. */
+            return Task.FromResult(validation.Warnings is { Count: > 0 } warnings
+                ? JsonSerializer.Serialize(new { valid = validation.IsValid, error = validation.Error, warnings }, McpHelpers.JsonOptions)
+                : JsonSerializer.Serialize(new { valid = validation.IsValid, error = validation.Error }, McpHelpers.JsonOptions));
         }
         catch (Exception ex)
         {
