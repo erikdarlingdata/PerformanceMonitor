@@ -71,12 +71,12 @@ internal static class DarlingServerOfflineNote
     internal static async Task<string?> LeadAsync(
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken,
         DateTime? windowEndUtc = null) =>
-        (await LeadWithNewestAsync(postgres, serverId, displayName, nowUtc, cancellationToken, windowEndUtc)).Lead;
+        (await LeadWithNewestAsync(postgres, serverId, displayName, nowUtc, windowEndUtc, cancellationToken)).Lead;
 
     /// <summary><see cref="LeadAsync"/>, with the newest SUCCESS collection it judged by (#7724), so a caller can say what was collected.</summary>
     private static async Task<(string? Lead, DateTime? Newest)> LeadWithNewestAsync(
-        NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken,
-        DateTime? windowEndUtc)
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, DateTime? windowEndUtc,
+        CancellationToken cancellationToken)
     {
         if (await ReadFreshnessAsync(postgres, serverId, cancellationToken, successOnly: true) is not var (registered, last))
         {
@@ -201,7 +201,7 @@ internal static class DarlingServerOfflineNote
 
         /* The caller's window end is the read's anchor (as_of, or now for a live read), so offline is judged as of it, not as of the
            clock: an as_of read of a past window must not answer as the server is today. */
-        var (lead, newest) = await LeadWithNewestAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
+        var (lead, newest) = await LeadWithNewestAsync(postgres, serverId, displayName, windowEndUtc, windowEndUtc, cancellationToken);
         if (lead is null)
         {
             return answer;
