@@ -24,9 +24,15 @@ const chosenHours = new Map();
 
 const LIMIT = 10;
 
+/* #7562: the band words take the colors the same words have on Recommendations. */
+const BAND_SEV = { high: "Critical", medium: "Warning", low: "Healthy" };
+function withBandSev(data) {
+  return { ...data, rows: (data.rows || []).map((r) => ({ ...r, impact_band_sev: BAND_SEV[String(r.impact_band || "").toLowerCase()] ?? null })) };
+}
+
 const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
-  { key: "impact_band", label: "Band" },
+  { key: "impact_band", label: "Band", sevKey: "impact_band_sev" },
   { key: "database_name", label: "Database", name: true },
   { key: "query_hash", label: "Query hash", mono: true },
   { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },
@@ -71,7 +77,7 @@ export const tab = {
         const data = res.data || {};
         mount(body, [
           captionStrip(noticeText(data)),
-          VIZ.table(data, { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
+          VIZ.table(withBandSev(data), { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {
         if (mine === seq && e?.name !== "AbortError") mount(body, errorStrip("Could not render this tab: " + (e && e.message ? e.message : String(e))));

@@ -273,26 +273,32 @@ function sweepDocument(d) {
   /* The instrument-liveness block, rendered honestly: the verdict, its counters, and every note the
      engine wrote about what it could and could not judge. */
   const liveness = d.instrument_liveness && typeof d.instrument_liveness === "object" ? d.instrument_liveness : {};
-  nodes.push(el("h4", { class: "sweep-section", text: "Instrument liveness" }));
+  nodes.push(el("h4", { class: "sweep-section", text: "Did monitoring keep running?" }));
   nodes.push(livenessBlock(d, liveness));
 
   return el("div", { class: "sweep-doc card" + (d.instruments_alive ? "" : " instruments-dead") }, nodes);
 }
 
-function livenessBlock(d, lv) {
+/* #7562: the rows of the liveness table, in words for a person. */
+export function livenessRows(d, lv) {
   const rows = [];
-  rows.push(["Verdict", d.instruments_alive ? "alive" : "DEAD", d.instruments_alive ? "sev-Healthy" : "sev-Critical"]);
+  rows.push(["Answer", d.instruments_alive ? "Yes, alerts and collection were running" : "No, something stopped", d.instruments_alive ? "sev-Healthy" : "sev-Critical"]);
   rows.push(["Service started", localTime(lv.service_started_at)]);
-  if (lv.baseline_reset) rows.push(["Pass-counter baseline", "reset by restart — advance not judgeable this sweep"]);
-  rows.push(["Alert passes", fmtInt(lv.alert_passes_total)
-    + (lv.alert_passes_previous != null ? " (previous " + fmtInt(lv.alert_passes_previous) + ")" : " (no baseline)")
-    + (lv.alert_passes_advancing === true ? " — advancing" : lv.alert_passes_advancing === false ? " — frozen" : "")]);
-  rows.push(["Alert read failures", fmtInt(lv.alert_read_failures_total)]);
+  if (lv.baseline_reset) rows.push(["Service restart", "The service restarted, so this sweep cannot tell whether alerts kept running"]);
+  rows.push(["Alert checks run", fmtInt(lv.alert_passes_total)
+    + (lv.alert_passes_previous != null ? " (previous sweep " + fmtInt(lv.alert_passes_previous) + ")" : " (no earlier count to compare)")
+    + (lv.alert_passes_advancing === true ? ", still counting up" : lv.alert_passes_advancing === false ? ", not counting up" : "")]);
+  rows.push(["Alert checks that could not read", fmtInt(lv.alert_read_failures_total)]);
+  return rows;
+}
+
+function livenessBlock(d, lv) {
+  const rows = livenessRows(d, lv);
 
   const faults = asArray(lv.server_read_faults);
   const notes = asArray(lv.notes);
   return el("div", { class: "liveness-block" }, [
-    table(["Instrument", "Reading"], rows.map((r) => [
+    table(["Check", "Result"], rows.map((r) => [
       cellText(r[0]),
       el("td", { class: r[2] || null, text: r[1] }),
     ])),
@@ -501,6 +507,19 @@ export function storeSizeText(store, nowMs) {
   return fmtMb(bytesToMb(store.size_bytes)) + (age == null ? (store.size_estimated === true ? " (estimate)" : "") : " (" + form + fmtMs(age * 1000) + " old)");
 }
 
+/* #7562: where the RAM figure came from, said in words and not as the name of a Windows call. */
+function ramSourceText(source) {
+  const s = String(source ?? "");
+  if (s === "GlobalMemoryStatusEx") return "read from Windows";
+  if (s.startsWith("/proc/meminfo")) return "read from the Linux host";
+  if (s.startsWith("GC.GetGCMemoryInfo()")) return "an estimate, because the host gave no reading";
+  return s ? s : "source unknown";
+}
+
+export function ramText(ram) {
+  return fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total, " + ramSourceText(ram.source);
+}
+
 /** The store host card's actual render, split out from the fetch above (#4214 round-1 review) so a poll tick
     can replay a previously fetched payload through the SAME render path a fresh fetch uses. */
 function renderStoreHostPayload(box, p) {
@@ -513,7 +532,7 @@ function renderStoreHostPayload(box, p) {
     [cellText("Platform"), cellText((p.platform || "—") + (p.containerized ? " (containerized)" : ""))],
     [cellText("CPUs"), cellText(fmtInt(p.processor_count))],
     [cellText("Cloud"), cellText(p.cloud && p.cloud.provider ? p.cloud.provider + " (" + fmtText(p.cloud.instance_type) + ")" : "not detected")],
-    [cellText("RAM"), cellText(fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total (" + fmtText(ram.source) + ")")],
+    [cellText("RAM"), cellText(ramText(ram))],
     [cellText("Data volume"), cellText(fmtMb(bytesToMb(vol.free_bytes)) + " free of " + fmtMb(bytesToMb(vol.total_bytes)) + " (" + fmtText(vol.filesystem) + ")" + (vol.note ? " — " + vol.note : ""))],
     [cellText("Managed store"), cellText(fmtBool(p.managed))],
     [cellText("PostgreSQL / TimescaleDB"), cellText(fmtText(store.postgres_version) + " / " + fmtText(store.timescale_version))],

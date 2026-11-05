@@ -58,4 +58,13 @@ public sealed class ProvisioningVerdictEvidenceTests
         Assert.Equal("", ProvisioningVerdict.StolenMemoryNote(40));
         Assert.Contains("88%", ProvisioningVerdict.StolenMemoryNote(88));
     }
+
+    [Fact]
+    public void StolenMemoryNote_KeepsOneDecimal_SoAFigureUnderTheRedLineDoesNotReadAsOnTheLine()
+    {
+        // 84.8 rounded to a whole number reads "85%", the red line, while the figure is under it (#7562).
+        var note = ProvisioningVerdict.StolenMemoryNote(84.8);
+        Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
+        Assert.Contains("red from 85%", note, System.StringComparison.Ordinal);
+    }
 }

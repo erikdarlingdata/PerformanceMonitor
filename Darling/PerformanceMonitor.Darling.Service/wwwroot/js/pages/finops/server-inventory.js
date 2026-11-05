@@ -58,9 +58,16 @@ const COLUMNS = [
 
 // The row as shown: a hardware-note code becomes the legend's text, the verdict token becomes its label, and the
 // severity names come from the payload's own band and verdict. A key the read omitted stays missing and shows "—".
+/* #7562: where the host info view does not exist the collector falls back to the end of @@VERSION, "Windows Server 2016 Datacenter 10.0 <X64> (Build 14393: ) (Hypervisor)".
+   The name is what comes before the version number and the platform tag. */
+export function shortHostOs(text) {
+  return typeof text === "string" ? text.replace(/\s+\d+(\.\d+)+\s*<[^>]*>.*$/, "") : text;
+}
+
 function displayRow(r, legend) {
   return {
     ...r,
+    host_os_version: shortHostOs(r.host_os_version),
     hardware_note: r.hardware_note == null ? null : (legend[r.hardware_note] ?? r.hardware_note),
     provisioning_status: r.provisioning_status == null ? null : (PROVISIONING[r.provisioning_status]?.[0] ?? r.provisioning_status.replace(/_/g, " ")),
     provisioning_sev: PROVISIONING[r.provisioning_status]?.[1] ?? null,
