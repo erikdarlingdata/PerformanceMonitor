@@ -113,6 +113,26 @@ try {
     };
     out.day = draw(10, "2026-10-21T00:00", "2026-10-21T23:50");
     out.week = draw(70, "2026-10-15T00:00", "2026-10-21T22:50");
+  } else if (scenario === "window") {
+    /* #7683: the columns run across the reply's window, not from the first bin to the last. A day of 10 minute bins (the window starts at
+       23:05 and ends at 23:05, so the first and last bins are partial and the day is 145 columns): one bin, and bins only in the last hour. */
+    const win = { window_start: "2026-11-04T23:05:00.0000000Z", window_end: "2026-11-05T23:05:00.0000000Z" };
+    const draw = (cells, truncated) => {
+      const d = { metric: "duration", bucket_minutes: 10, ...win, magnitude_buckets: labels, cell_count: cells.length, truncated, cells };
+      const g = model.buildHeatmap(d);
+      const filledColumns = [];
+      for (let c = 0; c < g.columns; c++) if (g.rows.some((r) => r[c])) filledColumns.push(c);
+      const body = page.renderHeatmapBody(d, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
+      const table = body.every((n) => n.tag === "table")[0];
+      return { columns: g.columns, filledColumns, startMs: g.startMs, cellsInRow: table.children[1].children.filter((c) => c.tag === "td").length,
+        minWidth: table.style.minWidth || "" };
+    };
+    out.one = draw([cell("2026-11-05T11:00", 1, 4)], false);
+    out.lastHour = draw([cell("2026-11-05T22:10", 1, 4), cell("2026-11-05T22:40", 3, 9), cell("2026-11-05T23:00", 2, 2)], false);
+    /* A cut read (the oldest bins dropped) starts at the first bin it returned. */
+    out.cut = draw([cell("2026-11-05T20:00", 1, 4), cell("2026-11-05T23:00", 2, 2)], true);
+    out.windowStartMs = Date.parse("2026-11-04T23:00:00Z");
+    out.cutStartMs = Date.parse("2026-11-05T20:00:00Z");
   } else if (scenario === "renderEmpty") {
     const body = page.renderHeatmapBody({ metric: "duration", bucket_minutes: 5, cells: [] }, { server: "SRV1", columns: [], desc: { emptyText: "none" } });
     out.tds = body.every((n) => n.tag === "td").length;

@@ -49,8 +49,11 @@ export function heatmapTimeMs(s) {
 }
 
 /**
- * Lay get_query_heatmap's cells out on a grid. Columns run from the first bin that holds a cell to the last, one per bin width, so a
- * quiet stretch between two busy ones is an empty column rather than missing; rows are the 7 magnitude buckets (row index = bucket_index).
+ * Lay get_query_heatmap's cells out on a grid. Columns run across the window the read answered (window_start to window_end), one per bin
+ * width, so a quiet stretch, or a window with a few bins in it, is empty columns rather than missing and one bin is one narrow column at its
+ * own place in the range (#7683). The bins sit on the read's own edges (multiples of the width from the Unix epoch, the read's date_bin
+ * origin). A read that was cut (`truncated`) dropped its OLDEST bins, so the grid starts at the first bin it returned. A reply with no
+ * window falls back to the first and last bin that holds a cell. Rows are the 7 magnitude buckets (row index = bucket_index).
  * Returns { empty, binMinutes, binMs, startMs, columns, labels, rows, max, cellCount } where rows[r][c] is the cell or null.
  */
 export function buildHeatmap(data) {
@@ -67,8 +70,14 @@ export function buildHeatmap(data) {
     placed.push({ ms, r, n, cell: c });
   }
   if (!placed.length) return { empty: true, binMinutes, binMs, startMs: NaN, columns: 0, labels, rows: [], max: 0, cellCount: 0 };
-  const startMs = Math.min(...placed.map((p) => p.ms));
-  const endMs = Math.max(...placed.map((p) => p.ms));
+  /* The bin a time falls in: bins start on multiples of the width from the epoch, as the read's date_bin does. */
+  const binStart = (ms) => Math.floor(ms / binMs) * binMs;
+  let startMs = Math.min(...placed.map((p) => p.ms));
+  let endMs = Math.max(...placed.map((p) => p.ms));
+  const winStart = heatmapTimeMs(data.window_start);
+  const winEnd = heatmapTimeMs(data.window_end);
+  if (!data.truncated && Number.isFinite(winStart)) startMs = Math.min(startMs, binStart(winStart));
+  if (Number.isFinite(winEnd)) endMs = Math.max(endMs, binStart(winEnd));
   const columns = Math.round((endMs - startMs) / binMs) + 1;
   const rowCount = Math.max(labels.length, ...placed.map((p) => p.r + 1));
   const rows = Array.from({ length: rowCount }, () => new Array(columns).fill(null));

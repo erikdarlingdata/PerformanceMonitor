@@ -85,7 +85,10 @@ export function renderHeatmapBody(data, opts) {
     const head = el("tr", {}, [el("th", { class: "qh-corner" })]);
     for (let c = 0; c < grid.columns; c += tick) {
       const span = Math.min(tick, grid.columns - c);
-      head.appendChild(el("th", { class: "qh-tick", colspan: String(span), text: axisTime(new Date(grid.startMs + c * grid.binMs), spansDays) }));
+      /* #7683: a window that starts and ends mid-bin leaves a last label with one or two columns under it, too narrow for its text (it clipped
+         to "11"). That label is left blank; its columns still count in the row. */
+      const label = span < Math.min(tick, 3) ? "" : axisTime(new Date(grid.startMs + c * grid.binMs), spansDays);
+      head.appendChild(el("th", { class: "qh-tick", colspan: String(span), text: label }));
     }
     table.appendChild(head);
     for (let r = grid.rows.length - 1; r >= 0; r--) {
