@@ -315,6 +315,7 @@ CROSS JOIN LATERAL
     FROM v_memory_grant_stats AS m
     WHERE m.server_id = s.server_id
     AND   m.collection_time = latest.collection_time
+    AND   COALESCE(m.resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
 ) AS pressure
 WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}";

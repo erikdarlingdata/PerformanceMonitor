@@ -265,9 +265,11 @@ public sealed class McpHealthParserTools
 
             var rows = await dataService.GetSchedulerIssuesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             var lastCapturedAt = await dataService.GetLastSystemHealthCaptureAsync(resolved.ServerId);
+            /* #7688: on SQL Server on Linux the read clears Other-Process CPU and Idle (idle reads 0), and the answer says why. */
+            var hostOs = await dataService.GetHostOsVersionAsync(resolved.ServerId);
             if (rows.Count == 0)
-                return await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt));
+                return SystemHealthHostCpu.WithNote(await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, await EmptyAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, SystemHealthParser.SchedulerMonitorEvent,
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", capturedInWindow: null, lastCapturedAt)), hostOs)!;
 
             var notice = await WindowNoticeAsync(dataService, resolved.ServerId, hours_back, windowEnd);
 
@@ -281,6 +283,7 @@ public sealed class McpHealthParserTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
+                system_cpu_note = SystemHealthHostCpu.SchedulerNoteFor(hostOs),
                 last_captured_at = Stamp(lastCapturedAt),
                 issue_count = rows.Count,
                 shown = Math.Min(rows.Count, limit),

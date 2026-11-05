@@ -6295,6 +6295,29 @@ public sealed class AlertEngineTests
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
+    /// <summary>
+    /// #7646: the fired Database State alert stored whatever number the database's NAME held. The fire site passed null
+    /// for both numerics, so the stores read the first digit out of "Sales2024: OFFLINE" and wrote 2024. The state alert
+    /// has no measurement: it stores the explicit 0 for both, and the classifier lists it as state-only so a stored 0
+    /// shows as a dash in the history grids.
+    /// </summary>
+    [Fact]
+    public async Task DatabaseState_StoresZero_NotANumberReadOutOfTheDatabaseName()
+    {
+        var h = new Harness();
+        h.Settings.DatabaseStateEnabled = true;
+        h.Adapter.DatabaseStates.Add(new DatabaseStateInfo { DatabaseName = "Sales2024", StateDesc = "OFFLINE", ExpectedState = "ONLINE" });
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var o = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("Database State", o.MetricName);
+        Assert.Equal(0d, AlertValueParser.ResolveStoredValue(o.NumericCurrentValue, o.CurrentValue));
+        Assert.Equal(0d, AlertValueParser.ResolveStoredValue(o.NumericThresholdValue, o.ThresholdValue));
+        Assert.True(AlertMetricClassifier.IsStateOnly(o.MetricName));
+    }
+
     [Fact]
     public async Task DatabaseState_FiresPerDatabase_GradingSeverityByCurrentState()
     {
