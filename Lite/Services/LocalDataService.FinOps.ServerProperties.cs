@@ -418,10 +418,11 @@ SELECT
     st.alloc_mb,
     st.free_mb,
     c.cpu_samples,
-    m.total_server_memory_mb
+    m.total_server_memory_mb,
+    props.ag_replica_role
 FROM known_servers s
 LEFT JOIN LATERAL (
-    SELECT engine_edition, edition
+    SELECT engine_edition, edition, ag_replica_role
     FROM " + propertiesRelation + @"
     WHERE server_id = s.server_id
     ORDER BY collection_time DESC
@@ -489,7 +490,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
     /// Inventory grid already shows a null status as blank. A server WITH CPU samples gets the same verdict as
     /// before, except that a logical server's master gets the N/A verdict. Ordinals match the fleet SELECT: 1 avg CPU,
     /// 4 max CPU, 5 p95 CPU, 6 max workers, 7 current workers, 8 grant waiters, 9 grant timeouts, 10 forced grants,
-    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory. Under
+    /// 11 grant utilization, 12 engine edition, 13 edition, 15 buffer pool, 19 CPU sample count, 20 total server memory, 21 the AG replica role (a secondary gets NOT_JUDGED_SECONDARY, #7705). Under
     /// <see cref="ProvisioningVerdict.MinSamples"/> samples the verdict is NOT_ENOUGH_DATA; high stolen memory is UNDER_PROVISIONED (#6139).</para>
     /// </summary>
     internal static string? FleetProvisioningStatusFor(System.Data.Common.DbDataReader reader)
@@ -510,6 +511,7 @@ LEFT JOIN grants g ON g.server_id = s.server_id";
             edition: reader.IsDBNull(13) ? null : reader.GetString(13),
             cpuSamples: reader.IsDBNull(19) ? 0L : ToInt64(reader.GetValue(19)),
             stolenMemoryPercent: ProvisioningVerdict.StolenMemoryPercent(
-                reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)), reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))));
+                reader.IsDBNull(20) ? 0 : Convert.ToInt32(reader.GetValue(20)), reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15))),
+            isAgSecondary: ProvisioningVerdict.IsSecondaryReplicaRole(reader.IsDBNull(21) ? null : reader.GetString(21)));
     }
 }
