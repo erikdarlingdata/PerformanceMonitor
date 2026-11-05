@@ -461,7 +461,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
             {
                 "alert_time", "server_id", "server_name", "metric_name",
                 /* #5654: Darling's external-alert source for the row; always null in Lite. */
-                "external_source", "current_value", "threshold_value", "alert_sent",
+                "external_source", "current_value", "threshold_value",
+                /* #7646: true when the alert reports a state, not a measurement, so its stored 0 is not a reading; Darling's twin field. */
+                "state_only", "alert_sent",
                 "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
                 "routing_reason",
                 /* #7084 part 4: the engine alert an analysis finding was attached to; null on every other row. */
