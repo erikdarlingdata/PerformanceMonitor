@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Collections.Generic;
+
 namespace PerformanceMonitor.Ui;
 
 /// <summary>
@@ -34,5 +37,57 @@ public static class BaselineBand
         band.FillStyle.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(FillAlpha);
         band.LineStyle.Width = 0;
         return band;
+    }
+
+    /// <summary>
+    /// #7644: one local hour of a stepped band, on the lane's X axis (OADate days). <c>Lower</c> and <c>Upper</c> are the hour's
+    /// mean minus and plus two effective standard deviations (the lower edge not below zero). The step covers
+    /// <c>FromX</c> up to, but not including, <c>ToX</c>.
+    /// </summary>
+    public sealed record HourStep(double FromX, double ToX, double Mean, double Lower, double Upper)
+    {
+        /// <summary>The step a point at <paramref name="x"/> falls in, or null when its hour has none (no band, no marker).</summary>
+        public static HourStep? At(IReadOnlyList<HourStep>? steps, double x)
+        {
+            if (steps is null)
+                return null;
+            foreach (var step in steps)
+            {
+                if (x >= step.FromX && x < step.ToX)
+                    return step;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>Builds a step from an hour's bucket: mean plus or minus two effective standard deviations, the lower edge not below zero.</summary>
+    public static HourStep MakeStep(double fromX, double toX, double mean, double effectiveStdDev)
+        => new(fromX, toX, mean, Math.Max(0, mean - 2 * effectiveStdDev), mean + 2 * effectiveStdDev);
+
+    /// <summary>
+    /// #7644: draws the stepped band, one rectangle per hour, then a dashed mean segment per hour. The rectangles are added first
+    /// so they paint behind the lane's series; the mean segments follow them. Returns the rectangles.
+    /// </summary>
+    public static List<ScottPlot.Plottables.Rectangle> AddSteps(ScottPlot.Plot plot, IReadOnlyList<HourStep> steps, string hexColor)
+    {
+        var rectangles = new List<ScottPlot.Plottables.Rectangle>(steps.Count);
+        foreach (var step in steps)
+        {
+            var rect = plot.Add.Rectangle(step.FromX, step.ToX, step.Lower, step.Upper);
+            rect.FillStyle.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(FillAlpha);
+            rect.LineStyle.Width = 0;
+            rectangles.Add(rect);
+        }
+
+        foreach (var step in steps)
+        {
+            var mean = plot.Add.Line(step.FromX, step.Mean, step.ToX, step.Mean);
+            mean.Color = ScottPlot.Color.FromHex(hexColor).WithAlpha(60);
+            mean.LinePattern = ScottPlot.LinePattern.Dashed;
+            mean.LineWidth = 1;
+        }
+
+        return rectangles;
     }
 }

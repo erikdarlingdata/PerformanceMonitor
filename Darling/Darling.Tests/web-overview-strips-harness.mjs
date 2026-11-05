@@ -242,7 +242,9 @@ if (scenario === "crosshair") {
     get_memory_trend: { trend: Array.from({ length: 6 }, (_, i) => ({ time: sample(i * 10), buffer_pool_mb: 2000 + i })) },
     get_file_io_trend: { trend: Array.from({ length: 4 }, (_, i) => ({ time: sample(i * 15), database_name: "A", file_type: "ROWS", reads: 10, avg_read_latency_ms: 2 })) },
   };
-  const baselineBody = { status: "ok", baselines: { cpu: laneOf({ mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" }) } };
+  /* The page asks for the real last hour, so the step covers the current clock, not the harness's January window. */
+  const nowStep = { from: new Date(now - 120 * MIN).toISOString(), to: new Date(now + 60 * MIN).toISOString(), mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" };
+  const baselineBody = { status: "ok", baselines: { cpu: { steps: [nowStep] } } };
   let releaseBaseline;
   const baselineGate = new Promise((r) => { releaseBaseline = r; });
   let failBaseline = false;
