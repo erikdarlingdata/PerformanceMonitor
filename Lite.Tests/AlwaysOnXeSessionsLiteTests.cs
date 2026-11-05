@@ -485,6 +485,22 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     }
 
     /// <summary>
+    /// #7639: a list that names only a database that is gone or renamed leaves nothing to create: no database is attempted, nothing is
+    /// sent, and the ensure does not throw (no database was attempted, so there is no refusal to report).
+    /// </summary>
+    [Fact]
+    public async Task AnXeSessionDatabaseList_NamingNoLiveDatabase_SendsNothingAndDoesNotThrow()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
+
+        Assert.Empty(rig.Alpha.Statements);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    /// <summary>
     /// #7639: a database on both lists gets no session. The list the ensure narrows is already without the excluded databases, so the
     /// exclusion wins; this stands the real listing's exclusion in for the test's listing.
     /// </summary>

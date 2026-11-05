@@ -198,6 +198,21 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Empty(rig.Beta.Statements);
     }
 
+    /* #7639: a list that names only a database that is gone or renamed leaves nothing to create: no database is attempted, nothing is sent,
+       and the ensure does not fail. */
+    [Fact]
+    public async Task AnXeSessionDatabaseList_NamingNoLiveDatabase_SendsNothingAndDoesNotFail()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "dropped_last_week" };
+
+        await EnsureAsync(rig);
+
+        Assert.Empty(rig.Alpha.Statements);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
     /* #7639: an empty list is how it worked before the setting: every database gets its sessions. */
     [Fact]
     public async Task AnEmptyXeSessionDatabaseList_EnsuresEveryDatabase()
