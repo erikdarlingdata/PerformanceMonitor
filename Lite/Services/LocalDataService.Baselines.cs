@@ -36,13 +36,14 @@ public partial class LocalDataService
 
     /// <summary>
     /// #7644: the lane's band as one step per local hour of the window, the way the web Overview and the Viewer draw it. An hour with no
-    /// usable bucket (no samples, or no dispersion) has no step. The series is computed at <paramref name="referenceTime"/>, as
-    /// <see cref="GetBaselineForLaneAsync"/> does, so the lanes share one cache entry per metric.
+    /// usable bucket (no samples, or no dispersion) has no step. The series is computed at now, as the Viewer's and the web page's
+    /// are, whatever window the page shows: the 30 days before now, so the lanes share one cache entry per metric and a window in the
+    /// past reads the same band as a request at now.
     /// </summary>
     public async Task<IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>> GetBaselineStepsForLaneAsync(
-        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc, DateTime referenceTime)
+        int serverId, string metricName, DateTime windowStartUtc, DateTime windowEndUtc)
     {
-        var steps = await GetBaselineProvider().GetBaselineStepsAsync(serverId, metricName, windowStartUtc, windowEndUtc, referenceTime);
+        var steps = await GetBaselineProvider().GetBaselineStepsAsync(serverId, metricName, windowStartUtc, windowEndUtc, DateTime.UtcNow);
         return ToBandSteps(steps, windowStartUtc, windowEndUtc);
     }
 

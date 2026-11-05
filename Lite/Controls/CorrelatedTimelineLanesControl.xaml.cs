@@ -138,17 +138,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// #4320: the UTC instant RefreshAsync's baseline lookups (<c>LocalDataService.GetBaselineForLaneAsync</c>
-    /// -&gt; <c>BaselineProvider.GetBaselineAsync</c> -&gt; <c>BaselineLocalClock.LocalKey</c>) should key their
-    /// server-local hour/day-of-week from. <c>LocalKey</c> expects UTC and converts it to server-local itself. Under a
-    /// CUSTOM range fromDate is already a UTC instant (#4766), so it goes through unchanged; under a PRESET range
-    /// (fromDate null) utcNow.AddHours(-hoursBack) is UTC too.
-    /// </summary>
-    internal static DateTime GetBaselineReferenceTimeUtc(
-        int hoursBack, DateTime? fromDate, DateTime utcNow) =>
-        fromDate ?? utcNow.AddHours(-hoursBack);
-
-    /// <summary>
     /// #4296, #4766: RefreshOverviewAsync's comparison window for the Overview tab's ghost-line overlay, as UTC
     /// instants, and the number of whole days the ghost lines are moved by (1 for Yesterday, 7 for Last week and
     /// Same day last week; null for "no comparison"). NOT ServerTab.Comparison.cs's GetComparisonRange, which serves
@@ -207,15 +196,13 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var memoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var fileIoTask = Task.Run(() => _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
-            // Fetch baselines for band rendering — chart-unit-matched metrics. #4320: GetBaselineReferenceTimeUtc
-            // hands BaselineLocalClock.LocalKey a UTC instant, which converts it to server-local itself: a custom
-            // range's fromDate is UTC already (#4766), and so is a preset range's utcNow.AddHours(-hoursBack).
-            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow);
+            // Fetch baselines for band rendering — chart-unit-matched metrics, computed at now whatever window is shown (#7644),
+            // as the Viewer's and the web page's are.
             /* #7644: a band per local hour of the axis window, each hour from its own hour-of-week bucket. The I/O lane reads the chart-unit arm
                (reads-weighted per collection), the unit of the line it sits behind, not the per-file arm the anomaly detector reads. */
             var (axisFromUtc, axisToUtc) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
             Task<IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>> BandsFor(string metric) => Task.Run(() =>
-                _dataService.GetBaselineStepsForLaneAsync(_serverId, metric, axisFromUtc, axisToUtc, referenceTime));
+                _dataService.GetBaselineStepsForLaneAsync(_serverId, metric, axisFromUtc, axisToUtc));
             var cpuBaselineTask = BandsFor(MetricNames.Cpu);
             var waitBaselineTask = BandsFor(MetricNames.WaitMsPerSec);
             var ioBaselineTask = BandsFor(MetricNames.IoLatencyChart);
