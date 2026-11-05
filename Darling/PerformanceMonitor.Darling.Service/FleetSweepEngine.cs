@@ -33,8 +33,16 @@ public sealed record FleetSweepServerReading(
     long PeakBlockWaitMs,
     string? ReadFault,
     DateTime? LastCollectionUtc = null,
-    DateTime? RegisteredUtc = null)
+    DateTime? RegisteredUtc = null,
+    FleetIdentityCapacity? IdentityCapacity = null)
 {
+    /// <summary>
+    /// #7669: a column at its identity limit is a state that stays true until someone acts, so no count of events in the span carries it.
+    /// It reads through the Fleet Overview card's own test (<see cref="FleetServerCard.IsIdentityCritical"/>), so the sweep is never
+    /// better than the card for it.
+    /// </summary>
+    public bool IdentityCapacityCritical => ReadFault is null && FleetServerCard.IsIdentityCritical(IdentityCapacity);
+
     /// <summary>
     /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
     /// started. Its silence is older than the restart, so the post-restart settle window does not explain it. A server last collected a
@@ -245,6 +253,13 @@ public static class FleetSweepEngine
             else
             {
                 var classified = DailyHealthBandCalculator.Classify(reading.Signals, banding);
+                /* #7669: a state that stays true until someone acts sets a floor on the sweep's band (Fleet Overview's
+                   OverallMetricSeverity does the same), so the sweep is never better than the card for it. */
+                if (reading.IdentityCapacityCritical)
+                {
+                    classified = DailyHealthBand.Critical;
+                }
+
                 band = DailyHealthBandCalculator.Label(classified);
                 reason = classified switch
                 {
@@ -261,6 +276,11 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
                 };
+                if (reading.IdentityCapacityCritical && reading.IdentityCapacity is { } identity)
+                {
+                    var identityReason = ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns);
+                    reason = string.IsNullOrEmpty(reason) ? identityReason : reason + "; " + identityReason;
+                }
             }
 
             verdicts.Add(new FleetSweepServerVerdict(
@@ -947,6 +967,9 @@ public static class FleetSweepEngine
             var nowUtc = DateTime.UtcNow;
             var spanStartUtc = ComputeSpanStart(nowUtc, interval, previousRun);
 
+            /* #7669: the state Fleet Overview shows, read once through the card's own reader. An engine-seam read like the two above. */
+            var identityCapacity = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, nowUtc, cancellationToken, logger).ConfigureAwait(false);
+
             /* Sequential, deliberately: 100+ aggregate reads against the loopback store are cheap one
                at a time and a herd all at once — and the sweep is a background errand racing nothing. */
             var readings = new List<FleetSweepServerReading>(servers.Count);
@@ -955,8 +978,9 @@ public static class FleetSweepEngine
                 cancellationToken.ThrowIfCancellationRequested();
                 IReadOnlyList<string>? separate = null;
                 separatelyMonitored?.TryGetValue(serverId, out separate);
-                readings.Add(await ReadServerSignalsAsync(
-                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false));
+                var reading = await ReadServerSignalsAsync(
+                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false);
+                readings.Add(identityCapacity.TryGetValue(serverId, out var identity) ? reading with { IdentityCapacity = identity } : reading);
             }
 
             var composition = Compose(
