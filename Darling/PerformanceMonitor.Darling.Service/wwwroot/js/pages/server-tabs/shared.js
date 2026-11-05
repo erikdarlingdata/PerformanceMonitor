@@ -15,12 +15,14 @@ import { mergeSeriesRows } from "../../multi-picker.js";
 import { findingTitle, severityLabel, mergeBySentence, chainLine } from "../analysis-findings.js";
 import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams, stripValue, stripGap } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
+import { withheldDisplayText } from "../../mute-context.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
 /** Query-text cell: a truncated one-liner that expands to the full statement (mono) — the B2 disclosure. */
-export function codeDisclosure(text) {
-  if (text == null || text === "") return document.createTextNode("—");
+export function codeDisclosure(rawText) {
+  if (rawText == null || rawText === "") return document.createTextNode("—");
+  const text = withheldDisplayText(rawText); /* #7548: the stored marker reads as words; every other text is shown as stored. */
   return disclosure(text, el("pre", { class: "code" }, [text]), { max: 100 });
 }
 
@@ -812,6 +814,9 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     format: opts.format,
     unit: opts.unit,
     emptyText: opts.emptyText,
+    /* #7682: a series with no measured value is left out (CPU's Other and Total on a Linux server), and the reply's footNoteKey field says why under the chart. */
+    hideEmptySeries: opts.hideEmptySeries === true,
+    footNoteKey: opts.footNoteKey,
     /* #5644 W16: the page's one sentence replaces the read's own empty message. */
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */

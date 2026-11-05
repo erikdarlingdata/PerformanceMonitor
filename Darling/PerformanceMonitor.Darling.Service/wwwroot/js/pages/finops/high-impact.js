@@ -30,10 +30,22 @@ function withBandSev(data) {
   return { ...data, rows: (data.rows || []).map((r) => ({ ...r, impact_band_sev: BAND_SEV[String(r.impact_band || "").toLowerCase()] ?? null })) };
 }
 
+/* #7695: a query hash's figures are summed across every database that ran it, and database_name is the one with the
+   most CPU. When more than one is in the total the cell says so, and the tooltip says what the figures cover. */
+function databaseCell(row) {
+  const name = row.database_name == null ? "" : String(row.database_name);
+  const n = Number(row.database_count);
+  if (!(n > 1)) return el("span", { text: name });
+  return el("span", {
+    text: name + " + " + (n - 1) + " more",
+    title: "The figures are summed across " + n + " databases. The name is the database with the most CPU.",
+  });
+}
+
 const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
   { key: "impact_band", label: "Band", sevKey: "impact_band_sev" },
-  { key: "database_name", label: "Database", name: true },
+  { key: "database_name", label: "Database", render: databaseCell, cellClass: () => "name-cell" },
   { key: "query_hash", label: "Query hash", mono: true },
   { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },
   { key: "total_executions", label: "Executions", format: "int" },

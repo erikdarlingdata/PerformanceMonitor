@@ -136,6 +136,13 @@ public sealed class ActualPlanModificationCheckGuardTests
         Assert.True(run.Success && run.Index > answer.Index, $"{relative} {method}: the query runs before the answer is tested");
     }
 
+    /// <summary>
+    /// <c>if (!Confirm(..., info[, more arguments]))</c>: the Detect result must be passed to Confirm and the answer tested.
+    /// Arguments after the result (the database count, #7695) are allowed. A call that never passes the result still fails.
+    /// </summary>
+    private static string ConfirmAnswerPattern(string info) =>
+        @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"(?:\s*,[^;]*)?\s*\)\s*\)";
+
     /// <summary>The viewer's gate: Detect, then its Confirm helper (given the check result), then the answer test, then the run.</summary>
     [Fact]
     public void TheViewerGate_ChecksThenConfirmsWithTheCheckResult_BeforeItQueuesTheRun()
@@ -147,7 +154,7 @@ public sealed class ActualPlanModificationCheckGuardTests
         Assert.True(detect.Success, "RequestActualPlanAsync never calls QueryModificationDetector.Detect into a variable");
         var info = detect.Groups[1].Value;
 
-        var confirm = Regex.Match(body, @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"\s*\)\s*\)", RegexOptions.CultureInvariant);
+        var confirm = Regex.Match(body, ConfirmAnswerPattern(info), RegexOptions.CultureInvariant);
         var run = body.IndexOf(".ExecuteActualPlanAsync(", StringComparison.Ordinal);
         Assert.True(confirm.Success && confirm.Index > detect.Index,
             $"RequestActualPlanAsync does not pass the Detect result '{info}' to Confirm before running");
@@ -330,7 +337,7 @@ public sealed class ActualPlanModificationCheckGuardTests
         }
         else if (confirms == 1 && boxes == 0)
         {
-            var answer = Regex.Match(member, @"if\s*\(\s*!Confirm\([^;]*\b" + Regex.Escape(info) + @"\s*\)\s*\)", RegexOptions.CultureInvariant);
+            var answer = Regex.Match(member, ConfirmAnswerPattern(info), RegexOptions.CultureInvariant);
             if (!answer.Success || answer.Index < detect.Index)
             {
                 problems.Add($"does not pass the Detect result '{info}' to its one Confirm call and test the answer");
