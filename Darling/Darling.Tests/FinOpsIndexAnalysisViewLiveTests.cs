@@ -150,15 +150,15 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
 
         using var doc = await ToolAsync(pg, ServerNameC, limit: 50, db: "tenant_alpha", ct: ct);
         var rows = doc.RootElement.GetProperty("recommendations").EnumerateArray().ToList();
-        /* Ordered by size: the 118 MB duplicate (0.115 GB) precedes the 64 MB unused index (0.063 GB). */
+        /* Ordered by size: the 118 MB duplicate (0.115234 GB) precedes the 64 MB unused index (0.0625 GB); GB goes out to six places. */
         Assert.Equal(new[] { "IX_Orders_Cust_Dup", "IX_Orders_Unused" }, rows.Select(r => r.GetProperty("index_name").GetString()).ToArray());
         var dup = rows[0];
         Assert.Equal("DISABLE", dup.GetProperty("action").GetString());
         Assert.Equal(3, dup.GetProperty("index_id").GetInt32());
-        Assert.Equal(0.115m, dup.GetProperty("index_size_gb").GetDecimal());
+        Assert.Equal(0.115234m, dup.GetProperty("index_size_gb").GetDecimal());
         Assert.Equal(51000, dup.GetProperty("index_rows").GetInt64());
         Assert.StartsWith("ALTER INDEX [IX_Orders_Cust_Dup] ON [tenant_alpha].[dbo].", dup.GetProperty("script").GetString(), StringComparison.Ordinal);
-        Assert.Equal(0.063m, rows[1].GetProperty("index_size_gb").GetDecimal());
+        Assert.Equal(0.0625m, rows[1].GetProperty("index_size_gb").GetDecimal());
     }
 
     [Fact]
@@ -171,8 +171,8 @@ public sealed class FinOpsIndexAnalysisViewLiveTests
 
         using var doc = await ToolAsync(pg, ServerNameC, limit: 50, ct: ct);
         var alpha = doc.RootElement.GetProperty("databases").EnumerateArray().Single(d => d.GetProperty("database_name").GetString() == "tenant_alpha");
-        /* 910.5 + 120.25 + 118 + 64 MB reserved = 1212.75 MB; / 1024 = 1.18433... GB, so three decimals is 1.184. */
-        Assert.Equal(1.184m, alpha.GetProperty("total_size_gb").GetDecimal());
+        /* 910.5 + 120.25 + 118 + 64 MB reserved = 1212.75 MB; / 1024 = 1.184326171875 GB, so six decimals is 1.184326. */
+        Assert.Equal(1.184326m, alpha.GetProperty("total_size_gb").GetDecimal());
         /* Lock waits: indexes 1-4 carry 3, 6, 9 and 12 waits and 11, 22, 33 and 44 ms; 110 ms / 30 waits = 3.666... -> 3.67. */
         Assert.Equal(30, alpha.GetProperty("lock_wait_count").GetInt64());
         Assert.Equal(3.67m, alpha.GetProperty("avg_lock_wait_ms").GetDecimal());

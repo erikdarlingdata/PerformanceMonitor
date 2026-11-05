@@ -415,6 +415,8 @@
   ],
   "rollupRows": [
     {
+      "LeftOver": false,
+      "Status": "",
       "CollectionTimeUtc": null,
       "Scope": "ALL DATABASES",
       "TablesAnalyzed": 2,
@@ -443,6 +445,8 @@
       "AvgLatchWaitMsSort": -1
     },
     {
+      "LeftOver": false,
+      "Status": "",
       "CollectionTimeUtc": "anchor-0.9167d[Utc]",
       "Scope": "OpsDb",
       "TablesAnalyzed": 1,
@@ -471,6 +475,8 @@
       "AvgLatchWaitMsSort": 0
     },
     {
+      "LeftOver": false,
+      "Status": "",
       "CollectionTimeUtc": "anchor-0.9167d[Utc]",
       "Scope": "SalesDb",
       "TablesAnalyzed": 1,
@@ -501,6 +507,8 @@
   ],
   "rollupRowsNoData": [
     {
+      "LeftOver": false,
+      "Status": "",
       "CollectionTimeUtc": null,
       "Scope": "ALL DATABASES",
       "TablesAnalyzed": 0,
@@ -1021,6 +1029,8 @@
     ],
     "rollupRows": [
       {
+        "LeftOver": false,
+        "Status": "",
         "CollectionTimeUtc": null,
         "Scope": "ALL DATABASES",
         "TablesAnalyzed": 2,
@@ -1049,6 +1059,8 @@
         "AvgLatchWaitMsSort": -1
       },
       {
+        "LeftOver": false,
+        "Status": "",
         "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "Scope": "OpsDb",
         "TablesAnalyzed": 1,
@@ -1077,6 +1089,8 @@
         "AvgLatchWaitMsSort": 0
       },
       {
+        "LeftOver": false,
+        "Status": "",
         "CollectionTimeUtc": "anchor-0.9167d[Utc]",
         "Scope": "SalesDb",
         "TablesAnalyzed": 1,

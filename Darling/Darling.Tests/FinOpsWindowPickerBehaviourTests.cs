@@ -125,8 +125,12 @@ public sealed class FinOpsWindowPickerBehaviourTests
     {
         var c = Run().GetProperty("indexCollected");
         var text = c.GetProperty("text").GetString()!;
-        var marker = "Original DefinitionScriptCollected";
-        var rec = text[(text.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..];
+        // The roll-up grid comes first and now prints its own Collected cell next to each Database (#7701), so Shared's two times are in the
+        // page text legitimately. Only the recommendations grid, which starts at its Action header, borrows a roll-up time by name.
+        var marker = "ActionResult KindRuleDatabaseCollected";
+        var at = text.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, "the recommendations grid header was not found in: " + text);
+        var rec = text[(at + marker.Length)..];
 
         // Two ids share "Shared": neither roll-up time is borrowed. "Solo" and "solo" differ by case: each gets its own.
         Assert.DoesNotContain(c.GetProperty("shared1").GetString()!, rec);
