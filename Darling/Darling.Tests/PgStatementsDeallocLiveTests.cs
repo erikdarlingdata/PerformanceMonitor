@@ -47,7 +47,7 @@ public sealed class PgStatementsDeallocLiveTests
         Assert.SkipWhen(maxEntries > MaxEntriesTheEvictionCanFill,
             $"pg_stat_statements.max is {maxEntries}, more than the {MaxEntriesTheEvictionCanFill} this test fills to force an eviction pass.");
 
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

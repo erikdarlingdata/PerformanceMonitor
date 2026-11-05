@@ -997,25 +997,81 @@ AND   sqlserver_cpu_utilization IS NOT NULL";
     /// minutes of history. Today is not required, so a covered server stays covered just after 00:00 UTC. Without the coverage there
     /// is no idle row at all.
     /// </summary>
-    internal async Task<bool> HasQueryStatsCoverageAsync(int serverId)
-    {
-        var (startDay, endDay, oldestCutoff) = IdleCoverageBounds(DateTime.UtcNow);
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        command.CommandText = @"
-SELECT
-    MIN(collection_time),
-    COUNT(DISTINCT CASE WHEN collection_time >= $2 AND collection_time < $3 THEN CAST(collection_time AS DATE) END)
-FROM v_query_stats
-WHERE server_id = $1";
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startDay });
-        command.Parameters.Add(new DuckDBParameter { Value = endDay });
-        using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync() || reader.IsDBNull(0) || reader.IsDBNull(1))
-            return false;
+    internal async Task<bool> HasQueryStatsCoverageAsync(int serverId) =>
+        (await IdleCoveredServerIdsAsync(DateTime.UtcNow, serverId)).Contains(serverId);
 
-        return Convert.ToDateTime(reader.GetValue(0)) <= oldestCutoff && Convert.ToInt64(reader.GetValue(1)) >= IdleCoverageDays;
+    /// <summary>
+    /// The servers (all of them, or just <paramref name="serverId"/>) whose query stats meet the idle-coverage rule at
+    /// <paramref name="nowUtc"/>, the one place the per-server check and the fleet read take it from so they cannot drift (#7014). The rule
+    /// is two conditions, and each reads only what it needs:
+    /// <list type="number">
+    /// <item>Each of the 7 complete UTC days holds a sample: a count over a WHERE range, so the archive side reads only the Parquet row
+    /// groups whose <c>collection_time</c> statistics overlap that window and not every archived day.</item>
+    /// <item>The oldest sample is at or before now minus 7 days: an existence question, not a MIN. The hot <c>query_stats</c> table
+    /// answers it for a server that has a row at or before the cutoff (the default 7 hot days put the cutoff at the edge of the hot
+    /// table, so a long-running server is often decided there). For the rest, one probe per server over the archive that stops at
+    /// the first matching row, so a server whose oldest sample is archived is decided without reading the whole archive.</item>
+    /// </list>
+    /// The statements run in turn. The hot <c>query_stats</c> read and the windowed day count share one connection, and the bounded
+    /// probes over the archive run on a second one; the profile reports only the last statement per connection, which is harmless for
+    /// the hot read because it touches no Parquet and so has nothing to miss. The answer for a
+    /// server is the old MIN and COUNT(DISTINCT) over the whole view, unchanged.
+    /// </summary>
+    internal async Task<HashSet<int>> IdleCoveredServerIdsAsync(DateTime nowUtc, int? serverId)
+    {
+        var (startDay, endDay, oldestCutoff) = IdleCoverageBounds(nowUtc);
+        /* serverId is an int from this process, never text. */
+        var serverFilter = serverId is { } id ? " AND server_id = " + id.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+
+        var covered = new HashSet<int>();
+        var oldEnoughInHot = new HashSet<int>();
+        using (var connection = await OpenConnectionAsync())
+        {
+            using (var hot = connection.CreateCommand())
+            {
+                hot.CommandText = "SELECT DISTINCT server_id FROM query_stats WHERE collection_time <= $1" + serverFilter;
+                hot.Parameters.Add(new DuckDBParameter { Value = oldestCutoff });
+                using var hotReader = await hot.ExecuteReaderAsync();
+                while (await hotReader.ReadAsync())
+                    oldEnoughInHot.Add(Convert.ToInt32(hotReader.GetValue(0)));
+            }
+
+            using var days = connection.CreateCommand();
+            days.CommandText = @"
+SELECT server_id
+FROM v_query_stats
+WHERE collection_time >= $1 AND collection_time < $2" + serverFilter + @"
+GROUP BY server_id
+HAVING COUNT(DISTINCT CAST(collection_time AS DATE)) >= $3";
+            days.Parameters.Add(new DuckDBParameter { Value = startDay });
+            days.Parameters.Add(new DuckDBParameter { Value = endDay });
+            days.Parameters.Add(new DuckDBParameter { Value = (long)IdleCoverageDays });
+            using var daysReader = await days.ExecuteReaderAsync();
+            while (await daysReader.ReadAsync())
+                covered.Add(Convert.ToInt32(daysReader.GetValue(0)));
+        }
+
+        var undecided = covered.Where(c => !oldEnoughInHot.Contains(c)).ToList();
+        var result = covered.Where(oldEnoughInHot.Contains).ToHashSet();
+        if (undecided.Count == 0)
+            return result;
+
+        /* One uncorrelated LIMIT 1 branch per server. A correlated EXISTS or a join would be a semi-join over the whole archive
+           up to the cutoff; a LIMIT 1 over the filtered scan stops at the first row it finds. */
+        using (var connection = await OpenConnectionAsync())
+        {
+            using var probe = connection.CreateCommand();
+            probe.CommandText = string.Join(" UNION ALL ", undecided.Select(u =>
+                "SELECT " + u.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " AS server_id FROM (SELECT 1 FROM v_query_stats WHERE server_id = " + u.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " AND collection_time <= $1 LIMIT 1)"));
+            probe.Parameters.Add(new DuckDBParameter { Value = oldestCutoff });
+            using var probeReader = await probe.ExecuteReaderAsync();
+            while (await probeReader.ReadAsync())
+                result.Add(Convert.ToInt32(probeReader.GetValue(0)));
+        }
+
+        return result;
     }
 
     private static string FormatDuration(long seconds)

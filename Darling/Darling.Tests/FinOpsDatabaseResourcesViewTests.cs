@@ -209,6 +209,22 @@ public sealed class FinOpsDatabaseResourcesViewLiveTests
         Assert.Equal("empty", status);
     }
 
+    /// <summary>#7010: a window that starts before the first query or file I/O row says so, and a window the rows cover does not.</summary>
+    [Fact]
+    public async Task WindowPastTheData_SaysWindowTruncated_AndACoveredWindowDoesNot()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var wide = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 24, 10, cancellationToken: ct));
+        Assert.True(wide.RootElement.GetProperty("window_truncated").GetBoolean());
+        using var covered = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", ServerName, 3, 10, cancellationToken: ct));
+        Assert.False(covered.RootElement.GetProperty("window_truncated").GetBoolean());
+        using var empty = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "database_resources", EmptyServerName, 24, 10, cancellationToken: ct));
+        Assert.True(empty.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+    }
+
     [Fact]
     public async Task PostgresServerWithNoRows_IsNotCollected_WhenBothCollectorsAreGated()
     {

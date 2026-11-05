@@ -75,7 +75,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             stop.CancelAfter(TimeSpan.FromMinutes(3));
             var task = (Task)loop.Invoke(
-                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
 
             /* The loop runs until it is stopped. Wait for the line that says it is up and waiting, then stop it. */
             while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
@@ -116,6 +116,90 @@ public sealed class DarlingStartWithNoServersLiveTests
             Assert.True(await reader.ReadAsync(ct));
             Assert.Equal(1L, reader.GetInt64(0));
             Assert.Equal(0L, reader.GetInt64(1));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
+            try
+            {
+                Directory.Delete(configFolder, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// #7153: stopping the collection loop writes the read-latency samples recorded since the last hourly tick. A read is recorded
+    /// after the loop is up and the loop is stopped at once, well inside the first hour, so the only way the row reaches the store is
+    /// the stop-time flush at the end of the loop. Deleting that call fails this fact.
+    /// </summary>
+    [Fact]
+    public async Task StoppingTheCollectionLoop_WritesTheReadLatencySamplesRecordedSinceTheLastHourlyTick()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live stop-time flush test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var configFolder = Directory.CreateTempSubdirectory("darling-stop-flush-").FullName;
+        var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
+        var bodySucceeded = false;
+        try
+        {
+            var configPath = Path.Combine(configFolder, "darling.json");
+            await File.WriteAllTextAsync(
+                configPath,
+                "{ \"postgres\": { \"managed\": false, \"connectionString\": \"" + scratch.ConnectionString.Replace("\\", "\\\\") + "\" } }",
+                ct);
+            Environment.SetEnvironmentVariable("DARLING_CONFIG", configPath);
+            var config = DarlingConfig.Load();
+
+            var logger = new RecordingLogger();
+            var latency = new ReadLatencyAccumulator();
+            var worker = new DarlingWorker(
+                logger, NullLoggerFactory.Instance, new McpRuntimeState(), new WebRuntimeState(), new MonitoredServerRegistryState(),
+                new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache(), latency);
+            var loop = typeof(DarlingWorker).GetMethod("RunCollectionLoopAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            stop.CancelAfter(TimeSpan.FromMinutes(3));
+            var task = (Task)loop.Invoke(
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
+
+            while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
+                && !task.IsCompleted)
+            {
+                await Task.Delay(100, ct);
+            }
+
+            Assert.False(task.IsCompleted, "the loop ended before it was stopped: " + task.Exception?.GetBaseException().Message);
+            latency.Record(ReadSurface.Web, "get_wait_stats", ReadOutcome.Ok, 70);
+            stop.Cancel();
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            Assert.Contains(logger.Lines, l => l.Contains("collection loop stopped", StringComparison.Ordinal));
+            Assert.False(latency.HasSamples, "the stop did not drain the read-latency samples");
+
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(
+                "SELECT coalesce(sum(run_count), 0), coalesce(sum(total_ms), 0) FROM collect.read_latency WHERE route = 'get_wait_stats'",
+                connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal((1L, 70L), (reader.GetInt64(0), reader.GetInt64(1)));
             bodySucceeded = true;
         }
         finally
@@ -194,7 +278,7 @@ public sealed class DarlingStartWithNoServersLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live stop-during-a-pass test.");
 
         var ct = TestContext.Current.CancellationToken;
-        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var configFolder = Directory.CreateTempSubdirectory("darling-stop-pass-").FullName;
         var previousConfig = Environment.GetEnvironmentVariable("DARLING_CONFIG");
         var bodySucceeded = false;
@@ -217,7 +301,7 @@ public sealed class DarlingStartWithNoServersLiveTests
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             stop.CancelAfter(TimeSpan.FromMinutes(3));
             var task = (Task)loop.Invoke(
-                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, stop.Token])!;
+                worker, [config, scratch.ConnectionString, null, null, null, null, false, null, null, null, stop.Token])!;
 
             while (!logger.Lines.Any(l => l.Contains("No monitored servers are configured yet", StringComparison.Ordinal))
                 && !task.IsCompleted)
@@ -296,7 +380,7 @@ public sealed class DarlingStartWithNoServersLiveTests
         logger.Entries.Where(e => e.Level >= LogLevel.Warning
             && !e.Message.StartsWith("Statement statistics:", StringComparison.Ordinal));
 
-    private sealed class RecordingLogger : ILogger<DarlingWorker>
+    internal sealed class RecordingLogger : ILogger<DarlingWorker>
     {
         private readonly List<(LogLevel Level, string Message)> _entries = new();
 

@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -46,6 +47,7 @@ public partial class NotificationRoutesWindow : Window
         if (dataService.IsReadOnly)
         {
             ActionButtonsPanel.Visibility = Visibility.Collapsed;
+            ReadOnlyBanner.Text = "Read-only connection: routes can be viewed but not changed here, and their destination URLs are not shown. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             ReadOnlyBanner.Visibility = Visibility.Visible;
         }
 
@@ -94,7 +96,7 @@ public partial class NotificationRoutesWindow : Window
 
     private async void AddRoute_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, null, null, _routes) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, null, null, _routes) { Owner = this, NobodyCanApprove = await NobodyCanApproveAsync() };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -141,6 +143,19 @@ public partial class NotificationRoutesWindow : Window
         }
     }
 
+    /// <summary>#7109: whether nobody can approve an action, for the editor's sentence. A read that fails shows no sentence.</summary>
+    private async System.Threading.Tasks.Task<bool> NobodyCanApproveAsync()
+    {
+        try
+        {
+            return await _dataService.NobodyCanApproveAnywhereAsync();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
     private async void EditRoute_Click(object sender, RoutedEventArgs e)
     {
         if (RoutesGrid.SelectedItem is not NotificationRouteRow selected)
@@ -148,7 +163,7 @@ public partial class NotificationRoutesWindow : Window
             return;
         }
 
-        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService, _routes) { Owner = this };
+        var dialog = new NotificationRouteEditDialog(_scopeInputs, selected, _dataService, _routes) { Owner = this, NobodyCanApprove = await NobodyCanApproveAsync() };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -229,7 +244,14 @@ public partial class NotificationRoutesWindow : Window
         }
     }
 
-    private void RoutesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditRoute_Click(sender, e);
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void RoutesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditRoute_Click(sender, e);
+        }
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 

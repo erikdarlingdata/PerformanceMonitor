@@ -21,7 +21,10 @@ namespace PerformanceMonitor.Analysis;
 /// </summary>
 public class InferenceEngine
 {
-    private const double MinimumSeverityThreshold = 0.5;
+    /// <summary>The severity an incident fact must clear to root a story. Internal because the scorer and
+    /// the relationship graphs read it as the bar a PEER fact must clear to corroborate or link
+    /// another (<see cref="FactScorer.ClearsRootBar"/>, #7464).</summary>
+    internal const double MinimumSeverityThreshold = 0.5;
     /// <summary>Hops the greedy traversal will follow from a root before it stops (a safety limit); the
     /// longest story path is therefore this plus the root — <see cref="StoryConfidence.MaxPathNodes"/>.</summary>
     internal const int MaxPathDepth = 10;
@@ -131,6 +134,8 @@ public class InferenceEngine
             var sideLeafKeys = SweepSideLeaves(path, factsByKey, consumed);
 
             var story = BuildStory(path, factsByKey, sideLeafKeys);
+            /* #7084: the window figures the page floor reads, taken from ALL facts (a CPU fact under the scoring bar is not in factsByKey). */
+            story.PageEvidence = FindingPageFloor.Evidence(path, facts);
             stories.Add(story);
         }
 
@@ -201,7 +206,7 @@ public class InferenceEngine
     /// root below the 0.5 incident line? <see cref="IsConfigAdvisoryFact"/> is the different, wider question the
     /// side-leaf sweep asks.
     /// </summary>
-    private static bool IsConfigAdvisoryRoot(string key) =>
+    internal static bool IsConfigAdvisoryRoot(string key) =>
         ConfigAdvisoryRootKeys.Contains(key) || PgTargetFactKeys.IsConfigAdvisoryRoot(key);
 
     /// <summary>

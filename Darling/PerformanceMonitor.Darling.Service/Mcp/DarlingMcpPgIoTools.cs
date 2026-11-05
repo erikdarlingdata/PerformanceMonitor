@@ -49,6 +49,24 @@ public sealed class DarlingMcpPgIoTools
               + "that changes this on the monitored server short of upgrading it."
             : null;
 
+    /// <summary>
+    /// #7459: the status and finding for a window with no pg_stat_io activity. The collector stores cumulative counters and the read differences
+    /// them, so two or more successful runs in the window and no movement is a measurement (empty). Fewer than two runs is a window nobody measured
+    /// (unavailable), which the old text called an idle server's empty answer while hedging that the collector may not have run.
+    /// </summary>
+    internal static (string Status, string Finding) EmptyWindowAnswer(CollectorRunFacts runFacts, int hoursBack)
+    {
+        var runs = runFacts.SuccessfulRunsInWindow ?? 0;
+        if (runs >= CollectorRunFacts.RunsForDeltaBaseline)
+        {
+            return ("empty", string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"No (backend_type, object, context) combination recorded read, write, extend or hit activity in this window: the pg_io_stats collector ran successfully {runs} time(s) in the last {hoursBack} hour(s) and no counter moved between them."));
+        }
+
+        return ("unavailable", string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"The pg_io_stats collector ran successfully {runs} time(s) in the last {hoursBack} hour(s), and activity is the difference between two of its snapshots, so this window was not measured. This is a collection gap, not an all-clear: check collection health."));
+    }
+
     [McpServerTool(Name = "get_pg_io_stats"), Description("Gets PostgreSQL I/O attributed to WHO, WHAT and WHY - backend_type/object/context from pg_stat_io, differenced across the window. track_io_timing is OFF by default: when untracked every *_time_ms and avg_read_ms are null, never a false 0.000; busiest_basis names the fallback ranking. Write counters are always null on Aurora, never a true zero. THE PAGE IS BOUNDED BY limit: combinations_returned/truncated. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads/pct_of_total_read_time divide by total_reads/total_read_time_ms; returned_reads states the page's own share. <<GUIDE>> Gets PostgreSQL I/O attributed to WHO did it, to WHAT, and WHY - the (backend_type, object, context) breakdown from pg_stat_io, differenced across the requested window. Richer than SQL Server's file-level dm_io_virtual_file_stats: instead of 'this file is busy' you get 'autovacuum workers are reading relations in the vacuum context', which names the cause. The context dimension is the one with no SQL Server equivalent and the one that changes the remedy - it separates ordinary buffer-pool misses (where more shared_buffers or a better index helps) from sequential scans that deliberately bypass the pool via a ring buffer (where it will not help at all), from vacuum's ring buffer, from a standby applying WAL. Reports whether the server tracks I/O TIMING at all: track_io_timing is OFF by default in PostgreSQL, and its zero read_time would otherwise divide out to a latency of 0.000 ms that reads as an impossibly fast disk rather than an unmeasured one - the time fields are null when untracked, and busiest_basis says what the ranking actually used. Also reports whether write counters are TRACKED at all, because on Amazon Aurora they are always null - backends there do not write data files, the storage layer does - and a zero would otherwise read as 'no writes happened'. Requires PostgreSQL 16 or later; valid on a standby. THE PAGE IS BOUNDED BY limit: combinations_returned is how many combinations you got, truncated says the window held more, and the rows are the busiest so the ones past the cap did less. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_total_reads' denominator is total_reads and pct_of_total_read_time's is total_read_time_ms, each the WHOLE window's figure across every combination that moved, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_reads / returned_read_time_ms (what the page adds up to) and the totals is the I/O the cap left out; returned_pct_of_total_reads and returned_pct_of_total_read_time are those ratios stated once.")]
     public static async Task<string> GetPgIoStats(
         NpgsqlDataSource postgres,
@@ -97,19 +115,24 @@ public sealed class DarlingMcpPgIoTools
                     return McpHelpers.Status("not_collected", versionGap);
                 }
 
-                /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. */
+                /* #7459: pg_io_stats stores cumulative counters and the read differences them, so an empty window is a measurement only when
+                   the collector took at least two snapshots in it. With fewer, nobody looked and the word is unavailable. */
+                var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(
+                    postgres, resolved.ServerId, "pg_io_stats", now.AddHours(-hours_back), now, cancellationToken);
+                var (emptyStatus, emptyFinding) = EmptyWindowAnswer(runFacts, hours_back);
+
+                /* #4966: the nothing-found word is an empty answer, so it carries the window floor under hints. #7459: the unavailable word
+                   is the same read with nothing found, so it asks the same probe (emptyAnswer is about the rows, not the word): with no
+                   row and no run in the window the notice then says the window was not covered, instead of hints that call it covered. */
                 var emptyNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                     postgres, "get_pg_io_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, logger, cancellationToken);
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
+                return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, DarlingMcpWindowNotice.FinishEmpty(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
-                    status = "empty",
+                    status = emptyStatus,
                     hints = emptyNotice.AsHints(),
-                    finding = "No (backend_type, object, context) combination recorded read, write, extend or "
-                            + "hit activity in this window. On a busy server that more likely means the "
-                            + "collector has not run yet than that the server is idle — pg_stat_io needs "
-                            + "PostgreSQL 16 or later, so check the target's major version.",
+                    finding = emptyFinding,
                 }, McpHelpers.JsonOptions), emptyNotice), cancellationToken);
             }
 
@@ -234,6 +257,15 @@ public sealed class DarlingMcpPgIoTools
         var bytesMeasured = rows.Any(r => r.ByteCountersTracked);
         var bytesEstimated = !bytesMeasured && rows.Any(r => r.OpBytes > 0);
 
+        /* #7409: nothing is busiest when no combination read anything. The first row of an all-zero window is only
+           the first of a tie (it read "autovacuum worker" on a server whose client backends did four times the buffer
+           hits), so the name is null and the tile draws a dash. When read time cannot rank (timing off, or every
+           measured time is zero) the read count ranked, and the tile says so. */
+        var busiest = totalReads > 0 || (timingTracked && totalReadTime > 0)
+            ? $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}"
+            : null;
+        var rankedByReads = !(timingTracked && totalReadTime > 0);
+
         return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = serverName,
@@ -268,7 +300,10 @@ public sealed class DarlingMcpPgIoTools
             /* The key survives untracked timing for the web tile's sake; busiest_basis beside it says
                what the ranking actually used. The reader orders by read time and then by read count, so
                over a store of zero times the count IS the ordering rather than a tiebreak. */
-            busiest_by_read_time = $"{rows[0].BackendType}/{rows[0].ObjectType}/{rows[0].Context}",
+            busiest_by_read_time = busiest,
+            /* #7409: a short tag the page draws beside the name when the ranking was the read COUNT, because the
+               busiest_basis sentence is too long for a tile. Null when read time ranked, and when nothing is busiest. */
+            busiest_rank_note = busiest is not null && rankedByReads ? "(by reads)" : null,
             busiest_basis = timingTracked
                 ? "total read time (read_time_ms), then read count"
                 : "read count (reads) — this server does not measure I/O time, so every read-time figure "

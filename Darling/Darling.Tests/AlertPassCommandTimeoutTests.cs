@@ -178,7 +178,7 @@ public sealed class AlertPassCommandTimeoutTests
         foreach (var path in AlertPassSources())
         {
             total += ScanForUntimedCommands(
-                File.ReadAllText(path), Path.GetFileName(path), firstLine: 1, offenders);
+                RepoFile.ReadRepoFile(path), Path.GetFileName(path), firstLine: 1, offenders);
         }
 
         Assert.True(total > 0, "the alert-pass scan matched no command constructions at all");
@@ -209,7 +209,7 @@ public sealed class AlertPassCommandTimeoutTests
         foreach (var (file, entryPoint) in s_alertPassEntryPoints)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var stripped = CSharpSourceWalker.StripCommentsAndStrings(text);
             var members = MemberBodies(stripped);
 

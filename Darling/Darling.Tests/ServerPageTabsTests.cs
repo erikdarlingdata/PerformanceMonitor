@@ -60,6 +60,9 @@ public sealed class ServerPageTabsTests
     private static string EditorJs => ReadRepoFileLf(Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "editor.js"));
 
+    private static string UtilJs => ReadRepoFileLf(Path.Combine(
+        "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js"));
+
     /// <summary>
     /// Which collector each served <c>get_pg_*</c> read is served FROM.
     ///
@@ -257,22 +260,34 @@ public sealed class ServerPageTabsTests
     /// meant, unaligned, unrounded, unlabelled. I wrote <c>format: "bytes"</c> into this file believing it
     /// existed, and the page would have shipped rendering nine-digit integers in a size column.</para>
     ///
-    /// <para>The vocabulary is taken from <c>editor.js</c>'s <c>FORMAT_OPTIONS</c>, which is the list the
-    /// custom-view editor already offers users — one source, so adding a format to the renderer without
-    /// offering it in the editor (or the reverse) is caught here rather than by someone noticing a
-    /// misrendered column.</para>
+    /// <para>The vocabulary is the renderer's own registry, <c>FORMATTERS</c> in <c>util.js</c> (what <c>applyFormat</c> looks a name up in).
+    /// The custom-view editor offers a subset of it (<c>FORMAT_OPTIONS</c> in <c>editor.js</c>): a server tab may use a format the editor does not
+    /// offer (<c>status</c>, which normalises the casing of a status word, means nothing for a user's own column), but the editor must never offer
+    /// one the renderer lacks.</para>
     /// </summary>
     [Fact]
     public void EveryColumnFormat_IsOneTheRendererKnows()
     {
-        var known = Regex.Match(EditorJs, @"const FORMAT_OPTIONS = \[(?<list>[^\]]*)\]")
-            is { Success: true } match
-            ? Regex.Matches(match.Groups["list"].Value, @"""(?<name>[a-z0-9]+)""")
+        var registry = Regex.Match(UtilJs, @"export const FORMATTERS = \{(?<list>.*?)\n\};", RegexOptions.Singleline);
+        var known = registry.Success
+            ? Regex.Matches(registry.Groups["list"].Value, @"^\s+(?<name>[a-z0-9]+):", RegexOptions.Multiline)
                 .Select(m => m.Groups["name"].Value)
                 .ToHashSet(StringComparer.Ordinal)
             : new HashSet<string>(StringComparer.Ordinal);
 
-        Assert.True(known.Count >= 8, "FORMAT_OPTIONS was not parsed out of editor.js — the guard would pass vacuously.");
+        Assert.True(known.Count >= 8, "FORMATTERS was not parsed out of util.js — the guard would pass vacuously.");
+
+        var offered = Regex.Match(EditorJs, @"const FORMAT_OPTIONS = \[(?<list>[^\]]*)\]")
+            is { Success: true } match
+            ? Regex.Matches(match.Groups["list"].Value, @"""(?<name>[a-z0-9]+)""")
+                .Select(m => m.Groups["name"].Value)
+                .ToArray()
+            : [];
+
+        Assert.True(offered.Length >= 8, "FORMAT_OPTIONS was not parsed out of editor.js — the guard would pass vacuously.");
+        Assert.True(
+            offered.All(known.Contains),
+            "editor.js offers column format(s) the renderer does not know: " + string.Join(", ", offered.Where(n => !known.Contains(n))));
 
         var used = Regex.Matches(ServerTabsJs, @"format:\s*""(?<name>[a-z0-9]+)""")
             .Select(m => m.Groups["name"].Value)
@@ -399,8 +414,11 @@ public sealed class ServerPageTabsTests
         /* The composite spans from its own definition to pickerControl's doc comment, which follows it. */
         var at = js.IndexOf("export function topQueriesPanel", StringComparison.Ordinal);
         Assert.True(at > 0, "topQueriesPanel is gone — remap this test before editing it");
-        var end = js.IndexOf("/**\n * A labelled <select>", at, StringComparison.Ordinal);
-        Assert.True(end > at, "pickerControl no longer follows the composite — remap this test before editing it");
+        /* #7027: the composite now ends where drawQueryTrend ends, because pickerControl sits in another file. */
+        var drawAt = js.IndexOf("async function drawQueryTrend(", at, StringComparison.Ordinal);
+        Assert.True(drawAt > at, "drawQueryTrend no longer follows the composite — remap this test before editing it");
+        var end = js.IndexOf("\n}\n", drawAt, StringComparison.Ordinal);
+        Assert.True(end > at, "drawQueryTrend has no closing brace — remap this test before editing it");
         var region = js[at..end];
 
         Assert.Equal(
@@ -455,8 +473,7 @@ public sealed class ServerPageTabsTests
         var body = ServerTabsJs[draw..end];
 
         Assert.Contains("if (trend.data.window_truncated) {", body, StringComparison.Ordinal);
-        Assert.Contains("trend.data.effective_hours_back", body, StringComparison.Ordinal);
-        Assert.Contains("History for this query starts ", body, StringComparison.Ordinal);
+        Assert.Contains("trendHeadNote(trend.data, \"History for this query\")", body, StringComparison.Ordinal);
         Assert.DoesNotContain("trend.data.truncated", body, StringComparison.Ordinal);
     }
 
@@ -660,19 +677,20 @@ public sealed class ServerPageTabsTests
             "these PostgreSQL reads are in the SQL Server registry, which is applied to every SQL Server in " +
             "the fleet — each would render permanently empty there: " + string.Join(", ", strays));
 
-        /* And the PostgreSQL registry borrows exactly three SQL-Server-named reads. All three read the
-           collection log or the findings store rather than a SQL Server collector's output, so they answer a
+        /* And the PostgreSQL registry borrows exactly four SQL-Server-named reads. Three read the
+           collection log or the findings store rather than a SQL Server collector's output, and audit_config
+           (#7447) has a PostgreSQL arm that projects the CONFIG_PG_* facts, so all four answer a
            PostgreSQL target honestly; anything else added here would be a panel that cannot fill. Named
            explicitly, because the reads that LOOK engine-neutral and are not (get_server_summary,
            get_daily_summary) are the ones someone reaches for first. */
-        var neutral = new[] { "get_analysis_findings", "get_collection_health", "get_collection_log" };
+        var neutral = new[] { "audit_config", "get_analysis_findings", "get_collection_health", "get_collection_log" };
         var unexpected = onPg
             .Where(n => !n.StartsWith("get_pg_", StringComparison.Ordinal) && !neutral.Contains(n, StringComparer.Ordinal))
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
         Assert.True(
             unexpected.Length == 0,
-            "the PostgreSQL registry names SQL Server reads beyond the three engine-neutral ones — each of " +
+            "the PostgreSQL registry names SQL Server reads beyond the four engine-neutral ones — each of " +
             "these answers a PostgreSQL target with a sentence about a collector that will never run: " +
             string.Join(", ", unexpected));
     }
@@ -896,7 +914,7 @@ public sealed class ServerPageTabsTests
         Assert.Contains("Plan analysis, cached-plan retrieval", js, StringComparison.Ordinal);
 
         /* The note renders — a `note` field with no renderer is the same silence in a different place. */
-        Assert.Contains("const strip = noticeStrip(note);", js, StringComparison.Ordinal);
+        Assert.Contains("const strip = captionStrip(note);", js, StringComparison.Ordinal);
         Assert.Contains("tabNote(tab, tabReach())", ServerJs, StringComparison.Ordinal);
     }
 
@@ -931,13 +949,13 @@ public sealed class ServerPageTabsTests
            into false confidence. The helper THROWS without an emptyText, and every tab is built during the
            DOM-shim run, so a table panel that forgot one cannot reach a browser. */
         Assert.Contains(
-            "if (!emptyText) throw new Error(\"table(\" + title + \"): a table panel must explain its own empty state.\");",
+            "if (!emptyText) throw new Error(\"tablePanel(\" + title + \"): a table panel must explain its own empty state.\");",
             js,
             StringComparison.Ordinal);
 
-        Assert.Contains("function line(title, read, params, rowsKey, xKey, series, opts = {})", js, StringComparison.Ordinal);
+        Assert.Contains("function linePanel(title, read, params, rowsKey, xKey, series, opts = {})", js, StringComparison.Ordinal);
         Assert.Contains(
-            "if (!opts.emptyText) throw new Error(\"line(\" + title + \"): a chart panel must explain its own empty state.\");",
+            "if (!opts.emptyText) throw new Error(\"linePanel(\" + title + \"): a chart panel must explain its own empty state.\");",
             js,
             StringComparison.Ordinal);
 
@@ -960,7 +978,7 @@ public sealed class ServerPageTabsTests
             "if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);",
             panels,
             StringComparison.Ordinal);
-        Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText) {", js, StringComparison.Ordinal);
+        Assert.Contains("function stat(title, read, params, stats, subtitle, span = 1, emptyText, extra = null) {", js, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -1047,8 +1065,8 @@ public sealed class ServerPageTabsTests
             var fn = "function " + call.TrimEnd('(');
             var at = js.IndexOf(fn, StringComparison.Ordinal);
             Assert.True(at > 0, "composite " + call + " is gone — remap it before editing this test");
-            /* Its reads and its helpers' reads: take everything from the definition to the descriptor section. */
-            var region = js[at..js.IndexOf("/* ─────────────────────────── descriptor helpers", StringComparison.Ordinal)];
+            /* Its reads and its helpers' reads: take everything from the definition on. #7027: to the end of the joined text, because the descriptor section it used to stop at now sits in another file. */
+            var region = js[at..];
             foreach (var read in reads) Assert.Contains("\"" + read + "\"", region, StringComparison.Ordinal);
         }
 
@@ -1162,7 +1180,7 @@ public sealed class ServerPageTabsTests
 
     /// <summary>
     /// The (read, param-keys) pairs the module sends. Both descriptor forms are covered: the positional helpers
-    /// (<c>table("T", "read", { ... })</c>) and the direct <c>readTool("read", { ... })</c> calls in the
+    /// (<c>tablePanel("T", "read", { ... })</c>) and the direct <c>readTool("read", { ... })</c> calls in the
     /// composites. The params object is matched non-greedily up to its closing brace, which is exact here because
     /// no params object in this file nests another.
     /// </summary>
@@ -1183,13 +1201,13 @@ public sealed class ServerPageTabsTests
     /// the body is the text between the brackets, comments included.</summary>
     private static Dictionary<string, string> DescriptorArraysIn(string js)
     {
-        var arrays = Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
+        var arrays = Regex.Matches(js, @"^(?:export )?const ([A-Z][A-Z0-9_]+) = \[(.*?)^\];", RegexOptions.Multiline | RegexOptions.Singleline)
             .ToDictionary(m => m.Groups[1].Value, m => m.Groups[2].Value, StringComparer.Ordinal);
 
         /* A set that lives in the read catalog is a top-level const that points into it; its text is the catalog
            entry for that read. */
         var catalog = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "read-fields.js");
-        foreach (Match m in Regex.Matches(js, @"^const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
+        foreach (Match m in Regex.Matches(js, @"^(?:export )?const ([A-Z][A-Z0-9_]+) = READ_FIELDS\.(\w+)\.", RegexOptions.Multiline))
         {
             var entry = Regex.Match(catalog, @"^  " + m.Groups[2].Value + @": \{.*?^  \},?\r?$", RegexOptions.Multiline | RegexOptions.Singleline);
             Assert.True(entry.Success, $"{m.Groups[2].Value} has no READ_FIELDS entry");
@@ -1201,7 +1219,7 @@ public sealed class ServerPageTabsTests
 
     /// <summary>
     /// The (read, descriptor-array names) pairs the module's panel helpers bind: <c>stat("T", "read", {...},
-    /// NAME, ...)</c>, <c>table("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
+    /// NAME, ...)</c>, <c>tablePanel("T", "read", {...}, "rows", NAME, ...)</c> and <c>fanout("read", {...}, [{ stats:
     /// NAME }, { columns: NAME }])</c>. Each call is sliced by bracket balance rather than by regex because a
     /// fanout's spec array nests objects inside an array inside the call; the read is the first read-shaped
     /// literal in the call, and the arrays are every <c>*_COLUMNS</c> / <c>*_STATS</c> token in it. The
@@ -1212,7 +1230,7 @@ public sealed class ServerPageTabsTests
     /// </summary>
     private static IEnumerable<(string Read, string[] Arrays)> DescriptorArraysBoundIn(string js)
     {
-        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|table|fanout)\("))
+        foreach (Match open in Regex.Matches(js, @"(?<![A-Za-z0-9_])(?:stat|momentStat|tablePanel|fanout)\("))
         {
             var depth = 1;
             var i = open.Index + open.Length;

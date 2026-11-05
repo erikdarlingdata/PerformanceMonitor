@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows.Media;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Analysis;
@@ -72,17 +73,19 @@ LIMIT 1";
             {
                 cpuPercent = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
                 otherProcessCpuPercent = reader.IsDBNull(1) ? null : ToDouble(reader.GetValue(1));
-                lastCollection = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
-                /* #3282: the SAME value, kept under its own name because the two have different jobs.
-                   lastCollection is overwritten below by the collection_log read and is freshness display;
-                   this one is the CPU persistence gate's observation identity and must stay the instant of
-                   the CPU reading these percentages came from. */
-                cpuSampleTime = lastCollection;
+                /* #3282: sample_time stays under its own name, the CPU persistence gate's observation identity: it
+                   must be the instant of the CPU reading these percentages came from, on the monitored server's
+                   local clock. */
+                cpuSampleTime = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
                 /* #3541 A10: the store's UTC clock for the same row — the stamp get_server_summary publishes
                    as cpu_captured_at. sample_time above is the monitored server's local wall clock and the
                    gate's identity; collection_time is the instant the monitor stored it, comparable with every
                    other captured_at on the MCP surface. */
                 cpuCollectionTime = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                /* #7527: lastCollection is freshness display and list_servers stamps it UTC, so its CPU fallback is
+                   collection_time, the store's UTC clock, not the server-local sample_time (off by the server's UTC
+                   offset). The collection_log read below overwrites it whenever that table has a row. */
+                lastCollection = cpuCollectionTime;
                 /* #3744: the UTC twin, NULL on a pre-v63 row. Kept beside the local stamp rather than folded
                    into it so the summary says which clock each value is in; the alert snapshot does the
                    folding (twin ?? local) where the gate's identity is built. */
@@ -90,6 +93,16 @@ LIMIT 1";
                 break;
             }
         }
+
+        /* #7196: the SHOWN CPU figure is bounded by age, the alert gate's input is not. A cpu_utilization collector
+           that stopped (or an unreachable server) leaves its last reading as the newest row for as long as retention
+           keeps it, and the card and get_server_summary showed that reading as current. The reading's own
+           collection_time is judged against the larger of CpuFreshnessFloor and twice the interval the collector is
+           scheduled at on this server, so a collector an operator set to every 30 minutes is not read as stopped
+           between samples. CpuPercent and the sample stamps keep the raw reading: MainWindow.AlertEngine feeds the
+           alert gate from them, and Darling left its alert-gate reads alone too. */
+        var cpuIsStale = cpuCollectionTime is { } cpuCollected
+            && DateTime.UtcNow - cpuCollected > CpuFreshnessBound(serverId);
 
         /* Latest SQL Memory — hot table first (#3895). */
         foreach (var relation in NewestFirstRelations("memory_stats"))
@@ -165,7 +178,7 @@ WHERE server_id = $1 AND deadlock_time >= $2";
         }
 
         /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
-           stamp above in place, exactly as the single view read did. #5643: the loop's skipped-slots row is not a
+           row's collection_time (UTC) above in place. #5643: the loop's skipped-slots row is not a
            collection, so it cannot make a stalled server read fresh. */
         foreach (var relation in NewestFirstRelations("collection_log"))
         {
@@ -193,6 +206,7 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
             CpuSampleTime = cpuSampleTime,
             CpuSampleTimeUtc = cpuSampleTimeUtc,
             CpuCollectionTime = cpuCollectionTime,
+            CpuIsStale = cpuIsStale,
             MemoryMb = memoryMb,
             MemoryCollectionTime = memoryCollectionTime,
             BlockingCount = blockingCount,
@@ -211,6 +225,28 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     }
 
     /// <summary>
+    /// The least age (#7196) at which the newest SQL Server CPU reading stops showing on the Overview card and in
+    /// get_server_summary: <see cref="CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes"/>, the one value Darling reads too.
+    /// </summary>
+    internal static readonly TimeSpan CpuFreshnessFloor = TimeSpan.FromMinutes(CollectorScheduleDefaults.CpuReadingFreshnessFloorMinutes);
+
+    /// <summary>
+    /// How old the newest CPU reading may be and still show (#7196): the larger of <see cref="CpuFreshnessFloor"/> and
+    /// twice the interval <c>cpu_utilization</c> is scheduled at on this server, read the way the scheduler reads it
+    /// (<see cref="CollectorFrequencyMinutes"/>, the per-server schedule else the global one, else the shipped
+    /// default). The twin of Darling's <c>CpuReadingFreshnessSql.Cutoff</c>.
+    /// </summary>
+    internal TimeSpan CpuFreshnessBound(int serverId)
+    {
+        const string collector = "cpu_utilization";
+        var scheduled = CollectorFrequencyMinutes?.Invoke(serverId, collector);
+        var minutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            CollectorScheduleDefaults.ResolveFrequencyMinutes(collector, scheduled, fleetOverride: null));
+        var twice = TimeSpan.FromMinutes(2.0 * minutes);
+        return twice > CpuFreshnessFloor ? twice : CpuFreshnessFloor;
+    }
+
+    /// <summary>
     /// Where a newest-row read looks, in order (#3895): the hot table, then the <c>v_</c> view that unions it
     /// with every archived parquet file. The Lite twin of Darling's per-server <c>LIMIT 1</c> fleet probes.
     ///
@@ -224,6 +260,49 @@ AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
     /// exactly as before.</para>
     /// </summary>
     private static string[] NewestFirstRelations(string table) => new[] { table, "v_" + table };
+
+    /// <summary>
+    /// #7167: when the server with this storage id was added (<see cref="Models.ServerConnection.RegisteredAtUtc"/>), or null for an unknown
+    /// one. The MCP host wires it from the server list. It is what tells a server that has never once succeeded since before the log's
+    /// retention horizon (offline) from one just added (not yet collected) when <see cref="GetLastSuccessfulCollectionAsync"/> finds nothing.
+    /// Null, as on a hand-built service, keeps every no-success server on the never-collected reading.
+    /// </summary>
+    internal Func<int, DateTime?>? RegisteredAtUtcLookup { get; set; }
+
+    /// <summary>
+    /// #7167: what the server with this storage id is called (its display name), or null for an unknown one. Wired with
+    /// <see cref="RegisteredAtUtcLookup"/>; the offline answer names the server with it, as Darling's does. Null keeps "This server".
+    /// </summary>
+    internal Func<int, string?>? ServerDisplayNameLookup { get; set; }
+
+    /// <summary>
+    /// #7167: when this server's newest SUCCESSFUL collector run landed (<c>collection_log.status = 'SUCCESS'</c>, the status Collection
+    /// Health counts as a run that reached the server), or null when the store holds none. A server Lite cannot reach logs ERROR,
+    /// PERMISSIONS or SKIPPED rows every cycle, which keep the plain newest-row read of <see cref="GetServerSummaryAsync"/> fresh while
+    /// nothing is being read, so this read leaves them out. The loop's skipped-slots row is not a collector run (#5643).
+    /// </summary>
+    public async Task<DateTime?> GetLastSuccessfulCollectionAsync(int serverId)
+    {
+        using var connection = await OpenConnectionAsync();
+        foreach (var relation in NewestFirstRelations("collection_log"))
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT MAX(collection_time)
+FROM " + relation + $@"
+WHERE server_id = $1
+AND   status = 'SUCCESS'
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            var result = await cmd.ExecuteScalarAsync();
+            if (result != null && result != DBNull.Value)
+            {
+                return Convert.ToDateTime(result);
+            }
+        }
+
+        return null;
+    }
 }
 
 /// <summary>One tag pill on an Overview card (#2020 2b-i): the tag name plus the brushes to render it,
@@ -385,6 +464,10 @@ public class ServerSummaryItem
 
     public bool? IsOnline { get; set; }
 
+    /// <summary>While the connection check says this server is down, the sentence naming since when and the last connect error
+    /// (#7590), from <see cref="ServerConnectionStatus.UnreachableReason"/>; null otherwise. The Offline card's tooltip quotes it.</summary>
+    public string? UnreachableReason { get; set; }
+
     /// <summary>True when a whole-server alert silence is active for this server (#2031) — drives the card's
     /// muted-bell, mirroring the sidebar row. Stamped by the Overview loader and the silence-indicator
     /// refresh; the card rebinds on a real flip.</summary>
@@ -425,6 +508,22 @@ public class ServerSummaryItem
     /// captured_at; <see cref="CpuSampleTime"/> is the monitored server's local clock and the gate's identity.</summary>
     public DateTime? CpuCollectionTime { get; set; }
 
+    /// <summary>True when the newest CPU reading is older than the freshness bound (#7196, see
+    /// <c>LocalDataService.CpuFreshnessBound</c>). Only the SHOWN figures honour it: <see cref="CpuPercent"/>,
+    /// <see cref="TotalCpuPercent"/> and the sample stamps keep the raw reading because the alert gate is fed from
+    /// them.</summary>
+    public bool CpuIsStale { get; set; }
+
+    /// <summary>The SQL Server CPU figure get_server_summary publishes: null when the reading is stale (#7196).</summary>
+    public double? ShownCpuPercent => CpuIsStale ? null : CpuPercent;
+
+    /// <summary>The instant of the CPU reading get_server_summary publishes: null with the figure when it is stale (#7196).</summary>
+    public DateTime? ShownCpuCollectionTime => CpuIsStale ? null : CpuCollectionTime;
+
+    /// <summary>The CPU value the card colour and the CPU sort use: <see cref="CpuPercentForAlert"/>, or null when
+    /// the reading is stale (#7196). The alert engine reads the raw properties, not this.</summary>
+    public double? ShownCpuPercentForAlert => CpuIsStale ? null : CpuPercentForAlert;
+
     /// <summary>The store's <c>collection_time</c> for the memory row <see cref="MemoryMb"/> came from (#3541
     /// A10) — get_server_summary's <c>memory_captured_at</c>.</summary>
     public DateTime? MemoryCollectionTime { get; set; }
@@ -447,7 +546,7 @@ public class ServerSummaryItem
     {
         get
         {
-            if (!CpuPercent.HasValue) return "--";
+            if (CpuIsStale || !CpuPercent.HasValue) return "--";
             if (!OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
@@ -614,8 +713,8 @@ public class ServerSummaryItem
 
        Note the gates follow the ROW, not the card border: the CPU row goes amber at 50 while the border only
        escalates at 80. The reason names rows, so it uses the row's threshold. */
-    private bool CpuIsElevated => CpuPercentForAlert >= 50;
-    private bool CpuIsCritical => CpuPercentForAlert >= 80;
+    private bool CpuIsElevated => ShownCpuPercentForAlert >= 50;
+    private bool CpuIsCritical => ShownCpuPercentForAlert >= 80;
     private bool BlockingIsElevated => BlockingCount > 0;
     private bool DeadlocksAreElevated => DeadlockCount > 0;
 
@@ -626,8 +725,9 @@ public class ServerSummaryItem
     public bool CollectionIsNotFresh =>
         CollectionFreshness is ServerFreshness.Stale or ServerFreshness.Offline or ServerFreshness.NeverCollected;
 
-    /* Color coding */
-    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : "#81C784");
+    /* Color coding. A CPU row with no shown figure (stale, #7196, or never measured) is the card's unknown grey, the one
+       StatusBrush's fallback uses, never the Healthy green (#3635): Darling bands the same case Unknown. */
+    public SolidColorBrush CpuBrush => MakeBrush(CpuIsCritical ? "#E57373" : CpuIsElevated ? "#FFB74D" : ShownCpuPercentForAlert is null ? "#888888" : "#81C784");
     public SolidColorBrush BlockingBrush => MakeBrush(BlockingIsElevated ? "#FFB74D" : "#81C784");
     public SolidColorBrush DeadlockBrush => MakeBrush(DeadlocksAreElevated ? "#E57373" : "#81C784");
     /* The border ranks the same states the status word names, so it reads the SAME discriminant rather than
@@ -730,6 +830,11 @@ public class ServerSummaryItem
         get
         {
             var lines = new List<string> { StatusHeadline };
+
+            if (CardStatus == ServerCardStatus.Offline && UnreachableReason is { Length: > 0 } unreachable)
+            {
+                lines.Add(unreachable);
+            }
 
             if (CardStatus != ServerCardStatus.Offline)
             {

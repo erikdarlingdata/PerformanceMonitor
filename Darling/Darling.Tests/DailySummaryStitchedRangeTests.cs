@@ -99,7 +99,10 @@ public sealed class DailySummaryStitchedRangeTests
 
         /* The not-carried ("NOT EXISTS") probe appears TWICE — once per relation name, decision 3 — each
            restricted to its side of F, and each keeps its own ceiling. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "NOT EXISTS").Count);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(queriesCte, "NOT EXISTS").Count);
         Assert.Contains($"SELECT 1 FROM collect.{Legacy} AS r", sql, StringComparison.Ordinal);
         Assert.Contains($"SELECT 1 FROM collect.{Successor} AS r", sql, StringComparison.Ordinal);
         Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
@@ -209,7 +212,10 @@ public sealed class DailySummaryStitchedRangeTests
         Assert.Contains($"FROM collect.{DailySuccessor}", sql, StringComparison.Ordinal);
         Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket < {literal}", sql, StringComparison.Ordinal);
         Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket >= {literal}", sql, StringComparison.Ordinal);
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "NOT EXISTS").Count);
+        /* #7028: counted inside the queries CTE only (it ends where deadlocks begins): the blocking waits chain that
+           follows (BlockingWaits.HourlyChosenWaitsSql) holds its own NOT EXISTS and UNION ALL. */
+        var queriesCte = sql[sql.IndexOf("queries AS (", StringComparison.Ordinal)..sql.IndexOf("deadlocks AS (", StringComparison.Ordinal)];
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(queriesCte, "NOT EXISTS").Count);
         Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
         Assert.Contains("queries_ceiling_successor", sql, StringComparison.Ordinal);
 

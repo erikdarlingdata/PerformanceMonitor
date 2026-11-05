@@ -122,4 +122,43 @@ WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
         Assert.Contains("not a round-trip UTC instant", log.Joined, StringComparison.Ordinal);
         Assert.Contains("yesterday-ish", log.Joined, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #7041: the Daily Health Report's once-a-local-day gate across a restart, against a real store. A second "process" (a fresh evaluator
+    /// and a fresh stamp store object over the same database, so empty memory) finds the day already delivered and sends nothing; the next
+    /// day it sends.
+    /// </summary>
+    [Fact]
+    public async Task TheDailyHealthReportGate_SurvivesARestart_AgainstTheRealStampStore()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-report gate test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var day = DailyHealthReportDeliveryTests.Day;
+
+        var first = new DailyHealthReportDeliveryTests.Process(new PgSelfAlertDeliveryStampStore(postgres));
+        first.Now = day.AddHours(7);
+        await first.Evaluator.EvaluateDailyHealthReportAsync(ct);
+        Assert.Single(first.Deliverer.Outcomes);
+
+        var restarted = new DailyHealthReportDeliveryTests.Process(new PgSelfAlertDeliveryStampStore(postgres));
+        restarted.Now = day.AddHours(9);
+        await restarted.Evaluator.EvaluateDailyHealthReportAsync(ct);
+        Assert.Empty(restarted.Deliverer.Outcomes);
+        Assert.Empty(restarted.Source.Periods);
+
+        restarted.Now = day.AddDays(1).AddHours(7);
+        await restarted.Evaluator.EvaluateDailyHealthReportAsync(ct);
+        Assert.Single(restarted.Deliverer.Outcomes);
+    }
 }

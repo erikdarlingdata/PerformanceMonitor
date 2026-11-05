@@ -55,7 +55,7 @@ public sealed class McpMissMessageParityPinTests
 
         var recorded = source.IndexOf($"{helper}.StatusAsync", StringComparison.Ordinal);
         var gate = source.IndexOf($"{helper}.GatedOffStatusAsync", StringComparison.Ordinal);
-        var empty = source.IndexOf("McpHelpers.Status(\"empty\"", StringComparison.Ordinal);
+        var empty = source.LastIndexOf("EmptyRunningJobsStatus(", StringComparison.Ordinal); // #7459: the last resort is the run-facts answer (empty after a good run, else unavailable)
 
         Assert.True(gate > 0, $"{relativePath} never asks whether the collector is gated off (#2559)");
         Assert.True(recorded > 0 && empty > 0, $"{relativePath} no longer has the arms this pin describes");
@@ -139,7 +139,7 @@ public sealed class McpMissMessageParityPinTests
         "The BASELINE window was only partly collected: ",
         "The COMPARISON window was only partly collected: ",
         ". Its rates are per observed time, and its windowed facts are absent where nothing was observed.",
-        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.",
+        "A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/new_issues/resolved_issues as change.",
 
         /* The analysis family's collection caveats (#3691). The SENTENCE comes from CollectionCaveats.Describe(),
            shared by construction; what lives twice is the label each tool body puts in front of it and the
@@ -228,7 +228,7 @@ public sealed class McpMissMessageParityPinTests
            a different next step. The negative-span refusal is built by McpHelpers.ValidateUncappedWindow and
            is shared by construction; what lives twice is the call, pinned by McpPageContractTests. */
         "): the per-signal tables the health band reads (deadlocks, blocking, CPU, memory, waits) have been purged for that day, so no health verdict is possible and the counts would be zeros by construction, not by measurement. Longer-lived sources may still record the day — collection_runs and alert_count below are real where non-zero.",
-        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking, or confirm current parallelism with analyze_query_plan.",
+        ". The filter was applied in SQL over the whole window, so this is the window's answer rather than a page artefact — drop parallel_only / min_dop to see the unfiltered ranking", // #7522: Lite's closing step differs (Lite keeps no plans), so only the shared part is pinned
         ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
 
         /* #3541 A12 — the health-parser family's four-rung empty ladder, now one EmptyAsync per SKU that all

@@ -36,14 +36,14 @@ public partial class ViewerServerTab
     /// <summary>One chart of a trend: its key, y-axis label, hover unit, and the lines it draws.</summary>
     private sealed record PgTrendPanel(string Key, string YLabel, string Unit, IReadOnlyList<PgTrendLine> Lines);
 
-    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(UniformGrid host, string key, string unit)
+    private (WpfPlot Chart, ChartHoverHelper Hover) PgTrendChart(Panel host, string key, string unit)
     {
         if (_pgTrendCharts.TryGetValue(key, out var existing))
         {
             return existing;
         }
 
-        var chart = new WpfPlot { MinHeight = 200, Margin = new System.Windows.Thickness(2) };
+        var chart = new WpfPlot();
         ApplyTheme(chart);
         chart.Refresh();
         var hover = new ChartHoverHelper(chart, unit, displayZone: ViewerTimeHelper.CurrentDisplayZone);
@@ -64,7 +64,7 @@ public partial class ViewerServerTab
     private static IEnumerable<PgTrendLine> Measured(params PgTrendLine[] lines) =>
         lines.Where(l => l.Values.Any(v => !double.IsNaN(v)));
 
-    private void RenderPgTrendPanels(UniformGrid host, IEnumerable<PgTrendPanel> panels, DateTime startUtc, DateTime endUtc)
+    private void RenderPgTrendPanels(Panel host, IEnumerable<PgTrendPanel> panels, DateTime startUtc, DateTime endUtc)
     {
         foreach (var panel in panels)
         {
@@ -100,7 +100,7 @@ public partial class ViewerServerTab
                 }
             }
 
-            chart.Plot.Axes.SetLimitsX(startUtc.ToOADate(), endUtc.ToOADate());
+            chart.Plot.Axes.SetLimitsX(ChartXStart(chart.Plot, startUtc, endUtc), endUtc.ToOADate());
             ReapplyAxisColors(chart);
             chart.Plot.YLabel(panel.YLabel);
             SetChartYLimitsWithLegendPadding(chart, 0, max > 0 ? max : 1);
@@ -179,10 +179,11 @@ public partial class ViewerServerTab
             : await _dataService.GetPgWaitTrendAsync(_server.ServerId, startUtc, endUtc);
         var p = trend.Points;
 
-        PgWaitTrendNote.Text = p.Count == 0
-            ? PanelNote("pg_wait_sampling", 0,
+        ShowNote(PgWaitTrendNote, p.Count == 0
+            ? PanelNoteParts("pg_wait_sampling", 0,
+                "There are no wait samples to chart in this window.",
                 "No samples for a wait event in this window. A trend needs at least two snapshots to difference, so a short window is legitimately empty here even while the event is being sampled.")
-            : $"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.";
+            : new PanelNoteText($"Wait Trend: {trend.Subject}, the event that dominates this window, over time. Estimates from a sampling profiler, so the shape is the finding.", null));
         RenderPgTrendPanels(PgWaitTrendHost, new[]
         {
             new PgTrendPanel("PgWait_Trend", "Est. wait ms/sec", "ms/s", p.Count == 0 ? Array.Empty<PgTrendLine>() : new[]

@@ -75,6 +75,8 @@
 
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
     <SolidColorBrush x:Key="BorderLightBrush" Color="{StaticResource BorderLightColor}"/>
+    <!-- #7218: the Availability Groups cards draw their outline from this key. Same value as the Darling Viewer dark theme. -->
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#3A3D45"/>
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
@@ -760,6 +762,7 @@
     <Style TargetType="DataGrid">
         <Setter Property="helpers:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
         <Setter Property="helpers:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
+        <Setter Property="helpers:DataGridFillColumn.Enabled" Value="True"/>
         <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>

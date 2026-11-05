@@ -21,7 +21,7 @@
  */
 import { el, mount, parseUtc, axisTime, windowFromHours, readTool, readToolWithinKeptHistory, getActiveDatabaseFilter, keptWindowStrip, emptyStrip, readErrorStrip } from "../util.js";
 import { chartZoomScope } from "../charts.js";
-import { gapThresholdMs, splitAtGaps } from "../chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "../chart-gaps.js";
 
 /* The held zoom, one entry per server, valid for one scope (page address + preset range): the same rule charts.js keeps for its own
    charts, held here because the strips are one chart of five lines and the zoom is a span of time, not of a chart's points. */
@@ -138,10 +138,13 @@ export function buildStrips(reads) {
     note: note(reads.waits, "No wait samples in this window."),
   };
 
+  /* #7219: get_blocking_trend counts blocked-process reports, or DMV snapshot rows when the window holds no reports (the AWS RDS case
+     and the database-filter case), and its `source` key says which; a snapshot row is not a report, so the series is named for the arm that answered. */
+  const blockingBySnapshot = !!(reads.blocking && reads.blocking.kind === "data" && reads.blocking.data && reads.blocking.data.source === "DMV snapshot");
   const blocking = {
-    key: "blocking", title: "Blocking", unit: "events", event: true, min: 0,
+    key: "blocking", title: "Blocking", unit: "per min", event: true, min: 0,
     series: [
-      { label: "Blocking", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
+      { label: blockingBySnapshot ? "Blocking snapshot rows" : "Blocked-process reports", color: "#ef5350", points: toTimed(rowsOf(reads.blocking, "trend"), "time", (r) => r.count) },
       { label: "Deadlocks", color: "#ab47bc", points: toTimed(rowsOf(reads.deadlocks, "trend"), "time", (r) => r.count) },
     ],
     note: null,
@@ -156,9 +159,19 @@ export function buildStrips(reads) {
     note: note(reads.memory, "No memory samples in this window."),
   };
 
+  const ioBucketMs = (res, withCadence) => {
+    const minutes = res && res.kind === "data" && res.data ? res.data.bucket_minutes : null;
+    return bucketMsOf(minutes, withCadence ? rowsOf(res, "trend").map((r) => { const d = parseUtc(r.time); return d ? d.getTime() : NaN; }) : null);
+  };
+  const ioStepMs = ioBucketMs(reads.io, true);
+  const ioWidthMs = ioBucketMs(reads.io, false);
   const io = {
     key: "io", title: "I/O latency", unit: "ms", min: 0,
-    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")) }],
+    /* #7572: `bucketMs` is the step a gap is judged by: the reply's bucket width, or the rows' own cadence when a collector scheduled slower than the bucket
+       keeps fewer rows than buckets (every row counts, the ones with no reads too, since each marks a collection). A step longer than that breaks the line.
+       `readSpanMs` is the span one row's reads were counted over, which the read floor scales by: the bucket width, or the collection step when the
+       collector is slower than the bucket (`bucketMsOf` returned 1.5 times that step), since such a row holds the reads of the whole step. */
+    series: [{ label: "Read latency", color: "#81c784", points: weightedReadLatency(rowsOf(reads.io, "trend")), bucketMs: ioStepMs, readSpanMs: ioStepMs > ioWidthMs ? ioStepMs / 1.5 : ioWidthMs }],
     note: note(reads.io, "No file I/O samples in this window."),
   };
 
@@ -167,6 +180,17 @@ export function buildStrips(reads) {
 
 /** Below this a point above the band is not called anomalous (the Viewer's floors: "1% CPU above 0.5% baseline" is not news on an idle server). */
 const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
+/** #7572: the reads a bucket needs behind its latency before it may carry the red dot, per FIFTEEN MINUTES of bucket. An average over a handful of reads
+ *  is noise (one read at 80 ms is a dot for the whole bucket). 250 per 15 minutes is the bar the PostgreSQL I/O baseline puts on a bucket
+ *  (PgTargetScorer.IoBaselineBucketMinimumReads). It is not Analysis's IoVolumeFloor.MinimumReads, which counts 250 reads over a window of an hour or more
+ *  (a looser bar per minute). The bucket varies with the window (1 to 30 minutes), so the floor is scaled to the span a row's reads were counted over: the
+ *  bucket width, or the collection step when the collector is slower than the bucket. The desktop lanes apply the same rule (OverviewIoReadFloor, #7624). */
+const ANOMALY_MIN_READS_PER_15_MIN = { io: 250 };
+/** The reads a row counted over `widthMs` needs (a span the reply did not state counts as 15 minutes). */
+export function minReadsFor(key, widthMs) {
+  const per15 = ANOMALY_MIN_READS_PER_15_MIN[key] || 0;
+  return per15 === 0 ? 0 : Math.max(1, Math.ceil((per15 * (widthMs > 0 ? widthMs : 15 * 60000)) / (15 * 60000)));
+}
 /** The strips whose baseline is server-wide while the strip's own read can follow the page's database filter. */
 const DATABASE_SCOPED = new Set(["io", "blocking"]);
 
@@ -197,7 +221,8 @@ export function applyBaselines(strips, res, window, opts) {
     if (s.key in ANOMALY_FLOOR) {
       const floor = ANOMALY_FLOOR[s.key];
       const line = s.series[0]; /* SQL CPU, the lane's wait time, the weighted read latency */
-      s.markers = line.points.filter((p) => (p.v > upper && p.v >= floor) || p.v < lower).map((p) => ({ t: p.t, v: p.v }));
+      const minReads = minReadsFor(s.key, line.readSpanMs);
+      s.markers = line.points.filter((p) => (minReads === 0 || p.reads >= minReads) && ((p.v > upper && p.v >= floor) || p.v < lower)).map((p) => ({ t: p.t, v: p.v }));
     }
   }
   return strips;
@@ -220,7 +245,7 @@ export function weightedReadLatency(rows) {
     acc.reads += r.reads;
     byTime.set(t, acc);
   }
-  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads }));
+  return [...byTime.entries()].sort((a, b) => a[0] - b[0]).map(([t, a]) => ({ t, v: a.ms / a.reads, reads: a.reads }));
 }
 
 /** The time axis the strips share: the zoom when one is held, else the read window; widened to the data when no window is known. */
@@ -344,7 +369,7 @@ export function drawStrips(strips, domain, width, onZoom) {
         } else {
           /* A stretch with no samples (the service was off) is a break in the line, not a diagonal across it: charts.js's gap rule, judged over the whole series so a zoom cannot invent a gap. */
           const times = c.shown.map((p) => p.t);
-          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t)));
+          const runs = splitAtGaps(times.map((_, i) => i), times, gapThresholdMs(c.points.map((p) => p.t), null, c.bucketMs));
           for (const run of runs) {
             if (run.length === 1) {
               g.appendChild(svg("circle", { cx: x(c.shown[run[0]].t), cy: y(c.shown[run[0]].v), r: 2.5, fill: c.color }));

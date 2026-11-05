@@ -80,7 +80,7 @@ public sealed class HyperscaleLogSizeCollectorTests
 
         Assert.DoesNotContain("Hyperscale", plan.Text, StringComparison.Ordinal);
         Assert.DoesNotContain("is_log_service", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(decimal(19,2), PerformanceMonitorLite.size * 8.0 / 1024.0)", plan.Text, StringComparison.Ordinal);
     }
 
     [Fact]

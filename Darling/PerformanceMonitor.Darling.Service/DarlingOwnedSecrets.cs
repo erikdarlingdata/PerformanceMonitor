@@ -480,6 +480,7 @@ public static class DarlingOwnedSecrets
                         DarlingManagedPostgres.AdminCredentialFileName,
                         DarlingManagedPostgres.ViewerCredentialFileName,
                         DarlingManagedPostgres.McpCredentialFileName,
+                        DarlingManagedPostgres.WebCredentialFileName,
                         DarlingManagedPostgres.ServerCertFileName,
                         DarlingManagedPostgres.ServerKeyFileName,
                         DarlingManagedPostgres.ServerLogFileName,

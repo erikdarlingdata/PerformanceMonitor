@@ -165,6 +165,7 @@ public static class PgTableTuning
         LegacyRowIndexName,
         QueryStatsRestartRowIndexName,
         ProcedureStatsRestartRowIndexName,
+        WaitStatsDailyCoverIndexName,
     };
 
     /// <summary>True for an index that shares the one-build-per-start budget.</summary>
@@ -204,6 +205,27 @@ public static class PgTableTuning
                 "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
                 table, ex.Message);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="table"/> is a TimescaleDB hypertable (#7152). The extension being installed says nothing, since a
+    /// store can have it and still run in plain-PostgreSQL mode with plain heap tables. A failed or timed-out check answers null
+    /// (unknown), and an unknown table is neither given an index build nor has its index dropped this start: a drop on a guess
+    /// would remove a valid index from a plain table, and the next start would build it and the next failed check drop it again.
+    /// </summary>
+    private static async Task<bool?> TableIsHypertableAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await QueryStoreBackgroundIndexes.IsHypertableAsync(connection, table, cancellationToken, EmptinessCheckTimeoutSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not tell whether {Table} is a hypertable, so {Index} is neither built nor dropped this start: {Message}",
+                table, WaitStatsDailyCoverIndexName, ex.Message);
+            return null;
         }
     }
 
@@ -257,6 +279,23 @@ public static class PgTableTuning
 
     /// <summary>The restart-row partial index on <c>collect.procedure_stats</c>, built and read like <see cref="QueryStatsRestartRowIndexName"/>.</summary>
     public const string ProcedureStatsRestartRowIndexName = "idx_procedure_stats_restart_rows_time";
+
+    /// <summary>#7147: the covering index for the Daily Summary's per-day wait sums, on a store where <c>collect.wait_stats</c> is a plain table.</summary>
+    public const string WaitStatsDailyCoverIndexName = "idx_wait_stats_daily_cover";
+
+    /// <summary>
+    /// #7147, #7152: the indexes built only while the table they are on (the <c>ON</c> table of their statement) is a plain
+    /// table. A hypertable compresses a chunk after <see cref="TimescaleSupport.CompressAfterDays"/> (1) day, so all but about the
+    /// newest day of a month sits in compressed chunks, where a heap btree index on the hypertable cannot serve the read, and the
+    /// index would still cost every insert (see the statement). The test is the table, not the extension: a store can have
+    /// TimescaleDB installed and still run in plain-PostgreSQL mode with plain heaps. On a hypertable the pass drops the index if it
+    /// is there (one built while the table was plain survives the conversion) and counts it as applied, like any index that is
+    /// already there.
+    /// </summary>
+    private static readonly HashSet<string> s_plainTableOnly = new(StringComparer.Ordinal)
+    {
+        WaitStatsDailyCoverIndexName,
+    };
 
     public static IReadOnlyList<string> ForcePlanFailuresIndexColumns { get; } = new[]
     {
@@ -517,6 +556,20 @@ public static class PgTableTuning
            StoreMetricsLatestSql below, the latest read went from 7,772 ms to 15 ms on the same seed with
            identical rows (251). */
         "CREATE INDEX IF NOT EXISTS idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
+        /* #7147: the Daily Summary and calendar month read on a store where wait_stats is a plain table (a bring-your-own
+           PostgreSQL store, or one with TimescaleDB installed that runs in plain-PostgreSQL mode: plain heaps, no rollups). That read has no rollup to take, so it scans a month of one server's raw
+           wait_stats; the servers interleave in the heap by time, so with only the (server_id, collection_time) index it
+           reads every heap page of the month for one server's share of the rows. This is covering for exactly that read
+           (DailySummarySql: server_id and collection_time to filter, wait_type and delta_wait_time_ms for the per-day wait
+           sums), so it becomes an Index Only Scan over the server's own slice of the index. The distinct-query count needs
+           no new index: it reads collect.query_stats directly and takes idx_query_stats_server_hash_time above. Measured on a
+           plain-heap test store, 4 servers x 33 days, 3.8 M query_stats and 5.7 M wait_stats rows, 31-day read for one server,
+           EXPLAIN (ANALYZE, BUFFERS): 219,525 buffers and 2,420 ms before, about 31,000 buffers and 1,550 ms after (both warm:
+           the buffer count is the cold-disk cost). Plain tables only (s_plainTableOnly, decided by whether wait_stats itself is
+           a hypertable, #7152): a hypertable compresses a chunk after TimescaleSupport.CompressAfterDays (1) day, so all but
+           about the newest day of the month sits in compressed chunks, where a heap btree index on the hypertable cannot serve
+           the read, and the index would still cost every insert. */
+        "CREATE INDEX IF NOT EXISTS " + WaitStatsDailyCoverIndexName + " ON collect.wait_stats (server_id, collection_time) INCLUDE (wait_type, delta_wait_time_ms)",
     };
 
     /// <summary>
@@ -553,14 +606,46 @@ public static class PgTableTuning
         var applied = 0;
         var buildIssued = false;
         var buildStartedAt = 0L;
+        Dictionary<string, bool?>? hypertableByTable = null;
         foreach (var statement in Statements)
         {
             var sql = statement;
+            var dropIssued = false;
             try
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal))
                 {
                     var indexName = CreatedIndexName(statement);
+                    if (s_plainTableOnly.Contains(indexName))
+                    {
+                        var indexTable = CreatedIndexTable(statement);
+                        hypertableByTable ??= new Dictionary<string, bool?>(StringComparer.Ordinal);
+                        if (!hypertableByTable.TryGetValue(indexTable, out var isHypertable))
+                        {
+                            isHypertable = await TableIsHypertableAsync(connection, indexTable, logger, cancellationToken);
+                            hypertableByTable[indexTable] = isHypertable;
+                        }
+
+                        if (isHypertable is null)
+                        {
+                            /* Unknown (the check failed and logged its Warning): neither build nor drop. Counted as applied, as a skip is. */
+                            applied++;
+                            continue;
+                        }
+
+                        if (isHypertable == true)
+                        {
+                            /* #7152: a cover built while the table was plain survives the conversion (create_hypertable with
+                               migrate_data keeps existing indexes) and then only costs every insert, so a hypertable drops it.
+                               A failed drop falls to the catch below: one Warning, the pass goes on, the next pass retries. */
+                            dropIssued = true;
+                            using var drop = new NpgsqlCommand(GuardedDrop(indexName), connection) { CommandTimeout = SetupTimeoutSeconds };
+                            await drop.ExecuteNonQueryAsync(cancellationToken);
+                            applied++;
+                            continue;
+                        }
+                    }
+
                     using var probe = new NpgsqlCommand(IndexValidSql, connection) { CommandTimeout = SetupTimeoutSeconds };
                     probe.Parameters.AddWithValue(indexName);
                     var valid = await probe.ExecuteScalarAsync(cancellationToken);
@@ -624,6 +709,13 @@ public static class PgTableTuning
                     logger?.LogInformation(
                         "Tuning setting on {Table} not applied this pass: the table was busy; the next pass tries again",
                         AlteredTable(statement));
+                }
+                else if (dropIssued)
+                {
+                    /* #7152: the statement that hit the lock was the cover's drop, so the cover is still on the hypertable. */
+                    logger?.LogInformation(
+                        "Index {Index} not dropped this pass: the table was busy; the next pass tries again",
+                        CreatedIndexName(statement));
                 }
                 else
                 {

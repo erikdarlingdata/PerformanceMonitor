@@ -39,7 +39,7 @@ internal static class DarlingWebThresholdOverrides
     internal static string RefusedMessage(bool managedStore, bool adminWritesOff = false) =>
         DarlingWebStoreWrites.Refused("change threshold overrides", managedStore, "Change them in the Viewer app",
             " If this login already is the admin role, the store has not had "
-            + "Darling/tools/provision-roles.sql re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).",
+            + DarlingManagedRoles.ProvisionRolesScriptPath + " re-run since the upgrade that added threshold overrides: run it once as a superuser (it is idempotent).",
             adminWritesOff);
 
     /// <summary>The list body: <c>{overrides: [{server_id, server_name, tag_id, tag_name, orphaned, database, key, value, global_value, set_by,

@@ -151,6 +151,42 @@ public static class DurationTrendRouting
             : (startUtc, false);
 
     /// <summary>
+    /// How long a tier keeps its rows (#7416, item 21): the raw tier's four days or the hourly rollup's ninety, the figures
+    /// <see cref="ShouldUseRawTier"/> and <see cref="ResolveTier"/> already route on. Null when the tier never drops rows: raw on a
+    /// store without the extension (<paramref name="rawRetentionApplies"/> false, nothing ever drops it, #1664), or a tier this
+    /// ladder does not serve. The one place the days are stated, so the payload field and the web and desktop notes agree.
+    /// </summary>
+    public static TimeSpan? TierRetention(RetentionTier tier, bool rawRetentionApplies) => tier switch
+    {
+        RetentionTier.Raw => rawRetentionApplies ? TimescaleSupport.RawRetentionSpan : null,
+        RetentionTier.Hourly => TimescaleSupport.HourlyRetentionSpan,
+        _ => null,
+    };
+
+    /// <summary>The whole days <see cref="TierRetention"/> names, for the payload field and the notes that say how long the tier keeps data.</summary>
+    public static int? TierKeepsDays(RetentionTier tier, bool rawRetentionApplies) =>
+        TierRetention(tier, rawRetentionApplies) is TimeSpan keeps ? (int)keeps.TotalDays : null;
+
+    /// <summary>The oldest instant the tier keeps at <paramref name="nowUtc"/>, or null when it keeps everything (<see cref="TierRetention"/>).</summary>
+    public static DateTime? TierFloorUtc(RetentionTier tier, bool rawRetentionApplies, DateTime nowUtc) =>
+        TierRetention(tier, rawRetentionApplies) is TimeSpan keeps ? nowUtc - keeps : null;
+
+    /// <summary>
+    /// <see cref="DescribeCoverage(DateTime?, DateTime)"/> plus the one reason a late head can be NAMED (#7416, item 21). A first point
+    /// later than the start is not proof that anything aged out: a query first run five hours ago, or a server that was off earlier in
+    /// the day, gives the same late head with every row the tier ever had still in place. <c>StartOlderThanTier</c> is true only on a
+    /// truncated answer whose requested start sits before <paramref name="tierFloorUtc"/>, the oldest instant the tier that answered
+    /// keeps (<see cref="TierFloorUtc"/>): then the part of the window before that floor is gone from this tier by retention, whatever else
+    /// is also true. A null floor (the tier keeps everything) is never older.
+    /// </summary>
+    public static (DateTime EffectiveStartUtc, bool Truncated, bool StartOlderThanTier) DescribeCoverage(
+        DateTime? firstPointUtc, DateTime startUtc, DateTime? tierFloorUtc)
+    {
+        var (effectiveStart, truncated) = DescribeCoverage(firstPointUtc, startUtc);
+        return (effectiveStart, truncated, truncated && tierFloorUtc is DateTime floor && startUtc < floor);
+    }
+
+    /// <summary>
     /// The one word both apps use for the tier a trend was served from — get_query_trend's payload vocabulary
     /// (<c>source</c>), reused by the viewer's chart subtitle so a user reading the chart and an agent reading
     /// the tool describe the same series with the same word. The daily tier is not on this ladder (see the
@@ -376,34 +412,59 @@ public static class DurationTrendRouting
     /// columns are projected, so the payload-resolving <c>v_*</c> view is not needed). $1 server_id, $2/$3 window
     /// (naive UTC).</para>
     /// </summary>
-    private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter)
+    private static string RawCollectionsCte(string rawTable, bool withDatabaseFilter, bool includeElapsed = true)
     {
         const string match = "$4::text[] IS NULL OR database_name = ANY($4)";
-        var sums = withDatabaseFilter
-            ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n"
-              + $"        COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
-              + $"        COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
-            : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n"
-              + "        SUM(delta_execution_count) AS total_executions,";
+        var maxGap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+        var elapsedSum = !includeElapsed ? ""
+            : withDatabaseFilter
+                ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
+                : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n                ";
+        var executionSum = withDatabaseFilter
+            ? $"COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"                COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
+            : "SUM(delta_execution_count) AS total_executions,";
+        var elapsedOut = includeElapsed ? "total_elapsed_ms, " : "";
+        var matchedOut = withDatabaseFilter ? ", matched_rows" : "";
 
+        // #7161: the collection's seconds are its gap to the previous collection (the shape ProcedureCollectionsCte settled on in
+        // #5449), not MAX(sample_interval_seconds): that is the longest interval of ANY query in the collection, and a query that
+        // returns every 15 or 30 minutes stretched a 60 s collection to 900 s, cutting the rate about 15-fold. The table is read from
+        // maxGap before $2 so the first in-window collection has its previous one; the rows before $2 are dropped after the LAG.
         return $"""
         raw AS
         (
             SELECT
-                collection_time,
-                {sums}
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                collection_time, {elapsedOut}total_executions{matchedOut},
+                -- Three states: every row stored 0 (a restart) is unrated whatever the gap; a previous collection within the collector's
+                -- own gap policy gives the seconds; the store's first collection has no previous one and keeps its stored interval.
+                CASE WHEN stored_interval = 0 THEN NULL
+                     WHEN gap_seconds IS NOT NULL THEN CASE WHEN gap_seconds <= {maxGap} THEN gap_seconds END
+                     ELSE NULLIF(stored_interval, 0)
                 END AS interval_seconds
-            FROM {rawTable}
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
+            FROM
+            (
+                SELECT
+                    collection_time,
+                    {elapsedSum}{executionSum}
+                    MAX(sample_interval_seconds) AS stored_interval,
+                    extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds
+                FROM {rawTable}
+                WHERE server_id = $1
+                AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                AND   collection_time <= $3
+                GROUP BY collection_time
+            ) AS g
+            WHERE collection_time >= $2
         )
         """;
     }
+
+    /// <summary>
+    /// #7161: the query grain's per-collection <c>raw</c> CTE without the elapsed sum, for the execution-count chart the viewer
+    /// builds ($4 database filter, always on). Same interval rule as <see cref="RawCollectionsCte"/>.
+    /// </summary>
+    public static string QueryExecutionCollectionsCte() => RawCollectionsCte("query_stats", withDatabaseFilter: true, includeElapsed: false);
 
     /// <summary>
     /// #5449: the per-collection CTE the bucketed raw statement reads for <c>procedure_stats</c>, in place of
@@ -812,4 +873,41 @@ stored AS
     /// <see cref="TimescaleSupport.ProcedureStatsHourlyView"/>.</summary>
     public static string ProcedureDurationTrendHourlySql(bool withDatabaseFilter)
         => BuildHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView, withDatabaseFilter, coverIdleHours: true);
+
+    /// <summary>
+    /// #7608: the query-history trend read over an hourly rollup relation (<paramref name="hourlyRelation"/>: the legacy
+    /// <c>query_stats_hourly</c>, its interval-honest successor, or a stitched relation). The rollup keeps one row per
+    /// <c>sql_handle</c> per hour, so the three measures are summed per <c>bucket</c>: a window of N hours gives at most N points.
+    /// The columns the rollup does not carry are typed NULLs in the raw query's ordinals. $1 server_id, $2 database_name,
+    /// $3 query_hash, $4/$5 window (naive UTC, end exclusive).
+    /// </summary>
+    public static string BuildQueryHistoryHourlySql(string hourlyRelation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
+        return $"""
+        SELECT
+            bucket AS collection_time,
+            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
+            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
+            CAST(NULL AS bigint) AS delta_logical_reads,
+            CAST(NULL AS bigint) AS delta_logical_writes,
+            CAST(NULL AS bigint) AS delta_physical_reads,
+            CAST(NULL AS bigint) AS delta_rows,
+            CAST(NULL AS bigint) AS delta_spills,
+            CAST(NULL AS int) AS min_dop,
+            CAST(NULL AS int) AS max_dop,
+            CAST(NULL AS text) AS query_plan_hash,
+            CAST(NULL AS int) AS plan_count
+        FROM {hourlyRelation}
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_hash = $3
+        AND   bucket >= $4
+        AND   bucket < $5
+        GROUP BY bucket
+        ORDER BY bucket
+        """;
+    }
 }

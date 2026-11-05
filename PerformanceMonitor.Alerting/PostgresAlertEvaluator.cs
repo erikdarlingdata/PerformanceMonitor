@@ -144,8 +144,10 @@ public static class PostgresAlertEvaluator
 
     /// <summary>
     /// #3444 (V122): the shipped default for <c>blocking.pg_count_threshold</c> — how many distinct ROOT
-    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1, for the same
-    /// reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>.
+    /// blockers inside the rolling window fire the PostgreSQL Blocking alert. 1 when
+    /// shipped, for the same reproduce-today's-behaviour reason as <see cref="DeadlockCountThresholdDefault"/>;
+    /// 3 since #7083, with the same 15-second worst-wait floor and one-event wait bar as SQL Server
+    /// (<see cref="BlockingPageRule"/>).
     ///
     /// <para><b>The denominators differ, which is the second reason this is not SQL Server's
     /// <c>blocking.count_threshold</c>.</b> That figure counts engine-recorded blocked-process reports and
@@ -153,7 +155,7 @@ public static class PostgresAlertEvaluator
     /// <c>pg_stat_activity</c> — PostgreSQL records nothing unless asked, so the same numeral is a bar
     /// against two different measurement processes.</para>
     /// </summary>
-    public const int BlockingCountThresholdDefault = 1;
+    public const int BlockingCountThresholdDefault = 3;
 
     /// <summary>
     /// The FLOOR both #3444 count knobs clamp to on read, and the lower write bound
@@ -590,6 +592,45 @@ public static class PostgresAlertEvaluator
         }
 
         var critical = avgWaiters >= PoisonWaitCriticalAvgWaiters;
+
+        /* #7082: a Warning pages only once the episode has held for two back-to-back windows, 20 minutes
+           (PostgreSQL only; SQL Server's THREADPOOL and RESOURCE_SEMAPHORE keep the fast page). The field
+           data was an Aurora store where a job on a two-hour schedule produced 8 minute episodes of 1.0 to
+           2.4 average backends on IPC:BtreePage and IPC:BufferIo that ended on their own. Two windows are
+           measured on the collector's clock (the prior window rides on the read), not counted in sweeps, so
+           a sliding window evaluated every sweep cannot satisfy it in 11 minutes. Critical keeps today's rule. */
+        if (!critical && wait.PriorWindowAccumulatedWaitMs < PoisonWaitWarningAvgWaiters * windowMs)
+        {
+            return null;
+        }
+
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical);
+    }
+
+    /// <summary>
+    /// The Warning-level Poison Wait that the two-window hold (#7082) is holding back right now: at or over the
+    /// Warning bar in the current window, under the Critical bar, and the earlier window under the Warning bar. The
+    /// host writes one held (digest) row per episode for it and pages nothing. Null for anything else, so a
+    /// finding <see cref="EvaluatePoisonWait"/> pages is never also held.
+    /// </summary>
+    public static Finding? EvaluateHeldPoisonWait(PostgresPoisonWaitAlertInfo wait)
+    {
+        ArgumentNullException.ThrowIfNull(wait);
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
+        var avgWaiters = wait.AccumulatedWaitMs / windowMs;
+        if (avgWaiters < PoisonWaitWarningAvgWaiters
+            || avgWaiters >= PoisonWaitCriticalAvgWaiters
+            || wait.PriorWindowAccumulatedWaitMs >= PoisonWaitWarningAvgWaiters * windowMs)
+        {
+            return null;
+        }
+
+        return BuildPoisonWaitFinding(wait, avgWaiters, critical: false);
+    }
+
+    private static Finding BuildPoisonWaitFinding(PostgresPoisonWaitAlertInfo wait, double avgWaiters, bool critical)
+    {
+        var windowMs = PoisonWaitWindowMinutes * 60_000.0;
         var breachedAvg = critical ? PoisonWaitCriticalAvgWaiters : PoisonWaitWarningAvgWaiters;
         var subject = PoisonWaitSubject(wait);
         var accumulatedSeconds = wait.AccumulatedWaitMs / 1000;
@@ -619,6 +660,58 @@ public static class PostgresAlertEvaluator
     /// </summary>
     public static string PoisonWaitSubject(PostgresPoisonWaitAlertInfo wait) =>
         $"{wait.WaitType}:{wait.WaitEvent}";
+
+    /// <summary>
+    /// The Poison Wait detail text on PostgreSQL (#7082): the top three wait events by average waiting backends
+    /// over the window, then the top three statements seen waiting on the alerting event, so a reader can judge
+    /// the page without opening a tool. Null when the read behind it failed: the alert still pages on its
+    /// figures, and an empty section would claim a quiet window that was never looked at.
+    /// <para>Statement text arrives at the <c>mcp.dataDetail</c> level already (see
+    /// <see cref="PostgresPoisonWaitStatement"/>). It is cut with <see cref="AlertContextBuilders.TruncateStatement"/>
+    /// like every other statement in an alert text.</para>
+    /// </summary>
+    public static string? BuildPoisonWaitDetailText(PostgresPoisonWaitDetail? detail, string subject)
+    {
+        if (detail is null)
+        {
+            return null;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append(CultureInfo.InvariantCulture,
+            $"  Top wait events, average backends waiting over {PoisonWaitWindowMinutes}m:\n");
+        if (detail.TopEvents.Count == 0)
+        {
+            sb.Append("    none recorded in the window\n");
+        }
+
+        foreach (var top in detail.TopEvents)
+        {
+            sb.Append(CultureInfo.InvariantCulture, $"    {top.WaitType}:{top.WaitEvent}  {top.AvgWaiters:N1}\n");
+        }
+
+        if (detail.Statements.Count == 0)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"  Statements waiting on {subject}: none recorded in the window");
+            return sb.ToString();
+        }
+
+        sb.Append(CultureInfo.InvariantCulture, $"  Top statements waiting on {subject}:");
+        foreach (var statement in detail.Statements)
+        {
+            var unit = string.Equals(statement.Source, "pg_wait_sampling", StringComparison.Ordinal)
+                ? "samples"
+                : "captures";
+            sb.Append(CultureInfo.InvariantCulture, $"\n    queryid {statement.QueryId} ({statement.Count:N0} {unit})");
+            if (!string.IsNullOrWhiteSpace(statement.QueryText))
+            {
+                sb.Append(": ").Append(AlertContextBuilders.TruncateStatement(statement.QueryText!, 200));
+            }
+        }
+
+        return sb.ToString();
+    }
 
     /// <summary>
     /// The two poison events present identically as "everything got slow at once" and have completely

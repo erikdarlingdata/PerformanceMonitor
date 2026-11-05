@@ -32,16 +32,6 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPgSessionStatesTools
 {
     /// <summary>
-    /// A session must have been seen holding the horizon in at least this share of the samples that saw it
-    /// before the tool calls it a sustained holder rather than a passing one.
-    /// <para>Half. Every session with an open write transaction is momentarily the oldest holder at some
-    /// point — that is what a transaction IS — so a single sighting proves nothing beyond "this instance
-    /// does writes". Sustained holding is the finding, and the tool reports the raw sample counts beside the
-    /// verdict so a caller can disagree with the threshold rather than having to trust it.</para>
-    /// </summary>
-    internal const double SustainedHolderSampleShare = 0.5;
-
-    /// <summary>
     /// The duration past which an idle-in-transaction session is worth a human's attention even when it
     /// pins nothing.
     /// <para>Five minutes. It holds no snapshot and no transaction id, so it is costing vacuum nothing — but
@@ -79,8 +69,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "Grant pg_monitor to the monitoring role and this becomes answerable.";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
@@ -93,6 +82,24 @@ public sealed class DarlingMcpPgSessionStatesTools
                  + "transaction end, which is an application change, not a database one - terminating the "
                  + "backend releases the horizon immediately but the code path that opened it will do it "
                  + "again.";
+        }
+
+        if (r.HorizonHolderSamples > 0 && r.PeakHorizonAge == 0)
+        {
+            /* #7381: the oldest open transaction on the instance, but at age 0 it held the newest xid or
+               snapshot, so no row version waited behind it. On a quiet instance the oldest is simply
+               whatever ran. Said plainly so a count like 5 of 5 does not read as a hold. */
+            var zero = "Was the oldest open transaction on the instance in "
+                     + $"{r.HorizonHolderSamples} of {r.SampleCount} sample(s), but its horizon age never rose "
+                     + "above 0: it held the newest xid or snapshot, so no row version waited behind it and "
+                     + "VACUUM lost nothing. On a quiet instance the oldest transaction is just whatever ran.";
+
+            /* Same long-idle check as the passing branch below, and for the same reason: a forgotten
+               idle-in-transaction writer on a quiet target is age 0 here AND Warning in SessionSeverity,
+               so returning only the sentence above put "lost nothing" and a Warning in one JSON row. */
+            return zero + LongIdleOtherAxis(r,
+                ", though at age 0 it pinned nothing for VACUUM to wait behind. A forgotten commit is "
+                + "still a forgotten commit on a quiet instance.");
         }
 
         if (r.HorizonHolderSamples > 0)
@@ -110,15 +117,10 @@ public sealed class DarlingMcpPgSessionStatesTools
                and the reason they nearly did not is that is_horizon_holder means OLDEST rather than
                HOLDS: several long transactions on one instance take turns being oldest, so none of them
                reaches the sustained threshold and every one of them still needs saying. */
-            return r.IdleInTransactionSamples > 0
-                && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs
-                ? passing + " It is a finding on the OTHER axis though: at "
-                          + FormatDuration(r.PeakStateDurationMs) + " idle inside a transaction it is "
-                          + "holding a connection and any locks the transaction took, and it did pin "
-                          + "the horizon while it did so - just not as the oldest holder for most of "
-                          + "the window. Being the oldest is a property of the INSTANCE, not of this "
-                          + "session: on a busy one several long transactions take turns."
-                : passing;
+            return passing + LongIdleOtherAxis(r,
+                ", and it did pin the horizon while it did so - just not as the oldest holder for most of "
+                + "the window. Being the oldest is a property of the INSTANCE, not of this "
+                + "session: on a busy one several long transactions take turns.");
         }
 
         if (r.PeakHorizonAge < 0 && r.IdleInTransactionSamples > 0)
@@ -150,6 +152,19 @@ public sealed class DarlingMcpPgSessionStatesTools
     }
 
     /// <summary>
+    /// The long-idle-in-transaction sentence both holder branches of <see cref="HorizonFinding"/> share, so
+    /// the text agrees with <see cref="SessionSeverity"/>'s Warning arm (same condition) whichever branch the
+    /// row lands in. Empty when the row is not long idle. <paramref name="tail"/> is what is particular to
+    /// the branch, and starts with its own punctuation.
+    /// </summary>
+    private static string LongIdleOtherAxis(DarlingPgSessionStatesReader.PgSessionStateRow r, string tail)
+        => r.IdleInTransactionSamples > 0 && r.PeakStateDurationMs >= IdleWithoutHorizonAttentionMs
+            ? " It is a finding on the OTHER axis though: at " + FormatDuration(r.PeakStateDurationMs)
+              + " idle inside a transaction it is holding a connection and any locks the transaction took"
+              + tail
+            : "";
+
+    /// <summary>
     /// Severity band, server-computed so the browser and the WPF row styles paint the same thing from the
     /// same decision rather than each re-deriving it.
     /// <para>The four words are the HOUSE vocabulary — <c>Healthy</c>, <c>Warning</c>, <c>Critical</c>,
@@ -168,8 +183,7 @@ public sealed class DarlingMcpPgSessionStatesTools
             return "Unknown";
         }
 
-        var sustained = r.SampleCount > 0
-            && r.HorizonHolderSamples >= Math.Max(1, (int)Math.Ceiling(r.SampleCount * SustainedHolderSampleShare));
+        var sustained = DarlingPgSessionStatesReader.IsSustainedHolder(r);
 
         if (r.HorizonHolderSamples > 0 && sustained)
         {
@@ -195,6 +209,13 @@ public sealed class DarlingMcpPgSessionStatesTools
         return "Healthy";
     }
 
+    /// <summary>#7528: the reader answers -1 for a duration the collector did not measure (an autovacuum worker in
+    /// state <c>starting</c> has no query start). The <c>*_duration</c> text twins already read "not measured"; the
+    /// numeric <c>_ms</c> field answers null so -1 cannot be read as a measured duration. Same treatment as the
+    /// replication slot sizes in <c>get_pg_replication_slots</c>. peak_horizon_age and the xmin/xid ages keep their
+    /// documented -1 (pinned nothing).</summary>
+    internal static long? MeasuredMs(long milliseconds) => milliseconds >= 0 ? milliseconds : null;
+
     internal static string FormatDuration(long milliseconds)
     {
         if (milliseconds < 0)
@@ -214,13 +235,14 @@ public sealed class DarlingMcpPgSessionStatesTools
     }
 
     [McpServerTool(Name = "get_pg_session_states")]
-    [Description("Gets PostgreSQL sessions holding a transaction open: how long, and WHETHER they are pinning the xmin horizon. peak_horizon_age carries that, not duration; -1 means pinned NOTHING, not a small age. THIS IS A SAMPLE at the collection interval - a transaction that opened and closed between samples is invisible; captures_in_window is the denominator, and captures_in_window = 0 means unavailable, not a clean bill. Requires pg_monitor; without it a row's state columns come back NULL (state_was_redacted) rather than refused. Window ends at as_of. <<GUIDE>> PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and it is not the same question as the first two: measured on a live instance, an idle-in-transaction session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of -1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, which names the CLASS of holder; this names the session. Rolled up per backend across the window, horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not an event log - PostgreSQL records nothing about session state unless something asks, so a transaction that opened and closed between samples is invisible; the capture counts are reported so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: pg_stat_activity.query carries literal parameter values, so the normalised query_id and a whitelisted command keyword are stored instead - join query_id to get_pg_top_queries for the statement text with placeholders. Requires pg_monitor on the target; without it PostgreSQL silently returns rows with every state column NULL, which the read reports rather than hides. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")]
+    [Description("Gets PostgreSQL sessions holding a transaction open: how long, and WHETHER they are pinning the xmin horizon. peak_horizon_age carries that, not duration; -1 means pinned NOTHING, not a small age. THIS IS A SAMPLE at the collection interval - a transaction that opened and closed between samples is invisible; captures_in_window is the denominator, and captures_in_window = 0 means unavailable, not a clean bill. Requires pg_monitor; without it a row's state columns come back NULL (state_was_redacted) rather than refused. last_query_text is the statement text. Window ends at as_of. <<GUIDE>> PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and it is not the same question as the first two: measured on a live instance, an idle-in-transaction session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of -1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, which names the CLASS of holder; this names the session. Rolled up per backend across the window, horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not an event log - PostgreSQL records nothing about session state unless something asks, so a transaction that opened and closed between samples is invisible; the capture counts are reported so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: pg_stat_activity.query carries literal parameter values, so the normalised query_id and a whitelisted command keyword are stored instead - last_query_text is that statement's normalised text with placeholders (a 400-character preview, last_query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly statement capture reaches the id and always null for query id 0 and a null id; join last_query_id to get_pg_top_queries for its call counts. Requires pg_monitor on the target; without it PostgreSQL silently returns rows with every state column NULL, which the read reports rather than hides. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")]
     public static async Task<string> GetPgSessionStates(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full last_query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -289,22 +311,26 @@ public sealed class DarlingMcpPgSessionStatesTools
                 /* Normalised statement identity. Join it to get_pg_top_queries for the text with $1
                    placeholders where the literals were. */
                 last_query_id = r.LastQueryId,
+                /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+                   that id (the same rules as get_pg_top_queries), and always null for query id 0 and a null id. */
+                last_query_text = DarlingMcpPgStatementTools.StatementTextFor(r.LastQueryText, full_text).Text,
+                last_query_text_truncated = DarlingMcpPgStatementTools.StatementTextFor(r.LastQueryText, full_text).Truncated,
                 query_id_note = r.LastQueryId is null
                     ? "No query_id. PostgreSQL 13 does not have the column at all; on 14+ it is NULL when "
                     + "compute_query_id is off, and on a redacted row it is NULL with everything else "
                     + "privileged. Check the target's version before reading anything into this."
                     : null,
-                peak_xact_duration_ms = r.PeakXactDurationMs,
+                peak_xact_duration_ms = MeasuredMs(r.PeakXactDurationMs),
                 peak_xact_duration = FormatDuration(r.PeakXactDurationMs),
-                peak_state_duration_ms = r.PeakStateDurationMs,
+                peak_state_duration_ms = MeasuredMs(r.PeakStateDurationMs),
                 peak_state_duration = FormatDuration(r.PeakStateDurationMs),
-                peak_query_duration_ms = r.PeakQueryDurationMs,
+                peak_query_duration_ms = MeasuredMs(r.PeakQueryDurationMs),
                 /* How long the BACKEND has existed, against how long it has held its transaction. The pair
                    separates two different bugs that look identical in the transaction duration alone: a
                    connection created ten minutes ago that has been idle in transaction for all ten is a
                    pool handing out a session nobody finished with, while a three-day-old worker that has
                    held one for ten minutes is a code path that forgot to commit. */
-                backend_age_ms = r.PeakBackendDurationMs,
+                backend_age_ms = MeasuredMs(r.PeakBackendDurationMs),
                 backend_age = FormatDuration(r.PeakBackendDurationMs),
                 /* -1 means pinned NOTHING. Not a small age - no age. */
                 peak_horizon_age = r.PeakHorizonAge,

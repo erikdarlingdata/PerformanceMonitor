@@ -143,4 +143,49 @@ public sealed class InvestigationsPageTests
         Assert.Equal(JsonValueKind.Null, run.GetProperty("claimedAtNever").ValueKind);
         Assert.False(run.GetProperty("params").GetProperty("none").TryGetProperty("state", out _));
     }
+
+    /// <summary>#6979: <c>#/investigations?request=&lt;id&gt;</c> opens one request on its own, with its report and its own agent changes only.</summary>
+    [Fact]
+    public void TheRequestRoute_OpensOneRequest_WithItsReportAndOnlyItsOwnAgentChanges()
+    {
+        var one = Run().GetProperty("one");
+        Assert.Empty(one.GetProperty("listCalls").EnumerateArray());
+        var read = Assert.Single(one.GetProperty("reportCalls").EnumerateArray());
+        Assert.Equal("11111111-1111-1111-1111-111111111111", read.GetProperty("request_id").GetString());
+        Assert.Equal(1, one.GetProperty("agentChangeReads").GetInt32());
+        /* The page asks the service for this request's changes by id: it does not filter the newest 200 in the browser (#6979). */
+        Assert.Equal("/api/agent-changes?request=11111111-1111-1111-1111-111111111111", Assert.Single(Strings(one.GetProperty("agentChangeUrls"))));
+        var text = one.GetProperty("text").GetString()!;
+        Assert.Contains("Request on srv-new", text);
+        Assert.Contains("Verdict: needs_person", text);
+        Assert.Contains("Agent changes (1)", text);
+        Assert.Contains("set_config", text);
+        Assert.DoesNotContain("other_tool", text);
+        Assert.Contains("#/admin/agent-changes", Strings(one.GetProperty("links")));
+        Assert.Equal(0, one.GetProperty("closeButtons").GetInt32());
+    }
+
+    [Fact]
+    public void TheRequestRoute_SaysPlainlyWhenTheIdIsNotARequest()
+    {
+        var text = Run().GetProperty("oneMissing").GetString()!;
+        Assert.Contains("No investigation request has id 99999999-9999-9999-9999-999999999999.", text);
+        Assert.DoesNotContain("Verdict", text);
+    }
+
+    [Fact]
+    public void TheRequestRoute_SaysSoWhenARequestHasNoAgentChange_AndStillLinksToTheTab()
+    {
+        var none = Run().GetProperty("oneNoChange");
+        Assert.Contains("Request on srv-old", none.GetProperty("text").GetString());
+        Assert.Contains("No agent change on this request", none.GetProperty("text").GetString());
+        Assert.Contains("#/admin/agent-changes", Strings(none.GetProperty("links")));
+    }
+
+    [Fact]
+    public void TheRequestId_IsReadFromTheHashQuery_AndBlankWhenThereIsNone()
+    {
+        var ids = Strings(Run().GetProperty("queryIds"));
+        Assert.Equal(new[] { "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "", "", "" }, ids);
+    }
 }

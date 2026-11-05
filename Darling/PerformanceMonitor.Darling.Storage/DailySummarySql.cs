@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -73,7 +74,9 @@ public static class DailySummarySql
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
+                /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
+                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             ) AS x
             GROUP BY x.d
@@ -90,18 +93,22 @@ public static class DailySummarySql
         ),
         /*blocking-waits*/
         bpr AS (
-            /* #5644: counts WAITS, not report rows (BlockingWaits.WaitsCteSql, the one definition the alert, the
-               fleet tile and the MCP counts share), bucketed on the day of the wait's longest report. */
+            /* #7028: the day's blocking WAITS, chosen per hour as the blocking alerts choose them for their rolling
+               hour (BlockingWaits.HourlyChosenWaitsSql): each hour takes its blocked-process-report waits when it has
+               any, else its DMV snapshot waits, so an hour that paged on DMV waits alone still counts in a day that
+               holds reports in another hour. c is the count the band bands and every surface shows, max_wait_ms
+               the longest of those waits. A wait lands on the day of its representative report (XE: event_time,
+               DMV: collection_time). xe_c counts the waits that came from reports: an hour that holds any report
+               waits chooses them, so a day holds blocked-process reports exactly when xe_c > 0, whatever else the
+               hour-choice picked. */
             SELECT date_trunc('day', event_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
-                   SUM(wait_reports)::bigint AS reports
-            FROM bpr_waits
+                   COUNT(*) FILTER (WHERE from_xe) AS xe_c
+            FROM blk
             GROUP BY 1
         ),
         dmv AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c, MAX(wait_time_ms) AS max_wait_ms,
-                   SUM(wait_reports)::bigint AS reports
-            FROM dmv_waits
-            GROUP BY 1
+            /* #7028: the snapshot arm's value per day, from the gated chain above (dmv_gated). */
+            SELECT d, peak_snapshot_wait_ms FROM dmv_gated
         ),
         cpu AS (
             /* Total host CPU = SQL + other-process (NULL on Linux -> 0), matching the Overview headline. The
@@ -178,16 +185,15 @@ public static class DailySummarySql
                is an instance of it. The readers keep the NULL (long?) and name the day in days_missing[]. */
             CASE WHEN q.d IS NULL THEN 0 ELSE q.c END AS unique_queries,
             COALESCE(dl.c, 0) AS deadlock_count,
-            COALESCE(NULLIF(b.c, 0), dm.c, 0) AS blocking_events,
+            COALESCE(b.c, 0) AS blocking_events,
             COALESCE(cp.c, 0) AS high_cpu_events,
             COALESCE(cl.errs, 0) AS collection_errors,
             COALESCE(m.pressure, 0) AS memory_pressure_events,
             COALESCE(m.critical, 0) AS memory_critical_events,
             COALESCE(al.c, 0) AS alert_count,
-            /* Peak block wait (ms) from the SAME source the blocking count came from (BPR preferred, DMV-snapshot
-               fallback), so the day-detail blocking reason ('N blocking events (peak block X)') reconciles with
-               the count. 0 when the blocking came from a source without a wait time. */
-            COALESCE(CASE WHEN COALESCE(b.c, 0) > 0 THEN b.max_wait_ms ELSE dm.max_wait_ms END, 0) AS peak_block_wait_ms,
+            /* Peak block wait (ms): the longest of the waits blocking_events counts (#7028), so the day-detail blocking
+               reason ('N blocking events (peak block X)') reconciles with the count. 0 when the day has none. */
+            COALESCE(b.max_wait_ms, 0) AS peak_block_wait_ms,
             /* Every collector run in the window (#3539 A2): the denominator that turns collection_errors
                into a share. Appended after peak_block_wait_ms so every existing ordinal read stays where it was. */
             COALESCE(cl.runs, 0) AS collection_runs,
@@ -208,16 +214,21 @@ public static class DailySummarySql
             (CASE WHEN w.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN q.c IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN dl.d IS NULL THEN 0 ELSE 1 END)
-              + (CASE WHEN b.d IS NULL THEN 0 ELSE 1 END)
+              /* Blocking is TWO sources, as the retention notes' "N of 7" counts them: the blocked-process reports and the
+                 DMV snapshots are separate tables with their own retention (#7028). The chosen waits (b.d) can come from
+                 either side, so the reports arm reads xe_c, the report-sourced waits, and a DMV-only day does not count
+                 as holding reports. dm.d is non-null on every day that holds a snapshot, whatever its gated value (the
+                 gate keeps one row per day with an in-window snapshot, and a low value is 0, not no row). */
+              + (CASE WHEN COALESCE(b.xe_c, 0) = 0 THEN 0 ELSE 1 END)
               + (CASE WHEN dm.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN cp.d IS NULL THEN 0 ELSE 1 END)
               + (CASE WHEN m.d IS NULL THEN 0 ELSE 1 END) AS signal_sources_present,
-            /* #5644: the day's blocked-process REPORT rows (DMV snapshot rows on the fallback), from the SAME source
-               and day bucket as blocking_events, which counts WAITS. The health band's count tiers
-               (ServerHealthThresholds.BlockingWarnPerHour/CriticalPerHour) were measured in reports per server-hour,
-               so the band reads this column; every displayed count stays blocking_events. Appended LAST, after
-               signal_sources_present, so every existing ordinal read stays where it was. */
-            CASE WHEN COALESCE(b.c, 0) > 0 THEN b.reports ELSE COALESCE(dm.reports, 0) END AS blocking_reports
+            /* #7028: the blocking band's snapshot arm, the Blocking Wait Time alert's own measure: the largest total
+               blocked wait of one DMV snapshot in the day after the alert's persistence gate (three adjacent snapshots,
+               or one at three times the bar), in milliseconds, 0 when the day has no snapshot. Replaces
+               blocking_reports (#5644), which the band no longer reads: it bands on blocking_events (waits). Appended
+               LAST, after signal_sources_present, so every existing ordinal read stays where it was. */
+            COALESCE(CAST(ROUND(dm.peak_snapshot_wait_ms) AS bigint), 0) AS peak_snapshot_wait_ms
         FROM day_spine s
         LEFT JOIN waits w ON w.d = s.d
         LEFT JOIN queries q ON q.d = s.d
@@ -232,22 +243,90 @@ public static class DailySummarySql
         """;
 
     /// <summary>
-    /// <see cref="RangeSqlTemplate"/> with the two blocking-wait chains spliced in (#5644): the day's
-    /// <c>blocking_events</c> counts blocking WAITS, as the alert value, the fleet "Blocking" tile and the MCP counts
-    /// do (<see cref="BlockingWaits.WaitsCteSql"/>), not blocked-process report rows (SQL Server writes about eleven
-    /// per one-minute wait). The blocked-process side carries <c>database_name</c> for
+    /// <see cref="RangeSqlTemplate"/> with the blocking chains spliced in. The day's <c>blocking_events</c> counts
+    /// blocking WAITS, as the alert value, the fleet "Blocking" tile and the MCP counts do
+    /// (<see cref="BlockingWaits.WaitsCteSql"/>), not blocked-process report rows (SQL Server writes about eleven per
+    /// one-minute wait). #7028: the waits are chosen per HOUR (<see cref="BlockingWaits.HourlyChosenWaitsSql"/>,
+    /// buckets anchored at the day start), the way the blocking alerts choose them for their rolling hour, and the
+    /// day also carries the <c>Blocking Wait Time</c> alert's measure, the largest gated DMV snapshot total
+    /// (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>). The blocked-process side carries <c>database_name</c> for
     /// <see cref="DailySummaryAzureMasterScope"/>'s filter; the DMV side keeps its collected-day bucket.
     /// </summary>
     public static readonly string RangeSql = RangeSqlTemplate.Replace(
         "/*blocking-waits*/",
-        BlockingWaits.WaitsCteSql(
+        /* The DMV rows are read once, from the lookback floor (a streak that began before $2 is seen), and the waits
+           and the gate both take them from here. */
+        @"dmv_src AS (
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= " + BlockingSnapshotFloorSql("$2", "$1") + @" AND collection_time < $3
+),"
+        + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "bpr_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms, database_name FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4", reportCount: true) + "," + BlockingWaits.WaitsCteSql(
+    " + BprSourceWhere) + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", reportCount: true) + ",",
+            @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE collection_time >= $2") + ","
+        /* Hourly buckets from a fixed midnight, so every bucket lies inside one day (date_bin on a day-aligned origin
+           is date_trunc('hour')); the DMV side buckets on collection_time, as this statement always has. */
+        + BlockingWaits.HourlyChosenWaitsSql(
+            "blk", "bpr_waits", "dmv_waits", "TIMESTAMP '2000-01-01'", false, null, "event_time", "collection_time") + ","
+        + BlockingWaits.GatedSnapshotWaitSql(
+            "dmv_gated", "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM dmv_src",
+            "$2", "$3", false,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes, byDay: true) + ",",
         StringComparison.Ordinal);
+
+    /// <summary>The blocked-process-report source's window, one line: <see cref="DailySummaryAzureMasterScope"/> appends
+    /// its keep predicate to it.</summary>
+    internal const string BprSourceWhere =
+        "WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4";
+
+    /* A property, not a static readonly field: RangeSql is initialised above it and would read a zero. */
+    private static int DefaultSnapshotCadenceMinutes =>
+        PerformanceMonitor.Collectors.CollectorScheduleDefaults.All["dmv_blocking_snapshot"].FrequencyMinutes;
+
+    /// <summary>
+    /// #7028: where the snapshot reads start for a window that starts at <paramref name="windowStartSql"/>, so a streak
+    /// that began before the window is seen (<see cref="BlockingWaits.SnapshotLookbackFloorSql"/> with the alert's own
+    /// constants). <paramref name="serverIdSql"/> is the one server's id, or null for the fleet.
+    /// </summary>
+    public static string BlockingSnapshotFloorSql(string windowStartSql, string? serverIdSql) =>
+        BlockingWaits.SnapshotLookbackFloorSql(
+            windowStartSql, serverIdSql, AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitEpisodeGapFactor,
+            DefaultSnapshotCadenceMinutes);
+
+    /// <summary>
+    /// #7028: the snapshot arm for a window with the alert's own gate constants and the shipped default cadence, one
+    /// definition for the fleet reads and the Viewer Overview (<see cref="BlockingWaits.GatedSnapshotWaitSql"/>).
+    /// <paramref name="serverIdSql"/> is the one server's id (<c>$1</c>), or null for every server. The snapshots are read
+    /// from the lookback floor up to the window end when one is given (the gate only looks backwards, so a snapshot after
+    /// the window can never change a value inside it, and a window in the past would otherwise read every snapshot
+    /// through now), bounded the way the gate keeps its rows (<c>&lt;=</c> with <paramref name="endInclusive"/>, else
+    /// <c>&lt;</c>). <paramref name="floorSql"/> is the statement's partition-column floor for the
+    /// window start (<see cref="EventWindowFloor"/>), which the lookback floor never goes below.
+    /// <paramref name="sourceRelation"/> names a relation the caller already reads the snapshots into (<c>server_id</c>,
+    /// <c>collection_time</c>, <c>wait_time_ms</c>, <c>blocked_spid</c>, <c>blocking_spid</c>, already scoped to the server
+    /// and read from at or before <paramref name="floorSql"/>), so the statement's wait count and this gate share one scan
+    /// of the snapshots instead of reading them twice (#7028: the second scan took the fleet card to 1.7 times the
+    /// buffers of the statement before the gate).
+    /// </summary>
+    public static string BlockingSnapshotGateSql(
+        string name, string windowStartSql, string? windowEndSql, bool endInclusive, string? serverIdSql, string floorSql,
+        string? sourceRelation = null) =>
+        BlockingWaits.GatedSnapshotWaitSql(
+            name,
+            (sourceRelation is null
+                ? @"SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM v_dmv_blocking_snapshots
+    WHERE collection_time >= " + floorSql + " AND collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql)
+                    + (serverIdSql is null ? string.Empty : " AND server_id = " + serverIdSql)
+                : "SELECT server_id, collection_time, wait_time_ms, blocked_spid, blocking_spid FROM " + sourceRelation
+                    + " WHERE collection_time >= " + BlockingSnapshotFloorSql(windowStartSql, serverIdSql))
+            + (windowEndSql is null ? string.Empty : " AND collection_time " + (endInclusive ? "<=" : "<") + " " + windowEndSql),
+            windowStartSql, windowEndSql, endInclusive,
+            AlertEngine.BlockingWaitBreachSamples, AlertEngine.BlockingWaitSingleSnapshotMultiplier,
+            AlertEngine.BlockingWaitEpisodeGapFactor, DefaultSnapshotCadenceMinutes);
 
     /// <summary>
     /// The <c>queries</c> CTE exactly as it appears in <see cref="RangeSql"/> — the ONE part of the
@@ -280,7 +359,9 @@ public static class DailySummarySql
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
-                FROM v_query_stats
+                /* #7147: collect.query_stats, not the v_query_stats view: the view's payload joins keep the planner off an
+                   index-only scan even though this read needs only server_id, collection_time and query_hash. */
+                FROM collect.query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
             ) AS x
             GROUP BY x.d
@@ -290,7 +371,10 @@ public static class DailySummarySql
     /// <summary>
     /// The same CTE against a rollup. <c>COUNT(DISTINCT query_hash)</c> is exact over a CAGG because query_hash is
     /// one of its GROUP BY columns — the rollup preserves every distinct hash per bucket, so counting them per day
-    /// gives the identical answer raw would. The time column becomes <c>bucket</c>; parameter positions are
+    /// gives the count of distinct hashes the rollup's source rows produced. That is raw's answer except for the
+    /// rows the rollup's own <c>WHERE</c> leaves out: the interval-honest successor skips restart rows
+    /// (<c>sample_interval_seconds IS DISTINCT FROM 0</c>), so a closed day can read a few hashes lower from the
+    /// rollup than from raw (369 against 362 on one store, #7505). The time column becomes <c>bucket</c>; parameter positions are
     /// unchanged, so the caller binds the same three values either way.
     ///
     /// <para><b>The days the rollup has not reached yet come from raw (#3653 A6, the <c>unique_queries = 0</c>
@@ -305,10 +389,24 @@ public static class DailySummarySql
     /// materialized yet" is. The CTE now takes the rollup for every day up to and including the rollup's last
     /// materialized DAY for this server and raw <c>query_stats</c> for the days after it — raw keeps four days
     /// and the lag is at most two, so those days are answered exactly, from the rows the rollup will
-    /// materialize tomorrow. The two halves are partitioned on the ceiling DAY, never on the hour, so no day
-    /// has two rows in <c>queries</c> (a <c>COUNT(DISTINCT)</c> cannot be summed across halves) and the
-    /// hourly tier's ceiling day reads its own partial rollup rather than a mix. Bounded by shape: the ceiling
-    /// is one indexed <c>max(bucket)</c> per server and the raw half is at most two days of one server.</para>
+    /// materialize tomorrow. No day has two rows in <c>queries</c> (a <c>COUNT(DISTINCT)</c> cannot be summed
+    /// across halves). Bounded by shape: the ceiling is one indexed <c>max(bucket)</c> per server and the raw
+    /// half is a day or two of one server.</para>
+    ///
+    /// <para><b>A day the rollup holds only part of reads raw too, and the larger count wins (#7505).</b> An
+    /// hourly rollup runs behind the clock: its refresh runs once an hour and its <c>end_offset</c> is an hour,
+    /// so its newest bucket can be two hours old. Split on the ceiling DAY alone, today read that partial
+    /// rollup: after a burst of new queries the month read showed 1 where the three-day read, which answers
+    /// from raw, showed 2,445. The ceiling now also carries <c>raw_from</c>, the day in which the newest bucket
+    /// ENDS. It is the day after the ceiling day when the newest bucket is the day's last (a daily rollup always,
+    /// an hourly one at 23:00), so a whole-bucket tier is read exactly as before. It is the ceiling day itself
+    /// when the newest bucket ends inside the day, and raw is then read from that day too. The two halves meet
+    /// on that one day, and <c>MAX</c> per day keeps one row: each half counts hashes that did appear, so the
+    /// larger is the closer. Raw's wins when the rollup has not caught up. The rollup's wins when raw has lost
+    /// the day, either all of it (a rollup that stopped refreshing for longer than raw's four days keeps its
+    /// partial count and never prints 0) or part of it (a chunk dropped by retention). A quiet server whose
+    /// last closed hour has no bucket reads raw for that day while raw holds it, and keeps the rollup's count
+    /// after.</para>
     ///
     /// <para><b>The days the rollup skipped BELOW its ceiling are NULL, not 0 (#3653 A6, the last clause).</b>
     /// A day at or below this server's ceiling for which the rollup holds no row was, until this, a day the
@@ -397,13 +495,35 @@ public static class DailySummarySql
         var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
         var sourceFilter = filter.Length == 0 ? string.Empty : $"\n          AND {filter}";
 
+        var width = (long)target.BucketWidth.TotalSeconds;
+
+        /* #7505: the partial ceiling day's raw rows are counted with the rollup's own source filter, so that day
+           is not read higher than the rollup would have read it once it catches up (a restart row's hash counts in
+           raw and not in the interval-honest successor). Days past the ceiling keep reading raw unfiltered, as they
+           always did. The filter is a no-op for a rollup with none. */
+        var partialDayFilter = filter.Length == 0
+            ? string.Empty
+            : $"\n                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2) OR ({filter}))";
+
         return $"""
+        /* #7505: last_day is the newest day the rollup holds a bucket for. raw_from is the first day the rollup
+           does NOT hold whole: the day in which the newest bucket ENDS. For a daily rollup, or an hourly one whose
+           newest bucket is 23:00, that is the day after last_day. For an hourly rollup that is still behind the
+           clock (its refresh runs an hour apart and stops an hour short of now, so it can lag two hours), the newest
+           bucket ends inside last_day, so raw_from = last_day and that day is partial. */
         queries_ceiling AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{width} seconds') AS raw_from
             FROM collect.{relation}
             WHERE server_id = $1
         ),
         queries AS (
+            /* One row per day. The rollup half and the raw half overlap on exactly one day, the partial one, and
+               two distinct counts of the halves cannot be added. Each half is a count of hashes that really
+               appeared that day, so the larger is the closer: the rollup's when raw has lost part of the day
+               (retention), raw's when the rollup has not caught up (#7505). */
+            SELECT u.d, MAX(u.c) AS c
+            FROM (
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
@@ -417,7 +537,7 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling), $2){partialDayFilter}
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -446,6 +566,8 @@ public static class DailySummarySql
                 SELECT 1 FROM collect.{target.Source} AS s
                 WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'{sourceFilter}
                 OFFSET 0)
+            ) AS u
+            GROUP BY u.d
         ),
         """;
     }
@@ -502,19 +624,32 @@ public static class DailySummarySql
         var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
         var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
         var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* #7505: the partial ceiling day's raw rows carry the owning side's source filter. See QueriesCteForCagg. */
+        var partialDaySuccessor = successorFilter.Length == 0 ? "TRUE" : $"({successorFilter})";
+        var partialDayLegacy = legacyFilter.Length == 0 ? "TRUE" : $"({legacyFilter})";
+        var legacyWidth = (long)legacyTarget.BucketWidth.TotalSeconds;
+        var successorWidth = (long)successorTarget.BucketWidth.TotalSeconds;
 
         return $"""
+        /* #7505: raw_from is the day in which each side's newest bucket ends, the first day that side does not
+           hold whole. See QueriesCteForCagg. */
         queries_ceiling_legacy AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{legacyWidth} seconds') AS raw_from
             FROM collect.{legacy}
             WHERE server_id = $1 AND bucket < {boundary}
         ),
         queries_ceiling_successor AS (
-            SELECT date_trunc('day', max(bucket)) AS last_day
+            SELECT date_trunc('day', max(bucket)) AS last_day,
+                   date_trunc('day', max(bucket) + INTERVAL '{successorWidth} seconds') AS raw_from
             FROM collect.{successor}
             WHERE server_id = $1 AND bucket >= {boundary}
         ),
         queries AS (
+            /* One row per day: the larger of the rollup's and raw's count on the one day both can hold. See
+               QueriesCteForCagg. */
+            SELECT u.d, MAX(u.c) AS c
+            FROM (
             SELECT x.d, COUNT(x.query_hash) AS c
             FROM (
                 SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
@@ -536,7 +671,10 @@ public static class DailySummarySql
                 SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
                 FROM v_query_stats
                 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+                  AND collection_time >= COALESCE((SELECT raw_from FROM queries_ceiling_successor), (SELECT raw_from FROM queries_ceiling_legacy), $2)
+                  AND (collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NOT NULL AND {partialDaySuccessor})
+                       OR ((SELECT last_day FROM queries_ceiling_successor) IS NULL AND {partialDayLegacy}))
             ) AS x
             GROUP BY x.d
             UNION ALL
@@ -575,6 +713,8 @@ public static class DailySummarySql
                 SELECT 1 FROM collect.{successorTarget.Source} AS s
                 WHERE s.server_id = $1 AND s.{successorTarget.SourceTimeColumn} >= b.d AND s.{successorTarget.SourceTimeColumn} < b.d + INTERVAL '1 day'{successorSourceFilter}
                 OFFSET 0)
+            ) AS u
+            GROUP BY u.d
         ),
         """;
     }

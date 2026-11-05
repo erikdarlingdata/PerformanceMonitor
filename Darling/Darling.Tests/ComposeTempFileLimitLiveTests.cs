@@ -38,7 +38,7 @@ public sealed class ComposeTempFileLimitLiveTests
         var ct = TestContext.Current.CancellationToken;
         var bodySucceeded = false;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
 
         /* A throwaway login role, provisioned with the SAME shape the product's renderer emits for viewer/mcp
            -- but with the ceiling lowered to 1MB so a normal test-sized spill trips it without needing to
@@ -62,6 +62,7 @@ public sealed class ComposeTempFileLimitLiveTests
                temp_file_limit) is exactly what BuildComposeStatementTimeoutSql emits for the real roles. */
             var rendered = (DarlingManagedRoles.BuildComposeStatementTimeoutSql(60) + "\n" + DarlingManagedRoles.BuildComposeTempFileLimitSql())
                 .Replace("viewer", roleName, StringComparison.Ordinal)
+                .Replace("ALTER ROLE web ", $"ALTER ROLE {roleName} ", StringComparison.Ordinal)
                 .Replace("mcp", roleName, StringComparison.Ordinal);
             await using (var applyRendered = new NpgsqlCommand(rendered, admin))
             {

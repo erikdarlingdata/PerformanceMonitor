@@ -284,7 +284,9 @@ public static class PgColumnStatsCoverage
             PgColumnStatsCoverageArm.FullyMeasured,
             census,
             "FULL COVERAGE: every table above the floor is represented, with none withheld by the pg_stats "
-            + "privilege filter. The ranking describes the whole of what this collector reads.");
+            + "privilege filter. The ranking describes the whole of what this collector reads. That is a "
+            + "statement about the collected census, not about the page in front of you: a page cut at its "
+            + "limit shows only the first columns of it.");
     }
 
     /// <summary>

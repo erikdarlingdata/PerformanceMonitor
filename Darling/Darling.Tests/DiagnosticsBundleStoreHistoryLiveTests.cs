@@ -48,7 +48,7 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
     private static async Task<(ScratchPostgres Scratch, NpgsqlDataSource Source)> StartAsync(CancellationToken ct, bool migrate = true)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the bundle's statement-history live pins (each mints its own scratch database).");
-        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         if (migrate)
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);

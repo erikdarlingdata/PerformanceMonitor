@@ -53,7 +53,7 @@ public sealed class PgLogTailStderrSiblingLiveTests
            starts — every message this test provokes below is written to BOTH files, exactly the shape #3997
            describes and this test's own header measured. Nothing has to fabricate the sibling; connecting to
            a target started this way is enough for one to be there. */
-        var context = new CollectorContext
+        CollectorContext NewContext() => new CollectorContext
         {
             ServerId = 1,
             ServerName = "live-rig-as-target",
@@ -133,31 +133,51 @@ public sealed class PgLogTailStderrSiblingLiveTests
         /* Now the real production SQL, against the SAME target, through the SAME connection this test used
            to provoke everything above — proving the fixed tail picks up the stderr file that this session's
            own backend just wrote to, not the csvlog sibling PostgreSQL wrote beside it. */
-        var planSql = PgPlanCaptureCollector.Instance.BuildQuery(context);
-        var deadlockSql = PgDeadlocksCollector.Instance.BuildQuery(context);
-        var eventsSql = PgLogEventsCollector.Instance.BuildQuery(context);
-
+        /* #7032: the logging collector writes the file from a pipe, asynchronously to the backend that logged each
+           line, so a read issued the moment the deadlock returns can run before the deadlock report (the last line
+           this test provokes) is in the file. The plan and duplicate-key lines were logged at least a deadlock
+           timeout earlier. Repeats the three fresh reads until each family's entry is present or 30 s pass, then
+           keeps the last reads. The assertions below stay exact, so an entry that never arrives still fails them. */
         List<PgPlanCaptureCollector.Row> planRows;
-        await using (var read = LiveTailQuery.Command(planSql, connection))
-        await using (var reader = await read.ExecuteReaderAsync(ct))
-        {
-            /* Throws PgLoggingCollectorOffException or PgNoStderrLogFileException if the tail picked a
-               sibling or found no stderr file — either would fail this test rather than silently pass. */
-            planRows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
-        }
-
         List<PgDeadlocksCollector.Row> deadlockRows;
-        await using (var read = LiveTailQuery.Command(deadlockSql, connection))
-        await using (var reader = await read.ExecuteReaderAsync(ct))
-        {
-            deadlockRows = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, ct);
-        }
-
         List<PgLogEvent> eventRows;
-        await using (var read = LiveTailQuery.Command(eventsSql, connection))
-        await using (var reader = await read.ExecuteReaderAsync(ct))
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
         {
-            eventRows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
+            var context = NewContext();
+            var planSql = PgPlanCaptureCollector.Instance.BuildQuery(context);
+            var deadlockSql = PgDeadlocksCollector.Instance.BuildQuery(context);
+            var eventsSql = PgLogEventsCollector.Instance.BuildQuery(context);
+
+            await using (var read = LiveTailQuery.Command(planSql, connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                /* Throws PgLoggingCollectorOffException or PgNoStderrLogFileException if the tail picked a
+                   sibling or found no stderr file — either would fail this test rather than silently pass. */
+                planRows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
+            }
+
+            await using (var read = LiveTailQuery.Command(deadlockSql, connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                deadlockRows = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, ct);
+            }
+
+            await using (var read = LiveTailQuery.Command(eventsSql, connection))
+            await using (var reader = await read.ExecuteReaderAsync(ct))
+            {
+                eventRows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
+            }
+
+            if ((planRows.Exists(r => r.PlanJson.Contains("log_tail_sibling_plan_3997", StringComparison.Ordinal))
+                    && deadlockRows.Exists(r => r.ParticipantCount == 2)
+                    && eventRows.Exists(r => r.Message != null && r.Message.Contains("duplicate key value violates unique constraint", StringComparison.Ordinal)))
+                || DateTime.UtcNow >= deadline)
+            {
+                break;
+            }
+
+            await Task.Delay(200, ct);
         }
 
         Assert.Contains(planRows, r => r.PlanJson.Contains("log_tail_sibling_plan_3997", StringComparison.Ordinal));

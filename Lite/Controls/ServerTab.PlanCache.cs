@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
@@ -105,7 +106,7 @@ public partial class ServerTab : UserControl
         }
 
         PlanCacheChart.Plot.Axes.DateTimeTicksBottomUtc(GetPickerZone);
-        PlanCacheChart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
+        PlanCacheChart.Plot.Axes.SetLimitsX(ChartXStart(PlanCacheChart.Plot, rangeStart, rangeEnd), rangeEnd.ToOADate());
         ReapplyAxisColors(PlanCacheChart);
         PlanCacheChart.Plot.YLabel("Plan Cache Size (MB)");
         SetChartYLimitsWithLegendPadding(PlanCacheChart, 0, globalMax > 0 ? globalMax : 10);
@@ -123,6 +124,7 @@ public partial class ServerTab : UserControl
         {
             PlanCacheTotalPlansText.Text = "--";
             PlanCacheOldestPlanText.Text = "--";
+            PlanCacheCompiledSingleUseText.Text = "--";
             PlanCacheBloatLevelText.Text = "--";
             PlanCacheBloatLevelText.Foreground = System.Windows.Media.Brushes.Gray;
             PlanCacheRecommendationText.Text = "";
@@ -130,12 +132,18 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        /* Derived single-use bloat badge + forced-parameterization hint (install/47 report.plan_cache_bloat
-           parity): a pure client-side CASE on the single-use / total ratio the reader already returns. */
-        var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
+        /* Derived single-use bloat badge and its recommendation (#7445): the shared PlanCacheBloatRule over
+           compiled plans, with a 100 MB single-use floor, from figures the reader already returns. */
+        var bloat = LocalDataService.ClassifyPlanCacheBloat(summary);
         PlanCacheBloatLevelText.Text = bloat.Level;
         PlanCacheBloatLevelText.Foreground = BloatLevelBrush(bloat.Level);
         PlanCacheRecommendationText.Text = bloat.Recommendation;
+        /* The figure the badge is judged on, so a Normal badge beside a busy cache is explained: single-use
+           COMPILED plans as a share of compiled plans, and the MB they take (the badge's floor is on that). */
+        PlanCacheCompiledSingleUseText.Text = summary.CompiledPlans > 0
+            ? string.Format(CultureInfo.CurrentCulture, "{0:0.0}% ({1:N0} MB)",
+                summary.CompiledSingleUsePlans * 100.0 / summary.CompiledPlans, summary.CompiledSingleUseSizeMb)
+            : "--";
 
         PlanCacheTotalPlansText.Text = summary.TotalPlans.ToString("N0");
         /* #4966: the summary totals are one snapshot (the newest in the range); say when it was collected. */

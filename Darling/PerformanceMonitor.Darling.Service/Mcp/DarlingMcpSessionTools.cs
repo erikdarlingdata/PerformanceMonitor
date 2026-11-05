@@ -120,7 +120,7 @@ public sealed class DarlingMcpSessionTools
     /// <inheritdoc cref="QueryTextPreviewLength"/>
     private const int DefaultLimit = 25;
 
-    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true) — pass full_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name, blocking_only and wait_type are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocking has its input buffer from the blocked-process report), filtered (your database_name or wait_type filter excluded it), or past_page (it is in the filtered population but beyond limit). When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
+    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true) — pass full_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name, blocking_only and wait_type are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks). is_head_blocker marks one that nothing blocks in turn: in a chain, only the top session has it. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocking has its input buffer from the blocked-process report), filtered (your database_name or wait_type filter excluded it), or past_page (it is in the filtered population but beyond limit). When the store did not cover the whole window, effective_start, window_truncated and truncation_note say where its data starts.")]
     public static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -134,10 +134,11 @@ public sealed class DarlingMcpSessionTools
         [Description(QueryTagReadJoin.TagParameterDescription)] string? tag = null,
         [Description("One snapshot's rows: a collection_time exactly as this tool returned it. hours_back/as_of are then ignored. Not with snapshots_only.")] string? collection_time = null,
         [Description("Return the snapshot times (newest first, with row counts) instead of rows; limit caps them. Default false.")] bool snapshots_only = false,
+        [Description(DarlingMcpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         GetActiveQueries(postgres, server_name, hours_back, database_name, blocking_only, wait_type, limit,
-            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag, collection_time, snapshots_only);
+            full_text ? null : QueryTextPreviewLength, as_of, logger, cancellationToken, tag, collection_time, snapshots_only, include_monitor);
 
     /// <summary>
     /// get_active_queries under an explicit query-text preview length (#4198 lane W2): the MCP tool above
@@ -152,10 +153,10 @@ public sealed class DarlingMcpSessionTools
     internal static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
-        string? collectionTime = null, bool snapshotsOnly = false) =>
+        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false) =>
     #pragma warning restore CA1068
         GetActiveQueries(postgres, server_name, hours_back, DatabaseFilter.One(database_name), blocking_only, waitType,
-            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag, collectionTime, snapshotsOnly);
+            limit, queryTextPreviewLength, as_of, logger, cancellationToken, tag, collectionTime, snapshotsOnly, includeMonitor);
 
     /// <summary>
     /// The same read over a SET of databases (#5245). The MCP tool and the web mirror pass <see cref="DatabaseFilter.One"/> of
@@ -167,7 +168,7 @@ public sealed class DarlingMcpSessionTools
     internal static async Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, DatabaseFilter databases, bool blocking_only, string? waitType,
         int limit, int? queryTextPreviewLength, string? as_of, ILogger? logger = null, CancellationToken cancellationToken = default, string? tag = null,
-        string? collectionTime = null, bool snapshotsOnly = false)
+        string? collectionTime = null, bool snapshotsOnly = false, bool includeMonitor = false)
     {
     #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -210,12 +211,12 @@ public sealed class DarlingMcpSessionTools
                the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
                used to be rows.Count of an unfiltered window read, a different population from the rows. */
             if (snapshotsOnly)
-                return await SnapshotListAsync(postgres, resolved, hours_back, now, limit, databases, blocking_only, waitFilter, tagFilter, filter, cancellationToken);
+                return await SnapshotListAsync(postgres, resolved, hours_back, now, limit, databases, blocking_only, waitFilter, tagFilter, filter, includeMonitor, cancellationToken);
 
             /* #6302: one snapshot is the window [instant, instant]: collection_time is stored to the microsecond and the string it
                was read as carries that, so the equality holds, and every filter still rides the same statement. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, snapshotAt ?? now.AddHours(-hours_back), snapshotAt ?? now, limit + 1, databases, blocking_only, waitFilter, tagFilter, cancellationToken);
+                postgres, resolved.ServerId, snapshotAt ?? now.AddHours(-hours_back), snapshotAt ?? now, limit + 1, databases, blocking_only, waitFilter, tagFilter, includeMonitor, cancellationToken);
             var rows = page.Rows;
 
             if (snapshotAt != null && rows.Count == 0)
@@ -223,7 +224,7 @@ public sealed class DarlingMcpSessionTools
                     "empty",
                     $"No active query rows on {resolved.DisplayName} at collection_time {snapshotAt.Value:o}"
                     + (!databases.IsAll || blocking_only || waitFilter != null ? " matched " + DescribeActiveQueryFilters(databases, blocking_only, waitFilter) : "")
-                    + ". Read the snapshot times with snapshots_only.");
+                    + ". Read the snapshot times with snapshots_only." + MonitorLeftOutNote(includeMonitor));
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. An answer
                with rows over a window of 90 minutes or less needs no probe; an empty one is always probed. */
@@ -239,17 +240,18 @@ public sealed class DarlingMcpSessionTools
                    database_name, blocking_only or wait_type means the window held no snapshot matching them. */
                 if (!databases.IsAll || blocking_only || waitFilter != null || tagFilter.Active)
                 {
-                    return McpHelpers.Status(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                         "empty",
                         $"No active query snapshots on {resolved.DisplayName} in the last {hours_back} hour(s) matched "
                         + DescribeActiveQueryFilters(databases, blocking_only, waitFilter)
                         + (tagFilter.Active ? $" (query tag '{tagFilter.Requested}')" : "")
-                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.",
-                        notice.AsHints());
+                        + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds."
+                        + MonitorLeftOutNote(includeMonitor),
+                        notice.AsHints()), cancellationToken);
                 }
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.", notice.AsHints());
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken);
             }
 
             var truncated = rows.Count > limit;
@@ -276,7 +278,7 @@ public sealed class DarlingMcpSessionTools
                 blocking_session_id = r.BlockingSessionId > 0 ? r.BlockingSessionId : (int?)null,
                 /* #3541 A13: the two blocking disclosures. is_head_blocker is why a WAITFOR row can be here;
                    blocker_not_shown names the ONE reason a victim's blocker is not, or is null when it is. */
-                is_head_blocker = r.IsHeadBlocker ? true : (bool?)null,
+                is_head_blocker = r.IsHeadBlocker && (r.BlockingSessionId <= 0 || r.BlockingSessionId == r.SessionId) ? true : (bool?)null,
                 blocker_not_shown = BlockerNotShown(r, onPage),
                 dop = r.Dop > 0 ? r.Dop : (int?)null,
                 parallel_worker_count = r.ParallelWorkerCount > 0 ? r.ParallelWorkerCount : (int?)null,
@@ -374,19 +376,19 @@ public sealed class DarlingMcpSessionTools
     /// </summary>
     private static async Task<string> SnapshotListAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, DateTime now, int limit, DatabaseFilter databases,
-        bool blockingOnly, string? waitFilter, QueryTagFilter? tags, string? databaseEcho, CancellationToken cancellationToken)
+        bool blockingOnly, string? waitFilter, QueryTagFilter? tags, string? databaseEcho, bool includeMonitor, CancellationToken cancellationToken)
     {
         var page = await DarlingSessionReader.GetActiveQuerySnapshotsAsync(
-            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, limit + 1, databases, blockingOnly, waitFilter, tags, cancellationToken);
+            postgres, resolved.ServerId, now.AddHours(-hoursBack), now, limit + 1, databases, blockingOnly, waitFilter, tags, includeMonitor, cancellationToken);
         if (page.Snapshots.Count == 0)
         {
             if (!databases.IsAll || blockingOnly || waitFilter != null)
-                return McpHelpers.Status(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                     "empty",
                     $"No active query snapshots on {resolved.DisplayName} in the last {hoursBack} hour(s) matched "
-                    + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + ".");
+                    + DescribeActiveQueryFilters(databases, blockingOnly, waitFilter) + "." + MonitorLeftOutNote(includeMonitor)), cancellationToken);
             return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
+                ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No active query snapshots found in the requested time range." + MonitorLeftOutNote(includeMonitor)), cancellationToken);
         }
 
         var truncated = page.Snapshots.Count > limit;
@@ -403,6 +405,10 @@ public sealed class DarlingMcpSessionTools
             snapshots = shown.Select(x => new { collection_time = x.CollectionTime.ToString("o"), row_count = x.RowCount }).ToList()
         }, McpHelpers.JsonOptions);
     }
+
+    /// <summary>#7573: said on an empty answer so a quiet server whose only sessions are the monitor's does not read as "nothing was collected".</summary>
+    private static string MonitorLeftOutNote(bool includeMonitor) =>
+        includeMonitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them.";
 
     /// <summary>
     /// The one reason a victim's head blocker is not on the page, or null when it is (or the row is not a
@@ -455,10 +461,11 @@ public sealed class DarlingMcpSessionTools
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(DarlingMcpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken);
+        GetWaitingTasks(postgres, server_name, hours_back, limit, DatabaseFilter.One(database_name), as_of, logger, cancellationToken, include_monitor);
 
     /// <summary>
     /// #5244: <see cref="GetWaitingTasks(NpgsqlDataSource,string,int,int,string,ILogger,CancellationToken)"/> over a SET of
@@ -468,10 +475,12 @@ public sealed class DarlingMcpSessionTools
     /// looked at) and otherwise says the CHOSEN databases had none, not that nothing was captured; the echoed <c>database_name</c> is the
     /// name for one database and "the chosen databases" for two or more.
     /// </summary>
+    #pragma warning disable CA1068 // #7573: includeMonitor trails the token on purpose; putting it before would shift every positional caller
     internal static async Task<string> GetWaitingTasks(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, DatabaseFilter databases, string? as_of,
-        ILogger? logger = null, CancellationToken cancellationToken = default)
+        ILogger? logger = null, CancellationToken cancellationToken = default, bool includeMonitor = false)
     {
+    #pragma warning restore CA1068
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
@@ -486,7 +495,7 @@ public sealed class DarlingMcpSessionTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, databases, cancellationToken, includeMonitor);
 
             /* #4966: the window floor, as get_active_queries writes it (see there). */
             var windowStart = now.AddHours(-hours_back);
@@ -498,14 +507,15 @@ public sealed class DarlingMcpSessionTools
                none. The unfiltered sentence below is the one it always was. */
             if (rows.Count == 0 && !databases.IsAll)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
-                    ?? McpHelpers.Status(
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                         "empty",
                         $"No waiting tasks captured in the specified time range{DarlingMcpBlockingTools.ForChosenDatabases(databases)}. "
-                        + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
-                        notice.AsHints());
+                        + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds."
+                        + MonitorLeftOutNote(includeMonitor),
+                        notice.AsHints()), cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", cancellationToken)
-                    ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.", notice.AsHints());
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No waiting tasks captured in the specified time range." + MonitorLeftOutNote(includeMonitor), notice.AsHints()), cancellationToken);
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;

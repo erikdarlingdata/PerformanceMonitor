@@ -10,7 +10,8 @@
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
          hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
          ambient token through every call. -->
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;xUnit1051</NoWarn>
+    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
+    <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -67,10 +68,14 @@
     <Compile Include="..\Darling\Darling.Tests\StatementScrubCanary.cs" Link="StatementScrubCanary.cs" />
     <!-- #5602 (was #5559's WpfStaGate): the one shared STA thread every WPF test body runs on, and the gate that keeps one body in at a time. -->
     <Compile Include="..\Darling\Darling.Tests\StaTestThread.cs" Link="StaTestThread.cs" />
+    <!-- #7600: what the hang guard reads about the stuck thread (its native stack) and the process around it; StaTestThread.cs calls it. -->
+    <Compile Include="..\Darling\Darling.Tests\StaThreadProbe.cs" Link="StaThreadProbe.cs" />
     <!-- #6136: finds the text a laid-out window cuts off, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\ClippedTextProbe.cs" Link="ClippedTextProbe.cs" />
     <!-- #6138: finds the Settings inputs a screen reader cannot name, shared so both apps are held to the one rule. -->
     <Compile Include="..\Darling\Darling.Tests\InputNamesProbe.cs" Link="InputNamesProbe.cs" />
+    <!-- #7478: finds every chart of a laid-out tab and measures its plot, legend, tick labels, axis start and group, shared so both apps are held to the one rule. -->
+    <Compile Include="..\Darling\Darling.Tests\ChartLayoutProbe.cs" Link="ChartLayoutProbe.cs" />
     <!-- #5602: the timing scanner, so both suites keep a clock-starting class in the one `timing` collection by one detector. -->
     <Compile Include="..\Darling\Darling.Tests\TimingTestScanner.cs" Link="TimingTestScanner.cs" />
     <!-- #5943: TestWait (WaitUntil, Elapse) and AnchorClock, the replacements for Thread.Sleep and for reading the clock twice. Its own tests stay in Darling.Tests. -->

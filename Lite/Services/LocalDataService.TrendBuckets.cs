@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -348,6 +349,28 @@ ORDER BY 1";
         ReadBucketedDurationTrendAsync("v_procedure_stats", serverId, hoursBack, asOfUtc, bucketMinutes, databaseNames);
 
     /// <summary>
+    /// #7498: whether the window holds a stored procedure row. Darling's duration read answers no points when it holds none
+    /// (the window <c>EXISTS</c> in <c>DurationTrendRouting</c>). Lite's unfiltered read plots each idle run as a 0, so
+    /// <c>get_procedure_duration_trend</c> asks the same question here.
+    /// </summary>
+    public async Task<bool> HasProcedureStatInWindowAsync(int serverId, int hoursBack, DateTime asOfUtc)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+        return await ReadWindowSkippingEmptyArchiveAsync<bool>("procedure_stats", "collection_time", startTime, ReadAsync, CancellationToken.None);
+
+        async Task<bool> ReadAsync(string relation)
+        {
+            using var connection = await OpenConnectionAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"SELECT 1 FROM {relation} WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 LIMIT 1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            return await command.ExecuteScalarAsync() is not null and not DBNull;
+        }
+    }
+
+    /// <summary>
     /// The shared body of the two bucketed duration reads (#3897), Darling's
     /// <c>DurationTrendRouting.BuildBucketedRawTrendSql</c> in DuckDB's dialect: the desktop read's per-collection
     /// CTE (the stored interval three-state, #3653 A11), then each bucket's rate is its RATED collections' summed
@@ -365,12 +388,22 @@ ORDER BY 1";
         string relation, int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes,
         IReadOnlyList<string>? databaseNames = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        /* #7256: a table whose archive holds nothing at or after the start of what the statement reads is read as the hot table alone. A view opens every Parquet file of its archive (one per day) however short the window is.
+           The statement reads from one gap policy before the window start (so the first point has its previous point), and the procedure form also reads the collection log its axis comes from.
+           The statement is built with the view's name, because the procedure form is chosen by it, and each view is swapped for its hot table afterwards. */
+        var tables = relation == "v_procedure_stats" ? new[] { "procedure_stats", "collection_log" } : new[] { relation.Substring(2) };
+        var readsFrom = startTime.AddSeconds(-PerformanceMonitor.Collectors.CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        return await ReadWindowSkippingEmptyArchivesAsync(tables, "collection_time", readsFrom, ReadAsync, CancellationToken.None);
+
+        async Task<List<QueryTrendPoint>> ReadAsync(Func<string, string> relationFor)
+        {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
-        command.CommandText = BucketedDurationTrendSql(relation, dbClause);
+        command.CommandText = SwapViews(BucketedDurationTrendSql(relation, dbClause), tables, relationFor);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -399,6 +432,7 @@ ORDER BY 1";
         }
 
         return items;
+        }
     }
 
     /// <summary>
@@ -411,9 +445,6 @@ ORDER BY 1";
     internal static string BucketedDurationTrendSql(string relation, string dbClause)
     {
         /* #5414 M1: the database filter is applied INSIDE the aggregates, not in the WHERE (see DbInPredicate). */
-        var matchedRows = dbClause.Length == 0
-            ? ""
-            : $",\n        COUNT(*) FILTER (WHERE {DbInPredicate(dbClause)}) AS matched_rows";
         var matchedCarry = dbClause.Length == 0 ? "" : ",\n        matched_rows";
         /* #5414 round 2: whether the chosen databases had any row is decided once for the whole window (the tool's
            empty), never per bucket: a bucket they were quiet in is a measured 0, and dropping it made it read missing and
@@ -424,22 +455,7 @@ ORDER BY 1";
            (the collector's runs are the axis, an idle run is a 0 point, a bucket's seconds are the rated gaps). */
         var collections = relation == "v_procedure_stats"
             ? ProcedureCollectionsSql(dbClause)
-            : $@"raw AS
-(
-    SELECT
-        collection_time,
-        {FilteredSum("delta_elapsed_time", dbClause)} / 1000.0 AS total_elapsed_ms,
-        {FilteredSum("delta_execution_count", dbClause)} AS total_executions,
-        CASE WHEN MAX(sample_interval_seconds) IS NULL
-             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-             ELSE NULLIF(MAX(sample_interval_seconds), 0)
-        END AS interval_seconds{matchedRows}
-    FROM {relation}
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    GROUP BY collection_time
-),";
+            : QueryCollectionsSql(relation, dbClause, includeElapsed: true);
 
         return $@"
 WITH {collections}

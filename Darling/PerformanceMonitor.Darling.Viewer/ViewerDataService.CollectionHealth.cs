@@ -299,28 +299,6 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// #1591: how many DISTINCT collectors were permission-denied in the window — the badge count for the
-    /// Collection Health tab header. Lite's twin, <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>,
-    /// still runs this shape directly (DuckDB has no rollup to route through). The Darling viewer's own
-    /// <see cref="GetPermissionDeniedCollectorCountAsync"/> no longer runs it: every server-tab refresh (auto
-    /// default 1 min, plus tab activation) used to issue this as its OWN raw <c>v_collection_log</c> scan per
-    /// open tab; it now filters the shared fleet-by-server rollup read instead (#4226), so this constant is
-    /// kept only as the documented raw shape the pins below hold it to.
-    ///
-    /// <para>Its own narrow COUNT rather than a reuse of <see cref="CollectionHealthSql"/>: that one is
-    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
-    /// invisible until someone thought to look. Counts collectors, not rows, so one collector failing every cycle
-    /// for a week reads as "1" rather than a meaningless four-figure number.</para>
-    /// </summary>
-    public const string PermissionDeniedCollectorCountSql = """
-        SELECT COUNT(DISTINCT collector_name)
-        FROM v_collection_log
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   status = 'PERMISSIONS'
-        """;
-
-    /// <summary>
     /// #3691 part a2: <c>collect.analysis_collection_caveats</c> (V141, part a1) — the data families the
     /// scheduled analysis pass could not read on this server, as of its most recent run. $1 server_id.
     /// </summary>
@@ -380,18 +358,40 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// #1591's badge count, one server's slice of the same 7-day window the health grid uses — served from the
-    /// shared fleet-by-server rollup read (#4226) instead of its own raw <c>v_collection_log</c> scan. That read
-    /// already carries <see cref="CollectorHealthRow.PermissionDeniedCount"/> per (server, collector), so the
-    /// badge is a filter over rows already in memory (rollup-backed when usable, memoized briefly — see
-    /// <see cref="GetFleetCollectionHealthByServerAsync"/>) rather than a fourth per-tick read of its own.
+    /// The Collection Health tab header's count (#1591, #7241): how many collectors were refused on their latest attempt after
+    /// their last success, the rule <c>get_collection_health</c> exposes as <c>denied_since_last_success</c>
+    /// (<see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/>). One refused, then successful since, is not counted. One
+    /// refused on every run and never successful is, and so is one that succeeded earlier and has been refused on every run since
+    /// (a revoked grant), from its first refused run. A collector the server's engine does not run (<c>EngineGated</c>) is never
+    /// counted, as Lite's badge has it. Reads the shared fleet-by-server rollup (#4226), no read of its own.
+    ///
+    /// <para>The fleet rows carry no last-refusal time: the hourly aggregate behind them does not hold one, and adding it means
+    /// rebuilding that aggregate. <see cref="CollectorHealthRow.LastRunTime"/> stands in for it, and only the rule's own
+    /// preconditions let it: at least one refusal in the window and no ERROR at all. Then a latest run later than the last
+    /// success is a refusal for a SQL Server target. The other non-success statuses a run can end on there are SESSION_MISSING,
+    /// YIELDED and ABANDONED, and EXTENSION_MISSING exists only for PostgreSQL targets, which skip this badge. The answer
+    /// differs from the MCP field only when a collector refused earlier, succeeded since, and its newest run is one of those
+    /// three, which the fleet banding already shows as its own problem.</para>
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
         var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
-        return byServer.TryGetValue(serverId, out var rows)
-            ? rows.Count(row => row.PermissionDeniedCount > 0)
-            : 0;
+        if (!byServer.TryGetValue(serverId, out var rows))
+        {
+            return 0;
+        }
+
+        var denied = 0;
+        foreach (var row in rows)
+        {
+            if (!row.EngineGated && CollectorHealthClassifier.DeniedSinceLastSuccess(
+                    row.PermissionDeniedCount, row.ErrorCount, row.LastSuccessTime, row.LastRunTime))
+            {
+                denied++;
+            }
+        }
+
+        return denied;
     }
 
     /// <summary>
@@ -488,21 +488,28 @@ public sealed partial class ViewerDataService
 
         /* #4999: read before the health statement's reader opens, so one call never holds two. */
         var scheduleOverrides = await ReadScheduleOverridesForHealthAsync(cancellationToken);
-        await using var command = _dataSource.CreateCommand(CollectionHealthSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        var windowStart = DateTime.UtcNow.AddDays(-7);
+        await using (var command = _dataSource.CreateCommand(CollectionHealthSql))
         {
-            TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified),
-        });
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified),
+            });
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(MapHealthRow(reader));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(MapHealthRow(reader));
+            }
         }
 
         ApplyScheduledFrequencies(items, serverId, scheduleOverrides);
+
+        /* #7242: the tab bands the same activity quiet bar as the Overview card and get_collection_health, in observed time. */
+        await ApplyObservedQuietRunsAsync(
+            _dataSource, new() { [serverId] = items }, windowStart, DateTime.UtcNow, cancellationToken);
         await ApplyReadSourceAsync(items, serverId, cancellationToken);
         return items;
     }
@@ -670,7 +677,7 @@ LIMIT 1";
     /// The per-(server, collector) breakdown the status bar's old fleet-cumulative read grouped by but did not
     /// project (#4226, #4999): the same eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
     /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
-    /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
+    /// read instead of one raw <c>CollectionHealthSql</c>
     /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — fourteen
     /// columns (#4812 appended the newest run note), in the order it requires.
     ///
@@ -685,8 +692,8 @@ LIMIT 1";
     /// <c>server_id</c> — the Overview card, the badge, and a per-server status-bar tab all need that
     /// server's exact rows whether or not it is currently enabled, or even registered in
     /// <c>config_monitored_servers</c> yet (the bootstrap window before the config store is seeded, see
-    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scans (<see cref="CollectionHealthSql"/>,
-    /// <see cref="PermissionDeniedCollectorCountSql"/>) never filtered by enable state either. The right
+    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scan (<see cref="CollectionHealthSql"/>)
+    /// never filtered by enable state either. The right
     /// precedent was the service's own by-server fleet read this statement mirrors
     /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>, moved here via <see cref="CollectionHealthRollupSupport"/>):
     /// <c>server_id &lt;&gt; 0</c> only, same as the aggregate this composes with
@@ -826,8 +833,54 @@ LIMIT 1";
 
         /* #5666: after the cadence is stamped (the ladder reads it) and after the aggregate's reader has closed. */
         await ApplyTrailingSuccessRunsAsync(_dataSource, byServer, windowStart, CancellationToken.None);
+        await ApplyObservedQuietRunsAsync(_dataSource, byServer, windowStart, now, CancellationToken.None);
 
         return byServer;
+    }
+
+    /// <summary>
+    /// #7242: sets <see cref="CollectorHealthRow.ObservedQuietRuns"/> and <see cref="CollectorHealthRow.ObservedQuietGaps"/> on the rows (the fleet's, and the server tab's) the activity quiet bar turns on
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), through <see cref="CollectorObservedQuietRuns"/>, the read the
+    /// service's fleet card shares, so the Overview card and the service agree for a server the service was stopped on. One follow-up
+    /// statement after the aggregate's reader has closed, and none when no row needs it.
+    /// </summary>
+    internal static async Task ApplyObservedQuietRunsAsync(
+        NpgsqlDataSource dataSource,
+        Dictionary<int, List<CollectorHealthRow>> byServer,
+        DateTime windowStart,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var requests = new List<(int ServerId, string CollectorName, DateTime? BreakTime)>();
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (CollectorHealthClassifier.NeedsObservedQuietRuns(r.CollectorName, r.LastProductiveTime, nowUtc))
+                {
+                    requests.Add((serverId, r.CollectorName, r.LastZeroRowStreakBreakTime));
+                }
+            }
+        }
+
+        if (requests.Count == 0)
+        {
+            return;
+        }
+
+        var counts = await CollectorObservedQuietRuns.ReadAsync(
+            dataSource, requests, windowStart, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+        foreach (var (serverId, serverRows) in byServer)
+        {
+            foreach (var r in serverRows)
+            {
+                if (counts.TryGetValue((serverId, r.CollectorName), out var gaps))
+                {
+                    r.ObservedQuietRuns = gaps.Runs;
+                    r.ObservedQuietGaps = gaps;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -1216,6 +1269,12 @@ public class CollectionLogRow
     /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
     public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
+    /// <summary>#7416: the Error cell. The stored message is an error only on a row that did not succeed, so a run's notes stay out of it.</summary>
+    public string ErrorFormatted => CollectorHealthClassifier.FormatRunError(Status, ErrorMessage);
+
+    /// <summary>#7416: the Note cell. The notes a successful run left, with the run's read source after them when it has one.</summary>
+    public string NoteFormatted => CollectorHealthClassifier.FormatRunNoteCell(Status, ErrorMessage, ReadSource);
+
     public string CollectionTimeFormatted => ViewerTimeHelper.FormatForDisplay(CollectionTime, "yyyy-MM-dd HH:mm:ss");
 
     public string DurationFormatted => DurationMs.HasValue
@@ -1299,8 +1358,22 @@ public class CollectorHealthRow
     /// (<see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/>) from the same aggregate and the cadence this row is
     /// banded against. Computed where it is read, so it always follows the cadence <see cref="ViewerDataService.ApplyScheduledFrequencies"/> stamped.
     /// </summary>
-    public long TrailingZeroRowSuccessRuns => CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
-        LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+    public long TrailingZeroRowSuccessRuns => ObservedQuietRuns
+        ?? CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns(
+            LastRunTime, LastZeroRowStreakBreakTime, TotalRuns, FrequencyMinutes);
+
+    /// <summary>
+    /// #7242: the EXACT count of zero-row runs after <see cref="LastZeroRowStreakBreakTime"/>, set for the rows the activity quiet bar turns
+    /// on (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The estimate above divides elapsed time
+    /// by the cadence, so for such a row it would hand the wall clock back, hours the service was stopped included.
+    /// </summary>
+    internal long? ObservedQuietRuns { get; set; }
+
+    /// <summary>
+    /// #7242: the gaps between those runs, set with <see cref="ObservedQuietRuns"/>. The observed quiet time the bar is measured in is
+    /// the sum of the gaps, each counted at most three intervals (an hour at least), read at the cadence this row is banded against.
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
 
     /// <summary>
     /// #6828: whether this collector WAS producing rows and now records SUCCESS with zero rows every cycle (#3885). Left off this row
@@ -1308,7 +1381,8 @@ public class CollectorHealthRow
     /// excluded inside the shared predicate.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>Whether the server this row was read for reports Always On as off. Stamped by the fleet read, false for a row built outside it.</summary>
     internal bool ServerAlwaysOnOff { get; set; }

@@ -328,7 +328,7 @@ public sealed class WebDataStartNoteConfigAndLogTests : IClassFixture<ConfigAndL
         ("get_pg_blocking", "pg_blocking_edges", "empty", ["blocking_sampled", "cycles_only"], ["unavailable"], "DarlingMcpPgBlockingTools.cs"),
         ("get_pg_database_stats", "pg_database_stats", "empty", ["database_activity"], ["unavailable"], "DarlingMcpPgDatabaseTools.cs"),
         ("get_pg_session_states", "pg_session_states", "empty", ["session_states"], ["unavailable"], "DarlingMcpPgSessionStatesTools.cs"),
-        ("get_pg_io_stats", "pg_io_stats", "empty", ["io_activity"], [], "DarlingMcpPgIoTools.cs"),
+        ("get_pg_io_stats", "pg_io_stats", "empty", ["io_activity"], ["unavailable"], "DarlingMcpPgIoTools.cs"),
         ("get_pg_replication_stats", "pg_replication_stats", "empty", [], [], "DarlingMcpPgReplicationStatsTools.cs"),
         ("get_pg_database_trend", "pg_database_stats", "empty", ["database_trend"], [], "DarlingMcpPgTrendTools.cs"),
         ("get_pg_query_duration_trend", "pg_statement_stats", "empty", ["query_duration_trend"], [], "DarlingMcpPgTrendTools.cs"),
@@ -521,7 +521,7 @@ public sealed class ComposedPanelNoticeZoneTests
         }
 
         /* 2026-01-02 00:00 UTC is 05:30 in Kolkata, and the window's start 2025-12-26 05:30: the page's own localTime. */
-        Assert.StartsWith("partial window: this panel's data starts at ", shown, StringComparison.Ordinal);
+        Assert.StartsWith("Partial window: this panel's data starts at ", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("UTC", shown, StringComparison.Ordinal);
         Assert.Contains("5:30", shown, StringComparison.Ordinal);
         Assert.EndsWith(" " + RowCapSentence, shown, StringComparison.Ordinal);
@@ -560,6 +560,7 @@ public sealed class ComposedPanelNoticeZoneTests
             return;
         }
 
-        Assert.Equal(Sentence + " " + RowCapSentence, shown);
+        /* #7416: the sentence is drawn as the server sent it, but a notice on a page starts a sentence, so its opening word is capitalised. */
+        Assert.Equal("P" + (Sentence + " " + RowCapSentence)[1..], shown);
     }
 }

@@ -119,7 +119,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V179 rung's live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -180,7 +180,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention plain-table live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -242,7 +242,7 @@ public sealed class AttentionPlainTableTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention count-row live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

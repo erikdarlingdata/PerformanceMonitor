@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Linq;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
@@ -236,6 +237,13 @@ public class ServerConnection : INotifyPropertyChanged
     public bool? HasCollectorErrors { get; set; }
 
     /// <summary>
+    /// While the connection check says this server is down, the sentence naming since when and the last connect error (#7590),
+    /// from <see cref="ServerConnectionStatus.UnreachableReason"/>; null otherwise. Never saved.
+    /// </summary>
+    [JsonIgnore]
+    public string? UnreachableReason { get; set; }
+
+    /// <summary>
     /// The sentence saying this server's host is not the one the current Windows user confirmed for it (see
     /// <c>ServerHostBindings</c>), shown first in the sidebar tooltip; null when the host is confirmed. Never saved:
     /// servers.json is shared, and the answer differs per user.
@@ -282,9 +290,14 @@ public class ServerConnection : INotifyPropertyChanged
     /// </summary>
     [JsonIgnore]
     public string DotTooltip => string.Join("\n",
-        HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
-        "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
-        DotTooltipAction);
+        new[]
+        {
+            HostChangeNotice is { Length: > 0 } notice ? notice + "\n" + CardStatus.Headline() : CardStatus.Headline(),
+            /* #7590: an unreachable server says since when and why, from the in-process connection check. */
+            CardStatus == ServerCardStatus.Offline ? UnreachableReason : null,
+            "It reports the connection check only, not collection freshness — the Overview card's Last Collect row bands that.",
+            DotTooltipAction,
+        }.Where(line => !string.IsNullOrEmpty(line)));
 
     /// <summary>The line the sidebar dot's tooltip ends on — the gesture the ROW actually supports.
     /// <c>ServerListView_MouseDoubleClick</c> connects; a single click only selects, so naming one would be
@@ -536,7 +549,7 @@ public class ServerConnection : INotifyPropertyChanged
             /* tcp: so SqlClient never falls back to a named pipe over SMB with this process's Windows credentials (#6352). */
             DataSource = ServerHostSetting.TcpDataSource(ServerName),
             InitialCatalog = string.IsNullOrWhiteSpace(DatabaseName) ? "master" : DatabaseName,
-            ApplicationName = "PerformanceMonitorLite",
+            ApplicationName = PerformanceMonitor.Common.MonitorApplicationNames.Lite,
             ConnectTimeout = 15,
             CommandTimeout = 60,
             TrustServerCertificate = TrustServerCertificate,

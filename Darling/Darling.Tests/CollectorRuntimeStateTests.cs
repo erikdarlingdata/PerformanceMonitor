@@ -394,7 +394,7 @@ public sealed class CollectorRuntimeStateTests
     public void EveryCollectionBlockingExitInTheStartupPath_PublishesAVerdictFirst()
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(
-            File.ReadAllText(Path.Combine(ServiceDirectory(), "DarlingWorker.cs")));
+            RepoFile.ReadRepoFile(Path.Combine(ServiceDirectory(), "DarlingWorker.cs")));
 
         var regions = new List<(string Name, string Body)>
         {
@@ -445,7 +445,7 @@ public sealed class CollectorRuntimeStateTests
     public void EveryRetryPublish_ReportsTheTriagesOwnAttemptCap()
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(
-            File.ReadAllText(Path.Combine(ServiceDirectory(), "DarlingWorker.cs")));
+            RepoFile.ReadRepoFile(Path.Combine(ServiceDirectory(), "DarlingWorker.cs")));
 
         var calls = Regex.Matches(code, @"_collectorState\.PublishRetrying\((?<args>[^)]*)\)").ToList();
         Assert.True(

@@ -19,27 +19,38 @@ public partial class DrillDownCollector
 {
     private async Task CollectFileLatencyBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("file_io_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
 
+        /* #7449: a file's latency is its stall divided by its operations over the window, not the mean of per-interval ratios.
+           The mean counted each collection interval once, so one 500 ms write in a quiet minute outweighed 1,000 1 ms writes in a
+           busy one, and a row's latency times its count was not its stall. With stall over count a row's latency times its count
+           is its stall, so the rows add up to the figure the finding states. $4 is the fact the drill-down serves: true for
+           IO_WRITE_LATENCY_MS, whose figure covers log files and tempdb only (#6959), so the rows are those files too and are
+           ordered by write stall; false for IO_READ_LATENCY_MS, every file ordered by read stall. The LIMIT 10 cut kept the
+           highest read-latency rows even on a write finding, so the file with the worst writes could fall off the page. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 SELECT database_name, file_type,
-       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_ms,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_ms,
+       SUM(delta_stall_read_ms) * 1.0 / NULLIF(SUM(delta_reads), 0) AS avg_read_ms,
+       SUM(delta_stall_write_ms) * 1.0 / NULLIF(SUM(delta_writes), 0) AS avg_write_ms,
        SUM(delta_reads)::BIGINT AS total_reads,
        SUM(delta_writes)::BIGINT AS total_writes
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   (delta_reads > 0 OR delta_writes > 0)
+AND   (NOT $4 OR (delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')))
 GROUP BY database_name, file_type
-ORDER BY avg_read_ms DESC NULLS LAST
+ORDER BY CASE WHEN $4 THEN SUM(delta_stall_write_ms) ELSE SUM(delta_stall_read_ms) END DESC NULLS LAST
 LIMIT 10";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServesWriteLatencyOnly(finding) });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -61,6 +72,15 @@ LIMIT 10";
     }
 
     /// <summary>
+    /// True when the finding is about the write figure alone (#7449): that figure covers log files and tempdb only, so the
+    /// drill-down lists those files by write stall. A finding that also carries the read fact, or neither, gets every file
+    /// ordered by read stall, the read figure's own scope.
+    /// </summary>
+    private static bool ServesWriteLatencyOnly(AnalysisFinding finding) =>
+        finding.PathKeys.Contains("IO_WRITE_LATENCY_MS", StringComparer.Ordinal)
+        && !finding.PathKeys.Contains("IO_READ_LATENCY_MS", StringComparer.Ordinal);
+
+    /// <summary>
     /// Lists the large (>= 10 GB) data/log files on PERCENTAGE autogrowth (WS3), latest
     /// snapshot per file within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's
     /// end (#3896), excluding system databases — and attaches a copy-paste
@@ -74,6 +94,7 @@ LIMIT 10";
         /* #3896: a no-op in the pass, whose fact collector stamped the bounds on this context already. */
         await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
 
+        var plan = await _duckDb.PlanArchiveReadAsync("database_size_stats", "collection_time", context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name), context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -103,6 +124,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
 ORDER BY total_size_mb DESC
 LIMIT 50";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name) });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
@@ -139,6 +161,7 @@ LIMIT 50";
 
     private async Task CollectTempDbBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("tempdb_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -152,6 +175,7 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY (user_object_reserved_mb + internal_object_reserved_mb + version_store_reserved_mb) DESC
 LIMIT 5";
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });

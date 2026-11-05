@@ -388,6 +388,20 @@ public sealed class DarlingMcpPgIndexTools
         }
     }
 
+    /// <summary>#7548: the structured hint an empty Column Statistics reply carries, so the web panel can say one sentence and the grant without reading the message. Present only when the privilege filter is the cause (the monitoring login cannot read pg_stats); every other empty cause sends none.</summary>
+    internal static object? EmptyColumnStatsHints(PgColumnStatsCoverageArm arm) =>
+        arm == PgColumnStatsCoverageArm.StatisticsNotVisible ? new { reason = "pg_stats_unreadable" } : null;
+
+    /// <summary>#7548: the empty Column Statistics reply, built in one place so a test reaches the same envelope the tool sends. The message is the coverage verdict's sentence for an MCP client, and the hint is the structured field the web panel reads.</summary>
+    internal static string EmptyColumnStatsReply(string displayName, int hoursBack, PgColumnStatsCoverageVerdict coverage) =>
+        McpHelpers.Status(
+            "empty",
+            $"No column statistics for {displayName} in the last {hoursBack} hour(s). "
+            + "This collector runs DAILY, so a window shorter than a day can be empty on a "
+            + "perfectly healthy server - widen it before concluding anything. " + coverage.Message,
+            /* #7548: the web panel says one sentence and the grant for a login that cannot read pg_stats, built from this field and not from the message. */
+            EmptyColumnStatsHints(coverage.Arm));
+
     /* #4966: no window notice on this read, for the reason get_pg_index_bloat has none. It is a newest-per-key read of the column
        statistics, and its own coverage verdict answers the question the window would raise. */
     [McpServerTool(Name = "get_pg_column_stats"), Description("Gets PostgreSQL per-column planner statistics from pg_stats: n_distinct, null fraction, average width, correlation, and top-value frequency. One row per column: the LATEST capture inside the window, not a history; this collector runs DAILY, so a window under a day can be empty on a healthy server. n_distinct is a RATIO of table rows when negative (-1 = every value unique), an absolute count when positive - check the sign. Gated: only columns on tables above a size floor, visible to the monitoring login, are collected; always read the coverage field first. <<GUIDE>> Gets PostgreSQL per-column distribution statistics from pg_stats: n_distinct, null fraction, average width, physical correlation, and the frequency of the single most common value. These are the numbers the PLANNER uses, so they explain plan shapes that otherwise look arbitrary. n_distinct is negative when PostgreSQL expresses it as a RATIO of table rows (-1 means every value is unique) and positive when it is an absolute count - do not compare the two without checking the sign. correlation near 1 or -1 means the column's physical order matches its logical order, which is what makes an index range scan cheap; near 0 makes the same scan expensive. A high top_value_frequency is the classic cause of a plan that is right for the common value and wrong for every other one. Only columns on tables above a size floor are collected, and only where the monitoring login can see the statistics - so ALWAYS read the coverage field before acting on this: it names which of those produced the result, and PartialVisibility or StatisticsNotVisible means the statistics you are looking at are not all of them.")]
@@ -395,7 +409,7 @@ public sealed class DarlingMcpPgIndexTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether more columns were collected than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -411,8 +425,12 @@ public sealed class DarlingMcpPgIndexTools
         {
             var windowStart = windowEnd.AddHours(-hours_back);
 
-            var rows = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
+            /* #7455: limit + 1 as the fetch, the same dialect as get_pg_index_bloat above, so the reply can say
+               whether the census held more columns than the page. It reported column_count = rows.Count and
+               nothing else, and a page of 3 columns under a FULL COVERAGE sentence read as the whole ranking. */
+            var fetched = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Asked on BOTH paths, not just the empty one (#3154). A returned row set that covers a
                fraction of the tables above the floor is the same defect as an unexplained empty, one
@@ -446,11 +464,8 @@ public sealed class DarlingMcpPgIndexTools
                    privilege filter and select neither, which is prose about the mechanism rather than a
                    diagnosis of it - measured on a 50-target fleet where the answer was the privilege
                    filter on every one of them and no read said so. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
-                    "empty",
-                    $"No column statistics for {resolved.DisplayName} in the last {hours_back} hour(s). "
-                    + "This collector runs DAILY, so a window shorter than a day can be empty on a "
-                    + "perfectly healthy server - widen it before concluding anything. " + coverage.Message), cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
+                    EmptyColumnStatsReply(resolved.DisplayName, hours_back, coverage), cancellationToken);
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
@@ -479,6 +494,7 @@ public sealed class DarlingMcpPgIndexTools
                 server = resolved.DisplayName,
                 hours_back,
                 column_count = rows.Count,
+                truncated,
                 /* The arm as its own field, beside the sentence. Automation keys on names rather than
                    parsing prose, and a caller deciding whether this ranking is safe to act on needs the
                    partial-coverage answer in a form it can branch on. */
@@ -487,6 +503,10 @@ public sealed class DarlingMcpPgIndexTools
                      + "positive — check the sign before comparing two columns. correlation near ±1 is "
                      + "what makes an index range scan cheap. A null common_value_count means the column "
                      + "has no most-common-value list at all, not that the list is empty. "
+                     + (truncated
+                         ? $"This page is cut at limit ({limit}): more columns were collected than it shows, so " 
+                           + "the coverage sentence below describes the whole census and not this page. Raise limit to see more. "
+                         : string.Empty)
                      + coverage.Message,
                 columns,
             }, McpHelpers.JsonOptions);

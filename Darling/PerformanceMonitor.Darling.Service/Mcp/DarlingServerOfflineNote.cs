@@ -25,15 +25,27 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// ago has a simpler explanation that outranks every one of them: nothing is reaching the store. So the answer says that first,
 /// with the last collection time.</para>
 ///
-/// <para><b>The rule is <c>list_servers</c>'s, not a second one.</b> The server counts as offline when
-/// <see cref="DarlingMcpDataTools.FreshnessStatus"/> says <c>Offline</c> for it: the same read of the newest collection-log row
-/// (<see cref="DarlingDataReader.ServerListSql"/>'s per-server probe) through the same ladder, so the answer and
-/// <c>list_servers</c> never disagree about which servers are offline.</para>
+/// <para><b>The rule is Lite's, and it is not <c>list_servers</c>'s.</b> A server counts as offline when
+/// <see cref="DarlingMcpDataTools.FreshnessStatus"/> says <c>Offline</c> for the instant of its newest SUCCESS collector run
+/// (#7167): only a run that reached the server is "heard from". A server the service cannot reach still writes ERROR, PERMISSIONS or
+/// SKIPPED rows every cycle, which keep <c>list_servers</c>'s newest-row probe (<see cref="FreshnessSql"/>, any non-cycle row) fresh
+/// while nothing is being read, so the two can disagree on such a server: <c>list_servers</c> bands it by its failing rows, and the
+/// read says nothing is arriving. That is deliberate, and Lite makes the same split (<c>GetLastSuccessfulCollectionAsync</c> against
+/// its Overview band), so a read answers the same way in both products.</para>
 /// </summary>
 internal static class DarlingServerOfflineNote
 {
-    /// <summary>The <c>list_servers</c> probe for one server: its registration instant and its newest non-cycle collection-log row.</summary>
-    internal static readonly string FreshnessSql = $"""
+    /// <summary>The <c>list_servers</c> probe for one server: its registration instant and its newest non-cycle collection-log row, whatever its status.</summary>
+    internal static readonly string FreshnessSql = BuildFreshnessSql(statusPredicate: "");
+
+    /// <summary>
+    /// #7167: <see cref="FreshnessSql"/> narrowed to the newest SUCCESS run (<c>status = 'SUCCESS'</c>, the status Collection Health counts
+    /// as a run that reached the server), so a server that logs only failed runs still reads as silent. Lite's rule.
+    /// </summary>
+    internal static readonly string SuccessFreshnessSql = BuildFreshnessSql(statusPredicate: "AND   cl.status = 'SUCCESS'");
+
+    /// <summary>The one probe both rules read, with <paramref name="statusPredicate"/> (empty for any row) closing the inner filter.</summary>
+    private static string BuildFreshnessSql(string statusPredicate) => $"""
         SELECT
             s.created_date,
             latest.collection_time AS last_collection
@@ -44,6 +56,7 @@ internal static class DarlingServerOfflineNote
             FROM v_collection_log cl
             WHERE cl.server_id = s.server_id
             AND   {CollectionCycleRow.NotCycleRowSql}
+            {statusPredicate}
             ORDER BY cl.collection_time DESC
             LIMIT 1
         ) AS latest ON TRUE
@@ -51,7 +64,7 @@ internal static class DarlingServerOfflineNote
         """;
 
     /// <summary>
-    /// The sentence that opens an <c>unavailable</c> answer for a server that is Offline by <c>list_servers</c>'s rule, or null
+    /// The sentence that opens an <c>unavailable</c> answer for a server that is offline by the SUCCESS-run rule, or null
     /// when the server is not offline or when the read fails: a diagnostic on a path that already found nothing must not turn
     /// that into an error.
     /// </summary>
@@ -59,7 +72,7 @@ internal static class DarlingServerOfflineNote
         NpgsqlDataSource postgres, int serverId, string displayName, DateTime nowUtc, CancellationToken cancellationToken,
         DateTime? windowEndUtc = null)
     {
-        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken) is not var (registered, last))
+        if (await ReadFreshnessAsync(postgres, serverId, cancellationToken, successOnly: true) is not var (registered, last))
         {
             return null;
         }
@@ -71,7 +84,30 @@ internal static class DarlingServerOfflineNote
             return null;
         }
 
-        return LeadFor(displayName, last, registered, nowUtc);
+        /* #7590: a stored failed connect is Offline whatever the collection age, and the note says so instead of the age. */
+        var (connectDownSince, lastConnectError) = await ReadConnectDownAsync(postgres, serverId, cancellationToken);
+        return LeadFor(displayName, last, registered, nowUtc, connectDownSince, lastConnectError);
+    }
+
+    /// <summary>The registry's failed-connect state for one server (#7590): since when and the last error, or nulls while the last connect succeeded
+    /// or when the read fails (a diagnostic never turns a finding into an error).</summary>
+    internal static async Task<(DateTime? Since, string? Error)> ReadConnectDownAsync(
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = postgres.CreateCommand("SELECT connect_down_since, last_connect_error FROM servers WHERE server_id = $1");
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0)
+                ? (reader.GetDateTime(0), reader.IsDBNull(1) ? null : reader.GetString(1))
+                : (null, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, null);
+        }
     }
 
     /// <summary>
@@ -79,11 +115,11 @@ internal static class DarlingServerOfflineNote
     /// not registered or the read fails, so a caller's diagnostic never turns a finding into an error.
     /// </summary>
     internal static async Task<(DateTime? Registered, DateTime? Last)?> ReadFreshnessAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken, bool successOnly = false)
     {
         try
         {
-            await using var command = postgres.CreateCommand(FreshnessSql);
+            await using var command = postgres.CreateCommand(successOnly ? SuccessFreshnessSql : FreshnessSql);
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -101,19 +137,29 @@ internal static class DarlingServerOfflineNote
     }
 
     /// <summary>The pure half of <see cref="LeadAsync"/>, over an already-read freshness probe.</summary>
-    internal static string? LeadFor(string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc)
+    internal static string? LeadFor(
+        string displayName, DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc,
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
-        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc) != "Offline")
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
+        if (DarlingMcpDataTools.FreshnessStatus(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) != "Offline")
         {
             return null;
         }
 
+        if (connectDownSinceUtc is { } downSince)
+        {
+            return $"{displayName} is offline: the service cannot connect to it. "
+                + ServerHealthClassifier.UnreachableReason(downSince, lastConnectError).TrimEnd('.')
+                + ". Nothing is arriving to read, whatever the collectors would otherwise report.";
+        }
+
         return lastCollectionUtc is { } last
-            ? $"{displayName} is offline: the store has had no collection from it since "
-                + $"{last.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC (list_servers shows it as Offline), "
+            ? $"{displayName} is offline: the store has had no successful collection from it since "
+                + $"{last.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC, "
                 + "so nothing is arriving to read, whatever the collectors would otherwise report."
-            : $"{displayName} is offline: the store holds no collection from it within its retained history "
-                + "(list_servers shows it as Offline), so nothing is arriving to read, whatever the collectors would otherwise report.";
+            : $"{displayName} is offline: the store holds no successful collection from it within its retained history, "
+                + "so nothing is arriving to read, whatever the collectors would otherwise report.";
     }
 
     /// <summary>
@@ -130,8 +176,8 @@ internal static class DarlingServerOfflineNote
         UnavailableAsync(postgres, serverId, displayName, message, null, cancellationToken);
 
     /// <summary>
-    /// #6155: <paramref name="answer"/>, when it says <c>empty</c> (the read looked and found nothing) for a server that is Offline by
-    /// <c>list_servers</c>'s rule, as an <c>unavailable</c> answer that opens with <see cref="LeadAsync"/>'s sentence. An offline server's
+    /// #6155: <paramref name="answer"/>, when it says <c>empty</c> (the read looked and found nothing) for a server that is offline by
+    /// the SUCCESS-run rule, as an <c>unavailable</c> answer that opens with <see cref="LeadAsync"/>'s sentence. An offline server's
     /// empty read is not a true negative: nothing has been arriving, so "no dead tuples", "no replication slots" or "nothing held the
     /// xmin horizon" would be a healthy all-clear built from missing data. The original answer's own wording is dropped with its word.
     /// Any other answer, any answer for a server that is not offline, and any answer whose window ends at or before the server's newest
@@ -147,6 +193,19 @@ internal static class DarlingServerOfflineNote
 
         /* The caller's window end is the read's anchor (as_of, or now for a live read), so offline is judged as of it, not as of the
            clock: an as_of read of a past window must not answer as the server is today. */
+        var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
+        return lead is null ? answer : OfflineInsteadOfEmpty(lead);
+    }
+
+    /// <summary>
+    /// #7459: <see cref="EmptyAsync"/> for a read whose own answer to a window nobody looked at is already <c>unavailable</c>. That answer
+    /// reports a gap in collection, and on an offline server the reason is known, so the offline answer replaces it whichever of the two
+    /// words the read chose. Judged as of the window end, as <see cref="EmptyAsync"/> is, so a window inside collected history keeps the
+    /// read's own answer.
+    /// </summary>
+    internal static async Task<string> UnavailableOrEmptyAsync(
+        NpgsqlDataSource postgres, int serverId, string displayName, DateTime windowEndUtc, string answer, CancellationToken cancellationToken)
+    {
         var lead = await LeadAsync(postgres, serverId, displayName, windowEndUtc, cancellationToken, windowEndUtc);
         return lead is null ? answer : OfflineInsteadOfEmpty(lead);
     }

@@ -7,6 +7,7 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -22,6 +23,15 @@ public partial class DuckDbFactCollector
     {
         try
         {
+            /* #7256: reads the hot table alone when the query_stats archive holds nothing at or after the window start. The read can run twice when
+               an archive rebuild lands mid-read, so it fills a local list and the facts are added once, after a read has succeeded. */
+            var badActors = await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
+                "query_stats", "collection_time", context.TimeRangeStart, ReadAsync, context.CancellationToken);
+            facts.AddRange(badActors);
+
+            async Task<List<Fact>> ReadAsync(string relation)
+            {
+            var found = new List<Fact>();
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -58,6 +68,7 @@ HAVING SUM(delta_execution_count) >= 100
 ORDER BY SUM(delta_worker_time)::DOUBLE PRECISION / GREATEST(SUM(delta_execution_count), 1) *
          LN(GREATEST(SUM(delta_execution_count), 1)) DESC
 LIMIT 5";
+            cmd.CommandText = cmd.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
@@ -80,7 +91,7 @@ LIMIT 5";
                 // Skip low-impact queries — need meaningful per-execution cost
                 if (avgCpuMs < 10 && avgReads < 1000) continue;
 
-                facts.Add(new Fact
+                found.Add(new Fact
                 {
                     Source = "bad_actor",
                     Key = $"BAD_ACTOR_{queryHash}",
@@ -100,6 +111,9 @@ LIMIT 5";
                     }
                 });
             }
+
+            return found;
+            }
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -117,12 +131,23 @@ LIMIT 5";
     {
         try
         {
+            /* #7256: reads the hot table alone when the query_snapshots archive holds nothing at or after the window start. The read can run twice when
+               an archive rebuild lands mid-read, so it returns the fact and it is added once, after a read has succeeded. */
+            var activeQueries = await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
+                "query_snapshots", "collection_time", context.TimeRangeStart, ReadAsync, context.CancellationToken);
+            if (activeQueries != null)
+            {
+                facts.Add(activeQueries);
+            }
+
+            async Task<Fact?> ReadAsync(string relation)
+            {
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 SELECT
     COUNT(*) AS total_snapshots,
     COUNT(CASE WHEN total_elapsed_time_ms > 30000 THEN 1 END) AS long_running_count,
@@ -134,17 +159,19 @@ SELECT
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   collection_time <= $3";
+AND   collection_time <= $3
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}";
+            cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            if (!await reader.ReadAsync(context.CancellationToken)) return null;
 
             var totalSnapshots = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-            if (totalSnapshots == 0) return;
+            if (totalSnapshots == 0) return null;
 
             var longRunning = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
             var blocked = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
@@ -153,7 +180,7 @@ AND   collection_time <= $3";
             var maxDop = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
             var distinctSessions = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
 
-            facts.Add(new Fact
+            return new Fact
             {
                 Source = "queries",
                 Key = "ACTIVE_QUERIES",
@@ -169,7 +196,8 @@ AND   collection_time <= $3";
                     ["max_dop"] = maxDop,
                     ["distinct_sessions"] = distinctSessions
                 }
-            });
+            };
+            }
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -188,6 +216,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the running_jobs archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("running_jobs", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -225,6 +255,7 @@ AND   collection_time <= $3";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -277,6 +308,8 @@ AND   collection_time <= $3";
     {
         try
         {
+            /* #7256: Reads the hot table alone when the session_stats archive holds nothing at or after the window start. The plan is taken before the read lock. */
+            var plan = await _duckDb.PlanArchiveReadAsync("session_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -303,6 +336,7 @@ FROM latest WHERE rn = 1";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.CommandText = plan.Apply(cmd.CommandText);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

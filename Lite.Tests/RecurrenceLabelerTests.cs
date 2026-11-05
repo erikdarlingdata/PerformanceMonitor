@@ -146,15 +146,155 @@ public class RecurrenceLabelerTests
         Assert.Null(RecurrenceLabeler.TryReadLabel(settingStory.StoryText));
     }
 
-    [Fact]
-    public void AChainWithAnyTimeSeriesFactOnItsPath_StaysEligible_EvenWhenItsRootIsASetting()
-    {
-        var story = Story("MAXDOP_CONFIG", "h-mixed", path: ["MAXDOP_CONFIG", "CXPACKET"]);
-        var facts = new List<Fact> { FactOf("config", "MAXDOP_CONFIG"), FactOf("waits", "CXPACKET") };
+    /* #7416 item 25: the ROOT decides. A setting's chain ending in a wait is still the setting's story. */
 
-        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-mixed", 1), InSlot("h-mixed", 2)));
+    [Fact]
+    public void AChainRootedInASetting_IsNotLabelledRecurring_WhateverWaitItEndsIn()
+    {
+        var story = Story("DB_CONFIG", "h-dbcfg", path: ["DB_CONFIG", "LCK_M_S"]);
+        var facts = new List<Fact> { FactOf("database_config", "DB_CONFIG"), FactOf("waits", "LCK_M_S") };
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-dbcfg", 1), InSlot("h-dbcfg", 2), InSlot("h-dbcfg", 3)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Fact]
+    public void AChainRootedInATimeSeries_ThatEndsInASetting_StaysEligible()
+    {
+        var story = Story("CXPACKET", "h-cx", path: ["CXPACKET", "CONFIG_MAXDOP"]);
+        var facts = new List<Fact> { FactOf("waits", "CXPACKET"), FactOf("config", "CONFIG_MAXDOP") };
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-cx", 1), InSlot("h-cx", 2)));
 
         Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    /* #7450: a chain that fires in most of its own span keeps no schedule, however many same-slot weeks it has. The
+       store reports the hours the chain fired in and the hours from its first saved row in the window to its last. */
+
+    private static PriorOccurrence InSlotWithHours(string hash, int weeksAgo, int firedHours, int spanHours) =>
+        new(hash, "X", SlotLocal.AddDays(-7 * weeksAgo), null, firedHours, spanHours);
+
+    [Fact]
+    public void AChainThatFiredInEveryHourOfItsSpan_GetsNoLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-always");
+        var before = story.StoryText;
+
+        RecurrenceLabeler.Label([story], null, Read(InSlotWithHours("h-always", 1, 504, 504), InSlotWithHours("h-always", 2, 504, 504), InSlotWithHours("h-always", 3, 504, 504)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+        Assert.Null(story.RootFactMetadata);
+    }
+
+    [Fact]
+    public void AChainThatFiredOnlyInThisSlotForThreeWeeks_KeepsTheLabel()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-weekly");
+
+        RecurrenceLabeler.Label([story], null, Read(InSlotWithHours("h-weekly", 1, 3, 337), InSlotWithHours("h-weekly", 2, 3, 337), InSlotWithHours("h-weekly", 3, 3, 337)));
+
+        Assert.Equal(4, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Theory]
+    [InlineData("DB_CONFIG")]
+    [InlineData("SERVER_CONFIG")]
+    [InlineData("CONFIG_MAXDOP")]
+    [InlineData("CONFIG_PG_SHARED_BUFFERS")]
+    [InlineData("CONFIG_PG_MAINT_WORK_MEM")] // evidence-gated, not in the root set, still a configuration fact
+    public void AChainRootedInAConfigurationFact_NeverGetsTheLabel(string rootKey)
+    {
+        var story = Story(rootKey, "h-config");
+        var before = story.StoryText;
+
+        // Few fired hours and no spread counts at all: only the root decides.
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-config", 1, rootKey), InSlot("h-config", 2, rootKey), InSlot("h-config", 3, rootKey)));
+
+        Assert.Equal(before, story.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Fact]
+    public void TheShareIsOfTheChainsOwnSpan_NotOfTheWholeWindow()
+    {
+        // Fired in 10 of the 20 hours between its first and last row: exactly half, so still labelled.
+        var half = Story("SOS_SCHEDULER_YIELD", "h-half");
+        RecurrenceLabeler.Label([half], null, Read(InSlotWithHours("h-half", 1, 10, 20), InSlotWithHours("h-half", 2, 10, 20)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(half.StoryText));
+
+        // Fired in 11 of 20: more than half. A server that was off for the rest of the window does not hide it:
+        // against the full 504 hours of the window the same 11 would be 2 percent.
+        var most = Story("SOS_SCHEDULER_YIELD", "h-most");
+        RecurrenceLabeler.Label([most], null, Read(InSlotWithHours("h-most", 1, 11, 20), InSlotWithHours("h-most", 2, 11, 20)));
+        Assert.Null(RecurrenceLabeler.TryReadLabel(most.StoryText));
+
+        var spread = Story("SOS_SCHEDULER_YIELD", "h-spread");
+        RecurrenceLabeler.Label([spread], null, Read(InSlotWithHours("h-spread", 1, 11, 504), InSlotWithHours("h-spread", 2, 11, 504)));
+        Assert.NotNull(RecurrenceLabeler.TryReadLabel(spread.StoryText));
+    }
+
+    [Fact]
+    public void AStoreThatReportsNoHourCounts_LabelsAsBefore()
+    {
+        var story = Story("SOS_SCHEDULER_YIELD", "h-unknown");
+
+        RecurrenceLabeler.Label([story], null, Read(InSlot("h-unknown", 1), InSlot("h-unknown", 2)));
+
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(story.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Fact]
+    public void FreeSpaceIsAStandingState_SoItIsNeverLabelledRecurring_ButAScheduledBurstStillIs()
+    {
+        var disk = Story("DISK_SPACE", "h-disk");
+        var burst = Story("IO_READ_LATENCY_MS", "h-burst");
+        var facts = new List<Fact> { FactOf("disk", "DISK_SPACE"), FactOf("io", "IO_READ_LATENCY_MS") };
+        var before = disk.StoryText;
+
+        RecurrenceLabeler.Label(
+            [disk, burst],
+            facts,
+            Read(InSlot("h-disk", 1), InSlot("h-disk", 2), InSlot("h-disk", 3), InSlot("h-burst", 1), InSlot("h-burst", 2)));
+
+        Assert.Equal(before, disk.StoryText);
+        Assert.Null(RecurrenceLabeler.TryReadLabel(disk.StoryText));
+        Assert.Equal(3, RecurrenceLabeler.TryReadLabel(burst.StoryText)!.RecurrenceWeeks);
+    }
+
+    [Theory]
+    [InlineData("MISSING_INDEX", "queries")]
+    [InlineData("PLAN_CACHE_BLOAT", "memory")]
+    public void AStandingAdvisoryOnAMeasurementSource_IsNotLabelledRecurring(string key, string source)
+    {
+        var story = Story(key, "h-adv");
+        var facts = new List<Fact> { FactOf(source, key) };
+
+        RecurrenceLabeler.Label([story], facts, Read(InSlot("h-adv", 1), InSlot("h-adv", 2), InSlot("h-adv", 3)));
+
+        Assert.Null(RecurrenceLabeler.TryReadLabel(story.StoryText));
+    }
+
+    [Theory]
+    [InlineData("DISK_SPACE", true)]
+    [InlineData("DB_CONFIG", true)]
+    [InlineData("CONFIG_MAXDOP", true)]
+    [InlineData("SERVER_MEMORY_DUMPS", true)]
+    [InlineData("TRACE_FLAGS", true)]
+    [InlineData("PG_POSTURE_FSYNC", true)]
+    [InlineData("PLAN_CACHE_BLOAT", true)]
+    [InlineData("LCK_M_S", false)]
+    [InlineData("CXPACKET", false)]
+    [InlineData("CPU_SQL_PERCENT", false)]
+    [InlineData("IO_READ_LATENCY_MS", false)]
+    [InlineData("", false)]
+    public void TheRootKeyOfAPersistedFinding_SaysWhetherItIsAStandingState(string key, bool standing)
+    {
+        Assert.Equal(standing, FactKinds.IsStandingStateKey(key));
     }
 
     [Fact]

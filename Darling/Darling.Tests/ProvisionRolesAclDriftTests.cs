@@ -75,6 +75,7 @@ public sealed class ProvisionRolesAclDriftTests
     private const string ViewerRole = DarlingManagedPostgres.ViewerRoleName;
     private const string AdminRole = DarlingManagedPostgres.AdminRoleName;
     private const string McpRole = DarlingManagedPostgres.McpRoleName;
+    private const string WebRole = DarlingManagedPostgres.WebRoleName;
     private const string ConfigSchema = PgSchemaGenerator.ConfigSchema;
 
     /// <summary>
@@ -84,6 +85,7 @@ public sealed class ProvisionRolesAclDriftTests
     /// </summary>
     [Theory]
     [InlineData(ViewerRole)]
+    [InlineData(WebRole)]
     [InlineData(McpRole)]
     public void ProvisionRolesSql_ColumnGrants_MatchTheCSharpAclExactly(string role)
     {
@@ -114,6 +116,7 @@ public sealed class ProvisionRolesAclDriftTests
 
     [Theory]
     [InlineData(ViewerRole)]
+    [InlineData(WebRole)]
     [InlineData(McpRole)]
     public void ProvisionRolesSql_EveryCarvedTable_HasThePairedRevoke(string role)
     {
@@ -168,7 +171,7 @@ public sealed class ProvisionRolesAclDriftTests
         Assert.Equal(2, begin.Count);
         Assert.Equal(2, commit.Count);
 
-        var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer;", StringComparison.Ordinal);
+        var firstGrant = code.IndexOf("GRANT USAGE ON SCHEMA collect, config TO admin, viewer, web;", StringComparison.Ordinal);
         var adminWrites = code.IndexOf("GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;", StringComparison.Ordinal);
         Assert.True(firstGrant >= 0 && adminWrites > firstGrant, "the step 2 grants or step 3's admin write grant moved - update this pin with them.");
         Assert.True(begin[0].Index < firstGrant, "BEGIN must come before the first blanket grant.");
@@ -198,7 +201,7 @@ public sealed class ProvisionRolesAclDriftTests
             $"'{item.What.Split('\n')[0]}' must sit between BEGIN and COMMIT."));
 
         /* The V131 pair: only under a to_regclass check, only through EXECUTE, its text unchanged. */
-        foreach (var role in new[] { ViewerRole, McpRole })
+        foreach (var role in new[] { ViewerRole, WebRole, McpRole })
         {
             var revoke = $"REVOKE SELECT ON {ConfigSchema}.config_notification_routes FROM {role};";
             Assert.Single(Regex.Matches(code, Regex.Escape(revoke)));
@@ -240,7 +243,7 @@ public sealed class ProvisionRolesAclDriftTests
         Assert.True(begin >= 0 && commit > begin);
 
         /* The step 2d block: after the last blanket grant, before the COMMIT, one table at a time. */
-        var revoke = code.IndexOf("REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, mcp CASCADE", StringComparison.Ordinal);
+        var revoke = code.IndexOf("REVOKE ALL ON config.%I FROM PUBLIC, admin, viewer, web, mcp CASCADE", StringComparison.Ordinal);
         Assert.True(revoke > begin && revoke < commit, "the key tables' revoke must sit between BEGIN and COMMIT.");
         var lastBlanket = Regex.Matches(code, @"GRANT SELECT ON ALL TABLES IN SCHEMA config\s+TO [a-z_, ]+;").Max(m => m.Index);
         Assert.True(revoke > lastBlanket, "the revoke must come after the last blanket config grant.");
@@ -305,9 +308,9 @@ public sealed class ProvisionRolesAclDriftTests
         Assert.Contains("ALTER ROLE mcp    LOGIN PASSWORD 'CHANGE_ME_MCP_PASSWORD';", sql, StringComparison.Ordinal);
         Assert.Contains("RAISE EXCEPTION 'Role \"mcp\" already exists and was not created by Darling", sql, StringComparison.Ordinal);
 
-        /* Every column-level SELECT grant names one of the two read roles, never admin, never several at once. */
+        /* Every column-level SELECT grant names one of the three read roles (viewer, web, mcp), never admin, never several at once. */
         var carved = ColumnGrant.Matches(sql).Select(m => m.Groups["role"].Value).ToHashSet(StringComparer.Ordinal);
-        Assert.Equal(new[] { McpRole, ViewerRole }, carved.OrderBy(r => r, StringComparer.Ordinal));
+        Assert.Equal(new[] { McpRole, ViewerRole, WebRole }, carved.OrderBy(r => r, StringComparer.Ordinal));
         foreach (Match match in ColumnGrant.Matches(sql))
         {
             Assert.Equal(ConfigSchema, match.Groups["schema"].Value);
@@ -352,7 +355,7 @@ public sealed class ProvisionRolesAclDriftTests
         }
 
         /* Guard the guard: the custom_alert_rules gap this test was written for is detected. */
-        var drifted = script.Replace("GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO viewer;", "", StringComparison.Ordinal);
+        var drifted = script.Replace("GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO web;", "", StringComparison.Ordinal);
         Assert.NotEqual(script, drifted);
         Assert.False(ReadRoleTableGrants(drifted).SetEquals(ReadRoleTableGrants(managed)));
     }
@@ -376,7 +379,7 @@ public sealed class ProvisionRolesAclDriftTests
         var acl = DarlingManagedRoles.ViewerRestrictedConfigTables[0];
         var droppedColumn = acl.NonSecretColumns[^1];
 
-        foreach (var role in new[] { ViewerRole, McpRole })
+        foreach (var role in new[] { ViewerRole, WebRole, McpRole })
         {
             Assert.True(MatchesCSharpAcl(real, role), $"The unmutated provision-roles.sql must match the C# ACL for {role}.");
 
@@ -503,7 +506,7 @@ public sealed class ProvisionRolesAclDriftTests
         TableGrant.Matches(sql)
             .Where(m => !m.Groups["spec"].Value.TrimStart().StartsWith("SELECT", StringComparison.Ordinal))
             .SelectMany(m => SplitColumns(m.Groups["roles"].Value)
-                .Where(role => role is ViewerRole or McpRole)
+                .Where(role => role is ViewerRole or WebRole or McpRole)
                 .Select(role => $"{Regex.Replace(m.Groups["spec"].Value.Trim(), @"\s+", " ")} ON {m.Groups["schema"].Value}.{m.Groups["table"].Value} TO {role}"))
             .ToHashSet(StringComparer.Ordinal);
 

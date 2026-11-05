@@ -37,6 +37,8 @@ public sealed class ViewerProfileStore
     /// <summary>Credential Manager key prefix for profile secrets, combined with the bare id → <c>profile_{id}</c>.</summary>
     public const string ProfileKeyPrefix = "profile_";
 
+    private const string LogSource = "ViewerProfileStore";
+
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
     private readonly string _filePath;
@@ -104,8 +106,19 @@ public sealed class ViewerProfileStore
         }
 
         _profiles.Add(profile);
+        try
+        {
+            Save();
+        }
+        catch
+        {
+            /* Not on disk, so not in the list: a retry must not trip the duplicate check on a profile that
+               was never written. */
+            _profiles.Remove(profile);
+            throw;
+        }
+
         StoreSecretIfNeeded(profile, username, secret);
-        Save();
     }
 
     /// <summary>
@@ -125,7 +138,17 @@ public sealed class ViewerProfileStore
             throw new InvalidOperationException($"A profile named '{profile.Name}' already exists");
         }
 
-        _profiles[_profiles.IndexOf(existing)] = profile;
+        var index = _profiles.IndexOf(existing);
+        _profiles[index] = profile;
+        try
+        {
+            Save();
+        }
+        catch
+        {
+            _profiles[index] = existing;
+            throw;
+        }
 
         if (profile.AuthType == AuthenticationTypes.ManagedIdentity)
         {
@@ -137,8 +160,6 @@ public sealed class ViewerProfileStore
             /* Only re-store when a fresh secret was supplied (a blank PasswordBox on edit means "leave it"). */
             _secrets.Save(ProfileCredentialId(profile.Id), username, secret);
         }
-
-        Save();
     }
 
     /// <summary>
@@ -159,9 +180,19 @@ public sealed class ViewerProfileStore
         var profile = _profiles.FirstOrDefault(p => p.Id == id);
         if (profile is not null)
         {
-            _profiles.Remove(profile);
+            var index = _profiles.IndexOf(profile);
+            _profiles.RemoveAt(index);
+            try
+            {
+                Save();
+            }
+            catch
+            {
+                _profiles.Insert(index, profile);
+                throw;
+            }
+
             _secrets.Delete(ProfileCredentialId(id));
-            Save();
         }
     }
 
@@ -207,35 +238,24 @@ public sealed class ViewerProfileStore
         }
     }
 
-    private List<ViewerCredentialProfile> LoadFromDisk()
-    {
-        try
-        {
-            if (!File.Exists(_filePath))
-            {
-                return new List<ViewerCredentialProfile>();
-            }
-
-            var json = File.ReadAllText(_filePath);
-            return JsonSerializer.Deserialize<List<ViewerCredentialProfile>>(json, s_jsonOptions)
-                ?? new List<ViewerCredentialProfile>();
-        }
-        catch (Exception ex)
-        {
-            /* A corrupt or unreadable registry must never block startup — begin empty and log. */
-            ViewerLogger.Warn("ViewerProfileStore", $"Failed to load '{_filePath}': {ex.Message}");
-            return new List<ViewerCredentialProfile>();
-        }
-    }
+    /// <summary>
+    /// Reads the profile list through the same guard the server registry and viewer-settings.json use. A
+    /// file that exists but cannot be read (a torn write, a hand-edit with a trailing comma, a backup or
+    /// antivirus lock) still starts the viewer with an empty list, but it is logged and left on disk, and
+    /// <see cref="Save"/> copies it aside before replacing it. Before #7209 the first Add after such a
+    /// failure overwrote the file with a one-profile list and every other profile was gone (#2434 fixed the
+    /// same thing for the server registry).
+    /// </summary>
+    private List<ViewerCredentialProfile> LoadFromDisk() =>
+        ViewerSettingsFile.Load<List<ViewerCredentialProfile>>(_filePath, LogSource, s_jsonOptions).Value!;
 
     private void Save()
     {
-        var directory = Path.GetDirectoryName(_filePath);
-        if (!string.IsNullOrEmpty(directory))
+        if (!ViewerSettingsFile.Save(_filePath, _profiles, LogSource, s_jsonOptions))
         {
-            Directory.CreateDirectory(directory);
+            throw new IOException(
+                $"The credential profiles could not be saved to '{_filePath}'. The file is unreadable or " +
+                "cannot be written; see the viewer log for the reason. Nothing was changed.");
         }
-
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(_profiles, s_jsonOptions));
     }
 }

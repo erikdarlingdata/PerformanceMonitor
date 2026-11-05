@@ -95,6 +95,7 @@ public sealed record RemediationResult(
         public const string GuidePermissionDenied = "guide_permission_denied";
         public const string SessionGone = "session_gone";
         public const string SessionReused = "session_reused";
+        public const string SessionChanged = "session_changed";
         public const string OwnSession = "own_session";
         public const string NotUserSession = "not_user_session";
         public const string KillPermissionDenied = "kill_permission_denied";

@@ -12,18 +12,18 @@
 import { VIZ } from "../../panels.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
-import { el, readTool, readErrorStrip, emptyStrip, errorStrip, loadingStrip, mount, fmtNum, localTime, windowFromHours } from "../../util.js";
+import { el, readTool, readErrorStrip, emptyStrip, captionStrip, errorStrip, loadingStrip, mount, fmtNum, tickDecimals, localTime, windowFromHours } from "../../util.js";
 
 /* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
 const TREND_HOURS = 168;
 
-const COLUMNS = [
-  { key: "database_name", label: "Database" },
+export const COLUMNS = [
+  { key: "database_name", label: "Database", name: true },
   { key: "is_adr_on", label: "ADR on", format: "bool" },
   { key: "pvs_size_mb", label: "PVS off-row MB", format: "num2" },
   { key: "pct_of_database", label: "% of database", format: "num2", nullKey: "pct_of_database_reason", wrap: true },
   { key: "online_index_version_store_mb", label: "Online index store MB", format: "num2" },
-  { key: "database_data_size_mb", label: "Database data size", format: "mb" },
+  { key: "database_data_size_mb", label: "Database data size", format: "mbfit" },
   { key: "aborted_transaction_count", label: "Aborted transactions", format: "int" },
   { key: "aborted_version_cleaner_start_time", label: "Aborted cleaner start", format: "time" },
   { key: "aborted_version_cleaner_end_time", label: "Aborted cleaner end", format: "time" },
@@ -93,10 +93,10 @@ async function load(server, ctx, body) {
     });
     const { points, series } = pivotTrend(data.trend);
     const chart = points.length
-      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v) => fmtNum(v, 2), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
+      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v, o) => fmtNum(v, Math.max(2, tickDecimals(o && o.step))), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
-      el("div", { class: "strip notice", role: "status", text: "As of " + localTime(data.as_of) + " (latest snapshot)." }),
+      captionStrip("As of " + localTime(data.as_of) + " (latest snapshot)."),
       table,
       el("h4", { text: "PVS off-row size (MB), last " + TREND_HOURS + " hours, top databases by current size" }),
       chart,

@@ -108,6 +108,35 @@ const scenarios = {
     out.chart = chartsNow();
     out.selects = cell.all((n) => n.tag === "select").length;
   },
+  /* #7586: a page with its own Query picker passes pickRow: the History button hands the row to it, reads nothing and opens no panel. */
+  async pickerRoute() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] });
+    const picked = [];
+    const cell = mod.statsHistoryColumn("queries", "srv-a", 24, (row) => picked.push(row)).render(queryRow);
+    cell.byText("History").click();
+    await flush();
+    out.picked = picked;
+    out.fetches = fetches.length;
+    out.charts = chartsNow().length;
+    out.hideButton = cell.byText("Hide history") !== null;
+    out.panels = cell.all((n) => String(n.className).includes("stats-history")).length;
+    const dash = mod.statsHistoryColumn("queries", "srv-a", 24, () => {}).render({ database_name: "Orders" });
+    out.noHashStillDash = dash.textContent;
+  },
+  /* #7586: the per-query history chart prints durations in the grid's format, from the largest tick, with no ms caption. */
+  async queryAxis() {
+    respond({ hours_back: 24, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 33700, avg_elapsed_ms: 31000 }] });
+    mod.statsHistoryColumn("queries", "srv-a", 24).render(queryRow).byText("History").click();
+    await flush();
+    const spec = globalThis.__charts[0].spec;
+    const util = await import(pathToFileURL(scratch + "/util.js").href);
+    const ticks = [0, 10000, 20000, 30000, 40000];
+    out.axisUnit = spec.unit ?? null;
+    out.sizeUnit = spec.sizeUnit;
+    out.labels = ticks.map((t) => spec.formatValue(t, { step: 10000, axisMax: 40000 }));
+    out.perAtTop = util.sizeAxisPer(spec.sizeUnit, 40000);
+    out.tooltip = spec.formatValue(33700);
+  },
   async rebuild() {
     respond(procTrend());
     mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow).byText("History").click();
@@ -190,6 +219,24 @@ const scenarios = {
     out.wholeHourNote = (util.widenedWindowNote?.(1) ?? null);
     util.setActiveRange(null);
     out.presetNote = (util.widenedWindowNote?.(1) ?? null);
+  },
+  /* #7416 item 21: the History panel names a cause for a late first point only when the read says the start is older than the tier keeps. */
+  async headNote() {
+    const notices = async (kind, row, payload) => {
+      respond(payload);
+      const cell = mod.statsHistoryColumn(kind, "srv-a", 24).render(row);
+      cell.byText("History").click();
+      await flush();
+      return cell.all((n) => n.className === "strip notice").map((n) => n.textContent);
+    };
+    const proc = { ...procTrend(), window_truncated: true, effective_hours_back: 4.9 };
+    const qry = { hours_back: 24, window_truncated: true, effective_hours_back: 4.9, trend: [{ collection_time: "2026-03-04T05:00:00", avg_cpu_ms: 40, avg_elapsed_ms: 100 }] };
+    const old = { start_older_than_tier: true, tier_keeps_days: 4, hours_back: 168, effective_hours_back: 90 };
+    out.lateProcedure = await notices("procedures", procRow, { ...proc, start_older_than_tier: false, tier_keeps_days: 4 });
+    out.oldProcedure = await notices("procedures", { ...procRow, full_name: "dbo.usp_Ship2" }, { ...proc, ...old });
+    out.lateQuery = await notices("queries", queryRow, { ...qry, start_older_than_tier: false, tier_keeps_days: 90 });
+    out.oldQuery = await notices("queries", { ...queryRow, query_hash: "0xDEF" }, { ...qry, ...old, tier_keeps_days: 90 });
+    out.oldQueryNoDays = await notices("queries", { ...queryRow, query_hash: "0x123" }, { ...qry, ...old, tier_keeps_days: null });
   },
   async points() {
     out.points = mod.procedurePoints(procTrend().trend);

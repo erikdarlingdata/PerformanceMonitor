@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PasswordKeyGrantParityTests
 {
-    private static readonly string[] Placeholders = { "admin", "viewer", "mcp", "config" };
+    private static readonly string[] Placeholders = { "admin", "viewer", "web", "mcp", "config" };
 
     private static string Managed => RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedRoles.cs");
 
@@ -63,12 +63,12 @@ public sealed class PasswordKeyGrantParityTests
         Assert.Equal(script.RevokeText, managed.RevokeText);
         Assert.Equal(script.GrantText, managed.GrantText);
         Assert.Equal(
-            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, mcp CASCADE",
+            "REVOKE ALL ON config.password_key, config.password_key_service, config.legacy_secret_pin, config.legacy_secret_pin_marker FROM PUBLIC, admin, viewer, web, mcp CASCADE",
             managed.RevokeText);
         Assert.Equal("GRANT SELECT ON config.password_key, config.password_key_service TO admin", managed.GrantText);
 
         /* The candidate table (V167) has its own REVOKE, the same text in both files. */
-        const string CandidateRevoke = "REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE";
+        const string CandidateRevoke = "REVOKE ALL ON config.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, web, mcp CASCADE";
         foreach (var text in new[] { Managed, Script })
         {
             var at = text.IndexOf("REVOKE ALL ON {config}.legacy_secret_pin_candidate", StringComparison.Ordinal);
@@ -105,7 +105,7 @@ public sealed class PasswordKeyGrantParityTests
 
         /* The candidate table is revoked in its own branch, inside the guarded block and after the four-table revoke. */
         var branch = Regex.Match(block,
-            @"IF pg_catalog\.to_regclass\('config\.legacy_secret_pin_candidate'\) IS NOT NULL THEN\s+REVOKE ALL ON config\.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, mcp CASCADE;\s+END IF;");
+            @"IF pg_catalog\.to_regclass\('config\.legacy_secret_pin_candidate'\) IS NOT NULL THEN\s+REVOKE ALL ON config\.legacy_secret_pin_candidate FROM PUBLIC, admin, viewer, web, mcp CASCADE;\s+END IF;");
         Assert.True(branch.Success, "the candidate table's own branch is missing");
         Assert.True(branch.Index > block.IndexOf("REVOKE ALL ON config.password_key,", StringComparison.Ordinal), "the branch follows the four-table revoke");
         Assert.True(branch.Index > guardStart, "the branch sits inside the guarded block");

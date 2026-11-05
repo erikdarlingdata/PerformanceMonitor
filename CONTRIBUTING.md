@@ -18,15 +18,13 @@ Thank you for your interest in contributing to the SQL Server Performance Monito
 
 This repository contains three editions of the SQL Server Performance Monitor:
 
-**Full Edition (deprecated)** — server-installed collectors with a separate dashboard. The Full Dashboard and the CLI installer are deprecated. No release since v3.3.0 includes them, and their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0). They still build from this repository and are supported for existing users. New deployments use Lite or Darling.
+**Full Edition (deprecated)** — server-installed collectors with a separate dashboard. The Full Dashboard and the CLI installer are deprecated. No release since v3.3.0 includes them, and their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0). Their source is frozen in [`deprecated/dashboard-installer-source.zip`](deprecated/README.md): nothing in this repository builds, tests or releases it. New deployments use Lite or Darling.
 
 | Folder | Description |
 |--------|-------------|
 | `install/` | 50+ T-SQL scripts that create the PerformanceMonitor database |
 | `upgrades/` | Version-specific upgrade scripts for that database |
-| `deprecated/Installer/` | CLI installer for the Full Edition database and collectors |
-| `deprecated/Installer.Core/` | Shared installation library (used by CLI installer and Dashboard) |
-| `deprecated/Dashboard/` | WPF dashboard — connects to PerformanceMonitor database, can also install/upgrade via Add Server |
+| `deprecated/` | One frozen zip holding the Full Dashboard, the CLI installer and their tests. See [`deprecated/README.md`](deprecated/README.md) |
 
 **Lite Edition** — standalone desktop app, nothing installed on the target server:
 
@@ -71,14 +69,8 @@ PostgreSQL.
 git clone https://github.com/erikdarlingdata/PerformanceMonitor.git
 cd PerformanceMonitor
 
-# Build Full Dashboard (deprecated)
-dotnet build deprecated/Dashboard/Dashboard.csproj
-
 # Build Lite Edition
 dotnet build Lite/PerformanceMonitorLite.csproj
-
-# Build CLI Installer (deprecated, self-contained)
-dotnet publish deprecated/Installer/PerformanceMonitorInstaller.csproj -c Release
 
 # Build Darling (headless service, then the viewer)
 dotnet build Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
@@ -87,11 +79,6 @@ dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darlin
 ```
 
 ### Running the Applications
-
-**Full Dashboard (deprecated):**
-1. Install the database on a SQL Server instance using the CLI installer in `deprecated/Installer/`
-2. Run `deprecated/Dashboard/bin/Debug/net10.0-windows/PerformanceMonitorDashboard.exe`
-3. Add your server connection and start monitoring
 
 **Lite Edition:**
 1. Run `Lite/bin/Debug/net10.0-windows/PerformanceMonitorLite.exe`
@@ -109,7 +96,7 @@ dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darlin
 
 ### Full Dashboard Architecture (deprecated)
 
-The Full Edition is deprecated, so this guide does not describe its architecture in detail. It installs a `PerformanceMonitor` database on the monitored SQL Server. T-SQL collectors in that database run under SQL Agent, and the Full Dashboard in `deprecated/Dashboard/` reads the data. The scripts are in `install/`. See [`deprecated/Dashboard/README.md`](deprecated/Dashboard/README.md) for the details.
+The Full Edition is deprecated, so this guide does not describe its architecture in detail. It installs a `PerformanceMonitor` database on the monitored SQL Server. T-SQL collectors in that database run under SQL Agent, and the Full Dashboard reads the data. The scripts are in `install/`. The Full Dashboard and the CLI installer are frozen in a zip, and [`deprecated/README.md`](deprecated/README.md) says what is in it and how to build it.
 
 **Key insight:** T-SQL collectors run independently from the C# Dashboard. You can modify collectors without touching C# code, and vice versa.
 
@@ -218,17 +205,16 @@ the extension is present, so the same store works on plain PostgreSQL.
 |------|------------|-------|
 | **Full Edition T-SQL collectors (deprecated)** | Low | Clean, self-contained stored procedures |
 | **Full Edition reporting views (deprecated)** | Low | SQL views in `install/47_create_reporting_views.sql` |
-| **Full Dashboard UI improvements (deprecated)** | Medium | WPF/C# in `deprecated/Dashboard/ServerTab.xaml*` |
 | **Lite UI improvements** | Medium | WPF/C# in `Lite/Controls/ServerTab.xaml*` |
 | **Bug fixes (any edition)** | Varies | Always welcome |
 | **Documentation** | Low | README, comments, troubleshooting guides |
-| **MCP tool improvements** | Medium | `Lite/Mcp/`, `Darling/PerformanceMonitor.Darling.Service/Mcp/` or `deprecated/Dashboard/Mcp/` |
+| **MCP tool improvements** | Medium | `Lite/Mcp/`, `Darling/PerformanceMonitor.Darling.Service/Mcp/` |
 | **New Lite collectors** | **High** | See warning below |
 | **Darling schema migrations** | **High** | Four coordinated edits — see below |
 
 ### Adding a New Full Edition Collector (deprecated)
 
-The Full Edition is deprecated but still supported for existing users. This is its cleanest contribution path. You need to:
+The Full Edition is deprecated. The CLI installer that deployed its T-SQL is frozen in the zip, so this repository's build cannot deploy a change to it. The scripts stay in `install/`. If you still edit one, you need to:
 
 1. **Create the collection table** in `install/02_create_tables.sql`
 2. **Create the collector procedure** in a new file `install/XX_collect_your_collector.sql`
@@ -449,6 +435,36 @@ Before submitting:
 - [ ] Changes are documented (comments, README if applicable)
 - [ ] New files have copyright headers
 
+### Optional pre-push check
+
+`.github/scripts/pre-push.sh` runs the first checks CI runs on a pull request. You can run it by hand before a push, or install it as a git hook so it runs on every push. The hook is optional. Nothing installs it for you, because it builds and tests on your machine.
+
+What the script does:
+
+1. It builds `Darling.Tests` and `Lite.Tests` in Debug.
+2. It runs all tests with the `Stage=Guard` trait in both projects. CI runs the same tests first.
+3. It runs the test classes that your changes need. It takes them from the newest nightly test map, which it downloads with the `gh` CLI. It adds every class in a test file that names a symbol you changed. If a diff changes only documentation, it selects only the classes that read those files.
+
+The script prints result lines only. Its last line is `GATE GREEN`, `GATE RED` or `GATE STOP`. `GATE STOP` means the selection is the whole suite, which your machine does not run. CI runs it. The hook lets a push with `GATE STOP` go through. It blocks a push with `GATE RED`.
+
+To install the hook, run this from the clone or from any of its worktrees:
+
+```bash
+bash .github/scripts/install-pre-push-hook.sh
+```
+
+One install covers the clone and all its linked worktrees. Running it again changes nothing. If a different `pre-push` hook already exists, the script leaves it alone, says so and exits with an error.
+
+To remove the hook, run:
+
+```bash
+bash .github/scripts/install-pre-push-hook.sh --remove
+```
+
+To skip the hook for one push, add `--no-verify` to `git push`.
+
+The run time depends on your diff. The build runs first. The Guard tests run next. The selected classes run last. The script prints nothing about progress until a stage ends, so a push can look stuck for several minutes.
+
 ### Review Process
 
 1. Submit your PR with a clear description
@@ -484,14 +500,6 @@ ORDER BY collection_time DESC;
 Use the troubleshooting scripts:
 - `install/99_installer_troubleshooting.sql` - Quick health check
 - `install/99_user_troubleshooting.sql` - Detailed diagnostics
-
-### Testing Full Dashboard Changes (deprecated)
-
-1. Build and run the Full Dashboard from `deprecated/Dashboard/`
-2. Connect to a test SQL Server with PerformanceMonitor installed
-3. Verify your changes appear correctly
-4. Test with different time ranges
-5. Check that CSV export still works (right-click any grid)
 
 ### Testing Lite Changes
 

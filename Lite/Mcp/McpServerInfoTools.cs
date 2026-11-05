@@ -25,7 +25,7 @@ public sealed class McpServerInfoTools
             var row = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             if (row == null)
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_properties", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No server properties available. The properties collector may not have run yet.");
+                    ?? McpHelpers.Status("unavailable", $"No server properties available for {resolved.DisplayName}. The properties collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return ServerPropertiesPayload(resolved.DisplayName, row);
         }

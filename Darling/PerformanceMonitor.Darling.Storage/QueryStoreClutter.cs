@@ -93,8 +93,49 @@ public static class QueryStoreClutter
     public const string ReasonStorageNearCap = "storage_near_cap";
     public const string ReasonQueryStoreReadOnly = "qs_read_only";
     public const string ReasonQueryStoreOff = "qs_off";
+
+    /// <summary>#7454: READ_ONLY because the database is in a state Query Store cannot record in (read-only,
+    /// single-user, emergency). A reason with no band, as <see cref="ReasonQueryStoreOff"/> is.</summary>
+    public const string ReasonReadOnlyDatabaseState = "qs_read_only_state";
+
+    /// <summary>The readonly_reason bits that name a database state (1 read-only, 2 single-user, 4 emergency).
+    /// A READ_ONLY store with none of them set has no documented cause (#7454).</summary>
+    private const int DocumentedStateBits = 1 | 2 | 4;
+
+    /// <summary>#7454: READ_ONLY with no reason bit while desired_state is READ_ONLY, which is an operator's own
+    /// <c>OPERATION_MODE = READ_ONLY</c>. A reason with no band.</summary>
+    public const string ReasonReadOnlyOperator = "qs_read_only_operator";
     public const string ReasonReplica = "qs_read_only_replica";
     public const string ReasonNotMeasured = "not_measured";
+
+    /// <summary>
+    /// A reason token in words for a person (#7416): <c>qs_off</c> reads "Query Store off". The MCP payload keeps the tokens, which a
+    /// client branches on. A token outside the closed set above is printed as it is. A band of Unknown is "not graded" (nothing was
+    /// judged: Query Store is off, the database is a read-only replica, or the window held nothing), and the row's text says so.
+    /// </summary>
+    public static string ReasonText(string token) => token switch
+    {
+        ReasonReadCostDominant => "Read cost dominates",
+        ReasonPlanChurnHigh => "High plan churn",
+        ReasonOneShotPlans => "Mostly one-shot plans",
+        ReasonPlansAtCap => "Plans per query at the cap",
+        ReasonStorageNearCap => "Storage near the cap",
+        ReasonQueryStoreReadOnly => "Query Store read-only",
+        ReasonQueryStoreOff => "Query Store off",
+        ReasonReadOnlyDatabaseState => "Query Store read-only (database state)",
+        ReasonReadOnlyOperator => "Query Store read-only (set by an operator)",
+        ReasonReplica => "Query Store read-only (replica)",
+        ReasonNotMeasured => "Nothing measured in this window",
+        _ => token,
+    };
+
+    /// <summary>The reasons of a row as one line: the words, and "not graded" after them when the band is Unknown.</summary>
+    public static string ReasonsLine(HealthSeverity verdict, IEnumerable<string> reasons)
+    {
+        var words = string.Join(", ", reasons.Select(ReasonText));
+        if (verdict != HealthSeverity.Unknown) return words;
+        return words.Length == 0 ? "Not graded" : words + " (not graded)";
+    }
 
     /// <summary>The <c>actual_state</c> token for a Query Store that is not recording at all.</summary>
     private const string StateOff = "OFF";
@@ -187,10 +228,26 @@ public static class QueryStoreClutter
                 measured = true;
                 if (string.Equals(config.ActualState, StateReadOnly, StringComparison.OrdinalIgnoreCase))
                 {
-                    /* An operator-set or cap-driven READ_ONLY (the replica bit was handled above). The cap
-                       case IS clutter at its terminal state: the store filled up and stopped. */
-                    reasons.Add(ReasonQueryStoreReadOnly);
-                    band = Max(band, HealthSeverity.Critical);
+                    /* The replica bit was handled above. A capacity bit is clutter at its terminal state: the
+                       store filled up and stopped, and it decides even when a state bit is set too. Any other
+                       READ_ONLY is not clutter (#7454): the database is in a state Query Store cannot record
+                       in, or an operator set OPERATION_MODE = READ_ONLY on purpose (reason 0, desired state
+                       READ_ONLY). Those are stated as a reason with no band, as qs_off is, and leave the
+                       config arm unmeasured unless the storage check below grades it. */
+                    if (QueryStoreReadonlyReason.HasCapacityBit(config.ReadonlyReason))
+                    {
+                        reasons.Add(ReasonQueryStoreReadOnly);
+                        band = Max(band, HealthSeverity.Critical);
+                    }
+                    else
+                    {
+                        measured = false;
+                        reasons.Add(
+                            config.ReadonlyReason == 0
+                            && string.Equals(config.DesiredState, StateReadOnly, StringComparison.OrdinalIgnoreCase)
+                                ? ReasonReadOnlyOperator
+                                : ReasonReadOnlyDatabaseState);
+                    }
                 }
 
                 var pctOfCap = PctOfCap(config);
@@ -198,6 +255,7 @@ public static class QueryStoreClutter
                 {
                     reasons.Add(ReasonStorageNearCap);
                     band = Max(band, HealthSeverity.Warning);
+                    measured = true;
                 }
             }
         }
@@ -467,7 +525,26 @@ public static class QueryStoreClutter
                     break;
                 case ReasonQueryStoreReadOnly when row.Config is { } c4:
                     lines.Add(
-                        $"Query Store is READ_ONLY (readonly_reason {c4.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c4.ReadonlyReason)}) while desired_state is {c4.DesiredState}. New runtime statistics are being dropped. get_query_store_health has the decode and the remedy; if the reason is the storage cap, this database's clutter reached its terminal state.");
+                        $"Query Store is READ_ONLY because it reached a limit of its own (readonly_reason {c4.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c4.ReadonlyReason)}) while desired_state is {c4.DesiredState}. New runtime statistics are being dropped, and this database's clutter reached its terminal state. get_query_store_health has the decode and the remedy.");
+                    break;
+                case ReasonReadOnlyDatabaseState when row.Config is { } c5:
+                    // Reason 0, or bits that are none of the three documented state bits (1, 2, 4), carries no
+                    // recorded cause. With desired_state READ_WRITE that is get_query_store_health's "classic
+                    // silent failure", so it must not be worded as the database's benign state (#7454).
+                    if ((c5.ReadonlyReason & DocumentedStateBits) == 0)
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {(c5.ReadonlyReason == 0 ? "no reason bit set" : QueryStoreReadonlyReason.Decode(c5.ReadonlyReason))}) while desired_state is {c5.DesiredState}. No documented reason is recorded for it, so the cause is not recorded: this view does not grade it as clutter, but do not treat it as benign. Read get_query_store_health and the SQL Server error log for the cause before deciding.");
+                    }
+                    else
+                    {
+                        lines.Add(
+                            $"Query Store is READ_ONLY (readonly_reason {c5.ReadonlyReason.ToString(culture)}: {QueryStoreReadonlyReason.Decode(c5.ReadonlyReason)}) while desired_state is {c5.DesiredState}. Query Store cannot record while the database is in that state, so runtime statistics are not being collected. This is the database's state, not clutter, and this view does not grade it. get_query_store_health has the decode.");
+                    }
+                    break;
+                case ReasonReadOnlyOperator when row.Config is { } c6:
+                    lines.Add(
+                        $"Query Store is READ_ONLY because its operation mode was set to READ_ONLY (readonly_reason {c6.ReadonlyReason.ToString(culture)}, desired_state {c6.DesiredState}). New runtime statistics are not being collected, as chosen. This is not clutter, and this view does not grade the choice.");
                     break;
                 case ReasonQueryStoreOff:
                     lines.Add("Query Store is OFF on this database: there is nothing here to be cluttered, and this view does not grade the choice.");

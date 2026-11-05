@@ -107,14 +107,14 @@ CREATE TRIGGER test_fail_first_late BEFORE INSERT ON config.investigation_journa
             }
 
             Assert.Equal(PlanUndoAnswer.OutcomeUnknown, undone.Status);
-            var attempt = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId != called);
+            var attempt = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes, x => x.CalledId != called);
             Assert.Equal("person:alice", attempt.Actor);
             Assert.Equal(AgentChangeKinds.PlanUndo, attempt.Kind);
             Assert.Equal(AgentChangeResult.Unknown, attempt.Result);
             Assert.False(attempt.CanTryUndo(DateTime.UtcNow));
             Assert.Equal(called, (long)System.Text.Json.Nodes.JsonNode.Parse(attempt.DetailJson)!["called_id"]!);
             /* The change it tried to undo is still on the list and still offered. */
-            var original = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId == called);
+            var original = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes, x => x.CalledId == called);
             Assert.True(original.CanTryUndo(DateTime.UtcNow));
             AssertNoSecret(c, undone.Message, await JournalTextAsync(c));
         });
@@ -149,7 +149,7 @@ CREATE TRIGGER test_fail_first_late BEFORE INSERT ON config.investigation_journa
             Assert.True((bool)done["recorded_late"]!);
             Assert.Equal(planA, (long)done["after"]!["state"]!["forced_plan"]!["plan_id"]!);
             Assert.Empty(await RowsAsync(c, "action_failed"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Done, change.Result);
             Assert.NotNull(change.ForceReview);
             Assert.True(change.ForceReview!.Running);

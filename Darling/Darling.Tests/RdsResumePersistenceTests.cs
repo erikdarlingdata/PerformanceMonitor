@@ -397,8 +397,8 @@ public sealed class RdsResumePersistenceTests
     public void TheRunnerAndWorkerCarryTheOutcomeToTheRow()
     {
         var service = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service");
-        var runner = File.ReadAllText(Path.Combine(service, "DarlingCollectorRunner.cs"));
-        var worker = File.ReadAllText(Path.Combine(service, "DarlingWorker.cs"));
+        var runner = RepoFile.ReadRepoFile(Path.Combine(service, "DarlingCollectorRunner.cs"));
+        var worker = RepoFile.ReadRepoFile(Path.Combine(service, "DarlingWorker.cs"));
 
         Assert.Equal(3, Regex.Matches(runner,
             @"filesSkipped: outcome\.FilesSkipped, resumeFileMissing: outcome\.ResumeFileMissing").Count);

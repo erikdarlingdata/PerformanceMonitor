@@ -27,7 +27,7 @@ public static class DarlingThresholdKeys
     /// can take, its bounds, its <c>config_alert_settings</c> column and its off end. The off end is the one value inside the
     /// bounds at which the alert can no longer fire: the top of the range where a higher value means fewer alerts (the counts,
     /// minutes and percent bars), zero for the four Low Disk bars where a lower value means fewer alerts, the shortest window
-    /// for the Failed Job look-back. It is null where no value turns the alert off (the File Growth rate window only averages).
+    /// for the Failed Job look-back. It is null where no value turns the alert off (the File Growth rate window only averages, and a database never backed up or checked is still overdue at the top of a Database Protection age).
     /// An agent is never allowed to set a threshold to its off end (<c>threshold_disables_alert</c>); that is the whole rule,
     /// so a very high count that is still reachable is allowed.</summary>
     public sealed record Entry(string Wire, AlertThresholdKey? Engine, AlertThresholdScope Scope, int Min, int Max, string Column, int? OffEnd);
@@ -39,6 +39,14 @@ public static class DarlingThresholdKeys
     /// (the database is the column's database) replaces the global bar for that scope.</summary>
     public const string IdentityCapacityWarning = "identity_capacity.warning_percent";
     public const string IdentityCapacityCritical = "identity_capacity.critical_percent";
+
+    /// <summary>The Database Protection overdue ages (#7611): a full backup older than this many hours (default 168), a log backup older than this many minutes
+    /// (default 60), a good CHECKDB older than this many hours (default 336). Darling's own, so no engine key. A per-server or per-database override (the database
+    /// is the judged database) replaces the global value for that scope. The tops are the ones the collector can still tell apart: a full or log backup is read
+    /// from a 60-day window, so 1440 hours and 86400 minutes are that window, and CHECKDB, which is not read from a window, tops at a year.</summary>
+    public const string BackupOverdueHours = "backup_overdue.threshold_hours";
+    public const string LogBackupOverdueMinutes = "log_backup_overdue.threshold_minutes";
+    public const string CheckDbOverdueHours = "checkdb_overdue.threshold_hours";
 
     private static readonly Entry[] All =
     [
@@ -67,6 +75,9 @@ public static class DarlingThresholdKeys
         new(PgDeadlockCount, null, AlertThresholdScope.Server, PostgresAlertEvaluator.CountThresholdFloor, int.MaxValue, "pg_deadlock_count_threshold", int.MaxValue),
         new(IdentityCapacityWarning, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_warning_percent", 100),
         new(IdentityCapacityCritical, null, AlertThresholdScope.ServerAndDatabase, 1, 100, "identity_capacity_critical_percent", 100),
+        new(BackupOverdueHours, null, AlertThresholdScope.ServerAndDatabase, 1, 1440, "backup_overdue_threshold_hours", null),
+        new(LogBackupOverdueMinutes, null, AlertThresholdScope.ServerAndDatabase, 1, 86400, "log_backup_overdue_threshold_minutes", null),
+        new(CheckDbOverdueHours, null, AlertThresholdScope.ServerAndDatabase, 1, 8760, "checkdb_overdue_threshold_hours", null),
     ];
 
     private static readonly Dictionary<string, Entry> ByWire = BuildByWire();

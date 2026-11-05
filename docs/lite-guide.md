@@ -12,7 +12,13 @@ Part of the [Performance Monitor documentation](../README.md#documentation).
 
 Data starts flowing within 1–5 minutes. That's it. No installation on your server, no Agent jobs, no sysadmin required.
 
-**Taking the portable ZIP (`PerformanceMonitorLite-<version>.zip`) instead?** It is a self-contained win-x64 build too, so there is **nothing to install first** — unzip it anywhere and run `PerformanceMonitorLite.exe`. A stock Windows Server with no .NET on it at all is fine.
+For the first server, check three things in the **Add Server** dialog:
+
+- Authentication: pick the mode that matches the login. [Authentication](authentication.md) describes each mode.
+- Certificate: Encryption defaults to Mandatory, and Lite checks the server certificate. If the server uses a self-signed certificate, check **Trust server certificate (skip certificate validation)**, or install a certificate that the Lite machine trusts.
+- Grants: the login needs four server grants, not only `VIEW SERVER STATE`. [Permissions](permissions.md#permissions) has the grant block, and the Azure SQL Database form.
+
+**Taking the portable ZIP (`PerformanceMonitorLite-<version>.zip`) instead?** It is a self-contained win-x64 build too, so there is **nothing to install first** — unzip it anywhere and run `PerformanceMonitorLite.exe`. A stock Windows Server with no .NET on it at all is fine. The release also lists `PerformanceMonitorLite-lite-Portable.zip`, which Velopack builds together with `Setup.exe`. It keeps the app in a `current` folder. This guide does not cover it.
 
 `READ-ME-FIRST.txt` still ships in the ZIP beside `PerformanceMonitorLite.exe`, now saying there is nothing to install rather than listing downloads. Monitored SQL Servers need nothing installed on them either way.
 

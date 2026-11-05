@@ -28,7 +28,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "optimization: idle databases, tempdb, waits, costly queries, grants.";
 
     internal const string OptimizationViewGuide =
-        "optimization answers five sections, each with its own status (ok, empty or not_collected, with a message when not collected) and its own window, beside server, hours_back, monthly_cost_usd and cost_reason. monthly_cost_usd is the server's registered monthly cost, null with cost_reason 'monthly cost not set' when none is set or it is 0 or less; every est_cost_usd is then null. idle_databases: databases with no query executions in a fixed 7 days (window_days 7; hours_back does not move it), from the latest size snapshot, system databases left out; rows are database_name, total_size_mb, file_count and last_execution_server_local, ordered by total_size_mb descending then database_name; up to 500 rows with database_count and truncated. last_execution_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, and null when none was recorded. tempdb_pressure: a fixed 24 hours (window_hours 24); rows are metric, current_mb (latest sample), peak_24h_mb and warning, the service's own band text ('' when none), in the fixed order User Objects, Internal Objects, Version Store, Total Reserved. wait_categories: wait time by category over hours_back (categories: CPU is SOS_SCHEDULER_YIELD; Parallelism is the exchange waits CXPACKET, CXCONSUMER, CXSYNC_PORT and CXSYNC_CONSUMER and the hash waits HTDELETE, HTBUILD and HTREPARTITION; Storage, Memory, Network and Locks; Other is everything else); rows are category, total_wait_time_ms, waiting_tasks, pct_of_total (as stored, one decimal), top_wait_type, top_wait_time_ms and est_cost_usd, ordered by total_wait_time_ms descending then category. expensive_queries: the statements with the most CPU over hours_back, clamped to the 3 days of retained query text, with effective_start the UTC start actually read (Z); limit is the top-N here (1-50, default 10; the desktop shows 20) and the only section limit applies to. Rows are database_name, total_cpu_ms, avg_cpu_ms_per_exec, total_reads, avg_reads_per_exec, executions, query_preview (first 200 characters, no full text), has_plan (no plan XML) and est_cost_usd, ordered by total_cpu_ms descending then database_name then query_preview; which of several statements tied at the top-N cut is returned is the engine's choice, since the SQL orders by CPU only. memory_grant_efficiency: a fixed 24 hours (window_hours 24, the desktop's window); one row per UTC day (day yyyy-MM-dd) with avg_granted_mb, avg_used_mb, efficiency_pct, peak_granted_mb, wasted_mb (average granted minus average used, as the desktop), total_grantees, total_waiters, timeout_errors and forced_grants, ordered by day ascending. est_cost_usd is the section's share of the window's monthly budget (monthly cost x hours_back / 730) by wait time or CPU among the rows returned, so for expensive_queries each row's share depends on limit; rounded to 2 places, null when the cost is unset or the rows total 0. est_cost_usd is an attribution of the window's budget across the returned rows, not a measured cost: the returned rows always sum to the whole window's budget whatever limit is, and the expensive-query budget uses hours_back even when its rows start at the clamped effective_start. The whole answer is status not_collected only when every section is gated for the server's engine, and status empty only when every section is empty and none is gated; a mix of gated and empty sections returns the payload, each section with its own status. Times are UTC and end in Z except last_execution_server_local.";
+        "optimization answers five sections, each with its own status (ok, empty, unavailable or not_collected, with a message when not collected or unavailable; idle_databases answers unavailable with coverage false when the query stats do not cover each of the 7 complete days before today, and empty only when they do and no database is idle) and its own window, beside server, hours_back, monthly_cost_usd and cost_reason. monthly_cost_usd is the server's registered monthly cost, null with cost_reason 'monthly cost not set' when none is set or it is 0 or less; every est_cost_usd is then null. idle_databases: databases with no query executions in a fixed 7 days (window_days 7; hours_back does not move it), from the latest size snapshot, system databases left out; rows are database_name, total_size_mb, file_count and last_execution_server_local, ordered by total_size_mb descending then database_name; up to 500 rows with database_count and truncated. last_execution_server_local is the monitored server's own clock, not UTC, printed yyyy-MM-ddTHH:mm:ss with no Z, and null when none was recorded. tempdb_pressure: a fixed 24 hours (window_hours 24); rows are metric, current_mb (latest sample), peak_24h_mb and warning, the service's own band text ('' when none), in the fixed order User Objects, Internal Objects, Version Store, Total Reserved. wait_categories: wait time by category over hours_back (categories: CPU is SOS_SCHEDULER_YIELD; Parallelism is the exchange waits CXPACKET, CXCONSUMER, CXSYNC_PORT and CXSYNC_CONSUMER and the hash waits HTDELETE, HTBUILD and HTREPARTITION; Storage, Memory, Network and Locks; Other is everything else); rows are category, total_wait_time_ms, waiting_tasks, pct_of_total (as stored, one decimal), top_wait_type, top_wait_time_ms and est_cost_usd, ordered by total_wait_time_ms descending then category. expensive_queries: the statements with the most CPU over hours_back, clamped to the 3 days of retained query text, with effective_start the UTC start actually read (Z); limit is the top-N here (1-50, default 10; the desktop shows 20) and the only section limit applies to. Rows are database_name, total_cpu_ms, avg_cpu_ms_per_exec, total_reads, avg_reads_per_exec, executions, query_preview (first 200 characters, no full text), has_plan (no plan XML) and est_cost_usd, ordered by total_cpu_ms descending then database_name then query_preview; which of several statements tied at the top-N cut is returned is the engine's choice, since the SQL orders by CPU only. memory_grant_efficiency: a fixed 24 hours (window_hours 24, the desktop's window); one row per UTC day (day yyyy-MM-dd) with avg_granted_mb, avg_used_mb, efficiency_pct, peak_granted_mb, wasted_mb (average granted minus average used, as the desktop), total_grantees, total_waiters, timeout_errors and forced_grants, ordered by day ascending. est_cost_usd is the section's share of the window's monthly budget (monthly cost x hours_back / 730) by wait time or CPU among the rows returned, so for expensive_queries each row's share depends on limit; rounded to 2 places, null when the cost is unset or the rows total 0. est_cost_usd is an attribution of the window's budget across the returned rows, not a measured cost: the returned rows always sum to the whole window's budget whatever limit is, and the expensive-query budget uses hours_back even when its rows start at the clamped effective_start. The whole answer is status not_collected only when every section is gated for the server's engine, and status empty only when every section is empty and none is gated; a mix of gated and empty sections returns the payload, each section with its own status. Times are UTC and end in Z except last_execution_server_local.";
 
     /// <summary>The fixed ceiling on the idle-database list.</summary>
     internal const int MaxIdleDatabaseRows = 500;
@@ -64,13 +64,13 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static decimal? OptimizationCostShare(long part, long total, decimal monthly, int hoursBack)
     {
         if (monthly <= 0m || total <= 0) return null;
-        return Math.Round(FinOpsCost.Share(part, total, FinOpsCost.WindowBudget(monthly, hoursBack)), 2, MidpointRounding.AwayFromZero);
+        return FinOpsWireFigures.Clean(Math.Round(FinOpsCost.Share(part, total, FinOpsCost.WindowBudget(monthly, hoursBack)), 2, MidpointRounding.AwayFromZero));
     }
 
     internal static object IdleDatabaseRow(IdleDatabase r) => new
     {
         database_name = r.DatabaseName,
-        total_size_mb = r.TotalSizeMb,
+        total_size_mb = FinOpsWireFigures.Mb(r.TotalSizeMb),
         file_count = r.FileCount,
         /* The monitored server's own clock, read verbatim: no Z, no shifting. */
         last_execution_server_local = r.LastExecutionTime?.ToString("yyyy-MM-dd'T'HH:mm:ss", CultureInfo.InvariantCulture),
@@ -79,8 +79,8 @@ public sealed partial class DarlingMcpFinOpsTools
     internal static object TempdbRow(TempdbSummaryMetric r) => new
     {
         metric = r.Metric,
-        current_mb = r.CurrentMb,
-        peak_24h_mb = r.Peak24hMb,
+        current_mb = FinOpsWireFigures.Mb(r.CurrentMb),
+        peak_24h_mb = FinOpsWireFigures.Mb(r.Peak24hMb),
         warning = r.Warning,
     };
 
@@ -93,7 +93,7 @@ public sealed partial class DarlingMcpFinOpsTools
             category = r.Category,
             total_wait_time_ms = r.TotalWaitTimeMs,
             waiting_tasks = r.WaitingTasks,
-            pct_of_total = r.PctOfTotal,
+            pct_of_total = FinOpsWireFigures.Pct(r.PctOfTotal),
             top_wait_type = r.TopWaitType,
             top_wait_time_ms = r.TopWaitTimeMs,
             est_cost_usd = OptimizationCostShare(r.TotalWaitTimeMs, total, monthly, hoursBack),
@@ -108,9 +108,9 @@ public sealed partial class DarlingMcpFinOpsTools
         {
             database_name = r.DatabaseName,
             total_cpu_ms = r.TotalCpuMs,
-            avg_cpu_ms_per_exec = r.AvgCpuMsPerExec,
+            avg_cpu_ms_per_exec = FinOpsWireFigures.Clean(r.AvgCpuMsPerExec),
             total_reads = r.TotalReads,
-            avg_reads_per_exec = r.AvgReadsPerExec,
+            avg_reads_per_exec = FinOpsWireFigures.Clean(r.AvgReadsPerExec),
             executions = r.Executions,
             /* #5320: judged on the whole statement, then cut to the 200 characters the SQL preview carries. */
             query_preview = McpHelpers.StatementPreview(r.FullQueryText, 200),
@@ -124,11 +124,11 @@ public sealed partial class DarlingMcpFinOpsTools
         rows.OrderBy(r => r.Day).Select(r => (object)new
         {
             day = r.Day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-            avg_granted_mb = r.AvgGrantedMb,
-            avg_used_mb = r.AvgUsedMb,
-            efficiency_pct = r.EfficiencyPct,
-            peak_granted_mb = r.PeakGrantedMb,
-            wasted_mb = r.AvgGrantedMb - r.AvgUsedMb,
+            avg_granted_mb = FinOpsWireFigures.Mb(r.AvgGrantedMb),
+            avg_used_mb = FinOpsWireFigures.Mb(r.AvgUsedMb),
+            efficiency_pct = FinOpsWireFigures.Pct(r.EfficiencyPct),
+            peak_granted_mb = FinOpsWireFigures.Mb(r.PeakGrantedMb),
+            wasted_mb = FinOpsWireFigures.Mb(r.AvgGrantedMb - r.AvgUsedMb),
             total_grantees = r.TotalGrantees,
             total_waiters = r.TotalWaiters,
             timeout_errors = r.TimeoutErrors,
@@ -169,24 +169,39 @@ public sealed partial class DarlingMcpFinOpsTools
         if (gates.All(g => g != null))
             return idleGate!;
         var counts = new[] { idle.Count, tempdb.Count, waits.Count, queries.Count, grants.Count };
+        /* #7010: the hours_back window reads wait_stats (wait categories) and query_stats (expensive queries); the other sections read their own fixed
+           spans (7 days, the tempdb and memory-grant hours) and say so in their window fields. The notice is the LATEST of the two floors. The
+           not_collected answer above stays bare. */
+        string[] windowedTables = ["wait_stats", "query_stats"];
         if (IsBareEmpty(counts, gates))
-            return McpHelpers.Status("empty",
-                "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.");
+        {
+            var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", true, ct);
+            /* #7459: with idle coverage missing, nothing read every day of the span, so the answer is unavailable, the word the idle_databases section
+               gives on the path below. A covered server with nothing to show stays empty. */
+            return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow,
+                DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(idleRead.Covered ? "empty" : "unavailable",
+                    "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.", noRows.AsHints()), noRows), ct);
+        }
+
+        var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, windowedTables, "wait_stats and query_stats", false, ct);
 
         var monthly = await FinOpsUtilizationFigures.GetMonthlyCostUsdAsync(postgres, resolved.ServerId, timeout, ct);
         var hasCost = monthly > 0m;
 
         var idleOrdered = OrderIdleDatabases(idle);
-        return JsonSerializer.Serialize(new
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = OptimizationView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             monthly_cost_usd = hasCost ? monthly : (decimal?)null,
             cost_reason = hasCost ? null : "monthly cost not set",
             idle_databases = new
             {
-                status = SectionStatus(idleGate, idle.Count),
+                status = IdleSectionStatus(idleGate, idle.Count, idleRead.Covered),
                 message = idleGate != null ? NotCollectedMessage(idleGate) : idleRead.Covered ? null : DarlingFinOpsOptimizationReader.IdleDatabasesEmptyText(false),
                 coverage = idleRead.Covered,
                 window_days = IdleDatabaseWindowDays,
@@ -223,7 +238,7 @@ public sealed partial class DarlingMcpFinOpsTools
                 window_hours = MemoryGrantWindowHours,
                 rows = MemoryGrantRows(grants),
             },
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>
@@ -235,4 +250,11 @@ public sealed partial class DarlingMcpFinOpsTools
 
     private static string SectionStatus(string? gate, int rowCount) =>
         gate != null ? "not_collected" : rowCount == 0 ? "empty" : "ok";
+
+    /// <summary>
+    /// #7459: the idle_databases word. Without seven days of query-stats coverage the section cannot say which databases are idle, so it
+    /// answers <c>unavailable</c> (its message says why) and not <c>empty</c>, which is reserved for a look that found no idle database.
+    /// </summary>
+    internal static string IdleSectionStatus(string? gate, int rowCount, bool covered) =>
+        gate == null && rowCount == 0 && !covered ? "unavailable" : SectionStatus(gate, rowCount);
 }

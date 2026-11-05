@@ -102,7 +102,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -167,7 +167,7 @@ CREATE TRIGGER trg_plan_regression_daily_late
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -251,7 +251,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -296,7 +296,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -348,7 +348,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -393,7 +393,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -434,7 +434,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var role = "qsp_reader_" + Guid.NewGuid().ToString("N")[..12];
         var bodySucceeded = false;
         NpgsqlConnection? connection = null;
@@ -494,7 +494,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -570,7 +570,7 @@ FROM generate_series(1, 50) AS g", ct);
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -603,7 +603,7 @@ SELECT -5571901, 'trg', 900000, 1, NULL, 900000, {0}, {0}, 'ph', 'qh', 1, 1, 1, 
     {
         var ct = TestContext.Current.CancellationToken;
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #5571 rung's live facts.");
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {

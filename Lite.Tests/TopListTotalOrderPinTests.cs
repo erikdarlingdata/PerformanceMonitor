@@ -47,11 +47,11 @@ public sealed class TopListTotalOrderPinTests
     {
         var sql = MethodText("Lite/Services/LocalDataService.QueryStore.cs", "GetQueryStoreTopQueriesAsync");
 
-        Assert.Contains("AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC, " + QueryStoreKey + "\n", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CAST(avg_duration_us AS DOUBLE PRECISION) * execution_count) DESC, " + QueryStoreKey + "\n", sql, StringComparison.Ordinal);
         Assert.Contains("ROW_NUMBER() OVER (ORDER BY r.total_executions * r.avg_duration_ms DESC, r.database_name, r.query_id, r.plan_id, r.query_hash, r.execution_type_desc, r.replica_role) AS page_ord", sql, StringComparison.Ordinal);
         /* #5381: the limit moved to code, after the WAITFOR filter, so the statement now ends on the page order; the total order is pinned by the page_ord line above. */
         Assert.Contains("\nORDER BY p.page_ord", sql, StringComparison.Ordinal);
-        AssertNoRankingOrderEndsOnTheMetric(sql, @"ORDER BY (?:SUM\(execution_count\) \*|r\.total_executions \*)[^\n]*");
+        AssertNoRankingOrderEndsOnTheMetric(sql, @"ORDER BY (?:SUM\(CAST\(avg_duration_us|r\.total_executions \*)[^\n]*");
     }
 
     private static void AssertNoRankingOrderEndsOnTheMetric(string sql, string rankingOrderPattern)

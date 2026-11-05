@@ -57,25 +57,31 @@ public sealed partial class DarlingMcpFinOpsTools
                 return gated;
             }
 
-            return McpHelpers.Status("empty",
-                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.");
+            /* #7010: the window-floor notice of the two tables the view windows (the not_collected answer above stays bare). */
+            var noRows = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", true, ct);
+            return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, DateTime.UtcNow, McpHelpers.Status("empty",
+                    $"No query statistics or file I/O were collected for this server in the last {hoursBack} hours, so there is no per-database usage to show.", noRows.AsHints()), noRows, ct);
         }
 
         var ordered = OrderDatabaseRows(rows);
         var (byTotal, byAvg) = await DarlingFinOpsDatabaseResourcesReader.GetTopResourceConsumersAsync(
             postgres, resolved.ServerId, rollups, coverage, cutoff, McpCommandDeadlines.ReadSeconds, limit, ct);
 
-        return JsonSerializer.Serialize(new
+        var notice = await ViewWindowNoticeAsync(postgres, resolved.ServerName, hoursBack, ["query_stats", "file_io_stats"], "query_stats and file_io_stats", false, ct);
+        return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
         {
             server = resolved.DisplayName,
             view = DatabaseResourcesView,
             hours_back = hoursBack,
+            effective_start = notice.EffectiveStart,
+            window_truncated = notice.WindowTruncated,
+            truncation_note = notice.TruncationNote,
             database_count = ordered.Count,
             truncated = ordered.Count > MaxDatabaseRows,
             rows = ordered.Take(MaxDatabaseRows).Select(DatabaseResourcesRow).ToList(),
             top_by_total = byTotal.Select(TopByTotalRow).ToList(),
             top_by_avg = byAvg.Select(TopByAvgRow).ToList(),
-        }, McpHelpers.JsonOptions);
+        }, McpHelpers.JsonOptions), notice);
     }
 
     /// <summary>One database-resources row in the wire shape: snake_case keys, no cost fields.</summary>
@@ -87,11 +93,11 @@ public sealed partial class DarlingMcpFinOpsTools
         physical_reads = r.PhysicalReads,
         logical_writes = r.LogicalWrites,
         execution_count = r.ExecutionCount,
-        io_read_mb = r.IoReadMb,
-        io_write_mb = r.IoWriteMb,
+        io_read_mb = FinOpsWireFigures.Clean(r.IoReadMb),
+        io_write_mb = FinOpsWireFigures.Clean(r.IoWriteMb),
         io_stall_ms = r.IoStallMs,
-        cpu_share_pct = r.PctCpuShare,
-        io_share_pct = r.PctIoShare,
+        cpu_share_pct = FinOpsWireFigures.Clean(r.PctCpuShare),
+        io_share_pct = FinOpsWireFigures.Clean(r.PctIoShare),
     };
 
     /// <summary>One top-by-total-CPU row in the wire shape.</summary>
@@ -100,19 +106,19 @@ public sealed partial class DarlingMcpFinOpsTools
         database_name = r.DatabaseName,
         cpu_time_ms = r.CpuTimeMs,
         execution_count = r.ExecutionCount,
-        io_total_mb = r.IoTotalMb,
-        cpu_share_pct = r.PctCpu,
-        io_share_pct = r.PctIo,
+        io_total_mb = FinOpsWireFigures.Clean(r.IoTotalMb),
+        cpu_share_pct = FinOpsWireFigures.Clean(r.PctCpu),
+        io_share_pct = FinOpsWireFigures.Clean(r.PctIo),
     };
 
     /// <summary>One top-by-CPU-per-execution row in the wire shape; <c>AvgCpuMs</c> holds the unrounded average on these rows (#5644 W4).</summary>
     internal static object TopByAvgRow(TopResourceConsumer r) => new
     {
         database_name = r.DatabaseName,
-        avg_cpu_ms = r.AvgCpuMs,
+        avg_cpu_ms = FinOpsWireFigures.Clean(r.AvgCpuMs),
         execution_count = r.ExecutionCount,
         total_cpu_ms = r.TotalCpuTimeMs,
-        io_total_mb = r.IoTotalMb,
-        avg_io_mb = r.AvgIoMb,
+        io_total_mb = FinOpsWireFigures.Clean(r.IoTotalMb),
+        avg_io_mb = FinOpsWireFigures.Clean(r.AvgIoMb),
     };
 }

@@ -386,6 +386,37 @@ public sealed class FleetGateSelfAlertTests
         new(run, skipped, QueueWaits: 12, QueueWaitTotal: TimeSpan.FromSeconds(6), QueueWaitMax: TimeSpan.FromSeconds(2), GateWidth: 4, WindowEndUtc: end);
 
     [Fact]
+    public async Task HoldsForThirtyMinutes_WritingOneHeldRow_ThenPagesOnce()
+    {
+        /* #7086 part 4: the fleet gate is evaluated every minute. Twenty minutes in: one held row, no page, and no page-cooldown
+           stamp. Thirty minutes in, the page goes out once, then follows the shared repeat policy as before. */
+        var h = new DarlingSelfAlertTests.Harness();
+        h.HoldSelfHealth = true;
+        var e = h.Build();
+
+        for (var minute = 0; minute <= 20; minute++)
+        {
+            await e.ApplyFleetGateAsync(Report(run: 380, skipped: 20, h.Now), Ct);
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        Assert.Equal(DarlingSelfAlertEvaluator.FleetGateMetric, held.MetricName);
+
+        for (var minute = 21; minute <= 35; minute++)
+        {
+            await e.ApplyFleetGateAsync(Report(run: 380, skipped: 20, h.Now), Ct);
+            h.Now = h.Now.AddMinutes(1);
+        }
+
+        var pages = h.Deliverer.Outcomes.Where(o => o.Hold is null).ToList();
+        var page = Assert.Single(pages);
+        Assert.Equal(DarlingSelfAlertEvaluator.FleetGateMetric, page.MetricName);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
     public async Task FiresAtFivePercentAndTwentySlots_NamingTheCountsTheGateWidthAndTheHour()
     {
         var h = new DarlingSelfAlertTests.Harness();

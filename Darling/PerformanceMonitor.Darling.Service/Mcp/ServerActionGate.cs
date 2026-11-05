@@ -85,7 +85,7 @@ internal static class ServerActionGate
 
         var hooks = new ServerActionHooks
         {
-            LoadLevels = (connection, _, ct) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, ct),
+            LoadRoutes = (connection, _, ct) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, ct),
             ReadCredential = (serverId, ct) => store.ReadServerCredentialStateAsync(ownerSource, serverId, ct),
         };
         return await store.AuthorizeServerActionAsync(new ServerActionCall(tool, serverAction, action!, target, agentTokenName), hooks, cancellationToken);

@@ -73,6 +73,14 @@ internal sealed class ServiceInvestigationEventSends(
 /// twice, and a post that fails is logged and not retried (the receiver can catch up through the MCP long-poll, which reads
 /// the same journal). A route with no generic URL gets the mark with the reason and no post.</para>
 ///
+/// <para><b>Report notice (#6979).</b> A report made in the last <see cref="ReportNoticeWindow"/> whose route's
+/// <c>report_notice</c> is not <c>off</c>, and that has no notice mark, goes to the route's Slack and Teams destinations when
+/// the setting takes it: <c>all</c> takes every report, <c>needs_person_or_change</c> a <c>needs_person</c> verdict or a request
+/// with an agent change. The mark (<c>report_notice:&lt;request_id&gt;</c>) is written first and the send made only when this pass
+/// wrote it; a failed send is logged and not retried. The destinations resolve as an alert's do (<see cref="NotificationRouter"/>,
+/// the settings' own channel when the route has none); a disabled route sends nothing. The root cause and each change's object are
+/// masked at <c>mcp.dataDetail</c>.</para>
+///
 /// <para><b>Wake.</b> A pass that found an undelivered event wakes every long-poll waiter, so a <c>resolved</c>,
 /// <c>expired</c>, <c>claims_exhausted</c> or <c>evidence_ready</c> event reaches a waiting agent within one pass; the
 /// dispatcher wakes the route at once for <c>opened</c> and an evented <c>joined</c>.</para>
@@ -85,6 +93,9 @@ public sealed class InvestigationEventDelivery
     /// <summary>The most events, and the most expiries, one pass takes.</summary>
     public const int BatchSize = 100;
 
+    /// <summary>#6979: how far back a pass reads reports for a notice. A route switched to <c>all</c> does not post the history.</summary>
+    public static readonly TimeSpan ReportNoticeWindow = TimeSpan.FromMinutes(30);
+
     /// <summary>The notice's title (the self-alert's metric name).</summary>
     public const string NoticeTitle = AlertFamily.InvestigationUnansweredMetric;
 
@@ -94,9 +105,19 @@ public sealed class InvestigationEventDelivery
     private readonly InvestigationOpenSignal? _signal;
     private readonly ILogger _logger;
     private readonly Func<DateTime> _utcNow;
+    private readonly IReportNoticeSends? _reportNotices;
+    private readonly IAlertSettings? _defaults;
+    private readonly McpDataDetail _dataDetail;
+    private readonly Func<string> _baseUrl;
 
+    /// <param name="reportNotices">#6979: sends a report notice to one Slack or Teams destination; null sends none.</param>
+    /// <param name="defaults">#6979: the settings' channels, the parent default a route with no channel of its own falls to.</param>
+    /// <param name="dataDetail">#6979: the <c>mcp.dataDetail</c> level the notice's text is masked at; the strictest unless told.</param>
+    /// <param name="baseUrl">#6979: the web dashboard's public base URL (empty for no links), read per notice.</param>
     public InvestigationEventDelivery(InvestigationRequestStore store, Func<IReadOnlyList<NotificationRoute>> routes,
-        IInvestigationEventSends sends, InvestigationOpenSignal? signal, ILogger logger, Func<DateTime>? utcNow = null)
+        IInvestigationEventSends sends, InvestigationOpenSignal? signal, ILogger logger, Func<DateTime>? utcNow = null,
+        IReportNoticeSends? reportNotices = null, IAlertSettings? defaults = null,
+        McpDataDetail dataDetail = McpDataDetail.MetadataOnly, Func<string>? baseUrl = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _routes = routes ?? throw new ArgumentNullException(nameof(routes));
@@ -104,11 +125,15 @@ public sealed class InvestigationEventDelivery
         _signal = signal;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _reportNotices = reportNotices;
+        _defaults = defaults;
+        _dataDetail = dataDetail;
+        _baseUrl = baseUrl ?? (() => "");
     }
 
-    /// <summary>One pass: fallbacks, then event posts. Answers how many fallbacks and posts this pass sent. Throws what the
-    /// store throws; a send's failure is logged.</summary>
-    public async Task<(int Fallbacks, int Posted)> RunOnceAsync(CancellationToken cancellationToken)
+    /// <summary>One pass: fallbacks, then event posts, then report notices. Answers how many fallbacks, posts and report notices
+    /// this pass sent. Throws what the store throws; a send's failure is logged.</summary>
+    public async Task<(int Fallbacks, int Posted, int Notices)> RunOnceAsync(CancellationToken cancellationToken)
     {
         var since = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc) - Lookback;
         var routes = _routes();
@@ -137,7 +162,78 @@ public sealed class InvestigationEventDelivery
             }
         }
 
-        return (fallbacks, posted);
+        var notices = await NoticePassAsync(routes, cancellationToken);
+        return (fallbacks, posted, notices + await ProposalNoticePassAsync(routes, cancellationToken));
+    }
+
+    /// <summary>#7109: how far back a pass reads proposal creations for a notice. A proposal expires after an hour, so a service that was down
+    /// longer than half of it does not announce a proposal with little time left.</summary>
+    public static readonly TimeSpan ProposalNoticeWindow = TimeSpan.FromMinutes(30);
+
+    /// <summary>#7109: the reason of the mark a proposal gets when its route has no notice channel.</summary>
+    internal const string NoProposalNoticeDestination = "no_destination";
+
+    /// <summary>
+    /// #7109: one notice for each new proposal. The proposal's <c>proposal_created</c> journal row drives it (a retry that returns the
+    /// same proposal writes none), the once mark is written before the send, and a pass that finds the mark sends nothing. The notice goes to
+    /// the email, Teams and Slack destinations of the request's route and carries the kind, the server and the link, and the sentence when
+    /// nobody can approve (<see cref="ProposalNotice"/>). A route with no channel gets the mark and no send. Answers how many proposals
+    /// reached at least one channel.
+    /// </summary>
+    private async Task<int> ProposalNoticePassAsync(IReadOnlyList<NotificationRoute> routes, CancellationToken cancellationToken)
+    {
+        var since = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc) - ProposalNoticeWindow;
+        var sent = 0;
+        foreach (var candidate in await _store.PendingProposalNoticesAsync(since, BatchSize, cancellationToken))
+        {
+            var route = routes.FirstOrDefault(r => r.RouteId == candidate.RouteId);
+            if (route is null || !route.Enabled)
+            {
+                continue;
+            }
+
+            var targets = DarlingAlertDeliverer.NoticeTargets(route);
+            if (targets.Count == 0)
+            {
+                await _store.MarkProposalNoticeAsync(candidate, NoProposalNoticeDestination, cancellationToken);
+                continue;
+            }
+
+            /* The sentence is read before the mark, so a read that fails is tried again next pass instead of losing the notice. */
+            var approval = await _store.RequestApprovalAsync(candidate.RequestId,
+                (connection, _, token) => Mcp.DarlingAgentActionGate.LoadRoutesAsync(connection, _logger, token), cancellationToken);
+            var nobody = approval is { } state
+                && await _store.NobodyCanApproveAsync(candidate.ServerId, InvestigationRequestStore.ServerActionForTool(candidate.Tool), state.SinglePerson, cancellationToken);
+            if (!await _store.MarkProposalNoticeAsync(candidate, "sent", cancellationToken))
+            {
+                continue;
+            }
+
+            var (currentValue, detail) = ProposalNotice.Build(candidate, _baseUrl(), nobody);
+            try
+            {
+                var reached = await _sends.SendNoticeAsync(targets, ProposalNotice.Title, candidate.ServerName, currentValue, detail, cancellationToken);
+                if (reached.Count > 0)
+                {
+                    sent++;
+                }
+                else
+                {
+                    _logger.LogWarning("Proposal notice for proposal {ProposalId} reached no channel", candidate.ProposalId);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                /* Not retried: the mark is written, and the proposal stays on the Viewer and the web page. */
+                _logger.LogWarning("Proposal notice for proposal {ProposalId} was not delivered: {Message}", candidate.ProposalId, ex.Message);
+            }
+        }
+
+        return sent;
     }
 
     private async Task<bool> FallBackAsync(
@@ -238,6 +334,198 @@ public sealed class InvestigationEventDelivery
 
         return true;
     }
+
+    private const string NeedsPersonVerdict = "needs_person";
+
+    /// <summary>#6979: the reason of the mark a qualifying report gets when its route has no Slack or Teams destination.</summary>
+    internal const string NoReportNoticeDestination = "no_destination";
+
+    /// <summary>#6979: the report notices this pass sends. Answers how many reports reached at least one channel.</summary>
+    private async Task<int> NoticePassAsync(IReadOnlyList<NotificationRoute> routes, CancellationToken cancellationToken)
+    {
+        if (_reportNotices is null || _defaults is null)
+        {
+            return 0;
+        }
+
+        var since = DateTime.SpecifyKind(_utcNow(), DateTimeKind.Utc) - ReportNoticeWindow;
+        var sent = 0;
+        foreach (var candidate in await _store.PendingReportNoticesAsync(since, BatchSize, cancellationToken))
+        {
+            if (await NoticeAsync(candidate, routes, _reportNotices, _defaults, cancellationToken))
+            {
+                sent++;
+            }
+        }
+
+        return sent;
+    }
+
+    private async Task<bool> NoticeAsync(ReportNoticeCandidate candidate, IReadOnlyList<NotificationRoute> routes,
+        IReportNoticeSends sends, IAlertSettings defaults, CancellationToken cancellationToken)
+    {
+        if (!ReportNoticeQualifies(candidate))
+        {
+            return false;
+        }
+
+        /* A route that is gone or disabled writes no mark (the SQL leaves a disabled one out): a gone route's report stays a
+           candidate for the rest of its window. */
+        var route = routes.FirstOrDefault(r => r.RouteId == candidate.RouteId);
+        if (route is null || !route.Enabled)
+        {
+            return false;
+        }
+
+        /* A route with nowhere to send writes a mark that says so, so the report is not read again on every pass for the rest of its
+           window and takes no place in the page. A destination set later does not send a notice for it. */
+        var targets = ReportNoticeTargets(route, defaults);
+        if (targets.Count == 0)
+        {
+            await _store.MarkReportNoticeAsync(candidate, NoReportNoticeDestination, cancellationToken);
+            return false;
+        }
+
+        /* The changes are read before the mark, so a read that fails is tried again next pass instead of losing the notice. */
+        var changes = candidate.HasChange ? await _store.ChangesForRequestAsync(candidate.RequestId, cancellationToken) : [];
+        if (!await _store.MarkReportNoticeAsync(candidate, candidate.ReportNotice, cancellationToken))
+        {
+            return false;
+        }
+
+        var content = new ReportNoticeContent(
+            candidate.RequestId, candidate.Verdict, candidate.ServerName, candidate.Metric,
+            RootCauseFirstLine(candidate.RootCause, _dataDetail),
+            changes.Select(c => new ReportNoticeChange(c.Tool, ChangeObject(c.TargetId, c.Database, _dataDetail), ChangeResultWord(c.Result))).ToList(),
+            _baseUrl() ?? "");
+        var reached = 0;
+        foreach (var (channel, destination) in targets)
+        {
+            string? error;
+            try
+            {
+                error = await sends.TrySendReportNoticeAsync(channel, destination, content, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+            }
+
+            if (error is null)
+            {
+                reached++;
+            }
+            else
+            {
+                /* Not retried: the mark is written, and the report stays on the Investigations page. */
+                _logger.LogWarning("Report notice for investigation request {RequestId} was not delivered to {Channel}: {Error}",
+                    candidate.RequestId, channel, error);
+            }
+        }
+
+        return reached > 0;
+    }
+
+    /// <summary>#6979: whether the route's setting takes this report: <c>all</c> every report, <c>needs_person_or_change</c> a
+    /// <c>needs_person</c> verdict or a request with at least one agent change, <c>off</c> (or a word nobody knows) none.</summary>
+    internal static bool ReportNoticeQualifies(ReportNoticeCandidate candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return NotificationRouteKinds.NormalizeReportNotice(candidate.ReportNotice) switch
+        {
+            NotificationRouteKinds.ReportNoticeAll => true,
+            NotificationRouteKinds.ReportNoticeNeedsPersonOrChange =>
+                candidate.HasChange || string.Equals(candidate.Verdict, NeedsPersonVerdict, StringComparison.Ordinal),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// #6979: the Slack and Teams destinations of a report notice. The route's own URL answers first and the settings' channel
+    /// (<paramref name="defaults"/>, when it is switched on) is the parent for a route with none of its own, as it is for an alert.
+    /// The route is NOT matched against the request's metric, scope or tag again: a route that was edited, or a server whose tags
+    /// changed, while the request was open must not send the notice to the parent channel instead of the route's own. Nothing for a
+    /// disabled route, and nothing for a channel the route turns off (<see cref="NotificationRoute.IsOffFor"/>). Email, the generic
+    /// URL and PagerDuty carry no notice.
+    /// </summary>
+    internal static IReadOnlyList<(string Channel, string Destination)> ReportNoticeTargets(
+        NotificationRoute route, IAlertSettings defaults)
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        ArgumentNullException.ThrowIfNull(defaults);
+        var targets = new List<(string Channel, string Destination)>();
+        if (!route.Enabled)
+        {
+            return targets;
+        }
+
+        (string Channel, string? Own, string? Parent)[] channels =
+        [
+            (NotificationRouter.TeamsChannel, route.TeamsUrl, defaults.TeamsWebhookEnabled ? defaults.TeamsWebhookUrl : null),
+            (NotificationRouter.SlackChannel, route.SlackUrl, defaults.SlackWebhookEnabled ? defaults.SlackWebhookUrl : null),
+        ];
+        foreach (var (channel, own, parent) in channels)
+        {
+            var destination = string.IsNullOrWhiteSpace(own) ? parent : own;
+            if (!route.IsOffFor(channel) && !string.IsNullOrWhiteSpace(destination))
+            {
+                targets.Add((channel, destination.Trim()));
+            }
+        }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// #6979: the first non-blank line of the root cause at <paramref name="mode"/>. <c>maskLiterals</c> masks the whole text before the
+    /// line is cut, because a quoted literal that runs over a line break is only recognised whole; <c>metadataOnly</c> leaves the root
+    /// cause out (null), as the MCP tools withhold a report's root cause there.
+    /// </summary>
+    internal static string? RootCauseFirstLine(string? rootCause, McpDataDetail mode)
+    {
+        if (mode == McpDataDetail.MetadataOnly || string.IsNullOrWhiteSpace(rootCause))
+        {
+            return null;
+        }
+
+        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskProse(rootCause) : rootCause;
+        foreach (var line in text.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length > 0)
+            {
+                return trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// #6979: a change's object at <paramref name="mode"/>: the target id, with the database when the tool named one. Object and
+    /// database names stay in the notice at every level (the MCP tools keep them, <c>McpDataDetail</c>), but a name can carry a
+    /// literal (a plan guide's name, a threshold key), so both go through <see cref="McpDataDetailMasker.MaskProse"/> (#7106) at
+    /// <c>maskLiterals</c> and at <c>metadataOnly</c>, which never hands out more than <c>maskLiterals</c> does. An all-digit id
+    /// (a rule, plan or session id the store or the server assigned) is kept: it is no literal of collected data, and masked it
+    /// would read <c>?</c>.
+    /// </summary>
+    internal static string ChangeObject(string targetId, string? database, McpDataDetail mode)
+    {
+        string Mask(string value) => mode == McpDataDetail.Full || value.All(char.IsAsciiDigit) ? value : McpDataDetailMasker.MaskProse(value);
+        var id = Mask(targetId ?? "");
+        return string.IsNullOrWhiteSpace(database) ? id : id + " in " + Mask(database);
+    }
+
+    private static string ChangeResultWord(AgentChangeResult result) => result switch
+    {
+        AgentChangeResult.Done => "done",
+        AgentChangeResult.Failed => "failed",
+        _ => "result unknown",
+    };
 
     /// <summary>The <c>webhook-id</c> of an event: its journal row's <c>event_id</c> (D6), so a receiver can drop a repeat.</summary>
     public static string MessageId(Guid eventId) => eventId.ToString("D");

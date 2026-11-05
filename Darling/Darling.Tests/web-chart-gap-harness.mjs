@@ -71,10 +71,12 @@ globalThis.location = { hash: "#/server/A/cpu" };
 
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-gap-")));
 let charts;
+let slicer;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
+  slicer = await import(pathToFileURL(path.join(scratch, "time-slicer.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -171,6 +173,42 @@ out.eventsThreshold = String(charts.gapThresholdMs(events.map((m) => m * MIN)));
 /* a 1 minute series that is missing a quarter of its samples at random is still sampled: it breaks at the 7 hour silence */
 out.jitterGap = marks(draw(withGap.filter((m, i) => i % 5 !== 3), { series: [{ key: "a", label: "A", color: "#f00" }] }));
 
+/* #7508: a series that joins two grains. The Query Store Duration Trend is one point per hour, then one point per interval from the
+   seam (routing.raw_from): 22 hourly points, then 90 one-minute points. One threshold for the whole series reads every hourly step as a
+   gap once the minute points outnumber them; with the seam each side is judged against its own spacing. */
+const seamAt = 22 * 60;
+const oneSeries = [{ key: "a", label: "A", color: "#f00" }];
+const hourly = seq(0, 21 * 60, 60);
+const raw = seq(seamAt, seamAt + 89);
+const seamExtra = { series: oneSeries, gapSeamMs: T0 + seamAt * MIN };
+out.seamJoined = marks(draw(hourly.concat(raw), seamExtra));
+out.seamAbsent = marks(draw(hourly.concat(raw), { series: oneSeries }));
+out.seamArea = marks(draw(hourly.concat(raw), { ...seamExtra, mode: "area" }));
+/* a 6 hour outage inside the hourly side, and a 20 minute one inside the raw side, each still break the line */
+out.seamHourlyOutage = marks(draw(seq(0, 10 * 60, 60).concat(seq(16 * 60, 21 * 60, 60), raw), seamExtra));
+out.seamRawOutage = marks(draw(hourly.concat(seq(seamAt, seamAt + 29), seq(seamAt + 50, seamAt + 89)), seamExtra));
+/* a seam with every point on one side of it, or a bad one, leaves the plain rule */
+out.seamAllRaw = marks(draw(seq(0, 119), { series: oneSeries, gapSeamMs: T0 + 500 * MIN }));
+out.seamAllRawOutage = marks(draw(withGap, { series: oneSeries, gapSeamMs: T0 }));
+out.seamBad = marks(draw(withGap, { series: oneSeries, gapSeamMs: NaN }));
+/* a side too short for a spacing of its own borrows the other side's, so an outage next to it still breaks. Two hourly points, a
+   19 hour silence, then one-minute points. And 22 hourly points, then 2 raw points 19 hours apart. */
+const silenceEnd = 20 * 60;
+out.seamShortHourlyOutage = marks(draw([0, 60].concat(seq(silenceEnd, silenceEnd + 59)), { series: oneSeries, gapSeamMs: T0 + silenceEnd * MIN }));
+out.seamShortRawOutage = marks(draw(hourly.concat([seamAt, seamAt + 19 * 60]), seamExtra));
+/* neither side can judge: the seam adds nothing */
+const bothShort = [0, 60, silenceEnd, silenceEnd + 1].map((m) => m * MIN);
+out.seamBothShortIsPlain = charts.gapThresholdMs(bothShort, silenceEnd * MIN) === charts.gapThresholdMs(bothShort);
+/* a seamed threshold is a function of a pair's two times; a plain one is a number */
+const at = (t, x, y) => (typeof t === "function" ? t(x, y) : t);
+out.seamThreshold = {
+  plain: charts.gapThresholdMs(noGap.map((m) => m * MIN), null),
+  oneSide: charts.gapThresholdMs(noGap.map((m) => m * MIN), 500 * MIN),
+  hourlySide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), 0, 60 * MIN),
+  rawSide: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt + 5) * MIN, (seamAt + 6) * MIN),
+  crossing: at(charts.gapThresholdMs(hourly.concat(raw).map((m) => m * MIN), seamAt * MIN), (seamAt - 60) * MIN, seamAt * MIN),
+};
+
 out.threshold = {
   empty: String(charts.gapThresholdMs([])),
   one: String(charts.gapThresholdMs([0])),
@@ -178,6 +216,64 @@ out.threshold = {
   oneMinute: charts.gapThresholdMs(noGap.map((m) => m * MIN)),
   fifteenMinute: charts.gapThresholdMs(seq(0, 300, 15).map((m) => m * MIN)),
 };
+/* #7572: a trend whose reply states its bucket. A quiet file's 15 minute buckets with readings at 5:45 PM, 6:00 PM, 7:30 PM and 11:45 PM: the
+   steps (15 min, 90 min, 255 min) have no cadence of their own, so the series read as events and never broke. With the bucket the line breaks
+   at every step longer than one bucket: one line for 5:45-6:00, and a dot each for 7:30 and 11:45. */
+const quiet = [0, 15, 105, 360];
+out.bucketQuiet = marks(draw(quiet, { series: oneSeries, bucketMs: 15 * MIN }));
+out.bucketQuietNoBucket = marks(draw(quiet, { series: oneSeries }));
+out.bucketQuietArea = marks(draw(quiet, { series: oneSeries, bucketMs: 15 * MIN, mode: "area" }));
+out.bucketQuietStacked = marks(draw(quiet, { series: oneSeries, bucketMs: 15 * MIN, mode: "stacked" }));
+/* a series with every bucket present stays one line, and a null bucket in the middle (a figure-less row) breaks it the same way */
+out.bucketFull = marks(draw(seq(0, 90, 15), { series: oneSeries, bucketMs: 15 * MIN }));
+out.bucketNullMiddle = marks(charts.renderLineChart({
+  points: [0, 15, 30, 45, 60].map((m, i) => ({ t: iso(T0 + m * MIN), a: i === 2 ? null : 10 + i })),
+  xKey: "t", series: oneSeries, bucketMs: 15 * MIN,
+}));
+/* A collector scheduled every 5 minutes on a chart of 1 minute buckets: rows 5 minutes apart (some with no figure, which still mark a collection).
+   The rows' own cadence is the step, so it stays one line; the same rows judged by the bucket alone are all dots. */
+const slowTimes = seq(0, 120, 5);
+const slowStep = charts.bucketMsOf(1, slowTimes.map((m) => T0 + m * MIN));
+out.slowCollector = marks(draw(slowTimes, { series: oneSeries, bucketMs: slowStep }));
+out.slowCollectorStep = slowStep;
+/* ...and an outage (no rows from minute 60 to 90) still breaks it */
+const slowWithOutage = slowTimes.filter((m) => m < 60 || m > 90);
+out.slowCollectorOutage = marks(draw(slowWithOutage, { series: oneSeries, bucketMs: charts.bucketMsOf(1, slowWithOutage.map((m) => T0 + m * MIN)) }));
+/* a quiet file at 15 minute buckets whose rows (figure-less ones included) are every bucket keeps the bucket */
+out.quietRowsStep = charts.bucketMsOf(15, seq(0, 360, 15).map((m) => T0 + m * MIN));
+out.bucketThreshold = {
+  stated: charts.gapThresholdMs(quiet.map((m) => m * MIN), null, 15 * MIN),
+  ignoredWhenAbsent: String(charts.gapThresholdMs(quiet.map((m) => m * MIN), null, null)),
+  bad: String(charts.gapThresholdMs(quiet.map((m) => m * MIN), null, NaN)),
+  minutes: [charts.bucketMsOf(15), String(charts.bucketMsOf(null)), String(charts.bucketMsOf(0)), String(charts.bucketMsOf("x"))],
+};
+
+/* #7544: the range strips. 5 minute points for an hour, a 3 hour hole, then an hour more. */
+const stripWin = { startMs: T0, endMs: T0 + 8 * 60 * MIN };
+const stripAt = (minutes) => minutes.map((m, i) => ({ t: T0 + m * MIN, v: 1 + (i % 4) }));
+const holey = seq(0, 55, 5).concat(seq(240, 295, 5));
+const subpaths = (d) => (d.match(/M/g) || []).length;
+const shape = (p) => ({ lineRuns: subpaths(p.line), areaRuns: subpaths(p.area), dots: p.dots.length });
+out.stripHole = shape(slicer.stripPaths(stripAt(holey), stripWin, null, 5 * MIN));
+out.stripHoleDerived = shape(slicer.stripPaths(stripAt(holey), stripWin));
+out.stripNoHole = shape(slicer.stripPaths(stripAt(seq(0, 115, 5)), stripWin, null, 5 * MIN));
+/* a burst, then nothing for hours, then a lone mark (the Blocking strip's day): per-minute buckets, so a 3 hour step breaks it */
+out.stripBurst = shape(slicer.stripPaths(stripAt([0, 1, 2, 3, 4, 5, 240]), stripWin, null, MIN));
+out.stripOne = shape(slicer.stripPaths(stripAt([30]), stripWin, null, MIN));
+out.stripNever = shape(slicer.stripPaths(stripAt(holey), stripWin, null, Infinity));
+/* the seam of a two-grain strip (Query Store): hourly points, then minute points */
+const twoGrains = seq(0, 3 * 60, 60).concat(seq(4 * 60, 4 * 60 + 30));
+out.stripSeam = shape(slicer.stripPaths(stripAt(twoGrains), stripWin, null, { seamMs: T0 + 4 * 60 * MIN }));
+out.stripValues = [null, undefined, "", 0, "3.5", 7].map((v) => String(slicer.stripValue(v)));
+/* a query strip on a collector every 5 minutes, whose reply states a 1 minute bucket: still one line */
+out.stripSlowCollector = shape(slicer.stripPaths(stripAt(seq(0, 115, 5)), stripWin, null, slicer.stripGap({}, { bucket_minutes: 1 })));
+out.stripGaps = {
+  blocking: slicer.stripGap({ stepMs: 60000 }, { bucket_minutes: 10 }),
+  bucket: String(slicer.stripGap({}, { bucket_minutes: 10 })),
+  none: String(slicer.stripGap({}, {})),
+  seam: slicer.stripGap({ bucketed: false, seam: (d) => d.routing.raw_from }, { bucket_minutes: 60, routing: { raw_from: "2026-01-01T04:00:00" } }),
+};
+
 out.split = charts.splitAtGaps([0, 1, 2, 3, 4], [0, 1, 2, 100, 101], 10).map((r) => r.join(","));
 
 fs.rmSync(scratch, { recursive: true, force: true });

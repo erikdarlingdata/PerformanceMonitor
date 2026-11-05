@@ -27,7 +27,11 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of memory_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var memoryRelation = await HotTableHasServerAsync(connection, "memory_stats", serverId) ? "memory_stats" : "v_memory_stats";
+        command.CommandText = $@"
 SELECT
     collection_time,
     total_physical_memory_mb,
@@ -40,7 +44,7 @@ SELECT
     total_server_memory_mb,
     buffer_pool_mb,
     plan_cache_mb
-FROM v_memory_stats
+FROM {memoryRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -394,6 +398,95 @@ ORDER BY sample_time";
         return items;
     }
 
+    /// <summary>One notification's count over the whole window.</summary>
+    public sealed record MemoryPressureNotificationCount(string MemoryNotification, long Events, long MediumOrWorseEvents);
+
+    /// <summary>The page (time order, oldest first), whether the window held more, and the whole window's counts.</summary>
+    public sealed record MemoryPressureEventsPage(
+        List<MemoryPressureEventRow> Rows, bool Truncated, long TotalEvents, long MediumOrWorseEvents,
+        IReadOnlyList<MemoryPressureNotificationCount> ByNotification);
+
+    /// <summary>
+    /// #7516: the newest <paramref name="limit"/> memory pressure events of the window, put back in time order, with the whole
+    /// window's counts per notification (and of the samples with either indicator at 2 or more, the bar the chart draws). A server
+    /// under pressure writes thousands of samples a day, so get_memory_pressure_events pages them. The page is fetched at limit + 1
+    /// so the extra row proves truncation. The chart's <see cref="GetMemoryPressureEventsAsync"/> still reads every row.
+    /// </summary>
+    public async Task<MemoryPressureEventsPage> GetMemoryPressureEventsPageAsync(int serverId, int hoursBack, int limit, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
+
+        var fetched = new List<MemoryPressureEventRow>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = @"
+SELECT
+    sample_time,
+    memory_notification,
+    memory_indicators_process,
+    memory_indicators_system
+FROM v_memory_pressure_events
+WHERE server_id = $1
+AND   sample_time >= $2
+AND   sample_time <= $3
+ORDER BY sample_time DESC
+LIMIT $4";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            command.Parameters.Add(new DuckDBParameter { Value = (long)limit + 1 });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                fetched.Add(new MemoryPressureEventRow
+                {
+                    SampleTime = reader.GetDateTime(0),
+                    MemoryNotification = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    MemoryIndicatorsProcess = reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
+                    MemoryIndicatorsSystem = reader.IsDBNull(3) ? 0 : reader.GetInt32(3)
+                });
+            }
+        }
+
+        var byNotification = new List<MemoryPressureNotificationCount>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = @"
+SELECT
+    memory_notification,
+    COUNT(*) AS events,
+    COUNT(*) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
+FROM v_memory_pressure_events
+WHERE server_id = $1
+AND   sample_time >= $2
+AND   sample_time <= $3
+GROUP BY memory_notification
+ORDER BY memory_notification";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = startTime });
+            command.Parameters.Add(new DuckDBParameter { Value = endTime });
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                byNotification.Add(new MemoryPressureNotificationCount(
+                    reader.IsDBNull(0) ? "" : reader.GetString(0), reader.GetInt64(1), reader.GetInt64(2)));
+            }
+        }
+
+        var truncated = fetched.Count > limit;
+        var page = truncated ? fetched.GetRange(0, limit) : fetched;
+        page.Reverse();
+        long total = 0, medium = 0;
+        foreach (var n in byNotification)
+        {
+            total += n.Events;
+            medium += n.MediumOrWorseEvents;
+        }
+
+        return new MemoryPressureEventsPage(page, truncated, total, medium, byNotification);
+    }
+
     /// <summary>
     /// Gets the latest memory clerk breakdown.
     /// </summary>
@@ -403,11 +496,15 @@ ORDER BY sample_time";
         using var command = connection.CreateCommand();
         /* #3541 A10: collection_time rides on the row (same statement as the values), so get_memory_clerks
            can publish captured_at — every clerk of one snapshot shares it by construction. */
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of memory_clerks.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var clerksRelation = await HotTableHasServerAsync(connection, "memory_clerks", serverId) ? "memory_clerks" : "v_memory_clerks";
+        command.CommandText = $@"
 SELECT clerk_type, memory_mb, collection_time
-FROM v_memory_clerks
+FROM {clerksRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_clerks WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM {clerksRelation} WHERE server_id = $1)
 ORDER BY memory_mb DESC";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

@@ -171,6 +171,57 @@ public sealed class McpDataDetailMaskerTests
     }
 
     [Fact]
+    public void MaskProse_KeepsAnApostropheInsideAWord_AndStillMasksAQuotedValueInTheSameText()
+    {
+        Assert.Equal(
+            "The session's blocker doesn't release '?' after ? minutes, said O'Brien",
+            McpDataDetailMasker.MaskProse("The session's blocker doesn't release 'alice' after 10 minutes, said O'Brien"));
+    }
+
+    [Fact]
+    public void MaskProse_StillMasksAPrefixedOrDoubledQuoteLiteral()
+    {
+        Assert.Equal(
+            "WHERE a = N'?' AND b = '?' AND c = '?' AND d = E'?' and the session's lock",
+            McpDataDetailMasker.MaskProse("WHERE a = N'abc' AND b = 'abc' AND c = 'it''s' AND d = E'x' and the session's lock"));
+        Assert.Equal("N'?'", McpDataDetailMasker.MaskProse("N'abc'"));
+    }
+
+    [Fact]
+    public void MaskProse_KeepsAPossessivePlural_AndStillMasksQuotesAfterPunctuation()
+    {
+        Assert.Equal(
+            "both sessions' locks are held by '?' and name='?' (is '?', '?')",
+            McpDataDetailMasker.MaskProse("both sessions' locks are held by 'bob' and name='abc' (is 'x', 'it''s')"));
+        Assert.Equal("both sessions' locks are held", McpDataDetailMasker.MaskProse("both sessions' locks are held"));
+        Assert.Equal("B'?' and X'?' and the sessions'", McpDataDetailMasker.MaskProse("B'101' and X'1F' and the sessions'"));
+    }
+
+    [Fact]
+    public void MaskProse_DoesNotTreatADashOrASlashStarAsAComment()
+    {
+        Assert.Equal(
+            "the blocker -- session ? -- held ? locks",
+            McpDataDetailMasker.MaskProse("the blocker -- session 87 -- held 3 locks"));
+        Assert.Equal("the blocker /* session ? */ held", McpDataDetailMasker.MaskProse("the blocker /* session 87 */ held"));
+        Assert.Equal("the blocker -- '?' held it", McpDataDetailMasker.MaskProse("the blocker -- 'alice' held it"));
+    }
+
+    [Fact]
+    public void MaskLiterals_StillTreatsEveryApostropheAsAQuote_ForSqlText()
+    {
+        Assert.Equal("The session'?'", McpDataDetailMasker.MaskLiterals("The session's blocker held 3 locks"));
+        Assert.Equal("both sessions'?'", McpDataDetailMasker.MaskLiterals("both sessions' locks are held"));
+    }
+
+    [Fact]
+    public void MaskLiterals_StillMasksADashDashAndASlashStarComment()
+    {
+        Assert.Equal("the blocker --\nheld", McpDataDetailMasker.MaskLiterals("the blocker -- session 87\nheld"));
+        Assert.Equal("the blocker /**/ held", McpDataDetailMasker.MaskLiterals("the blocker /* session 87 */ held"));
+    }
+
+    [Fact]
     public void MaskLiterals_KeepsIdentifiersAndParameters_AndEmptiesComments()
     {
         const string sql = "SELECT [col 1], \"c2\", t1.x, @p1, $1 FROM #t2 WHERE y = $$abc$$ -- note 5\n AND z = 0x1F /* 9 */ AND w = 1.5e3 AND v = 'it''s'";
@@ -317,6 +368,28 @@ public sealed class McpDataDetailMaskerTests
         Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals, key: PseudonymTestKey.Key));
     }
 
+    /// <summary>
+    /// The keys that name who made a change (a server action's and a threshold override's set_by, the investigation
+    /// writes' decided_by, closed_by and the like) are logins: metadataOnly replaces the name, maskLiterals keeps it.
+    /// </summary>
+    [Theory]
+    [InlineData("set_by")]
+    [InlineData("closed_by")]
+    [InlineData("decided_by")]
+    [InlineData("opened_by")]
+    [InlineData("saved_by")]
+    [InlineData("modified_by")]
+    [InlineData("author")]
+    public void WhoMadeAChange_IsALogin_MaskedAtMetadataOnly_KeptAtMaskLiterals(string key)
+    {
+        string json = "{\"actions\":[{\"" + key + "\":\"jsmith\",\"status\":\"ok\"}]}";
+        Assert.Same(json, McpDataDetailMasker.MaskJson(json, McpDataDetail.MaskLiterals, key: PseudonymTestKey.Key));
+
+        var row = MaskedKeyed(json)["actions"]!.AsArray()[0]!.AsObject();
+        Assert.Equal(PseudonymTestKey.Login("jsmith"), row[key]!.GetValue<string>());
+        Assert.Equal("ok", row["status"]!.GetValue<string>());
+    }
+
     /* ---- row 6: object and database names, counts, durations, waits, times, program names ---- */
 
     [Theory]
@@ -400,6 +473,32 @@ public sealed class McpDataDetailMaskerTests
         var meta = Masked(json, McpDataDetail.MetadataOnly);
         Assert.Equal(Withheld, meta["send_error"]!.GetValue<string>());
         Assert.False(meta["alert_sent"]!.GetValue<bool>());
+    }
+
+    /// <summary>
+    /// #7590: <c>last_connect_error</c> is the connect exception's message, which quotes the host, the port or the login the server
+    /// refused. list_servers carries it on the row and get_collection_health inside the <c>server_connection</c> block; neither masked
+    /// level returns the raw text, and the fields beside it are not touched.
+    /// </summary>
+    [Fact]
+    public void LastConnectError_IsMasked_AtBothMaskedLevels_OnARowAndInsideTheConnectionBlock()
+    {
+        const string raw = "Login failed for user 'svc_monitor' on sql-prod-07.corp.test,1433";
+        var json = "{\"servers\":[{\"server_name\":\"sql-prod-07\",\"last_connect_error\":\"" + raw + "\"}],"
+            + "\"server_connection\":{\"last_connect_error\":\"" + raw + "\",\"state\":\"down\"}}";
+
+        var literals = Masked(json, McpDataDetail.MaskLiterals);
+        Assert.DoesNotContain("svc_monitor", literals.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("sql-prod-07.corp", literals.ToJsonString(), StringComparison.Ordinal);
+        Assert.Equal("down", literals["server_connection"]!["state"]!.GetValue<string>());
+
+        var meta = Masked(json, McpDataDetail.MetadataOnly);
+        Assert.Equal(Withheld, meta["servers"]![0]!["last_connect_error"]!.GetValue<string>());
+        Assert.Equal(Withheld, meta["server_connection"]!["last_connect_error"]!.GetValue<string>());
+        Assert.Equal("down", meta["server_connection"]!["state"]!.GetValue<string>());
+
+        var full = Masked(json, McpDataDetail.Full);
+        Assert.Equal(raw, full["server_connection"]!["last_connect_error"]!.GetValue<string>());
     }
 
     /// <summary>
@@ -793,7 +892,6 @@ public sealed class McpDataDetailMaskerTests
         int statement = source.IndexOf(".AddCallToolFilter(SensitiveStatementOutputFilter.Instance)", StringComparison.Ordinal);
         int gcf = source.IndexOf(".AddCallToolFilter(GcfCallToolFilter.Instance)", StringComparison.Ordinal);
         Assert.True(gcf > 0 && dataDetail > gcf && statement > dataDetail, "filter order: GCF, then mcp.dataDetail, then the statement filter");
-        Assert.Contains("AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail", source, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

@@ -234,7 +234,7 @@ public sealed class ComposeDataFloorLiveTests
 
         Assert.Empty(drawn.GetProperty("errors").EnumerateArray());
         var shown = Assert.Single(drawn.GetProperty("notices").EnumerateArray()).GetString();
-        Assert.StartsWith("partial window:", shown, StringComparison.Ordinal);
+        Assert.StartsWith("Partial window:", shown, StringComparison.Ordinal);
         Assert.DoesNotContain("UTC", shown, StringComparison.Ordinal);
         Assert.DoesNotContain(Minute(store.RecentFirstRow), shown, StringComparison.Ordinal);
     }

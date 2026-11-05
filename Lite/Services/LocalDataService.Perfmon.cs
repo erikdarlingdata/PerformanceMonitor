@@ -26,7 +26,11 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
+        /* #7216: the newest-snapshot lookup has no time bound, so through the v_ view it read every archived row of perfmon_stats.
+           The hot table holds the newest snapshot of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var perfmonRelation = await HotTableHasServerAsync(connection, "perfmon_stats", serverId) ? "perfmon_stats" : "v_perfmon_stats";
+        command.CommandText = $@"
 SELECT
     counter_name,
     instance_name,
@@ -34,11 +38,12 @@ SELECT
     delta_cntr_value,
     collection_time,
     cntr_type,
-    sample_interval_seconds
-FROM v_perfmon_stats
+    sample_interval_seconds,
+    object_name
+FROM {perfmonRelation}
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
-ORDER BY counter_name";
+AND   collection_time = (SELECT MAX(collection_time) FROM {perfmonRelation} WHERE server_id = $1)
+ORDER BY lower(counter_name), counter_name, instance_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
@@ -55,7 +60,8 @@ ORDER BY counter_name";
                 DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 CollectionTime = reader.GetDateTime(4),
                 CntrType = reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6)
+                SampleIntervalSeconds = reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                ObjectName = reader.IsDBNull(7) ? null : reader.GetString(7)
             });
         }
 
@@ -76,12 +82,13 @@ ORDER BY counter_name";
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
-SELECT DISTINCT counter_name
+/* #7550: DISTINCT may only order on what it selects, so the lower-cased name rides along as a second column and the reader ignores it. */
+SELECT DISTINCT counter_name, lower(counter_name) AS name_key
 FROM v_perfmon_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY counter_name";
+ORDER BY lower(counter_name), counter_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -377,6 +384,9 @@ public class PerfmonRow
     /// <summary>The seconds <see cref="DeltaValue"/> covers under the three-state rule (0 = no delta knowable, null
     /// on a gauge): the denominator of a rate row's per-second figure.</summary>
     public int? SampleIntervalSeconds { get; set; }
+
+    /// <summary>The perfmon object the counter belongs to (#7416). The same counter and instance can come from two objects, and the tool shows which.</summary>
+    public string? ObjectName { get; set; }
 }
 
 public class PerfmonTrendPoint

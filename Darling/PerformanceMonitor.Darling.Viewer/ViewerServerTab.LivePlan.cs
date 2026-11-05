@@ -187,7 +187,7 @@ public partial class ViewerServerTab
         catch (Exception ex)
         {
             HidePlanLoading();
-            MessageBox.Show($"Failed to fetch the live plan:\n\n{ex.Message}", "Cached Plan Error",
+            MessageBox.Show($"Could not fetch the live plan from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Cached Plan Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -257,7 +257,7 @@ public partial class ViewerServerTab
         catch (Exception ex)
         {
             HidePlanLoading();
-            MessageBox.Show($"Failed to fetch the live plan:\n\n{ex.Message}", "Cached Plan Error",
+            MessageBox.Show($"Could not fetch the live plan from server {_server.DisplayName}: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Cached Plan Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }

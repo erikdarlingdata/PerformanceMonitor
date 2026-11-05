@@ -65,9 +65,9 @@ jobs:
               - 'nuget.config'
               - 'NuGet.config'
               - '.github/workflows/build.yml'
-            # The shared PerformanceMonitor.* core libraries feed Lite, the Full Dashboard, AND
-            # Darling (verified via ProjectReference), so a change here fans out to all three.
-            # NOT the CLI Installer — it references only Installer.Core.
+            # The shared PerformanceMonitor.* core libraries feed Lite AND Darling (verified via
+            # ProjectReference), so a change here fans out to both. The deprecated Dashboard and Installer
+            # are frozen as a zip under deprecated/ and are no longer built or tested (#6973).
             #
             # Every area pattern says `dir/**/!(*.md)` — any non-markdown file under the
             # area — instead of the old `dir/**` include plus a bare `!**/*.md` exclude.
@@ -89,17 +89,13 @@ jobs:
               - 'PerformanceMonitor.Notifications/**/!(*.md)'
               - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
               - 'PerformanceMonitor.Ui/**/!(*.md)'
-            # Installer.Core is shared by the CLI Installer AND the Full Dashboard's integrated
-            # installer — a change rebuilds both, and nothing else.
-            installer_core:
-              - 'deprecated/Installer.Core/**/!(*.md)'
-            dashboard:
-              - 'deprecated/Dashboard/**/!(*.md)'
-              - 'deprecated/Dashboard.Tests/**/!(*.md)'
-              # ThemeParityTests compares the Dashboard's theme files with Lite's, so a change to Lite's
-              # themes alone must run it too. #4658 changed a Lite theme color, its CI skipped the test,
-              # and the next run that included it failed on dev (#4668).
-              - 'Lite/Themes/**/!(*.md)'
+            # The Darling export tool (Exporter/). It reads PerformanceMonitor.PlanAnalysis (and Common through it), so a change
+            # there reaches it too. pr.yml's exporter job reads this filter through ci-select.py. The root files are covered
+            # by the `root` filter above.
+            exporter:
+              - 'Exporter/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
@@ -107,8 +103,8 @@ jobs:
               - '.github/scripts/run-lite-shard.ps1'
               - '.github/scripts/lite-shard-pack.py'
               # #5656: Lite.Tests pins read install/ scripts as source (CpuSchedulerStatsCollectorDefinitionTests reads install/17,
-              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires `installer`
-              # and `sql-validation`, neither of which runs Lite.Tests, so the nightly would be the first to catch drift.
+              # DmvResourceDatabaseSentinelTests reads install/56). A PR that edits only an install script fires
+              # `sql-validation`, which does not run Lite.Tests, so the nightly would be the first to catch drift.
               - 'install/**/!(*.md)'
               # Lite.Tests.csproj compiles tools/ui-smoke-wpf/LiteSeedGuard.cs into its own assembly and tests it, so an edit to that tree has to reach the Lite suite.
               - 'tools/ui-smoke-wpf/**/!(*.md)'
@@ -151,11 +147,6 @@ jobs:
               # drift the pin exists to close. A diff that reaches only these three Darling trees runs just
               # the Lite.Tests classes tagged Reads=Darling, in one shard (the lite-tests job's scope step).
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
-            installer:
-              - 'deprecated/Installer/**/!(*.md)'
-              - 'deprecated/Installer.Tests/**/!(*.md)'
-              - 'install/**/!(*.md)'
-              - 'upgrades/**/!(*.md)'
             darling:
               - 'Darling/**/!(*.md)'
               # nightly.yml is not a build input, but Darling.Tests PARSES it: the #1888
@@ -221,7 +212,7 @@ jobs:
             # not a "everything that isn't code" subtraction — a new file type defaults
             # to being treated as code, which is the safe direction to be wrong in.
             #
-            # NOT here, on purpose: *.sql (the installer and sql-validation compile it),
+            # NOT here, on purpose: *.sql (sql-validation runs it),
             # *.yml (workflows), *.csproj / *.props / packages.lock.json (build inputs),
             # and *.cs regardless of how comment-only the change looks — an XML doc
             # comment still recompiles, and the compiler is what proves it still builds.
@@ -287,7 +278,7 @@ jobs:
           ALL_COUNT: ${{ steps.filter.outputs.all_count }}
           DOCS_COUNT: ${{ steps.filter.outputs.docs_count }}
           DOCS_FILES: ${{ steps.filter.outputs.docs_files }}
-          AREAS: 'root=${{ steps.filter.outputs.root }} core=${{ steps.filter.outputs.core }} installer_core=${{ steps.filter.outputs.installer_core }} dashboard=${{ steps.filter.outputs.dashboard }} lite=${{ steps.filter.outputs.lite }} installer=${{ steps.filter.outputs.installer }} darling=${{ steps.filter.outputs.darling }}'
+          AREAS: 'root=${{ steps.filter.outputs.root }} core=${{ steps.filter.outputs.core }} lite=${{ steps.filter.outputs.lite }} darling=${{ steps.filter.outputs.darling }}'
         run: |
           set -euo pipefail
 
@@ -351,23 +342,14 @@ jobs:
       # check passed carrying `error NU1004` in its own log, and the only job that went red was
       # darling-tree-guards, whose restore is a single-command step.
       #
-      # Every project with a committed lock file bar one is reached from this list, directly or through a
+      # Every project with a committed lock file is reached from this list, directly or through a
       # ProjectReference — a locked-mode restore validates the lock file of every project in the graph it
-      # walks, not only the one it was handed. The exception is deprecated/Installer, and it is deliberate.
-      # That project is the only one publishing single-file, so the SDK adds an implicit
-      # Microsoft.NET.ILLink.Tasks reference at the SDK's OWN version, and its lock file is the only one
-      # carrying that entry; global.json rolls forward across patches, so a runner on 10.0.303 wants
-      # [10.0.11, ) where a file written under 10.0.302 records [10.0.10, ). No restore line makes that file
-      # right for both, and nothing references the project, so nothing else reaches it either: a restore
-      # pointed at it reports NU1004 from dev today, with no dependency change involved (#3143). Whether it
-      # should carry a lock file at all, and whether global.json should pin the SDK exactly, are decisions.
+      # walks, not only the one it was handed.
       #
-      # LockedModeRestoreCoverageTests derives both requirements — from the lock files on disk and the
-      # reference edges between projects — so a tenth lock file makes its restore mandatory rather than
-      # remembered, and re-spelling this block in a shell that swallows failures fails the suite. It derives
-      # the exception from the SDK coupling too, and ratchets its membership, so pinning the SDK exactly
-      # makes this restore mandatory and a second project taking an SDK-coupled reference fails rather than
-      # joining the exemption quietly.
+      # LockedModeRestoreCoverageTests derives that requirement from the lock files on disk and the
+      # reference edges between projects, so a new lock file makes its restore mandatory rather than
+      # remembered, and re-spelling this block in a shell that swallows failures fails the suite. It also
+      # ratchets the set of lock files an SDK-coupled package excuses; that set is empty (#6973).
       - name: Restore dependencies
         if: steps.fastpath.outputs.engaged != 'true'
         shell: bash
@@ -384,30 +366,15 @@ jobs:
 
           dotnet restore Lite/PerformanceMonitorLite.csproj --locked-mode
           dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
-          dotnet restore deprecated/Installer.Tests/Installer.Tests.csproj --locked-mode
-          dotnet restore deprecated/Dashboard.Tests/Dashboard.Tests.csproj --locked-mode
           dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
           dotnet restore Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj --locked-mode
           dotnet restore tools/ui-smoke-wpf/UiSmokeWpf.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj --locked-mode
 
       - name: Build Lite.Tests
         if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
-
-      - name: Build Installer.Tests
-        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet build deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-restore
-
-      # The 'dashboard' path filter was defined when the Full Dashboard moved to deprecated/ (#1612) but
-      # never wired to a step, so its build and tests silently stopped running — which is how a batch of
-      # compiler warnings and three broken ThemeParityTests accumulated unnoticed (#1643). Deprecated means
-      # bug-fix-only, not unverified: it still compiles warning-free and its tests still guard cross-app
-      # parity (the theme palettes it checks are LITE's too).
-      # installer_core too: the Dashboard references Installer.Core, and the filter's own comment says a
-      # change there rebuilds both products, which only held for the CLI Installer until now.
-      - name: Build Dashboard.Tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
         if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
@@ -450,14 +417,6 @@ jobs:
             TestResults/lite-timing-*.xml.cpu.json
           retention-days: 7
           if-no-files-found: ignore
-
-      - name: Run Installer tests
-        if: steps.filter.outputs.installer == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
-
-      - name: Run Dashboard tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
       # gate matches (the same .github/darling-paths-filter.yml the darling-pg job reads). This no-store pass would
@@ -612,6 +571,13 @@ jobs:
         if: github.event_name == 'release'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release -r win-x64 --self-contained -o publish/DarlingViewer-velopack
 
+      # The Darling export tool (Exporter/): one self-contained win-x64 folder, zipped as PerformanceMonitorDarlingExport-<version>-win-x64.zip.
+      # It is its own artifact and its own SignPath configuration, and it is not part of the Darling zip. The linux-x64 zip is
+      # built in the darling-linux job, unsigned, like the other Linux assets.
+      - name: Publish Darling Export
+        if: github.event_name == 'release'
+        run: dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r win-x64 --self-contained -o publish/DarlingExport
+
       # Darling bundles a PostgreSQL 18 + TimescaleDB runtime (pg-runtime.zip) that ships beside
       # the service exe; DarlingManagedPostgres extracts it on first run. The fetch script pulls
       # ~340MB of pinned EDB/TimescaleDB archives, so this is release-only and cached. The key is
@@ -673,6 +639,21 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
+      - name: Stage Darling Export for signing
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          # The three documents ride along unsigned: SignPath signs the executables and libraries and leaves other files as they are.
+          Copy-Item 'Exporter/README.md', 'Exporter/file-contract.md', 'Exporter/darling-export.sample.json' 'publish/DarlingExport'
+
+      - name: Upload Darling Export for signing
+        if: github.event_name == 'release'
+        id: upload-darling-export
+        uses: actions/upload-artifact@v6
+        with:
+          name: DarlingExport-unsigned
+          path: publish/DarlingExport/
+
       # v3 of this action talks to SignPath's Pipeline Connector, which needs the SignPath
       # GitHub App installed on this repository (v2's connector did not). Without it every
       # attempt fails with "Failed to retrieve GitHub App token" (erikdarlingdata/PerformanceStudio#569,
@@ -705,6 +686,21 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Darling'
 
+      # Needs the SignPath artifact configuration 'DarlingExport' (the same rules as 'Darling': sign every exe and dll).
+      # A step that names a slug that does not exist fails the release (the standing #1340 prerequisite).
+      - name: Sign Darling Export
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'DarlingExport'
+          github-artifact-id: '${{ steps.upload-darling-export.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/DarlingExport'
+
       - name: Replace with signed artifacts
         if: github.event_name == 'release'
         shell: pwsh
@@ -730,6 +726,14 @@ jobs:
           Remove-Item "releases/PerformanceMonitorDarling-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Darling/*' -DestinationPath "releases/PerformanceMonitorDarling-$version.zip" -Force
 
+      - name: Package Darling Export (signed)
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          Remove-Item "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/DarlingExport/*' -DestinationPath "releases/PerformanceMonitorDarlingExport-$version-win-x64.zip" -Force
+
       # #6480: the Darling MSI, built from the same signed tree the zip above holds (signed/Darling: the service at the
       # root, viewer\, the three signed scripts, pg-runtime.zip), the way darling-msi.yml builds it. It goes to
       # build/msi/, never releases/: the checksum step and the upload read only releases/, so building the package here
@@ -737,10 +741,10 @@ jobs:
       # and not on the day signing is switched on. WiX's ICE validation runs as part of the build and any error fails it.
       #
       # An MSI is signed as a whole, and the three steps after this one (upload for signing, SignPath, the copy into
-      # releases/) run only when the repository variable DARLING_MSI_SIGNING is 'true'. Nothing sets it yet: it waits
-      # on the SignPath artifact configuration 'DarlingMsi' (the MSI file at the root) and is then set to 'true'. With
-      # it unset nothing is submitted and no MSI ships; the signature step below fails the job if an .msi reaches
-      # releases/ without a Valid SignPath Foundation signature.
+      # releases/) run only when the repository variable DARLING_MSI_SIGNING is 'true'. It has been set to 'true' since
+      # 2026-10-23, so each release signs the MSI (SignPath artifact configuration 'DarlingMsi', the MSI file at the
+      # root) and ships it. Unsetting the variable skips the MSI: nothing is submitted and no MSI ships. The signature
+      # step below fails the job if an .msi reaches releases/ without a Valid SignPath Foundation signature.
       - name: Build Darling MSI
         if: github.event_name == 'release'
         shell: pwsh
@@ -1004,7 +1008,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $zips = @(Get-ChildItem -Path releases -Filter '*.zip' -File |
-            Where-Object { $_.Name -match 'darling' -and $_.Name -notmatch 'darlingviewer' })
+            Where-Object { $_.Name -match 'darling' -and $_.Name -notmatch 'darlingviewer' -and $_.Name -notmatch 'darlingexport' })
           if ($zips.Count -ne 1) {
             Write-Host "::error::Expected one Darling zip in releases/, found $($zips.Count): $($zips.Name -join ', ')"
             exit 1
@@ -1205,6 +1209,19 @@ jobs:
         if: github.event_name == 'release' || steps.filter.outputs.darling == 'true'
         run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
 
+      # The Darling export tool for Linux: self-contained linux-x64, zipped in the package step below. It is not signed
+      # (SignPath signs Windows PE files), so it stays out of the Windows job and its signature guard, like the tarball.
+      - name: Publish Darling Export (linux-x64)
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet publish Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj -c Release -r linux-x64 --self-contained -o publish/DarlingExport-linux
+          cp Exporter/README.md Exporter/file-contract.md Exporter/darling-export.sample.json publish/DarlingExport-linux/
+          chmod 755 publish/DarlingExport-linux/darling-export
+
       - name: Build container image
         if: github.event_name != 'release' && steps.filter.outputs.darling == 'true'
         run: docker build -f Darling/Dockerfile -t performancemonitor-darling:pr .
@@ -1279,7 +1296,14 @@ jobs:
             echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
+          export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
+          (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+            echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
+            exit 1
+          fi
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" "${export_zip}" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
       # #5804: the tarball and its checksums leave this job as a same-run artifact rather than as release
       # assets. darling-linux-publish uploads them only after the Windows build job, whose release steps
@@ -1347,13 +1371,14 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           test -f "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz"
           test -f "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
+          test -f "releases/PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd releases && sha256sum -c SHA256SUMS-linux.txt)
 
       - name: Upload linux artifact to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz --clobber
+        run: gh release upload ${{ github.event.release.tag_name }} releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt releases/PerformanceMonitorDarling-compose-*.tar.gz releases/PerformanceMonitorDarlingExport-*-linux-x64.zip --clobber
 
       - name: Build and push container image (ghcr, versioned + latest)
         if: github.event_name == 'release'
@@ -1376,9 +1401,11 @@ jobs:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:<version> \
       #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
+      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
       - name: Install cosign
         if: github.event_name == 'release'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign container image (keyless, Sigstore)
         if: github.event_name == 'release'

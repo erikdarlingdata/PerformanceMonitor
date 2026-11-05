@@ -79,7 +79,8 @@ public partial class ServerTab : UserControl
             (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
-        SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, rangeStart.ToOADate(), rangeEnd.ToOADate());
+        SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, ChartXStart(rangeStart, rangeEnd), rangeEnd.ToOADate());
+        KeepPlottedInView(SessionStatsChart, rangeStart, rangeEnd);
 
         /* Summary panel reflects the latest snapshot in the window (Dashboard uses the last point). */
         var ordered = data.OrderBy(d => d.CollectionTime).ToList();

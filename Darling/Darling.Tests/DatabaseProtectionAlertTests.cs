@@ -129,6 +129,39 @@ public sealed class DatabaseProtectionAlertTests
     }
 
     [Fact]
+    public async Task AServerWithHundredsOfOverdueDatabases_NamesTheOldestFew_AndCountsTheRest()
+    {
+        /* #7202: every overdue database in one flat sentence put a Teams card past its size ceiling. The ones named are the most
+           overdue, not the first the read returned: 600 distinct ages, deliberately not in read order, and one never backed up. */
+        var h = AllOn();
+        var late = ReadAt(h.Now, c => Enumerable.Range(0, 600)
+            .Select(i => Db($"Tenant_{i:D4}", c, TimeSpan.FromDays(30) + TimeSpan.FromMinutes(i * 7 % 600), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)))
+            .Append(Db("Never_Backed_Up", c, fullAgo: null, logAgo: TimeSpan.FromMinutes(5), checkDbAgo: TimeSpan.FromDays(2), fullState: DatabaseProtectionCollector.BackupNoneInWindow))
+            .ToArray());
+        var oldest = Enumerable.Range(0, 600).OrderByDescending(i => i * 7 % 600).Select(i => $"Tenant_{i:D4}").ToArray();
+
+        await h.Build().ApplyDatabaseProtectionAsync(ServerId, Name, late, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("601 overdue", fired.CurrentValue);
+        Assert.Contains("on 601 database(s)", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains($", and {601 - DarlingSelfAlertEvaluator.OverdueDetailDatabases} more.", fired.DetailText, StringComparison.Ordinal);
+        Assert.StartsWith("Backup Overdue: 601 database(s) - Never_Backed_Up, " + string.Join(", ", oldest.Take(4)) + ", ...", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Contains("Never_Backed_Up (no backup on record)", fired.DetailText, StringComparison.Ordinal);
+        foreach (var name in oldest.Take(DarlingSelfAlertEvaluator.OverdueDetailDatabases - 1))
+        {
+            Assert.Contains(name + " (", fired.DetailText, StringComparison.Ordinal);
+        }
+
+        foreach (var name in oldest.Skip(DarlingSelfAlertEvaluator.OverdueDetailDatabases))
+        {
+            Assert.DoesNotContain(name, fired.DetailText, StringComparison.Ordinal);
+        }
+
+        Assert.True(fired.DetailText?.Length < 1_000, "the detail stays short however many databases are overdue");
+    }
+
+    [Fact]
     public async Task AStandingOverdue_SendsAgainAfterTheRefireInterval_AndNotBefore()
     {
         var h = AllOn();
@@ -473,8 +506,8 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
         }, async (postgres, connection, ct) =>
         {
             await using var viewer = new ViewerDataService(postgres.ConnectionString);
-            var (value, detail) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
-            Assert.Equal("2 overdue", value);
+            var (value, detail, _) = await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct);
+            Assert.Equal("2 items on 1 database", value);
             Assert.Equal("Full backup: Sales (30 days old), CHECKDB: Sales (never checked)", detail);
 
             /* The Overview card itself carries the chip: the summary read fills both strings the XAML binds, so a chip read that is never
@@ -485,7 +518,7 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
 
             var later = DateTime.UtcNow.AddMinutes(-1);
             await InsertCaptureAsync(connection, ct, later, Healthy("Sales", later));
-            Assert.Equal((null, null), await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct));
+            Assert.Equal((null, null, 0), await viewer.GetDatabaseProtectionChipAsync(ServerId, DateTime.UtcNow, ct));
             var clearCard = await viewer.GetServerSummaryAsync(ServerId, "Protection card", null, ct);
             Assert.Null(clearCard.DatabaseProtectionChipValue);
             Assert.False(clearCard.HasDatabaseProtectionOverdue);
@@ -564,6 +597,312 @@ VALUES (515152, 'PROTECTION-PG', 'PROTECTION-PG', TRUE, 0, $1), (515153, 'PROTEC
             after.LogBackupOverdueEnabled = before.LogBackupOverdueEnabled;
             Assert.True(before.ValueEquals(after), "saving the database protection switches moved another column");
 
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /* ---------------- #7611: the three ages are settings, and every judgment uses the ones in force ---------------- */
+
+    private static readonly DateTime Capture = new(2026, 11, 2, 12, 0, 0, DateTimeKind.Utc);
+
+    private static DatabaseProtectionThresholdResolver ResolverOf(
+        DatabaseProtectionGlobalThresholds global, params (string? Database, string Key, double Value)[] rows) =>
+        DatabaseProtectionThresholdResolver.FromRows(global, rows);
+
+    [Fact]
+    public void ALogBackup90MinutesOld_IsNotOverdue_UnderAServerOverride_AndOnlyTheOverriddenDatabaseIs_UnderADatabaseOverride()
+    {
+        var dbs = new[]
+        {
+            Db("A", Capture, TimeSpan.FromDays(1), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)),
+            Db("B", Capture, TimeSpan.FromDays(1), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)),
+        };
+
+        var shipped = DatabaseProtectionBands.OverdueFacts(dbs, Capture, ResolverOf(DatabaseProtectionGlobalThresholds.Default).ForDatabase);
+        Assert.Equal(["A", "B"], shipped.Where(o => o.Kind == DatabaseProtectionBands.KindLogBackup).Select(o => o.Database).ToArray());
+
+        var server = ResolverOf(DatabaseProtectionGlobalThresholds.Default, (null, DarlingThresholdKeys.LogBackupOverdueMinutes, 1440));
+        Assert.Empty(DatabaseProtectionBands.OverdueFacts(dbs, Capture, server.ForDatabase));
+
+        var database = ResolverOf(DatabaseProtectionGlobalThresholds.Default,
+            (null, DarlingThresholdKeys.LogBackupOverdueMinutes, 1440), ("A", DarlingThresholdKeys.LogBackupOverdueMinutes, 30));
+        var overdue = DatabaseProtectionBands.OverdueFacts(dbs, Capture, database.ForDatabase);
+        var only = Assert.Single(overdue);
+        Assert.Equal(("A", DatabaseProtectionBands.KindLogBackup, TimeSpan.FromMinutes(30)), (only.Database, only.Kind, only.Threshold!.Value));
+    }
+
+    [Fact]
+    public void AGlobalFullBackupAge_Of24Hours_MakesA2DayOldBackupOverdue_AndTheOtherTwoAgesStayPut()
+    {
+        var dbs = new[] { Db("A", Capture, TimeSpan.FromDays(2), TimeSpan.FromMinutes(50), TimeSpan.FromDays(10)) };
+        Assert.Empty(DatabaseProtectionBands.OverdueFacts(dbs, Capture, ResolverOf(DatabaseProtectionGlobalThresholds.Default).ForDatabase));
+
+        var resolver = ResolverOf(new DatabaseProtectionGlobalThresholds(24, 60, 336));
+        var overdue = Assert.Single(DatabaseProtectionBands.OverdueFacts(dbs, Capture, resolver.ForDatabase));
+        Assert.Equal(DatabaseProtectionBands.KindFullBackup, overdue.Kind);
+        Assert.Equal(new DatabaseProtectionThresholds(TimeSpan.FromHours(24), TimeSpan.FromMinutes(60), TimeSpan.FromDays(14)), resolver.For("A"));
+
+        /* Independence: moving the log age alone leaves the other two where they were. */
+        var log = ResolverOf(new DatabaseProtectionGlobalThresholds(168, 5, 336)).For("A");
+        Assert.Equal(new DatabaseProtectionThresholds(TimeSpan.FromDays(7), TimeSpan.FromMinutes(5), TimeSpan.FromDays(14)), log);
+        var checkDb = ResolverOf(DatabaseProtectionGlobalThresholds.Default, (null, DarlingThresholdKeys.CheckDbOverdueHours, 24)).For("A");
+        Assert.Equal(new DatabaseProtectionThresholds(TimeSpan.FromDays(7), TimeSpan.FromMinutes(60), TimeSpan.FromHours(24)), checkDb);
+    }
+
+    [Fact]
+    public void AnAgeLongerThanTheHistoryWindow_NeverTurnsNoneInWindowHealthy()
+    {
+        /* A log backup absent from the 60-day window of a database 100 days old stays overdue under the longest log age (86400 minutes, the window). */
+        var db = Db("A", Capture, TimeSpan.FromDays(1), null, TimeSpan.FromDays(2), logState: DatabaseProtectionCollector.BackupNoneInWindow);
+        var resolver = ResolverOf(new DatabaseProtectionGlobalThresholds(168, 86400, 336));
+        var overdue = Assert.Single(DatabaseProtectionBands.OverdueFacts([db], Capture, resolver.ForDatabase));
+        Assert.Equal((DatabaseProtectionBands.KindLogBackup, DatabaseProtectionBands.NoneInWindow), (overdue.Kind, overdue.State));
+    }
+
+    [Fact]
+    public void AnOverrideOutsideItsBounds_OrNotAnInteger_IsSkipped_AndTheKeysTakeTheirBounds()
+    {
+        var resolver = ResolverOf(DatabaseProtectionGlobalThresholds.Default,
+            (null, DarlingThresholdKeys.LogBackupOverdueMinutes, 0), (null, DarlingThresholdKeys.BackupOverdueHours, 1441),
+            ("A", DarlingThresholdKeys.CheckDbOverdueHours, 1.5));
+        Assert.Equal(DatabaseProtectionThresholds.Default, resolver.For("A"));
+        Assert.True(DarlingThresholdKeys.TryGet(DarlingThresholdKeys.BackupOverdueHours, out var full));
+        Assert.True(DarlingThresholdKeys.TryGet(DarlingThresholdKeys.LogBackupOverdueMinutes, out var log));
+        Assert.True(DarlingThresholdKeys.TryGet(DarlingThresholdKeys.CheckDbOverdueHours, out var checkDb));
+        Assert.Equal(((1, 1440), (1, 86400), (1, 8760)), ((full.Min, full.Max), (log.Min, log.Max), (checkDb.Min, checkDb.Max)));
+        Assert.All(new[] { full, log, checkDb }, e => Assert.Equal(AlertThresholdScope.ServerAndDatabase, e.Scope));
+    }
+
+    [Fact]
+    public async Task TheWorkersWiring_FeedsTheStoredGlobalAgesToTheEvaluator_InTheOrderFullLogCheckDb()
+    {
+        /* The worker hands the evaluator the stored ages through DarlingWorker.ProtectionThresholdsOf (#7611). Distinct values, so a swapped pair cannot pass. */
+        var config = new DarlingConfig();
+        config.Alerts.BackupOverdueThresholdHours = 24;
+        config.Alerts.LogBackupOverdueThresholdMinutes = 90;
+        config.Alerts.CheckDbOverdueThresholdHours = 500;
+        var wired = DarlingWorker.ProtectionThresholdsOf(new DarlingAlertSettings(config));
+        Assert.Equal(new DatabaseProtectionGlobalThresholds(24, 90, 500), wired);
+
+        /* Through the evaluator: a full backup 30 hours old is overdue against the stored 24, where the shipped 168 would stay quiet. */
+        var h = AllOn();
+        h.ProtectionThresholds = () => wired;
+        var read = ReadAt(h.Now, c => new[] { Db("A", c, TimeSpan.FromHours(30), TimeSpan.FromMinutes(5), TimeSpan.FromDays(2)) });
+        await h.Build().ApplyDatabaseProtectionAsync(ServerId, Name, read, Ct);
+        var detail = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Backup Overdue").DetailText;
+        Assert.Contains("older than 1 day", detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TheAlertDetail_NamesEachDatabasesOwnAge_WhenTheyDiffer_AndReadsAsBefore_WhenTheyDoNot()
+    {
+        var h = AllOn();
+        h.ResolveThreshold = (wire, serverKey, database, global) =>
+            wire == DarlingThresholdKeys.LogBackupOverdueMinutes && database == "Short" ? 30 : global;
+        var e = h.Build();
+        var read = ReadAt(h.Now, c => new[]
+        {
+            Db("Short", c, TimeSpan.FromDays(1), TimeSpan.FromMinutes(45), TimeSpan.FromDays(2)),
+            Db("Long", c, TimeSpan.FromDays(1), TimeSpan.FromMinutes(61), TimeSpan.FromDays(2)),
+        });
+        await e.ApplyDatabaseProtectionAsync(ServerId, Name, read, Ct);
+        var detail = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Log Backup Overdue").DetailText;
+        Assert.Contains("Short (45 minutes old, limit 30 minutes)", detail, StringComparison.Ordinal);
+        Assert.Contains("Long (1 hour 1 minute old, limit 60 minutes)", detail, StringComparison.Ordinal);
+
+        /* A server-wide age of 1440 minutes makes both databases healthy: no alert. */
+        var quiet = AllOn();
+        quiet.ProtectionThresholds = () => new DatabaseProtectionGlobalThresholds(168, 1440, 336);
+        await quiet.Build().ApplyDatabaseProtectionAsync(ServerId, Name, read, Ct);
+        Assert.Empty(quiet.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task TheStore_ReadsTheDefaultsOnAFreshStore_TheToolBoundsThem_AndAnOverrideChangesTheToolsBandAndTheFleetFacts()
+    {
+        await WithStoreAsync(async (connection, ct) =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-5);
+            await InsertCaptureAsync(connection, ct, at, Db("Sales", at, TimeSpan.FromDays(1), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+        }, async (postgres, connection, ct) =>
+        {
+            /* A fresh store holds 168, 60 and 336. */
+            var provider = new StoreConfigProvider(postgres);
+            await provider.SeedIfEmptyAsync(new DarlingConfig(), ct);
+            using (var doc = JsonDocument.Parse(await DarlingMcpAlertTools.GetAlertSettings(postgres)))
+            {
+                var root = doc.RootElement.TryGetProperty("settings", out var wrapped) ? wrapped : doc.RootElement;
+                Assert.Equal(168, root.GetProperty("backup_overdue").GetProperty("threshold_hours").GetInt32());
+                Assert.Equal(60, root.GetProperty("log_backup_overdue").GetProperty("threshold_minutes").GetInt32());
+                Assert.Equal(336, root.GetProperty("checkdb_overdue").GetProperty("threshold_hours").GetInt32());
+            }
+
+            /* The tool refuses a value outside the bounds and accepts the bounds themselves. */
+            foreach (var bad in new[] { "{\"log_backup_overdue\":{\"threshold_minutes\":0}}", "{\"log_backup_overdue\":{\"threshold_minutes\":86401}}",
+                         "{\"backup_overdue\":{\"threshold_hours\":1441}}", "{\"checkdb_overdue\":{\"threshold_hours\":8761}}" })
+            {
+                Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.UpdateAlertSettings(postgres, bad)));
+            }
+
+            var top = await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+                "{\"backup_overdue\":{\"threshold_hours\":1440},\"log_backup_overdue\":{\"threshold_minutes\":86400},\"checkdb_overdue\":{\"threshold_hours\":8760}}");
+            Assert.False(McpHelpers.IsErrorEnvelope(top), top);
+            var low = await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+                "{\"backup_overdue\":{\"threshold_hours\":1},\"log_backup_overdue\":{\"threshold_minutes\":1},\"checkdb_overdue\":{\"threshold_hours\":1}}");
+            Assert.False(McpHelpers.IsErrorEnvelope(low), low);
+            await DarlingMcpAlertTools.UpdateAlertSettings(postgres,
+                "{\"backup_overdue\":{\"threshold_hours\":168},\"log_backup_overdue\":{\"threshold_minutes\":60},\"checkdb_overdue\":{\"threshold_hours\":336}}");
+
+            /* 90 minutes old against the 60-minute age: overdue on the tool and in the fleet facts. */
+            async Task<(bool Overdue, long Threshold)> ToolLogBand()
+            {
+                using var doc = JsonDocument.Parse(await DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(postgres, Name));
+                var log = doc.RootElement.GetProperty("databases")[0].GetProperty("log_backup");
+                return (log.GetProperty("overdue").GetBoolean(), log.GetProperty("threshold_minutes").GetInt64());
+            }
+
+            Assert.Equal((true, 60L), await ToolLogBand());
+            Assert.True((await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow, ct)).ContainsKey(ServerId));
+
+            /* A server override set through the override store moves both. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, 'protection-override', 'protection-override') ON CONFLICT DO NOTHING", ServerId);
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                await ThresholdOverrideStore.UpsertAsync(connection, transaction, ServerId, null, DarlingThresholdKeys.LogBackupOverdueMinutes, 1440, "test", null, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            Assert.Equal((false, 1440L), await ToolLogBand());
+            Assert.False((await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow, ct)).ContainsKey(ServerId));
+
+            /* A database override beats the server's. */
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                await ThresholdOverrideStore.UpsertAsync(connection, transaction, ServerId, "Sales", DarlingThresholdKeys.LogBackupOverdueMinutes, 30, "test", null, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            Assert.Equal((true, 30L), await ToolLogBand());
+
+            /* The Viewer reads the same ages. */
+            await using var viewer = new ViewerDataService(postgres.ConnectionString);
+            var row = await viewer.GetAlertSettingsAsync(ct);
+            Assert.Equal((168, 60, 336), (row!.BackupOverdueThresholdHours, row.LogBackupOverdueThresholdMinutes, row.CheckDbOverdueThresholdHours));
+            return 0;
+        });
+    }
+
+    private static DarlingServer ProtectionServer() =>
+        new(ServerId, Name, Name, true, 16, engineKind: MonitoredEngineKind.SqlServer, engineEdition: CollectorEngineCapability.UnknownEngineEdition);
+
+    [Fact]
+    public void ATagOverride_BeatsTheGlobalValue_ButNotAServerOrDatabaseOverride()
+    {
+        var tags = new Dictionary<string, int> { [DarlingThresholdKeys.LogBackupOverdueMinutes] = 1440 };
+        var global = DatabaseProtectionGlobalThresholds.Default;
+
+        Assert.Equal(TimeSpan.FromMinutes(1440), DatabaseProtectionThresholdResolver.FromRows(global, [], tags).For("A").LogBackup);
+        Assert.Equal(TimeSpan.FromMinutes(60), DatabaseProtectionThresholdResolver.FromRows(global, []).For("A").LogBackup);
+
+        var server = DatabaseProtectionThresholdResolver.FromRows(global, [(null, DarlingThresholdKeys.LogBackupOverdueMinutes, 120)], tags);
+        Assert.Equal(TimeSpan.FromMinutes(120), server.For("A").LogBackup);
+        var database = DatabaseProtectionThresholdResolver.FromRows(
+            global, [(null, DarlingThresholdKeys.LogBackupOverdueMinutes, 120), ("A", DarlingThresholdKeys.LogBackupOverdueMinutes, 30)], tags);
+        Assert.Equal((TimeSpan.FromMinutes(30), TimeSpan.FromMinutes(120)), (database.For("A").LogBackup, database.For("B").LogBackup));
+    }
+
+    [Fact]
+    public async Task ATagOverride_OfTheServersTag_MovesTheToolTheFleetFactsAndTheViewer_AndAServerOverrideStillBeatsIt()
+    {
+        await WithStoreAsync(async (connection, ct) =>
+        {
+            var at = DateTime.UtcNow.AddMinutes(-5);
+            await InsertCaptureAsync(connection, ct, at, Db("Sales", at, TimeSpan.FromDays(1), TimeSpan.FromMinutes(90), TimeSpan.FromDays(2)));
+        }, async (postgres, connection, ct) =>
+        {
+            async Task<bool> ToolLogOverdue()
+            {
+                using var doc = JsonDocument.Parse(await DarlingMcpDatabaseProtectionTools.GetDatabaseProtection(postgres, Name));
+                return doc.RootElement.GetProperty("databases")[0].GetProperty("log_backup").GetProperty("overdue").GetBoolean();
+            }
+
+            async Task<string> ViewerStatus()
+            {
+                await using var viewer = new ViewerDataService(postgres.ConnectionString);
+                return (await viewer.ReadDatabaseProtectionAsync(ProtectionServer(), DateTime.UtcNow, cancellationToken: ct)).Status;
+            }
+
+            async Task<bool> FleetOverdue() =>
+                (await DarlingFleetReader.ReadDatabaseProtectionOverdueAsync(postgres, DateTime.UtcNow, ct)).ContainsKey(ServerId);
+
+            /* 90 minutes old against the 60-minute age is overdue everywhere. */
+            Assert.True(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Overdue, await ViewerStatus());
+            Assert.True(await FleetOverdue());
+
+            /* A 1440-minute override on a tag above the server's own tag moves all three, as it moves the service's alert. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ($1, 'protection-tag', 'protection-tag') ON CONFLICT DO NOTHING", ServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.server_tags (name, parent_id) VALUES ('Production', NULL), ('east', 1)");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.server_tag_map (server_id, tag_id) VALUES ($1, 2)", ServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO config.config_threshold_overrides (scope_tag_id, threshold_key, value, set_by) VALUES (1, $1, 1440, 'test')", DarlingThresholdKeys.LogBackupOverdueMinutes);
+            Assert.False(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Ok, await ViewerStatus());
+            Assert.False(await FleetOverdue());
+
+            /* A server override of 30 minutes beats the tag's 1440. */
+            await using (var transaction = await connection.BeginTransactionAsync(ct))
+            {
+                await ThresholdOverrideStore.UpsertAsync(connection, transaction, ServerId, null, DarlingThresholdKeys.LogBackupOverdueMinutes, 30, "test", null, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            Assert.True(await ToolLogOverdue());
+            Assert.Equal(ViewerDatabaseProtectionRead.Overdue, await ViewerStatus());
+            Assert.True(await FleetOverdue());
+            return 0;
+        });
+    }
+
+    [Fact]
+    public async Task AStoreUpgradedFromV244_GainsTheThreeAgesAtTheirDefaults_AndKeepsItsOtherAlertSettings()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live database protection alert tests.");
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: a scratch database of its own, migrated from the ladder below. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct, "INSERT INTO config.config_alert_settings (id) VALUES (1) ON CONFLICT DO NOTHING");
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE config.config_alert_settings SET cpu_threshold_percent = 91, backup_overdue_enabled = TRUE");
+
+            /* The store as V244 left it: none of the three columns, and no V245 row in the version table. */
+            await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 244, ct);
+            await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 245");
+            await using (var check = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_attribute WHERE attrelid = 'config.config_alert_settings'::regclass AND NOT attisdropped " +
+                "AND attname IN ('backup_overdue_threshold_hours', 'log_backup_overdue_threshold_minutes', 'checkdb_overdue_threshold_hours')", connection))
+            {
+                Assert.Equal(0L, await check.ExecuteScalarAsync(ct));
+            }
+
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+            var row = await viewer.GetAlertSettingsAsync(ct);
+            Assert.NotNull(row);
+            Assert.Equal((168, 60, 336), (row.BackupOverdueThresholdHours, row.LogBackupOverdueThresholdMinutes, row.CheckDbOverdueThresholdHours));
+            Assert.Equal(91, row.CpuThresholdPercent);
+            Assert.True(row.BackupOverdueEnabled);
             bodySucceeded = true;
         }
         finally

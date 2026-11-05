@@ -108,12 +108,12 @@ public interface IAlertEngineSettings
     /// <summary>Fire when the selected CPU metric (see <see cref="CpuAlertMode"/>) is at/above this %.</summary>
     int CpuThresholdPercent { get; }
 
-    /// <summary>Fire when the rolling-window blocking-WAIT count (one per blocked session, blocker and wait start, not one per blocked-process report; #5644) reaches this value (count-based; see class remarks).</summary>
+    /// <summary>Fire when the rolling-window blocking-WAIT count (one per blocked session, blocker and wait start, not one per blocked-process report; #5644) reaches this value AND the worst wait among them is 15 s or more (#7083, <see cref="BlockingPageRule"/>). Default 3.</summary>
     int BlockingCountThreshold { get; }
 
     /// <summary>
     /// Fire when the TOTAL blocked wait time in the latest blocking snapshot reaches this many seconds
-    /// (#1839). 0 = OFF, and off is the shipped default — this is a second, independent gate alongside
+    /// (#1839). 0 = OFF; the shipped default is 60 since #7083, which is also the bar for one blocked event (<see cref="BlockingPageRule"/>) — this is a second, independent gate alongside
     /// <see cref="BlockingCountThreshold"/>: a count gate cannot tell one session blocked for an hour
     /// from one blocked for a second. Level-triggered (fires while above, re-fires on cooldown, resolves
     /// when it drops below), unlike the count gate's rolling-window edge trigger, and it reports under

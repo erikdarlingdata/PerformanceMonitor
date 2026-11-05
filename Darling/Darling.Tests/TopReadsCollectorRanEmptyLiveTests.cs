@@ -143,6 +143,137 @@ public sealed class TopReadsCollectorRanEmptyLiveTests
         });
     }
 
+    /* #7442: a reply that counts the collector's runs in the window is not a window the store holds no collection for. The probe finds no
+       row because the runs stored none, and the note that says so contradicted the sentence beside it. A first run within the slack of
+       the start is not truncated, and its window starts at that run. */
+    private static void AssertCovered(JsonElement answer, DateTime firstRun)
+    {
+        var hints = answer.GetProperty("hints");
+        Assert.Equal(McpHelpers.FormatEffectiveStart(firstRun), hints.GetProperty("effective_start").GetString());
+        Assert.False(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, hints.GetProperty("truncation_note").ValueKind);
+    }
+
+    private static void AssertNotCovered(JsonElement answer)
+    {
+        var hints = answer.GetProperty("hints");
+        Assert.Equal(JsonValueKind.Null, hints.GetProperty("effective_start").ValueKind);
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("The store holds no collection of ", hints.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueryStats_RanInTheWindow_CarriesTheCoveredWindowNote_AndNoRunKeepsTheNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            /* No run in the window: the note is true here. */
+            var none = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+            AssertNotCovered(none);
+
+            await PlantRunAsync(connection, ct, "query_stats", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertCovered(ran, now.AddMinutes(-30));
+        });
+    }
+
+    [Fact]
+    public async Task QueryStoreTop_RanInTheWindow_CarriesTheCoveredWindowNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            await PlantRunAsync(connection, ct, "query_store", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertCovered(ran, now.AddMinutes(-30));
+        });
+    }
+
+    [Fact]
+    public async Task TopProcedures_RanInTheWindow_CarriesTheCoveredWindowNote_AndNoRunKeepsTheNote()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            /* Two runs, both before the window: the collector is not new, but it did not look at this window. */
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddHours(-5), "SUCCESS", rows: 0);
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddHours(-4), "SUCCESS", rows: 0);
+            var none = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("unavailable", none.GetProperty("status").GetString());
+            AssertNotCovered(none);
+
+            await PlantRunAsync(connection, ct, "procedure_stats", now.AddMinutes(-30), "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 1, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            AssertCovered(ran, now.AddHours(-1));
+        });
+    }
+
+    /* #7442: a run in the window does not show when collection began. A server registered 30 minutes ago and asked for 24 hours has a
+       first run 30 minutes ago, so the window is cut short and starts at that run. A first run within the 90-minute slack of the start is
+       still a covered window, which the one-hour tests above cannot tell apart from the truncated one. */
+    private static void AssertTruncatedAt(JsonElement answer, DateTime firstRun)
+    {
+        var hints = answer.GetProperty("hints");
+        Assert.Equal(McpHelpers.FormatEffectiveStart(firstRun), hints.GetProperty("effective_start").GetString());
+        Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+        var note = hints.GetProperty("truncation_note").GetString();
+        Assert.StartsWith("The window reaches further back than", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("holds no collection", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task QueryStats_LongWindow_FirstRunThirtyMinutesAgo_IsTruncatedAtThatRun()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            var firstRun = now.AddMinutes(-30);
+            await PlantRunAsync(connection, ct, "query_stats", firstRun, "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertTruncatedAt(ran, firstRun);
+        });
+    }
+
+    [Fact]
+    public async Task QueryStoreTop_LongWindow_FirstRunThirtyMinutesAgo_IsTruncatedAtThatRun()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            var firstRun = now.AddMinutes(-30);
+            await PlantRunAsync(connection, ct, "query_store", firstRun, "SUCCESS", rows: 0);
+            var ran = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, as_of: now.ToString("o"))).RootElement;
+            Assert.Equal("empty", ran.GetProperty("status").GetString());
+            Assert.Equal(1, ran.GetProperty("hints").GetProperty("successful_runs_in_window").GetInt64());
+            AssertTruncatedAt(ran, firstRun);
+        });
+    }
+
+    [Fact]
+    public async Task LongWindow_FirstRunWithinTheSlackOfTheStart_IsCovered_ForBothTools()
+    {
+        await RunAsync(async (connection, postgres, now, ct) =>
+        {
+            var start = now.AddHours(-24);
+            await PlantRunAsync(connection, ct, "query_stats", start.AddMinutes(60), "SUCCESS", rows: 0);
+            await PlantRunAsync(connection, ct, "query_store", start.AddMinutes(60), "SUCCESS", rows: 0);
+            /* A server with no recent collection at all answers offline; an unrelated collector's recent run keeps it online. */
+            await PlantRunAsync(connection, ct, "wait_stats", now.AddMinutes(-3), "SUCCESS", rows: 5);
+
+            var stats = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24, as_of: now.ToString("o"))).RootElement;
+            Assert.True(stats.GetProperty("status").GetString() == "empty", stats.ToString());
+            AssertCovered(stats, start.AddMinutes(60));
+
+            var store = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 24, as_of: now.ToString("o"))).RootElement;
+            Assert.True(store.GetProperty("status").GetString() == "empty", store.ToString());
+            AssertCovered(store, start.AddMinutes(60));
+        });
+    }
+
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, DateTime, CancellationToken, Task> body)
     {
         var cs = ConnectionString;

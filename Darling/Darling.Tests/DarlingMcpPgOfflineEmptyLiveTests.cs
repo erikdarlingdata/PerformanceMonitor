@@ -32,14 +32,44 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
     {
         "get_pg_autovacuum_health" => DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(ds, name, 1, as_of: asOf),
         "get_pg_replication_slots" => DarlingMcpPgSlotTools.GetPgReplicationSlots(ds, name, 1, asOf),
+        "get_pg_io_stats" => DarlingMcpPgIoTools.GetPgIoStats(ds, name, 1, as_of: asOf),
         _ => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(ds, name, 1, as_of: asOf),
     };
+
+    /// <summary>
+    /// A PostgreSQL target the service cannot reach still logs failed runs every cycle (the same collection_log, the same status words).
+    /// Its newest SUCCESS is three days old, so the read is unavailable even with a fresh ERROR row in the log.
+    /// </summary>
+    [Theory]
+    [InlineData("get_pg_replication_slots")]
+    [InlineData("get_pg_autovacuum_health")]
+    public async Task AnEmptyRead_FromATargetWithOnlyAFreshErrorRow_IsUnavailable_AgainstDevPostgres(string read)
+    {
+        const string Name = "pg7167-error-only.example:appdb:pg";
+        await WindowFloorLiveHarness.RunAsync(ConnectionString, ["pg_blocking"], [Name], Tables, async (c, ds, now) =>
+        {
+            var lastSuccess = now.AddDays(-3);
+            await WindowFloorLiveHarness.SeedServerAsync(
+                c, Name, now.AddDays(-40), "pg_blocking", lastSuccess.AddHours(-3), 30, lastSuccess, Tables, TestContext.Current.CancellationToken);
+            await WindowFloorLiveHarness.SeedRunAsync(c, Name, "pg_blocking", "ERROR", DateTime.UtcNow.AddMinutes(-1), TestContext.Current.CancellationToken);
+
+            var root = WindowFloorLiveHarness.Parse(await ReadAsync(ds, read, Name));
+
+            Assert.Equal("unavailable", root.GetProperty("status").GetString());
+            Assert.StartsWith(
+                Name + " is offline: the store has had no successful collection from it since "
+                + lastSuccess.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
+                root.GetProperty("message").GetString()!,
+                StringComparison.Ordinal);
+        });
+    }
 
     /// <summary>A target last collected ten days ago: each read says it is offline first and gives no healthy sentence.</summary>
     [Theory]
     [InlineData("get_pg_autovacuum_health")]
     [InlineData("get_pg_replication_slots")]
     [InlineData("get_pg_replication_stats")]
+    [InlineData("get_pg_io_stats")]
     public async Task AnEmptyRead_FromAnOfflineServer_IsUnavailable_WithTheOfflineLeadFirst_AgainstDevPostgres(string read)
     {
         const string Name = "pg6155-offline.example:appdb:pg";
@@ -54,7 +84,7 @@ public sealed class DarlingMcpPgOfflineEmptyLiveTests
             Assert.Equal("unavailable", root.GetProperty("status").GetString());
             var message = root.GetProperty("message").GetString()!;
             Assert.StartsWith(
-                Name + " is offline: the store has had no collection from it since "
+                Name + " is offline: the store has had no successful collection from it since "
                 + lastCollection.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC",
                 message,
                 StringComparison.Ordinal);

@@ -38,6 +38,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -91,6 +92,7 @@ AND   v.delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -116,6 +118,7 @@ AND   v.delta_execution_count > 0";
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                     rankCmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                    rankCmd.CommandText = plan.Apply(rankCmd.CommandText);
                     using var rankReader = await rankCmd.ExecuteReaderAsync(context.CancellationToken);
                     while (await rankReader.ReadAsync(context.CancellationToken))
                     {
@@ -192,6 +195,7 @@ AND   v.delta_execution_count > 0";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -296,6 +300,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                two plans is two offenders. */
             var ranked = new List<RankedObject>();
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
@@ -397,6 +402,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
             {
+                var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), context.CancellationToken);
                 using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
                 using var connection = _duckDb.CreateConnection();
                 await connection.OpenAsync(context.CancellationToken);
@@ -405,7 +411,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                    that regresses into timeouts or errors is found here. A failed read costs the failure half only. */
                 try
                 {
-                    failures = await ReadPlanRegressionFailuresAsync(connection, context);
+                    failures = await ReadPlanRegressionFailuresAsync(connection, context, plan);
                 }
                 catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
                 {
@@ -555,6 +561,10 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost in the window, the ranking key and a floor (PlanRegressionRanking): the
+        -- per-execution difference times the latest plan's executions. A factor alone ranked a 455 us statement over a
+        -- 1.2 s one. NULL cpu figures give NULL, which the floor drops.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         l.database_name,
         -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
         -- on both SKUs, so a best plan can be two weeks old.
@@ -600,13 +610,16 @@ SELECT
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
--- near-zero-cost queries whose ratios are all sampling jitter; magnitude ranking stays with
--- regression_factor and the scorer.
+-- near-zero-cost queries whose ratios are all sampling jitter. Magnitude ranking is the ORDER BY below (#7417).
 AND   latest_total_cpu_us >= 10000000
+-- #7417: and a CPU-path regression must have LOST that much of it (PlanRegressionRanking). A duration-path row keeps the
+-- bar above: it got slower through waits more than CPU, so its CPU loss is small by construction.
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements (change tracking cleanup and the like) are not application code. Left out
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY regression_factor DESC
+-- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
 -- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
 -- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
 -- offender short.
@@ -618,6 +631,7 @@ LIMIT 100";
                    primary stay in the window, so the read skips those databases. */
                 cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 3);
 
+                cmd.CommandText = plan.Apply(cmd.CommandText);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
@@ -658,7 +672,7 @@ LIMIT 100";
             {
                 var row = kept[i];
 
-                // Rows arrive ordered by regression_factor DESC — the first kept row is the worst offender.
+                // Rows arrive ordered by the CPU the regression lost (#7417), the factor second — the first kept row is the worst offender.
                 if (i == 0)
                 {
                     worstQueryId = row.QueryId;
@@ -718,7 +732,9 @@ LIMIT 100";
                advice reads their absence as "no cost regression" and not as a zero factor (#6267). */
             if (offenderCount > 0)
             {
-                fact.Metadata["worst_regression_factor"] = worstFactor;
+                /* #7417: the LEAD offender's factor (the one that lost the most CPU), the figure the advice pairs with the
+                   lead's own per-execution costs below. Another kept row can have a larger factor. */
+                fact.Metadata["lead_regression_factor"] = worstFactor;
                 fact.Metadata["worst_query_id"] = worstQueryId;
                 fact.Metadata["latest_cpu_per_exec_us"] = worstLatestCpu;
                 fact.Metadata["best_cpu_per_exec_us"] = worstBestCpu;
@@ -753,6 +769,7 @@ LIMIT 100";
     {
         try
         {
+            var plan = await _duckDb.PlanArchiveReadAsync("procedure_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
@@ -775,6 +792,7 @@ AND   delta_execution_count > 0";
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+            cmd.CommandText = plan.Apply(cmd.CommandText);
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
@@ -825,6 +843,7 @@ AND   delta_execution_count > 0";
         {
             var planXmls = new List<string>();
 
+            var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
             using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
             using (var connection = _duckDb.CreateConnection())
             {
@@ -844,6 +863,7 @@ LIMIT 10";
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
                 command.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
+                command.CommandText = plan.Apply(command.CommandText);
                 using var reader = await command.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {

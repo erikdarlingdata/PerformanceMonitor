@@ -133,6 +133,8 @@ To keep the folder somewhere else instead, point the `DARLING_CONFIG` environmen
 
 ### 3. Start the Viewer
 
+If you copied the folder next to `PerformanceMonitor.Darling.Viewer.exe`, run that exe. If you installed the Viewer with `PerformanceMonitorDarlingViewer-darlingviewer-Setup.exe` from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest), set `DARLING_CONFIG` to the exported `darling.json`, then start the Viewer.
+
 That is the whole setup. Re-run the export after a credential or certificate rotation — the store's certificate regenerates when its bind IP changes — and copy the folder over again; it replaces its own previous output without ceremony.
 
 ### If it does not connect
@@ -175,6 +177,36 @@ It decrypts the `network.role` credential and prints a paste-ready connection st
 
 **Plaintext at rest on the viewer machine.** However you get there, the connection string holds the role password in cleartext in that machine's `darling.json` (there is no client-side secret store yet). That is acceptable for the read-only `viewer` credential on a single-operator, ACL'd profile; if you use `role: "admin"`, treat that file as a secret and NTFS-ACL it to your account. DPAPI-encrypting the viewer's BYO connection string is future hardening, out of scope today.
 
+## Daily Health Report settings
+
+Settings, Notifications, Daily Health Report ([#7041](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7041), store schema V232) holds the four settings: the "Send a daily health report" checkbox, "Send at" (`HH:mm`, 24-hour), "Time zone" and an optional "Title". A report that is off and has no zone yet starts with this machine's IANA zone filled in. A blank zone means the service host's zone, and a blank title means `Daily Health Report`. Save checks the three with the rules `update_alert_settings` uses and names the field it refused. The zone is checked against this machine, and a stored id the service host does not know is read as the host's own zone. Restore defaults turns the report off and clears the zone and the title.
+
+A read-only seat sees the fields for reference and cannot save them. The Viewer refuses a store below its own schema version, so the fields are always backed by the V232 columns. See [Daily Health Report](alerts-and-notifications.md#daily-health-report) for what the report holds and how to route it.
+
+## People
+
+Settings, Muting and triage, Manage People ([#7107](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7107), store schema V237) lists the people who work with the agents. Add, rename, disable or enable a person, then map identities and give grants to the selected one. A `web` identity is the 43-character sign-in key the person copies from the web page after they sign in. A `slack` identity is a Slack team id and user id. A grant is a capability plus a scope picked as a notification route picks one: the whole fleet, a tag or one server. The Level 3 request and approve capabilities also list the server actions they cover.
+
+Every change goes through the service, which writes it and journals it. A refusal shows the service's own sentence. A read-only seat sees the lists and no buttons. Only the `approve` grant is read today, when a person approves a server action that an agent proposed (see [Proposals](#proposals)). This screen changes no other power.
+
+## Proposals
+
+A route set to **Act on servers** (Level 3) can make an agent's server action wait for a person ([#7109](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7109), store schema V238). The agent then stores a proposal instead of running the action. The rules for approval are in [Level 3 server actions: approval](security.md#level-3-server-actions-approval).
+
+### The grid
+
+The **Agent changes** tab of the Investigations window has a Proposals grid under the list of changes. It lists the newest 200 proposals. The columns are Kind, Server, Target, State, Agent's reason, Expires and Approval. The reason is the agent's own words. A read-only seat sees no proposals. The statement in a target follows `mcp.dataDetail`.
+
+### Approve Selected Proposal
+
+The Viewer presses as an administrator, so it approves only a pending proposal on a route with single-person approval. The first press reads the facts again and shows them with the agent's reason. If you confirm, the second press runs the action only when the facts still match. If they changed, the proposal ends as `superseded` and the message names what changed.
+
+On any other route the Approval column says that a mapped person approves it in the web. It gives the link `<web.publicBaseUrl>/#/proposals?proposal=<id>` when the dashboard is on and `web.publicBaseUrl` is set. When nobody can approve the proposal, the column adds "Nobody can approve this. Map a person, or turn on single-person approval."
+
+### The route dialog
+
+The Viewer's route dialog has an **Action approval** box (`Required` or `Off`) and a **The person who asked may approve** box. They apply when the agent level is **Act on servers**. Under them the dialog shows "Nobody can approve this. Map a person, or turn on single-person approval." in one case. Approval is `Required`, the second box is off, and no enabled person with a sign-in holds any `approve` grant. The sentence follows the two controls as you change them.
+
 ## Read-only versus read-write seats
 
 This is the question that people ask most about the viewer. The answer is not what the wording suggests.
@@ -212,7 +244,7 @@ The defaults are opposite on purpose. The local seat belongs to the operator, an
 On connect the viewer runs one probe:
 
 ```sql
-SELECT has_table_privilege('config_mute_rules', 'INSERT')
+SELECT has_table_privilege('config_alert_log', 'UPDATE')
 ```
 
 True means read-write. False means read-only. Any other result also means read-only. The probe fails safe, so a permission quirk or a mis-provisioned store hides the write controls. You do not click one and hit a permission error. A failure to reach the store is not a read-only verdict. The viewer then shows "Can't reach the Darling store — is the Darling service running?" instead.

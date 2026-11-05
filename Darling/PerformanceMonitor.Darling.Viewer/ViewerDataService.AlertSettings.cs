@@ -101,7 +101,13 @@ public sealed partial class ViewerDataService
         /* #6875 (V224): the Identity Capacity alert's switch (off by default) and its two bars, APPENDED for the same reason and under the same gate. */
         "identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent, " +
         /* #6927 (V228): the blocking health band's four tiers, APPENDED for the same reason and under the same connect-time store gate. */
-        "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds";
+        "blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds, " +
+        /* #7028 (V230): the two snapshot wait tiers, APPENDED under the same connect-time store gate. */
+        "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds, " +
+        /* #7041 (V232): the Daily Health Report's switch, send time (a time of day), zone and title, APPENDED for the same reason and under the same connect-time store gate. */
+        "daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title, " +
+        /* #7611 (V245): the three Database Protection ages, APPENDED for the same reason and under the same connect-time store gate. */
+        "backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -118,7 +124,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -211,6 +217,15 @@ ON CONFLICT (id) DO UPDATE SET
     blocking_critical_per_hour = EXCLUDED.blocking_critical_per_hour,
     blocking_warn_wait_seconds = EXCLUDED.blocking_warn_wait_seconds,
     blocking_critical_wait_seconds = EXCLUDED.blocking_critical_wait_seconds,
+    blocking_warn_snapshot_wait_seconds = EXCLUDED.blocking_warn_snapshot_wait_seconds,
+    blocking_critical_snapshot_wait_seconds = EXCLUDED.blocking_critical_snapshot_wait_seconds,
+    daily_report_enabled = EXCLUDED.daily_report_enabled,
+    daily_report_send_at = EXCLUDED.daily_report_send_at,
+    daily_report_time_zone = EXCLUDED.daily_report_time_zone,
+    daily_report_title = EXCLUDED.daily_report_title,
+    backup_overdue_threshold_hours = EXCLUDED.backup_overdue_threshold_hours,
+    log_backup_overdue_threshold_minutes = EXCLUDED.log_backup_overdue_threshold_minutes,
+    checkdb_overdue_threshold_hours = EXCLUDED.checkdb_overdue_threshold_hours,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -355,6 +370,16 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalPerHour });     // $88 (#6927, V228)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnWaitSeconds });     // $89 (#6927, V228)
         command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalWaitSeconds }); // $90 (#6927, V228)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingWarnSnapshotWaitSeconds });     // $91 (#7028, V230)
+        command.Parameters.Add(new NpgsqlParameter<double> { TypedValue = r.BlockingCriticalSnapshotWaitSeconds }); // $92 (#7028, V230)
+        /* #7041 (V232): the Daily Health Report. The send time binds as a time of day (a value that does not parse falls back to 07:00, as the service does), and a blank zone or title binds as a typed text NULL: NULL is "the host's zone" and "the default title". */
+        command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = r.DailyReportEnabled });                                                                       // $93 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = ViewerDailyReportRules.ResolveSendAt(r.DailyReportSendAt).ToTimeSpan() }); // $94 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTimeZone) });            // $95 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTitle) });               // $96 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.BackupOverdueThresholdHours, DatabaseProtectionThresholdSettings.BackupHoursKey) });           // $97 (#7611, V245)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.LogBackupOverdueThresholdMinutes, DatabaseProtectionThresholdSettings.LogBackupMinutesKey) }); // $98 (#7611, V245)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey) });        // $99 (#7611, V245)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -473,6 +498,17 @@ ON CONFLICT (id) DO UPDATE SET
         BlockingCriticalPerHour = reader.GetDouble(87),
         BlockingWarnWaitSeconds = reader.GetDouble(88),
         BlockingCriticalWaitSeconds = reader.GetDouble(89),
+        /* #7028 (V230) the two blocking band snapshot wait tiers appended at ordinals 90-91. */
+        BlockingWarnSnapshotWaitSeconds = reader.GetDouble(90),
+        BlockingCriticalSnapshotWaitSeconds = reader.GetDouble(91),
+        /* #7041 (V232) the Daily Health Report switch, send time, zone and title appended at ordinals 92-95. */
+        DailyReportEnabled = reader.GetBoolean(92),
+        DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+        DailyReportTimeZone = reader.IsDBNull(94) ? null : reader.GetString(94),
+        DailyReportTitle = reader.IsDBNull(95) ? null : reader.GetString(95),
+        BackupOverdueThresholdHours = reader.GetInt32(96),
+        LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
+        CheckDbOverdueThresholdHours = reader.GetInt32(98),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -589,11 +625,11 @@ public sealed class AlertSettingsRow
     public string CpuMode { get; set; } = ViewerDataService.CpuModeTotal;
 
     public bool BlockingEnabled { get; set; } = true;
-    public int BlockingCountThreshold { get; set; } = 1;
+    public int BlockingCountThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
 
     /// <summary>#1839 (V40): fire when the latest blocking snapshot's TOTAL blocked wait reaches this many
-    /// seconds. 0 = off, matching the V40 DDL default — the shipped behavior is unchanged on upgrade.</summary>
-    public int BlockingWaitSecondsThreshold { get; set; }
+    /// seconds, and the bar for one blocked event (#7083). 0 = off. Default 60 since #7083 (V235 moves a store still at the old 0).</summary>
+    public int BlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
 
     public bool DeadlockEnabled { get; set; } = true;
     public int DeadlockCountThreshold { get; set; } = 1;
@@ -635,6 +671,21 @@ public sealed class AlertSettingsRow
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
     public double BlockingWarnWaitSeconds { get; set; } = ServerHealthThresholds.BlockingWarnWaitSeconds;
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+    /// <summary>#7028 (V230): the snapshot wait tiers of the blocking band, seconds. 0 means the tier is off.</summary>
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
+    /// <summary>#7041 (V232): send the scheduled Daily Health Report. Off by default: a new report must not start going out on upgrade.</summary>
+    public bool DailyReportEnabled { get; set; }
+    /// <summary>#7041 (V232): the local time of day, HH:mm, in <see cref="DailyReportTimeZone"/> the report goes out.</summary>
+    public string DailyReportSendAt { get; set; } = ViewerDailyReportRules.DefaultSendAt;
+    /// <summary>#7041 (V232): the report's time zone id; null means the service host's local zone.</summary>
+    public string? DailyReportTimeZone { get; set; }
+    /// <summary>#7041 (V232): the report's title; null means "Daily Health Report".</summary>
+    public string? DailyReportTitle { get; set; }
+    /// <summary>#7611 (V245): the Database Protection ages. A full backup older than this many hours (default 168), a log backup older than this many minutes (default 60) or a good CHECKDB older than this many hours (default 336) is overdue; a threshold override replaces each for a server or a database.</summary>
+    public int BackupOverdueThresholdHours { get; set; } = 168;
+    public int LogBackupOverdueThresholdMinutes { get; set; } = 60;
+    public int CheckDbOverdueThresholdHours { get; set; } = 336;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -774,6 +825,8 @@ public sealed class AlertSettingsRow
             && Math.Abs(BlockingCriticalPerHour - other.BlockingCriticalPerHour) < 0.0001
             && Math.Abs(BlockingWarnWaitSeconds - other.BlockingWarnWaitSeconds) < 0.0001
             && Math.Abs(BlockingCriticalWaitSeconds - other.BlockingCriticalWaitSeconds) < 0.0001
+            && Math.Abs(BlockingWarnSnapshotWaitSeconds - other.BlockingWarnSnapshotWaitSeconds) < 0.0001
+            && Math.Abs(BlockingCriticalSnapshotWaitSeconds - other.BlockingCriticalSnapshotWaitSeconds) < 0.0001
             && LongRunningQueryEnabled == other.LongRunningQueryEnabled
             && LongRunningQueryThresholdMinutes == other.LongRunningQueryThresholdMinutes
             && TempDbSpaceEnabled == other.TempDbSpaceEnabled
@@ -827,6 +880,13 @@ public sealed class AlertSettingsRow
             && (LongRunningQueryExcludedLogins ?? new List<string>()).SequenceEqual(other.LongRunningQueryExcludedLogins ?? new List<string>())
             /* #3712 (V137): the route knob's tri-state -- null and a route differ, two spellings of one route
                do not (the store holds the lower-case form; a row built from the combo does too). */
-            && string.Equals(AnalysisUncorroboratedRoute, other.AnalysisUncorroboratedRoute, StringComparison.OrdinalIgnoreCase);
+            && string.Equals(AnalysisUncorroboratedRoute, other.AnalysisUncorroboratedRoute, StringComparison.OrdinalIgnoreCase)
+            && DailyReportEnabled == other.DailyReportEnabled
+            && string.Equals(DailyReportSendAt, other.DailyReportSendAt, StringComparison.Ordinal)
+            && string.Equals(DailyReportTimeZone, other.DailyReportTimeZone, StringComparison.Ordinal)
+            && string.Equals(DailyReportTitle, other.DailyReportTitle, StringComparison.Ordinal)
+            && BackupOverdueThresholdHours == other.BackupOverdueThresholdHours
+            && LogBackupOverdueThresholdMinutes == other.LogBackupOverdueThresholdMinutes
+            && CheckDbOverdueThresholdHours == other.CheckDbOverdueThresholdHours;
     }
 }

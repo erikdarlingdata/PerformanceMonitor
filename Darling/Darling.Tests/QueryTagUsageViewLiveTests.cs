@@ -74,7 +74,7 @@ public sealed class QueryTagUsageViewLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the viewer's by-tag pins.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
         await using var store = new NpgsqlConnection(connectionString);
         await store.OpenAsync(ct);
@@ -156,6 +156,51 @@ public sealed class QueryTagUsageViewLiveTests
             /* A key tagged on one server is untagged on the other. */
             Assert.Equal(6_000, Cell(two.Rows.Single(r => r.Kind == "untagged"), two, "CPU (ms)"));
             Assert.Equal(10_000, Cell(fleet.Rows.Single(), fleet, "CPU (ms)"));
+        });
+    }
+
+    /// <summary>#7376: a server the newest server_properties row marks a readable secondary, with no query_store_replica, reads not_collected in its
+    /// Query Store table in both scopes, with the words get_query_store_top gives. The server beside it, and the secondary's other sections, are what
+    /// they were, and the secondary is not named under "Sections not served".</summary>
+    [Fact]
+    public async Task AReadableSecondary_ReadsNotCollectedInQueryStore_WithTheToolsWords_InBothScopes()
+    {
+        await WithViewAsync(async (store, viewer, ct) =>
+        {
+            await ExecAsync(store,
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) " +
+                "VALUES ($1, $2, $3, 'x', 'Enterprise', '16.0.1000.6', 'RTM', 3, 'Secondary')",
+                ct, CollectionIdGenerator.Next(), DateTime.UtcNow, ServerTwo);
+            var a = await TagAsync(store, ct, "A");
+            await MapAsync(store, ct, ServerTwo, "0xB1", a);
+            await PlanCacheAsync(store, ct, ServerTwo, "0xB1", 3_000_000);
+
+            var servers = new[] { new DarlingServer(ServerOne, "srv-one", "srv-one", true, 15), new DarlingServer(ServerTwo, "srv-two", "srv-two", true, 15) };
+            await using var source = NpgsqlDataSource.Create(store.ConnectionString);
+            var expected = await PerformanceMonitor.Darling.Service.Mcp.DarlingRuntimePrecondition.QueryStoreReadableSecondaryMessageAsync(
+                source, ServerTwo, "srv-two", ct);
+            Assert.Contains("readable secondary", expected, StringComparison.Ordinal);
+
+            var end = DateTime.UtcNow;
+            var fleetData = await viewer.GetQueryTagRollupDataAsync([ServerOne, ServerTwo], end.AddHours(-24), end, ct);
+            var fleetReasons = await viewer.GetQueryStoreNotCollectedAsync(fleetData, servers, new Dictionary<int, string>(), ct);
+            Assert.Equal([ServerTwo], fleetReasons.Keys);
+            var fleet = QueryTagUsageView.Build(
+                fleetData, servers.Select(x => (Id: x.ServerId, Name: x.DisplayName)).ToList(), allServers: true, tagFilter: null, queryStoreNotCollected: fleetReasons);
+            var secondary = fleet.Tables.Single(t => t.Section == "query_store" && t.Title.EndsWith(" - srv-two", StringComparison.Ordinal));
+            Assert.Equal("not_collected", secondary.Status);
+            Assert.Equal(expected, secondary.Message);
+            Assert.NotEqual("not_collected", fleet.Tables.Single(t => t.Section == "query_store" && t.Title.EndsWith(" - srv-one", StringComparison.Ordinal)).Status);
+            Assert.Equal("ok", fleet.Tables.Single(t => t.Section == "plan_cache" && t.Title.EndsWith(" - srv-two", StringComparison.Ordinal)).Status);
+            Assert.DoesNotContain("srv-two", fleet.Message ?? string.Empty, StringComparison.Ordinal);
+
+            var oneData = await viewer.GetQueryTagRollupDataAsync([ServerTwo], end.AddHours(-24), end, ct);
+            var oneReasons = await viewer.GetQueryStoreNotCollectedAsync(oneData, servers.Skip(1), new Dictionary<int, string>(), ct);
+            var one = QueryTagUsageView.Build(oneData, [(ServerTwo, "srv-two")], allServers: false, tagFilter: null, queryStoreNotCollected: oneReasons);
+            var oneQs = one.Tables.Single(t => t.Section == "query_store");
+            Assert.Equal("not_collected", oneQs.Status);
+            Assert.Equal(expected, oneQs.Message);
+            Assert.DoesNotContain("Sections not served", one.Message ?? string.Empty, StringComparison.Ordinal);
         });
     }
 

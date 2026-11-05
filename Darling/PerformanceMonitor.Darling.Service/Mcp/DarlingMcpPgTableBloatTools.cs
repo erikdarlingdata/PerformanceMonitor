@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -34,6 +35,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgTableBloatTools
 {
+    /// <summary>#7010: the collector table this read windows on, for the window-floor notice.</summary>
+    private const string BloatTable = "pg_table_bloat_stats";
+
     /// <summary>
     /// The threshold, re-exported from the ONE place the rule lives so this tool's tests can pin it without
     /// reaching across projects. <see cref="DarlingPgTableBloatReader.StaleStatisticsChurnRatio"/> carries
@@ -75,6 +79,22 @@ public sealed class DarlingMcpPgTableBloatTools
             return "SUPPRESSED: this table has never been analyzed, so PostgreSQL does not know how many "
                  + "rows it holds (reltuples is -1, its explicit 'unknown'). There is no row count to "
                  + "compare the page count against. Run ANALYZE on the table and re-read.";
+        }
+
+        if (r.LastAnalyzed is null)
+        {
+            /* #7456: statistics exist (the first two branches ruled out "no pg_stats" and "never analyzed")
+               but last_analyze and last_autoanalyze are both empty. PostgreSQL clears them, and
+               n_mod_since_analyze, whenever its statistics counters are lost, so the churn test below would
+               read 0 and call months-old widths fresh. The cause is not named as a crash: pg_stat_reset()
+               leaves the same trace. */
+            return "SUPPRESSED: PostgreSQL holds column statistics for this table but has no record of when "
+                 + "it was last analyzed (last_analyze and last_autoanalyze are both empty), so how stale "
+                 + "those statistics are cannot be judged. PostgreSQL discards that record, and the count of "
+                 + "rows modified since, when its statistics counters are lost: at crash recovery, after an "
+                 + "immediate shutdown, or after pg_stat_reset(). Stale statistics can put this estimate "
+                 + "tens of points off, so it is withheld rather than shown as fresh. Run ANALYZE on the "
+                 + "table, then re-read once the collector has run again.";
         }
 
         {
@@ -221,7 +241,9 @@ public sealed class DarlingMcpPgTableBloatTools
         + "Against pgstattuple on real tables with current statistics it was within about 2 percentage "
         + "points; with STALE statistics it was wrong by 81 percentage points, so the tool suppresses the "
         + "number outright rather than captioning it when the statistics behind it are stale, when the table "
-        + "has never been analyzed, or when the monitoring login cannot SELECT from the table (pg_monitor "
+        + "has never been analyzed, when PostgreSQL holds statistics for it but no record of when they were "
+        + "taken (statistics counters are lost at crash recovery, an immediate shutdown or pg_stat_reset(), so "
+        + "freshness cannot be judged until an ANALYZE runs), or when the monitoring login cannot SELECT from the table (pg_monitor "
         + "alone does not confer that, and in that state the estimator silently returns large numbers). "
         + "Measured sizes, the dead-tuple fraction from the server's own counters, and the growth across the "
         + "window are always reported, so a suppressed estimate degrades the answer rather than removing it. "
@@ -236,6 +258,7 @@ public sealed class DarlingMcpPgTableBloatTools
         [Description("Hours of history to analyze. Default 168 (seven days), which shows whether the waste is growing or being reclaimed.")] int hours_back = 168,
         [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -252,22 +275,36 @@ public sealed class DarlingMcpPgTableBloatTools
             var start = end.AddHours(-hours_back);
             /* #3653 (one vocabulary): the page cut is OBSERVED off a limit + 1 fetch through McpHelpers.BoundPage
                (the #3594 dialect), replacing `limit_reached = tables.Count >= limit` — which read a server with
-               exactly `limit` measured tables as a cut page. Bound BEFORE the aggregates below, so every count and
-               every estimate sum is over the page. */
+               exactly `limit` measured tables as a cut page. The table list is the page; the counts and the estimate sum
+               below come from the whole-window totals read (#7551), not from this page. */
             var fetched = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
                 postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, start, end, cancellationToken);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, hours_back, start, end, logger, cancellationToken);
             }
 
-            var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
-            var trusted = rows.Where(r => EstimateSuppressionReason(r) == null).ToList();
-            var trustedBloatBytes = trusted.Sum(r => Math.Max(r.BloatBytesEstimate, 0));
-            var anyPgstattuple = rows.Any(r => r.PgstattupleAvailable);
-            var permissionsSuspected = rows.Count(r => r.EstimateUnavailable);
+            /* #7010: heap_bytes_growth_in_window and first_seen_at are read across the window, so a store that starts later than the window
+               undercounts the growth. A failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, BloatTable, resolved.ServerName, start, end, cancellationToken),
+                start, end, BloatTable,
+                "heap_bytes_growth_in_window and first_seen_at cover only effective_start onward, so a short history understates how much the waste grew.",
+                logger: logger, cancellationToken: cancellationToken);
+
+            /* #7551: the tally is over the WHOLE window, not the page. Suppressed rows sort last, so a page cut at the limit is all
+               suppressed rows on a server whose published estimates are few, and "25 suppressed" then described the page. */
+            var totals = await DarlingPgTableBloatReader.GetPgTableBloatTotalsAsync(
+                postgres, resolved.ServerId, start, end, cancellationToken);
+            var suppressedCount = totals.SuppressedCount;
+            var trustedCount = totals.TrustedCount;
+            /* Null when no estimate was published, never 0: a sum over no estimates is not a measured nothing, and 0 reads as an all-clear. */
+            long? trustedBloatBytes = trustedCount > 0 ? totals.TrustedBloatBytes : null;
+            /* Whole window as well: suppressed rows sort last, so a cut page drops the estimate_unavailable rows this hint counts. */
+            var anyPgstattuple = totals.PgstattupleAvailableAnywhere;
+            var permissionsSuspected = totals.EstimateUnavailableCount;
 
             var tables = rows.Select(r =>
             {
@@ -367,18 +404,26 @@ public sealed class DarlingMcpPgTableBloatTools
             })
             .ToList();
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the window floor, right after hours_back. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 status = "table_bloat",
                 /* The page's count under the page's name (#3594). */
                 tables_returned = tables.Count,
                 /* Named for what it is: a sum of ESTIMATES over the tables whose estimates were fit to
                    publish. Not "reclaimable bytes", which is a promise the arithmetic cannot make. */
                 estimated_bloat_bytes_over_trusted_rows = trustedBloatBytes,
-                estimated_bloat_mb_over_trusted_rows = Math.Round(trustedBloatBytes / 1024.0 / 1024, 2),
-                trusted_estimate_count = trusted.Count,
+                estimated_bloat_mb_over_trusted_rows = trustedBloatBytes is { } sum ? Math.Round(sum / 1024.0 / 1024, 2) : (double?)null,
+                /* What a viewer shows in place of the null above (#7551). */
+                estimated_bloat_state = trustedBloatBytes is null ? "No estimate published" : null,
+                /* The three counts are over every table the window held (#7551); tables_returned is the page. */
+                tables_in_window = totals.TableCount,
+                trusted_estimate_count = trustedCount,
                 suppressed_estimate_count = suppressedCount,
                 pgstattuple_available_anywhere = anyPgstattuple,
                 truncated,
@@ -400,11 +445,15 @@ public sealed class DarlingMcpPgTableBloatTools
                          + "SELECT is the only route."
                          : string.Empty)
                      + (truncated
-                         ? $" TRUNCATED: the server held more measured tables than the {limit} returned, so the "
-                         + "totals cover only the tables returned. Raise limit for the full picture."
+                         ? $" TRUNCATED: the server held more measured tables than the {limit} returned. The estimate "
+                         + "totals and counts cover every table in the window, and only the tables list is cut. Raise limit for more rows."
+                         : string.Empty)
+                     + (trustedBloatBytes is null
+                         ? " NO ESTIMATE WAS PUBLISHED for any table in the window, so the estimated bloat total is null: that is "
+                         + "not a zero. Nothing here says the tables are free of bloat."
                          : string.Empty),
                 tables,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -421,8 +470,8 @@ public sealed class DarlingMcpPgTableBloatTools
     /// under the 1 MB floor.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
-        CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, string registeredName, string serverName, int hoursBack, DateTime start, DateTime end,
+        ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
             postgres, serverId, serverName, "pg_table_bloat_stats", cancellationToken);
@@ -433,23 +482,31 @@ public sealed class DarlingMcpPgTableBloatTools
 
         var probe = await DarlingPgTableBloatReader.ProbePgTableBloatAsync(postgres, serverId, start, end, cancellationToken);
 
-        var hints = new
+        /* #7010: the window keys ride under hints on the empty and the unavailable answers (nothing was read, so a short store reads as
+           "nothing happened" otherwise); not_collected, decided above, stays bare. */
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, BloatTable, registeredName, start, end, cancellationToken),
+            start, end, BloatTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+
+        var hints = DarlingMcpWindowNotice.AttachToHints(new
         {
             server = serverName,
             hours_back = hoursBack,
             rows_in_window = probe.RowsInWindow,
             snapshots_in_window = probe.SnapshotsInWindow,
             ever_collected = probe.RowsEver > 0,
-        };
+        }, notice);
 
         if (probe.SnapshotsInWindow >= 1)
         {
             return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
                 "empty",
-                $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
-                + "collection ran. Every table on every collected database is under the collector's 1 MB "
-                + "floor, below which bloat is not an actionable amount of space. That is a genuine "
-                + "all-clear rather than missing data.",
+                McpHelpers.QuietUnlessCut(
+                    notice is { IsUnavailable: false, WindowTruncated: true }, notice.EffectiveStart,
+                    factual: $"No tables were recorded for {serverName} in the last {hoursBack} hour(s) even though "
+                        + "collection ran. Every table on every collected database is under the collector's 1 MB "
+                        + "floor, below which bloat is not an actionable amount of space",
+                    coveredClaim: ". That is a genuine all-clear rather than missing data."),
                 hints), cancellationToken);
         }
 

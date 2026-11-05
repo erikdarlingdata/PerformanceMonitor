@@ -61,6 +61,17 @@ namespace Darling.Tests;
 internal sealed class LiveCleanupBatch
 {
     /// <summary>
+    /// <c>DROP OWNED BY</c> for each of the four product roles (admin, viewer, web, mcp) that exists, and no error for one that
+    /// does not: the statement has no <c>IF EXISTS</c> form, so a cleanup that names a role its class never created (the body
+    /// failed before the batch ran, or the class makes only some of them) would throw 42704 and hide the real failure.
+    /// A statement to put in front of <c>DROP ROLE IF EXISTS</c> for each role.
+    /// </summary>
+    public const string DropOwnedByExistingProductRolesSql =
+        "DO $do$ DECLARE r text; BEGIN FOREACH r IN ARRAY ARRAY['admin', 'viewer', 'web', 'mcp'] LOOP "
+        + "IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN EXECUTE pg_catalog.format('DROP OWNED BY %I', r); END IF; "
+        + "END LOOP; END $do$;";
+
+    /// <summary>
     /// Attempts per object. The collision clears as soon as the in-flight refresh finishes, which in the test
     /// suite's data volumes is sub-second; the repro above needed one retry with a 20-million-row refresh
     /// running. Seven attempts spend at most ~9s of backoff before giving up, and only ever on the path that

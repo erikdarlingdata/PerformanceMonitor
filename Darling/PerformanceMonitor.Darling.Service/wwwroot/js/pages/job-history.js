@@ -48,7 +48,7 @@ export const LIMITS = [100, 250, 500, 1000];
 export const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
   { key: "server", label: "Server" },
-  { key: "job_name", label: "Job" },
+  { key: "job_name", label: "Job", name: true },
   { key: "category", label: "Category" },
   { key: "step", label: "Step" },
   { key: "status", label: "Status" },
@@ -198,8 +198,8 @@ export function retainedNote(data) {
   if (!data || data.window_truncated !== true) return null;
   const from = typeof data.effective_start === "string" && data.effective_start ? localTime(data.effective_start) : null;
   return from
-    ? "partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
-    : "partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
+    ? "Partial window: the store keeps job history from " + from + ", after the window's start, so earlier runs are not shown."
+    : "Partial window: the store keeps less job history than the window asks for, so earlier runs are not shown.";
 }
 
 /** The notice for a list the row limit cut, or null. `server` is the Server pick ("" for All servers): a list already scoped to one server is not told to pick one. */

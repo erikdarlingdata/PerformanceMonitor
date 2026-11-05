@@ -50,17 +50,21 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id.
+    /// <summary>Latest SQL + other-process CPU for one server (newest ring-buffer sample). $1 server_id, $2 now
+    /// (naive UTC), $3 the freshness floor in minutes. The read is cut off on <c>collection_time</c> at now minus the
+    /// larger of the floor and twice this server's <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a reading from a collector that stopped days ago is not shown as current (#7196). The fleet
+    /// card (<c>DarlingFleetReader.FleetCpuSql</c>) carries the same bound, so the two cards agree.
     /// Ordered on <c>collection_time</c> — the hypertable's partition column, which earns TimescaleDB's
     /// ordered ChunkAppend and so touches ONE chunk instead of appending and top-N sorting the server's whole
-    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no time predicate:
+    /// retained history — with <c>sample_time</c> as the within-batch tiebreak. Carries no predicate on <c>sample_time</c>:
     /// <c>sample_time</c> is the monitored server's local wall clock, so bounding on it against store time
     /// returns zero rows for any server behind the store. Full reasoning on
     /// <c>DarlingWorker.LatestCpuSql</c>.</summary>
-    public const string ServerSummaryCpuSql = @"
+    public static readonly string ServerSummaryCpuSql = $@"
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("$1", "$2", "$3")}
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -161,16 +165,27 @@ FROM newest";
     /// they ask for the newest event in all of history, which a floor would change the answer to.</para>
     /// </summary>
     /* #5644 W1: the two counts are WAITS (BlockingWaits.WaitsCteSql), not report rows, as the fleet tile's are.
-       The last two columns are the raw report / snapshot rows (the CTE's *_marked relation holds every source row):
-       the unit the health band's per-hour count tiers were measured in, so the band reads them (#5644 review). */
+       #7028: the band bands on these waits (the card's window is one hour, so XE-or-DMV for the window is the per-hour
+       choice the blocking alerts make for their rolling hour) and on the last column, the Blocking Wait Time alert's own
+       measure: the largest total blocked wait of one DMV snapshot in the window after the alert's persistence gate,
+       in milliseconds, taken from the DMV snapshots whichever source the count chose. The gate is the one shared definition
+       (DailySummarySql.BlockingSnapshotGateSql): the server's own snapshot cadence, snapshots read from before the window
+       start so a streak that began before it counts. */
     public static readonly string ServerSummaryBlockingSql = @"
-WITH " + BlockingWaits.WaitsCteSql(
+WITH dmv_src AS (
+    /* #7028: ONE scan of the snapshots, shared by the wait count and the snapshot gate (reading them once for each
+       took the statement to 1.3 times the buffers of the statement before the gate). */
+    SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM v_dmv_blocking_snapshots
+    WHERE server_id = $1 AND collection_time >= $3
+),"
+    + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
     WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
-        @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3") + @"
+        @"SELECT blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms FROM dmv_src
+    WHERE event_time >= $2") + ","
+    + DailySummarySql.BlockingSnapshotGateSql("dmv_gated", "$2", null, false, "$1", "$3", "dmv_src") + @"
 SELECT
     (SELECT COUNT(*)          FROM xe_waits),
     (SELECT MAX(wait_time_ms) FROM xe_waits),
@@ -178,8 +193,7 @@ SELECT
     (SELECT MAX(wait_time_ms) FROM dmv_waits),
     (SELECT MAX(event_time)   FROM v_blocked_process_reports WHERE server_id = $1),
     (SELECT MAX(event_time)   FROM v_dmv_blocking_snapshots   WHERE server_id = $1),
-    (SELECT COUNT(*)          FROM xe_waits_marked),
-    (SELECT COUNT(*)          FROM dmv_waits_marked)";
+    (SELECT CAST(ROUND(MAX(peak_snapshot_wait_ms)) AS bigint) FROM dmv_gated)";
 
     /// <summary>
     /// Deadlock count in the window plus the newest deadlock ever — the windowed count for the card value,
@@ -264,11 +278,13 @@ LIMIT 1";
     {
         var read = await DarlingIdentityCapacityReader.ReadNewestScansAsync(
             _dataSource, serverId, DatabaseFilter.All, nowUtc.AddHours(-168), nowUtc,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, ViewerStoreLogger.Instance, cancellationToken);
         var bands = read.Columns.Select(c => c.Band).Where(b => b is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical).ToList();
+        var worst = read.Columns.Where(c => c.Band is IdentityCapacityMath.BandWarning or IdentityCapacityMath.BandCritical)
+            .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count);
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
     }
 
     /// <summary>
@@ -309,7 +325,7 @@ LIMIT 1";
         double? memoryMb = null;
         double? bufferPoolMb = null;
         var blockingCount = 0;
-        var blockingReportCount = 0;
+        long peakSnapshotWaitMs = 0;
         long maxBlockingWaitMs = 0;
         int? lastBlockingMinutesAgo = null;
         var deadlockCount = 0;
@@ -332,6 +348,11 @@ LIMIT 1";
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
+            });
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = CpuReadingFreshnessSql.FloorMinutes });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -426,15 +447,14 @@ LIMIT 1";
             {
                 var xeCount = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
                 var xeMaxWait = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
-                var xeReports = reader.IsDBNull(6) ? 0 : Convert.ToInt32(reader.GetValue(6));
-                var dmvReports = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7));
+                peakSnapshotWaitMs = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6));
                 if (separate.Count > 0)
                 {
                     /* The XE arm without the separately monitored databases' reports; the DMV arm and the
                        XE-then-DMV fallback below are unchanged. */
                     try
                     {
-                        (xeCount, xeMaxWait, xeReports) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
+                        (xeCount, xeMaxWait) = await ReadScopedBlockingAsync(serverId, windowStart, scopeEnd, separate, cancellationToken);
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
@@ -451,13 +471,11 @@ LIMIT 1";
                 if (xeCount > 0)
                 {
                     blockingCount = xeCount;
-                    blockingReportCount = xeReports;
                     maxBlockingWaitMs = xeMaxWait;
                 }
                 else
                 {
                     blockingCount = dmvCount;
-                    blockingReportCount = dmvReports;
                     maxBlockingWaitMs = dmvMaxWait;
                 }
 
@@ -575,7 +593,7 @@ LIMIT 1";
             MemoryTimeoutCount = memoryTimeoutCount,
             MemoryForcedCount = memoryForcedCount,
             BlockingCount = blockingCount,
-            BlockingReportCount = blockingReportCount,
+            PeakSnapshotWaitMs = peakSnapshotWaitMs,
             MaxBlockingWaitMs = maxBlockingWaitMs,
             LastBlockingMinutesAgo = lastBlockingMinutesAgo,
             DeadlockCount = deadlockCount,
@@ -602,6 +620,7 @@ LIMIT 1";
             LastCollectionTime = lastCollection,
             AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
             DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionOverdueCount = protectionChip.Count,
             DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
@@ -735,7 +754,7 @@ public sealed class ServerSummaryItem
     public string IdentityCapacityDisplay => IdentityCapacity is null ? "" : IdentityCapacity.ColumnsAtBar == 1 ? "1 column" : $"{IdentityCapacity.ColumnsAtBar} columns";
 
     /// <summary>Identity capacity detail: the fullest column's band.</summary>
-    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {IdentityCapacity.WorstBand}.";
+    public string IdentityCapacityDetail => IdentityCapacity is null ? "" : IdentityCapacity.Detail;
 
     /// <summary>The row's dot and value brush: the card's critical red when the fullest is critical, else its warning amber.</summary>
     public SolidColorBrush IdentityCapacityBrush => IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical ? s_criticalBrush : s_warningBrush;
@@ -976,11 +995,25 @@ public sealed class ServerSummaryItem
     /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
     public string? DatabaseProtectionChipValue { get; set; }
 
+    /// <summary>#7561: how many facts are overdue, for the Needs attention reason ("Protection 3 overdue items"). 0 with <see cref="DatabaseProtectionChipValue"/> null.</summary>
+    public int DatabaseProtectionOverdueCount { get; set; }
+
     /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
     public string? DatabaseProtectionChipDetail { get; set; }
 
     /// <summary>The chip shows only when something is overdue, and not on an offline card (its figures are old).</summary>
     public bool HasDatabaseProtectionOverdue => DatabaseProtectionChipValue is not null && !IsOffline;
+
+    /// <summary>#7561: the tiles no band reads and that still want a person (a warning Identity capacity column, an Agent alerts gap, an overdue backup or CHECKDB), by name,
+    /// from <see cref="ServerHealthClassifier.AdvisoryTiles"/>, the one rule the web fleet card and <c>get_fleet_overview</c> read too. Empty when there are none.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AdvisoryTiles => ServerHealthClassifier.AdvisoryTiles(
+        AgentAlertGaps.Count,
+        HasDatabaseProtectionOverdue ? 1 : 0,
+        IdentityCapacity?.ColumnsAtBar ?? 0,
+        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical);
+
+    /// <summary>#7561: true when <see cref="AdvisoryTiles"/> names any. The band stays what the metrics say; the fleet's Needs attention list and ranking count the server.</summary>
+    public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
 
     /// <summary>The chip's colour: always the Warning tone, like the web chip.</summary>
     public SolidColorBrush DatabaseProtectionBrush => s_warningBrush;
@@ -995,6 +1028,13 @@ public sealed class ServerSummaryItem
     /// from one that has never collected.
     /// </summary>
     public DateTime? RegisteredAt { get; set; }
+
+    /// <summary>When the service's connect to this server first failed (UTC), or null (#7590). Copied from the registry row the card was built
+    /// from; set, <see cref="ApplyFreshness(DateTime)"/> bands the card Offline and <see cref="FleetRollup.BuildReason"/> says why.</summary>
+    public DateTime? ConnectDownSince { get; set; }
+
+    /// <summary>The last connect error text while <see cref="ConnectDownSince"/> is set (#7590).</summary>
+    public string? LastConnectError { get; set; }
 
     /// <summary>
     /// Headline CPU display: total non-idle CPU prominently with the SQL-only number alongside, e.g.
@@ -1077,7 +1117,9 @@ public sealed class ServerSummaryItem
         }
     }
 
-    public string BlockingDisplay => IsOffline ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
+    /* #7560: PostgreSQL has no blocked-process reports or blocking DMV snapshots behind this count, so its 0 is structural
+       (the band reads Unknown through BlockingCountForBand). "--" is the word the tile uses for a reading it does not have. */
+    public string BlockingDisplay => IsOffline || IsPostgres ? "--" : BlockingCount > 0 ? BlockingCount.ToString() : "0";
 
     /// <summary>
     /// The blocking detail (Dashboard's BlockingDetailText): while blocking is present in the window, the
@@ -1205,7 +1247,7 @@ public sealed class ServerSummaryItem
             + (WarningCollectorCount > 0 ? $"Warning: {WarningCollectorCount}, " : "")
             + $"Failing: {FailedCollectorCount}"
             + (NotCollectedCollectorCount > 0 ? $", Not collected: {NotCollectedCollectorCount}" : "")
-            + (NoPermissionCollectorCount > 0 ? $", No permission: {NoPermissionCollectorCount}" : "");
+            + (NoPermissionCollectorCount > 0 ? $", Need setup: {NoPermissionCollectorCount}" : "");
 
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
@@ -1298,15 +1340,18 @@ public sealed class ServerSummaryItem
     /// semaphore to read (every PostgreSQL target).</summary>
     public bool? MemoryPressureForBand => ServerMetricSources.DmvSourced(HasMemoryPressure, IsPostgres);
 
-    /// <summary>Blocking as a BANDABLE reading — null when this card reads no blocking source for this engine.
-    /// It is the REPORT count (<see cref="BlockingReportCount"/>), not the wait count the card shows
-    /// (<see cref="BlockingCount"/>, #5644 W1): the band's per-hour count tiers (5 / 20) were measured in blocked-process
-    /// reports per server-hour, and a long wait is many reports and one wait.</summary>
-    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingReportCount ?? BlockingCount, IsPostgres);
+    /// <summary>Blocking as a BANDABLE reading - null when this card reads no blocking source for this engine. It is
+    /// the wait count the card shows (<see cref="BlockingCount"/>, #5644 W1 and #7028): the unit the blocking alerts
+    /// count, so a tier set to the alert's number means the same thing on the card.</summary>
+    public int? BlockingCountForBand => ServerMetricSources.DmvSourced(BlockingCount, IsPostgres);
 
-    /// <summary>The winning source's blocked-process report (or DMV snapshot) rows in the window, before they collapse
-    /// to waits (#5644). Set by the read; null on a card built without one, which bands on <see cref="BlockingCount"/>.</summary>
-    public int? BlockingReportCount { get; set; }
+    /// <summary>#7028: the blocking band's snapshot arm in milliseconds, the largest total blocked wait of one DMV
+    /// snapshot in the window after the Blocking Wait Time alert's persistence gate. 0 when the window holds no
+    /// snapshot wait; the arm is off unless a snapshot tier is above 0.</summary>
+    public long PeakSnapshotWaitMs { get; set; }
+
+    /// <summary>The snapshot arm as a BANDABLE reading in seconds - null on a card that reads no blocking source.</summary>
+    public double? PeakSnapshotWaitSecondsForBand => BlockingCountForBand.HasValue ? PeakSnapshotWaitMs / 1000.0 : null;
 
     /// <summary>Deadlocks as a BANDABLE reading (#3539). On a SQL Server card it is the count itself — a
     /// graph count is an observation even at zero (#3272's engine-not-collector rule). On a PostgreSQL card
@@ -1342,7 +1387,7 @@ public sealed class ServerSummaryItem
     /// hour over the window against the store's tiers (#6927, 20/hr Critical, 5/hr Warning by default); a 10 s block
     /// Warning by default; no source Unknown.</summary>
     public HealthSeverity BlockingSeverity =>
-        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds);
+        ServerHealthClassifier.BlockingSeverity(BlockingCountForBand, MaxBlockedSeconds, BlockingWindow, BlockingBandThresholds, PeakSnapshotWaitSecondsForBand);
 
     /// <summary>
     /// The window <see cref="DeadlockCount"/> and <see cref="BlockingCount"/> cover (#3368) — the
@@ -1433,6 +1478,7 @@ public sealed class ServerSummaryItem
         MaxBlockedSeconds = MaxBlockedSeconds,
         /* #3539 A3: the count's denominator, for the reason the deadlock trio below travels together. */
         BlockingWindow = BlockingWindow,
+        PeakSnapshotWaitSeconds = PeakSnapshotWaitSecondsForBand,
         DeadlockCount = DeadlockCountForBand,
         /* #3368: the three travel together. Without them the card's overall band and its border would
            re-band the same count against no window while the deadlock dot banded a rate — a card
@@ -1447,6 +1493,8 @@ public sealed class ServerSummaryItem
         FailedCollectorCount = FailedCollectorCount,
         /* #3539 A8d: the share's denominator, or the overall band would grade presence-flat again. */
         CollectorCount = CollectorCount,
+        /* #7561: a column at its critical bar is a failing insert, so the card bands Critical, as the service's fleet card does. */
+        IdentityCapacityCritical = IdentityCapacity is { ColumnsAtBar: > 0 } && IdentityCapacity.WorstBand == IdentityCapacityMath.BandCritical,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────
@@ -1512,6 +1560,12 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(
             lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc);
 
+    /// <summary>The registration rule with the service's own connection answer folded in (#7590): a failed connect is Offline at once.
+    /// One rule for every surface, <see cref="ServerHealthClassifier.ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime, DateTime?)"/>.</summary>
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, DateTime? connectDownSinceUtc) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc, connectDownSinceUtc);
+
     /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
     /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
@@ -1525,7 +1579,9 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc));
+        /* #7590: as on the sidebar row, a collection newer than the first failed connect makes the stored flag stale. */
+        ConnectDownSince = ServerHealthClassifier.EffectiveConnectDownSince(LastCollectionTime, ConnectDownSince);
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc, ConnectDownSince));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1577,4 +1633,24 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar);
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, IdentityColumnFact? Worst = null)
+{
+    /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
+    /// sentence when no column is known.</summary>
+    public string Detail
+    {
+        get
+        {
+            if (Worst is null)
+                return $"At or past 70% used (the shipped bar, the alert's own bars may differ). The fullest is {WorstBand}.";
+            var name = string.Join(".", new[] { Worst.DatabaseName, Worst.SchemaName, Worst.TableName, Worst.ColumnName }.Where(p => !string.IsNullOrEmpty(p)));
+            var percent = Worst.PercentUsed is { } p
+                ? string.Create(CultureInfo.InvariantCulture, $": {(p >= 99.95 || p == 0 ? p.ToString("0", CultureInfo.InvariantCulture) : p.ToString("0.0", CultureInfo.InvariantCulture))}% used")
+                : "";
+            var left = Worst.ValuesRemaining is { } r ? ", " + r.ToString("N0", CultureInfo.InvariantCulture) + " left" : "";
+            return name + percent + left + (ColumnsAtBar > 1
+                ? string.Create(CultureInfo.InvariantCulture, $". The fullest of {ColumnsAtBar} columns at 70% or more. The Identity Capacity tab lists them.")
+                : ". The Identity Capacity tab lists it.");
+        }
+    }
+}

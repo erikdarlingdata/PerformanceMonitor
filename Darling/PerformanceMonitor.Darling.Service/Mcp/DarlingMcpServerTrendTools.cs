@@ -123,7 +123,7 @@ public sealed class DarlingMcpServerTrendTools
 
                 if (selected.Count == 0)
                 {
-                    return await EmptyAsync(postgres, resolved, name, hours_back, cancellationToken);
+                    return await EmptyAsync(postgres, resolved, name, start, end, hours_back, cancellationToken);
                 }
             }
 
@@ -150,7 +150,7 @@ public sealed class DarlingMcpServerTrendTools
                 {
                     return named
                         ? await NoNamedSeriesAsync(postgres, resolved, kind, selected, start, end, hours_back, name, cancellationToken)
-                        : await EmptyAsync(postgres, resolved, name, hours_back, cancellationToken);
+                        : await EmptyAsync(postgres, resolved, name, start, end, hours_back, cancellationToken);
                 }
 
                 var missing = named ? selected.Where(c => !series.ContainsKey(c)).ToList() : [];
@@ -169,10 +169,19 @@ public sealed class DarlingMcpServerTrendTools
                 var points = await ReadPointsAsync(postgres, name, resolved.ServerId, start, end, bucketMinutes, cancellationToken);
                 if (points.Count == 0)
                 {
-                    return await EmptyAsync(postgres, resolved, name, hours_back, cancellationToken);
+                    return await EmptyAsync(postgres, resolved, name, start, end, hours_back, cancellationToken);
                 }
 
                 envelope["trend"] = points;
+            }
+
+            /* #7010: the window-floor notice, on the collector table the metric reads. */
+            var dataNotice = await NoticeAsync(postgres, resolved.ServerName, Describe(name).Collector, start, end, emptyAnswer: false, cancellationToken);
+            if (!dataNotice.IsUnavailable)
+            {
+                envelope["effective_start"] = dataNotice.EffectiveStart;
+                envelope["window_truncated"] = dataNotice.WindowTruncated;
+                envelope["truncation_note"] = dataNotice.TruncationNote;
             }
 
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, end, cancellationToken);
@@ -293,6 +302,31 @@ public sealed class DarlingMcpServerTrendTools
             + TrendBuckets.Sizing(requested, budgetPoints);
     }
 
+    /// <summary>The three window-floor keys added to a hints dictionary; none when the probe failed.</summary>
+    private static Dictionary<string, object?> AddNotice(Dictionary<string, object?> hints, McpWindowNotice notice)
+    {
+        if (!notice.IsUnavailable)
+        {
+            hints["effective_start"] = notice.EffectiveStart;
+            hints["window_truncated"] = notice.WindowTruncated;
+            hints["truncation_note"] = notice.TruncationNote;
+        }
+
+        return hints;
+    }
+
+    /// <summary>
+    /// #7010: the window-floor notice of the metric's collector table (the collection log for collector_duration, which reads the log itself).
+    /// </summary>
+    private static Task<McpWindowNotice> NoticeAsync(
+        NpgsqlDataSource postgres, string serverName, string collector, DateTime start, DateTime end, bool emptyAnswer, CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(
+                postgres,
+                collector == "collection_log" ? DataWindowFloor.Source.ForCollectionLog() : DataWindowFloor.Source.ForCollectorTable(collector),
+                serverName, start, end, cancellationToken),
+            start, end, collector, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
     /// <summary>Series were named and none has a sample in the window: say so, and list what the window did record.</summary>
     private static async Task<string> NoNamedSeriesAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, SeriesKind kind, List<string> named, DateTime start, DateTime end,
@@ -301,14 +335,15 @@ public sealed class DarlingMcpServerTrendTools
         var heaviest = await ReadTopNamesAsync(postgres, kind, resolved.ServerId, start, end, metric, cancellationToken);
         if (heaviest.Count == 0)
         {
-            return await EmptyAsync(postgres, resolved, metric, hoursBack, cancellationToken);
+            return await EmptyAsync(postgres, resolved, metric, start, end, hoursBack, cancellationToken);
         }
 
         var spelling = kind.Param == "names" ? "Names" : "Clerk types";
+        var notice = await NoticeAsync(postgres, resolved.ServerName, Describe(metric).Collector, start, end, emptyAnswer: false, cancellationToken);
         return McpHelpers.Status(
             "empty",
             $"None of the named {kind.Noun} were recorded for {resolved.DisplayName} in the last {hoursBack} hour(s). {spelling} are matched exactly, so check the spelling and case. The window does hold others: {kind.HeaviestKey} lists the top of them.",
-            new Dictionary<string, object?> { [kind.Missing] = named, [kind.HeaviestKey] = heaviest });
+            AddNotice(new Dictionary<string, object?> { [kind.Missing] = named, [kind.HeaviestKey] = heaviest }, notice));
     }
 
     private static (string Sql, string Collector, string EverSql, string What) Describe(string metric) => metric switch
@@ -328,7 +363,8 @@ public sealed class DarlingMcpServerTrendTools
 
     /// <summary>The two kinds of nothing, plus the gated engine: asked only on the path that already found no rows.</summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, string metric, int hoursBack, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, string metric, DateTime start, DateTime end, int hoursBack,
+        CancellationToken cancellationToken)
     {
         var (_, collector, everSql, what) = Describe(metric);
         /* One literal per metric, so the engine-capability census can read which collectors this tool asks about. */
@@ -374,15 +410,24 @@ public sealed class DarlingMcpServerTrendTools
         DarlingMcpReadParameters.AddInt(command, resolved.ServerId);
         var everCollected = await command.ExecuteScalarAsync(cancellationToken) is not null;
 
-        return everCollected
-            ? McpHelpers.Status(
+        /* #7010: the window-floor notice, only where the server HAS collected the metric (a never-collected server answers bare: there is no window
+           to be short of data). Under hints, because a window the store does not reach back to is not a true negative. */
+        var notice = everCollected ? await NoticeAsync(postgres, resolved.ServerName, collector, start, end, emptyAnswer: true, cancellationToken) : McpWindowNotice.Unavailable;
+        /* #7167: these metrics are periodic snapshots, so no rows in a cut window is not a quiet window, and an offline server answers unavailable, as the get_pg_* reads do. */
+        var answer = everCollected
+            ? DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                 "empty",
-                $"No {what} recorded for {resolved.DisplayName} in the last {hoursBack} hour(s). This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples.")
+                McpHelpers.QuietUnlessCut(
+                    notice.WindowTruncated, notice.EffectiveStart,
+                    factual: $"No {what} recorded for {resolved.DisplayName} in the last {hoursBack} hour(s)",
+                    coveredClaim: ". This server HAS collected them before, so this window is genuinely quiet rather than broken - widen hours_back to find the most recent samples."),
+                notice.AsHints()), notice)
             : McpHelpers.Status(
                 "unavailable",
                 metric == "tempdb_file_io"
                     ? $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored no rows for the tempdb files of this server (it may have stored other databases' files). Check that collection is running and that the server is enabled."
                     : $"No {what} have EVER been recorded for {resolved.DisplayName}. This is not an empty window - the {collector} collector has stored nothing at all for this server. Check that collection is running and that the server is enabled.");
+        return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, answer, cancellationToken);
     }
 
     private static async Task<List<string>> ReadTopNamesAsync(
@@ -483,7 +528,9 @@ public sealed class DarlingMcpServerTrendTools
         return items;
     }
 
-    /// <summary>Adds a number rounded to 2 places, a text column as it is, or nothing when the column is NULL.</summary>
+    /// <summary>Adds a number, a text column as it is, or nothing when the column is NULL. A number is rounded to 2 places, except a rate
+    /// (a column named <c>..._per_sec</c> or <c>..._per_second</c>), which keeps 4 significant digits and never fewer than 2 places (#7586): a
+    /// file moving 0.0042 MB/s is not 0, and a steady small rate is not a line that jumps between 0.01 and 0.02.</summary>
     private static void AddNumber(Dictionary<string, object?> point, string key, NpgsqlDataReader reader, int ordinal)
     {
         if (reader.IsDBNull(ordinal))
@@ -495,8 +542,22 @@ public sealed class DarlingMcpServerTrendTools
         {
             var type when type == typeof(string) => reader.GetString(ordinal),
             var type when type == typeof(int) => reader.GetInt32(ordinal),
-            _ => Math.Round(reader.GetDouble(ordinal), 2),
+            _ => Rounded(reader.GetDouble(ordinal), IsRate(key)),
         };
+    }
+
+    internal static bool IsRate(string key) => key.EndsWith("_per_sec", StringComparison.Ordinal) || key.EndsWith("_per_second", StringComparison.Ordinal);
+
+    /// <summary>2 places, or for a rate 4 significant digits (at least 2 places): 0.0042 stays 0.0042, 1234.5678 reads 1234.57.</summary>
+    internal static double Rounded(double value, bool rate)
+    {
+        if (!rate || value == 0 || !double.IsFinite(value))
+        {
+            return Math.Round(value, 2);
+        }
+
+        var places = Math.Clamp(3 - (int)Math.Floor(Math.Log10(Math.Abs(value))), 2, 15);
+        return Math.Round(value, places);
     }
 
     private static string Stamp(DateTime value) =>

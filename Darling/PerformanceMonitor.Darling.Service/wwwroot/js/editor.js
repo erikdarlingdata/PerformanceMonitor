@@ -34,6 +34,7 @@ import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { buildSaveWarningsStrip, savedViewWarnings } from "./view-save-warnings.js";
 import { refreshChoiceOf } from "./refresh-policy.js";
 import { buildRefreshControl } from "./refresh-control.js";
 import { buildViewMetaFields } from "./view-meta-fields.js";
@@ -42,7 +43,7 @@ import * as derive from "./derive.js";
 import { rollingHoursPicker } from "./page-range.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
-const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "bytes", "time", "reltime", "bool"];
+const FORMAT_OPTIONS = ["text", "int", "num1", "num2", "rate", "pct", "ms", "mb", "mbfit", "bytes", "time", "reltime", "bool"];
 const PREVIEW_DEBOUNCE_MS = 350;
 
 /** The view-level default time-range choices (hours) offered in the composer + the rendered view's chrome. */
@@ -521,6 +522,18 @@ function buildEditor(main, ctx) {
     }
 
     if (res.kind === "data" && res.data) {
+      /* #7565: a save the service accepted with warnings stays on the page, so the advice is read before the redirect.
+         The saved view is now the one being edited, so a second Save updates it rather than creating a twin. */
+      const warnings = savedViewWarnings(res.data);
+      if (warnings.length > 0) {
+        ctx.editingId = res.data.id;
+        ctx.loadedVersion = res.data.version;
+        saveBtn.textContent = "Save changes"; /* the saved view has an id now, so the button updates it rather than creating */
+        saveBtn.disabled = false;
+        mount(saveStatus, buildSaveWarningsStrip(warnings, storeHash("#/view/") + encodeURIComponent(res.data.id)));
+        return;
+      }
+
       location.hash = storeHash("#/view/") + encodeURIComponent(res.data.id);
       return;
     }

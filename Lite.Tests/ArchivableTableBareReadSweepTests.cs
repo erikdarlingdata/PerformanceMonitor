@@ -50,6 +50,16 @@ public class ArchivableTableBareReadSweepTests
            reads tell the two apart or verify the UPDATE. The alert history itself reads v_config_alert_log. */
         [("LocalDataService.AlertHistory.cs", "config_alert_log")] = 6,
 
+        /* #7014: the hot half of the idle-coverage oldest-sample check. The hot table answers "a row at or before the cutoff"
+           first, and a server it does not decide goes to the bounded LIMIT 1 probes over v_query_stats, so an archived oldest
+           sample still counts. */
+        [("LocalDataService.FinOps.Recommendations.cs", "query_stats")] = 1,
+
+        /* #7216: the probe that picks the relation for the "newest server_properties row with an offset" reads. A hot row with a
+           non-NULL utc_offset_minutes proves the newest such row is hot (archival moves only older rows), so the read skips the
+           archive; no such row sends the read to v_server_properties. The probe itself must be on the hot table. */
+        [("LocalDataService.FinOps.Utilization.cs", "server_properties")] = 1,
+
         /* The newest AG snapshot. The alert path skips a snapshot that is not fresh, so an empty hot table right
            after a reset reads as "no data yet", not as healthy. */
         [("LocalDataService.AgTopology.cs", "ag_replica_states")] = 2,
@@ -63,6 +73,12 @@ public class ArchivableTableBareReadSweepTests
         /* A current-state read: the collector's last run and the server's last and first collection are read
            together from one table, so they never come from different sources. */
         [("LocalDataService.RuntimePrecondition.cs", "collection_log")] = 4,
+
+        /* #7386: the server's first collection for the charts' X axis, read only after the archive span probe proved the archive
+           holds nothing at or after the window start. Every row of the window is then hot, so the hot oldest row is the oldest
+           row the window can show: it is either before the start (the axis stays at the start) or the first row inside it. An
+           archive that may hold rows in the window, or an unknown span, never reaches this read, and the answer is null. */
+        [("LocalDataService.ServerDataStart.cs", "collection_log")] = 1,
 
         /* Collector path. The backfill's candidate databases share one rule with Darling's; its orphan prune
            compares against MAX(collection_time), which is NULL on an empty table, so it deletes nothing then.

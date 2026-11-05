@@ -595,6 +595,10 @@ public static partial class TimescaleSupport
     public const string QueryStatsBaselineView = "query_stats_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
     public const string DeadlockBaselineView = "deadlock_baseline";
+    /// <summary>#7588: the DMV blocking snapshot baseline, the Blocking spike's history when the window counted snapshot rows
+    /// (RDS, Azure, or any window with no blocked process report). A PLAIN view over the raw table, never an aggregate: see
+    /// <see cref="PlainBaselineViews"/>.</summary>
+    public const string DmvBlockingBaselineView = "dmv_blocking_baseline";
     public const string MemoryBaselineView = "memory_baseline";
 
     /// <summary>
@@ -807,6 +811,24 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>#7588: the blocking baseline for the DMV snapshot arm. The Blocking spike counts its window as blocked process
+    /// reports, or as snapshot rows when the window holds no report; each arm is judged against its own history so the ratio never
+    /// divides snapshot rows by report rows. Same shape and the same self-wait filter as <see cref="CreateBlockedProcessBaselineSql"/>,
+    /// over <c>dmv_blocking_snapshots</c>, so the provider's event baseline reads either one. Written in the aggregate's text so
+    /// <see cref="CreateBaselineFallbackViewSql"/> derives the view, but it is never created as an aggregate (a sixteenth
+    /// hourly refresh would leave the refresh grid's heaviest window 4 s of headroom).</summary>
+    public const string CreateDmvBlockingBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.dmv_blocking_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    count(*) AS event_count
+FROM collect.dmv_blocking_snapshots
 WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
@@ -1073,7 +1095,7 @@ WITH NO DATA";
 
         var filled = 0;
 
-        foreach (var (createSql, view) in BaselineAggregates)
+        foreach (var (createSql, view) in BaselineAggregates.Concat(PlainBaselineViews))
         {
             try
             {
@@ -2514,6 +2536,18 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     };
 
     /// <summary>
+    /// #7588: baseline relations that are ordinary views on every store. <see cref="EnsureBaselineFallbackViewsAsync"/> creates
+    /// them, on a fresh store and on an upgraded one alike (it runs on every start and skips what exists). Not in
+    /// <see cref="BaselineAggregates"/>, so they take no slot on the refresh grid, in the compression targets or in the retention
+    /// policies. The raw table behind them is purged at the collector's own retention, and the baseline read clamps its
+    /// window to that horizon (<c>PgBaselineProvider.EventSupplyFor</c>), the same as the report arm.
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] PlainBaselineViews =
+    {
+        (CreateDmvBlockingBaselineSql, DmvBlockingBaselineView),
+    };
+
+    /// <summary>
     /// The seven DAILY continuous aggregates in CREATION order — every one of them hierarchical, sourced from
     /// an hourly aggregate rather than from raw, which is why the ensure sweep creates them after
     /// <see cref="HourlyAggregates"/> and why the order inside this list is load-bearing too: the day-grain
@@ -3506,6 +3540,53 @@ WITH NO DATA";
     /// </summary>
     public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
         KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
+
+    /// <summary>The name of the (query_hash, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#7609, V246).</summary>
+    public const string QueryStoreCorrectedHourlyHashIndexName = "ix_qs_corrected_hourly_hash_bucket";
+
+    /// <summary>
+    /// #7609 (V246): the index <c>get_query_fleet_summary</c>'s Query Store source reads, <c>(query_hash, bucket DESC)</c> on the corrected hourly
+    /// rollup's materialization hypertable. V152 dropped the auto-created <c>query_hash</c> group index there for zero scans, because no reader
+    /// filtered on the hash; this read filters on the hash alone across every server, so without it the statement scans the whole rollup. A named
+    /// index: V246 runs it on an upgraded store and <see cref="QueryStoreRollupKeptIndexesSql"/> runs it after the view is created on a fresh one,
+    /// so both land the same index, and the Viewer's schema probe finds it by name. <see cref="QueryStoreRollupKeptIndexesSql"/> also runs it on
+    /// EVERY hourly convergence pass, so the block reads <c>pg_index</c> for the name first and issues the <c>CREATE INDEX</c> only when the index is
+    /// missing: <c>CREATE INDEX IF NOT EXISTS</c> alone saves the build but still takes a ShareLock on the materialization before it checks the name,
+    /// which conflicts with the refresh's RowExclusiveLock. A settled store therefore does a catalog read with no lock request. A store without
+    /// TimescaleDB, or without the view, returns before touching anything. The lock timeout is V152's: the build waits out one refresh and then
+    /// fails retryably (#7667).
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedHourlyHashIndexSql = @"
+SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_mat_oid regclass;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT format(''%I.%I'', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+             FROM timescaledb_information.continuous_aggregates
+             WHERE view_schema = ''collect'' AND view_name = ''" + QueryStoreStatsCorrectedHourlyView + @"'''
+    INTO v_mat_oid;
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_mat_oid
+        AND   c.relname = '" + QueryStoreCorrectedHourlyHashIndexName + @"'
+    ) THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
+END $$;";
 
     /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
@@ -8143,10 +8224,11 @@ AND   j.hypertable_name = '{relation}'";
     /// purging across every tier and grown disk until someone noticed, trading #1877's bounded depth cap for an
     /// unbounded disk risk.</para>
     /// </summary>
-    private enum RetentionCoverage
+    internal enum RetentionCoverage
     {
-        /// <summary>Every named consumer positively reaches at least as far back as the source — or the source
-        /// is empty, so there is no history to lose. The only verdict that permits arming or dropping.</summary>
+        /// <summary>Every named consumer positively reaches at least as far back as the source, or as far back
+        /// as its own armed retention keeps (#7114) — or the source is empty, so there is no history to lose.
+        /// The only verdict that permits arming or dropping.</summary>
         Covered,
 
         /// <summary>MEASURED short: the probe ran, the source holds rows, and a named consumer either holds none
@@ -8169,12 +8251,113 @@ AND   j.hypertable_name = '{relation}'";
     /// <para>The verdict is an AND across consumers (#1849): one empty or shallow consumer holds the policy even
     /// if every other consumer is complete.
     /// A raw table with two rollup families is covered when the LEAST-covering of them covers it.</para>
+    ///
+    /// <para><b>A consumer is judged only within its own horizon (#7114).</b> A consumer whose own retention
+    /// policy is armed (its <c>policy_retention</c> job is scheduled) with <c>drop_after</c> R covers the slot
+    /// when its oldest bucket is no later than max(the slot's oldest source row, now - R + one bucket width of
+    /// that consumer). TimescaleDB drops a chunk only when all of it is older than the job's run time minus R,
+    /// so right after a run the consumer's oldest bucket is at most one bucket later than now - R (later only
+    /// when the source had no rows in the bucket at the horizon), and between runs it only gets older relative
+    /// to now. Days older than now - R are days the consumer drops anyway, so the source dropping them loses
+    /// nothing that consumer keeps. The one-bucket slack is the only span the consumer might have kept and
+    /// does not hold, and those rows pass its horizon within one bucket width (a day for a daily tier). Before
+    /// this rule a held source that outlived its consumer's own retention stayed Short forever: the consumer
+    /// trimmed itself to now - R on every run while the held source's oldest row never moved.</para>
+    ///
+    /// <para>The horizon rule also needs the consumer's OWN gate to be Covered on this same measure (its entry in
+    /// <see cref="RetentionPolicies"/>, measured with the same "now"). A consumer whose own gate is Short or
+    /// Unknown is about to be held, or cannot be shown to keep running, so the days below its horizon may still
+    /// be needed for a backfill. The sweep judges a source before its consumer, so the scheduled flag alone
+    /// could be stale by the time the consumer is judged later in the same pass.</para>
+    ///
+    /// <para>A consumer with no retention policy, or whose policy is not scheduled (held by this same gate, or
+    /// paused by hand), keeps the strict rule: its oldest bucket must reach the source's oldest row. So does a
+    /// consumer that holds nothing, and one this code knows no bucket width for (it is not in
+    /// <see cref="RollupViews"/>). The verdict stays an AND, so a consumer with no retention still protects
+    /// history on its own. "now" is the service's UTC clock, bound as a parameter, never <c>now()</c> in the
+    /// SQL (the #4981 reasoning).</para>
     /// </summary>
     private static async Task<(RetentionCoverage Verdict, IReadOnlyList<string> ShortConsumers)> MeasureRetentionCoverageAsync(
         NpgsqlConnection connection, string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations, CancellationToken cancellationToken)
     {
+        var measure = await MeasureRetentionCoverageAsync(connection, relation, sourceTimeColumn, coverageRelations, DateTime.UtcNow, cancellationToken);
+        return (measure.Verdict, measure.ShortConsumers);
+    }
+
+    /// <summary>
+    /// #7114: one consumer that covered its slot only because of its own armed retention (the horizon rule on
+    /// <see cref="MeasureRetentionCoverageAsync(NpgsqlConnection, string, string, IReadOnlyList{string}, CancellationToken)"/>),
+    /// with that retention as the job's <c>drop_after</c> text and as seconds, so the ARMED line can say what
+    /// the check was made within.
+    /// </summary>
+    internal readonly record struct HorizonCoveredConsumer(string Consumer, string DropAfter, double DropAfterSeconds);
+
+    /// <summary>#7114: what one coverage measure found: the verdict, every short consumer, and every consumer
+    /// that covered only within its own retention.</summary>
+    internal readonly record struct RetentionCoverageMeasure(
+        RetentionCoverage Verdict, IReadOnlyList<string> ShortConsumers, IReadOnlyList<HorizonCoveredConsumer> HorizonCovered);
+
+    /// <summary>
+    /// #7114: the retention of each named consumer whose own <c>policy_retention</c> job is scheduled, with its
+    /// <c>drop_after</c> as text and as seconds. <c>$1</c> is the consumer names as <c>text[]</c>. A consumer with
+    /// no retention job, or one whose job is not scheduled, returns no row, which is what keeps it on the strict
+    /// rule. The same job lookup as <see cref="RetentionPolicyScheduledSql"/>.
+    /// </summary>
+    internal const string ConsumerRetentionHorizonSql = @"SELECT j.hypertable_name::text, j.config->>'drop_after', extract(epoch FROM (j.config->>'drop_after')::interval)::float8
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name::text = ANY($1::text[])
+AND   j.scheduled";
+
+    /// <summary>
+    /// #7114: the measure with the service clock passed in, so a test can place "now" against the rows it seeds.
+    /// <paramref name="utcNow"/> feeds both the #4981 stitch horizon and each armed consumer's own horizon.
+    /// </summary>
+    internal static async Task<RetentionCoverageMeasure> MeasureRetentionCoverageAsync(
+        NpgsqlConnection connection, string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations, DateTime utcNow, CancellationToken cancellationToken)
+    {
         try
         {
+            /* #7114: the earliest bucket each armed consumer still keeps: now - R + one bucket width. Read first,
+               off the live job catalog, only for consumers this code knows a bucket width for and that are not
+               the relation itself (a leaf names itself, and its slot compares a relation with itself). */
+            var horizonFloors = new Dictionary<string, (DateTime Floor, HorizonCoveredConsumer Consumer)>(StringComparer.Ordinal);
+            var widths = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
+            foreach (var consumer in coverageRelations)
+            {
+                if (!string.Equals(consumer, relation, StringComparison.Ordinal)
+                    && RollupViews.FirstOrDefault(r => string.Equals(r.View, consumer, StringComparison.Ordinal)) is { View: not null } view)
+                {
+                    widths[consumer] = view.BucketWidth;
+                }
+            }
+
+            if (widths.Count > 0)
+            {
+                using var horizonRead = new NpgsqlCommand(ConsumerRetentionHorizonSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                horizonRead.Parameters.AddWithValue(widths.Keys.ToArray());
+                using var horizonReader = await horizonRead.ExecuteReaderAsync(cancellationToken);
+                while (await horizonReader.ReadAsync(cancellationToken))
+                {
+                    var consumer = horizonReader.GetString(0);
+                    if (await horizonReader.IsDBNullAsync(2, cancellationToken) || !widths.TryGetValue(consumer, out var width))
+                    {
+                        continue;
+                    }
+
+                    var seconds = horizonReader.GetDouble(2);
+                    var floor = DateTime.SpecifyKind(utcNow - TimeSpan.FromSeconds(seconds) + width, DateTimeKind.Unspecified);
+
+                    /* Two retention jobs on one consumer: keep the longer one, whose floor is earlier, so the check
+                       is the stricter of the two. */
+                    if (!horizonFloors.TryGetValue(consumer, out var existing) || floor < existing.Floor)
+                    {
+                        horizonFloors[consumer] = (floor, new HorizonCoveredConsumer(consumer, horizonReader.GetString(1), seconds));
+                    }
+                }
+            }
+
             var coverageSql = RetentionArmSafetySql(relation, sourceTimeColumn, coverageRelations);
             using var command = new NpgsqlCommand(coverageSql, connection) { CommandTimeout = SetupTimeoutSeconds };
 
@@ -8183,26 +8366,33 @@ AND   j.hypertable_name = '{relation}'";
                it: a relation with no stitched slot (query_store_stats) builds a statement that has no use for it. */
             if (coverageSql.Contains(RetentionArmSafetyHorizonPlaceholder, StringComparison.Ordinal))
             {
-                command.Parameters.AddWithValue(RetentionArmSafetyHorizon(DateTime.UtcNow));
+                command.Parameters.AddWithValue(RetentionArmSafetyHorizon(utcNow));
             }
 
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken))
             {
-                return (RetentionCoverage.Unknown, Array.Empty<string>());
+                return new RetentionCoverageMeasure(RetentionCoverage.Unknown, Array.Empty<string>(), Array.Empty<HorizonCoveredConsumer>());
             }
 
             /* Nothing in the source - a fresh store. No history to lose, so arm. */
             if (await reader.IsDBNullAsync(0, cancellationToken))
             {
-                return (RetentionCoverage.Covered, Array.Empty<string>());
+                return new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), Array.Empty<HorizonCoveredConsumer>());
             }
+
+            var horizonCovered = new List<HorizonCoveredConsumer>();
 
             /* #6081: EVERY short consumer, in the order the coverage list names them (dependency order), not
                the first one found. The verdict is still an AND, so the safe direction is unchanged; what changed
                is that the operator line and the bounded fill can see the second short consumer in the same
-               pass instead of one round later. */
-            var shortConsumers = new List<string>();
+               pass instead of one round later. Marked per slot and listed at the end, so a consumer the horizon
+               check below finds short keeps its place in that order. */
+            var slotShort = new bool[coverageRelations.Count];
+
+            /* #7114: the slots that cover only within their consumer's own armed horizon. Judged after this
+               reader closes, because each needs that consumer's own gate measured on this connection. */
+            var horizonCandidates = new List<(int Slot, HorizonCoveredConsumer Consumer)>();
 
             /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
                1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
@@ -8228,27 +8418,106 @@ AND   j.hypertable_name = '{relation}'";
                    newly-added consumer is born in on an upgrading store (#1877). */
                 if (await reader.IsDBNullAsync(coverageOldestColumn, cancellationToken))
                 {
-                    shortConsumers.Add(coverageRelations[i]);
+                    slotShort[i] = true;
                     continue;
                 }
 
-                if (reader.GetDateTime(coverageOldestColumn) > slotSourceOldest)
+                var coverageOldest = reader.GetDateTime(coverageOldestColumn);
+                if (coverageOldest <= slotSourceOldest)
                 {
-                    shortConsumers.Add(coverageRelations[i]);
+                    continue;
+                }
+
+                /* #7114: short of the source, but not of what its own armed retention keeps. The rows below its
+                   oldest bucket are rows it drops anyway (see the summary for the one-bucket slack), as long as
+                   that retention stays armed, which the check after this loop decides. */
+                if (horizonFloors.TryGetValue(coverageRelations[i], out var horizon) && coverageOldest <= horizon.Floor)
+                {
+                    horizonCandidates.Add((i, horizon.Consumer));
+                    continue;
+                }
+
+                slotShort[i] = true;
+            }
+
+            await reader.CloseAsync();
+
+            /* #7114 (review of #7115): the horizon rule holds only while the consumer's own retention keeps
+               running, and the sweep goes source-first, so it can hold that consumer later in this same pass
+               (its own consumer went short: the rebuilt day-grain daily of #1869/#1877). Trusting the job's
+               scheduled flag alone would let this source drop the days below the consumer's horizon just before
+               the hold that keeps them for a backfill. So the consumer's own gate is measured here, from the
+               same policy table the sweep walks and on the same clock: only Covered keeps the horizon rule.
+               Short, Unknown, or no entry in that table puts the consumer back on the strict rule, which it
+               already failed above. This makes the verdict independent of the order the sweep runs in. The
+               recursion ends at a consumer with no armed retention, which never becomes a candidate. */
+            foreach (var (slot, consumer) in horizonCandidates)
+            {
+                var ownCovered = false;
+                foreach (var (ownRelation, _, ownTimeColumn, ownCoverage) in RetentionPolicies)
+                {
+                    if (string.Equals(ownRelation, consumer.Consumer, StringComparison.Ordinal))
+                    {
+                        var own = await MeasureRetentionCoverageAsync(connection, ownRelation, ownTimeColumn, ownCoverage, utcNow, cancellationToken);
+                        ownCovered = own.Verdict == RetentionCoverage.Covered;
+                        break;
+                    }
+                }
+
+                if (ownCovered)
+                {
+                    horizonCovered.Add(consumer);
+                }
+                else
+                {
+                    slotShort[slot] = true;
                 }
             }
 
+            var shortConsumers = coverageRelations.Where((_, i) => slotShort[i]).ToList();
+
             return shortConsumers.Count > 0
-                ? (RetentionCoverage.Short, shortConsumers)
-                : (RetentionCoverage.Covered, Array.Empty<string>());
+                ? new RetentionCoverageMeasure(RetentionCoverage.Short, shortConsumers, horizonCovered)
+                : new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), horizonCovered);
         }
         catch (Exception)
         {
             /* Fail closed: if coverage cannot be established the policy is not armed — and, since #1877, not
                re-held either. Both directions read the same way here: an unmeasurable store is left exactly as
                it was, because nothing was learned about it. */
-            return (RetentionCoverage.Unknown, Array.Empty<string>());
+            return new RetentionCoverageMeasure(RetentionCoverage.Unknown, Array.Empty<string>(), Array.Empty<HorizonCoveredConsumer>());
         }
+    }
+
+    /// <summary>
+    /// #7114: the clause the ARMED line adds when the horizon rule decided coverage for one or more consumers,
+    /// for example <c>, checked within query_store_stats_interval_daily's 10-day retention</c>. Empty when every
+    /// consumer reached the source's oldest row.
+    /// </summary>
+    internal static string DescribeHorizonCoverage(IReadOnlyList<HorizonCoveredConsumer> horizonCovered)
+    {
+        if (horizonCovered.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        static string Span(HorizonCoveredConsumer c)
+        {
+            var span = TimeSpan.FromSeconds(c.DropAfterSeconds);
+            if (span > TimeSpan.Zero && span.Ticks % TimeSpan.TicksPerDay == 0)
+            {
+                return $"{(long)span.TotalDays}-day";
+            }
+
+            if (span > TimeSpan.Zero && span.Ticks % TimeSpan.TicksPerHour == 0)
+            {
+                return $"{(long)span.TotalHours}-hour";
+            }
+
+            return $"'{c.DropAfter}'";
+        }
+
+        return ", checked within " + string.Join(" and ", horizonCovered.Select(c => $"{c.Consumer}'s {Span(c)} retention"));
     }
 
     /// <summary>
@@ -8515,7 +8784,7 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                var (verdict, shortConsumers) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
+                var (verdict, shortConsumers, horizonCovered) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, DateTime.UtcNow, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
                     if (isRawRelation)
@@ -8545,8 +8814,8 @@ AND   j.hypertable_name = '{relation}'";
                            had. Arming moves no other job. */
                         armed++;
                         logger?.LogInformation(
-                            "Retention policy for {Relation} ARMED - {Coverage} now covers everything it holds, so the {DropAfter} purge the coverage gate was holding is released. The first drop runs on the scheduler's next pass and then daily; no other store job moves.",
-                            relation, string.Join(" + ", coverage), dropAfter);
+                            "Retention policy for {Relation} ARMED - {Coverage} now covers everything it holds{HorizonCheck}, so the {DropAfter} purge the coverage gate was holding is released. The first drop runs on the scheduler's next pass and then daily; no other store job moves.",
+                            relation, string.Join(" + ", coverage), DescribeHorizonCoverage(horizonCovered), dropAfter);
                     }
                     else
                     {
@@ -9188,9 +9457,28 @@ AND   j.hypertable_name = '{relation}'";
     /// every one of the registered aggregates, and that read grows with the chunk count — to feed a staging
     /// decision that only an aggregate with no policy yet ever makes. <see cref="AggregateCompressionSizeSql"/>
     /// reads them, for those aggregates only; a converged store makes no second read at all.</para>
+    ///
+    /// <para><b>Each information view is read ONCE (#7016).</b> The join's <c>OR</c> between the two identities
+    /// cannot be a hash or merge join, so the planner ran it as a nested loop and re-evaluated the whole
+    /// <c>timescaledb_information.jobs</c> view (itself a join of the job catalog, the job stats and the
+    /// hypertable and aggregate catalogs) once per aggregate row: 29 evaluations for one answer, every hour.
+    /// The two views are now <c>MATERIALIZED</c> CTEs, the jobs one already narrowed to compression jobs, so the
+    /// <c>OR</c> only compares small in-memory sets. The rows are the same.</para>
     /// </summary>
     public static string AggregateCompressionStateSql =>
         $@"
+WITH ca AS MATERIALIZED (
+    SELECT c.view_schema, c.view_name, c.compression_enabled,
+           c.materialization_hypertable_schema, c.materialization_hypertable_name
+    FROM timescaledb_information.continuous_aggregates AS c
+    WHERE c.view_schema = 'collect'
+),
+j AS MATERIALIZED (
+    SELECT jb.job_id, jb.config, jb.schedule_interval, jb.fixed_schedule, jb.initial_start,
+           jb.hypertable_schema, jb.hypertable_name
+    FROM timescaledb_information.jobs AS jb
+    WHERE jb.proc_name LIKE '%compression%' OR jb.proc_name LIKE '%columnstore%'
+)
 SELECT
     ca.view_name,
     ca.compression_enabled,
@@ -9200,14 +9488,10 @@ SELECT
     j.fixed_schedule,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(HOUR FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_hour,
     CASE WHEN j.initial_start IS NULL THEN NULL ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int END AS phase_minute
-FROM timescaledb_information.continuous_aggregates AS ca
-LEFT JOIN timescaledb_information.jobs AS j
-  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
-  AND (
-        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
-     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
-      )
-WHERE ca.view_schema = 'collect'";
+FROM ca
+LEFT JOIN j
+  ON  (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+   OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)";
 
     /// <summary>
     /// How large each named materialization is, and how many of its chunks would compress on a policy's first
@@ -9610,30 +9894,50 @@ WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'";
     /// its parent index): a copy is named <c>&lt;chunk&gt;_&lt;parent index&gt;</c> truncated to 63 characters.
     /// A copy TimescaleDB had to suffix to keep unique after truncation is missed by that join, which
     /// understates the logged figure and changes nothing else.
+    ///
+    /// <para><b>The one relation is resolved BEFORE any index is deparsed (#7016).</b> This runs in every hourly
+    /// upkeep pass and finds nothing on a settled store, so its cost is all overhead. The <c>pg_indexes</c> view's
+    /// <c>indexdef</c> column IS <c>pg_get_indexdef()</c>, and the shape filter on it could run for every index in
+    /// the database, chunk indexes included, before the join narrowed the rows to one table: a read that grew with
+    /// the chunk count and found nothing. The index list is now read from <c>pg_index</c> by the materialization's
+    /// own <c>indrelid</c>, so the definition is deparsed for that relation's indexes alone, and the chunk copies
+    /// are sized only for an index that matched.</para>
     /// </summary>
     public static string IntervalDedupMaterializationGroupIndexesSql =>
         $@"
+WITH mat AS MATERIALIZED (
+    SELECT ca.materialization_hypertable_schema AS schema_name,
+           ca.materialization_hypertable_name AS table_name,
+           to_regclass(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)) AS relid
+    FROM timescaledb_information.continuous_aggregates AS ca
+    WHERE ca.view_schema = 'collect'
+    AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
+),
+idx AS MATERIALIZED (
+    SELECT mat.schema_name,
+           mat.table_name,
+           ic.relname::text AS index_name,
+           pg_get_indexdef(x.indexrelid) AS index_def
+    FROM mat
+    JOIN pg_index AS x ON x.indrelid = mat.relid
+    JOIN pg_class AS ic ON ic.oid = x.indexrelid
+)
 SELECT
-    i.schemaname,
-    i.indexname,
-    i.indexdef,
-    pg_relation_size(format('%I.%I', i.schemaname, i.indexname)::regclass)
+    i.schema_name AS schemaname,
+    i.index_name AS indexname,
+    i.index_def AS indexdef,
+    pg_relation_size(format('%I.%I', i.schema_name, i.index_name)::regclass)
       + COALESCE((SELECT sum(pg_relation_size(format('%I.%I', ci.schemaname, ci.indexname)::regclass))
                   FROM timescaledb_information.chunks AS ch
                   JOIN pg_indexes AS ci
                     ON  ci.schemaname = ch.chunk_schema
                     AND ci.tablename = ch.chunk_name
-                    AND ci.indexname = left(ch.chunk_name || '_' || i.indexname, 63)
-                  WHERE ch.hypertable_schema = ca.materialization_hypertable_schema
-                  AND   ch.hypertable_name = ca.materialization_hypertable_name), 0) AS bytes
-FROM timescaledb_information.continuous_aggregates AS ca
-JOIN pg_indexes AS i
-  ON  i.schemaname = ca.materialization_hypertable_schema
-  AND i.tablename = ca.materialization_hypertable_name
-WHERE ca.view_schema = 'collect'
-AND   ca.view_name = '{QueryStoreStatsIntervalHourlyView}'
-AND   i.indexdef ~ 'USING btree \([a-z_]+, bucket DESC\)$'
-ORDER BY i.indexname";
+                    AND ci.indexname = left(ch.chunk_name || '_' || i.index_name, 63)
+                  WHERE ch.hypertable_schema = i.schema_name
+                  AND   ch.hypertable_name = i.table_name), 0) AS bytes
+FROM idx AS i
+WHERE i.index_def ~ 'USING btree \([a-z_]+, bucket DESC\)$'
+ORDER BY i.index_name";
 
     /// <summary>
     /// The lock wait the index drops below will tolerate before giving the start back, as a PostgreSQL
@@ -10641,6 +10945,9 @@ LEFT JOIN LATERAL (
         public DateTime? CatalogFailingSince;
         public DateTime? CatalogFailureWarnedAt;
 
+        /// <summary>#7240: when the per-probe watermark read last failed and was logged at Warning (null while it succeeds).</summary>
+        public DateTime? CeilingReadWarnedAt;
+
         /// <summary>#5808: views whose floor measure failed, keyed by view: the identity it failed on, how many times in a
         /// row, when the next try is due (<see cref="RollupFloorRetryDelay"/>), and whether the repeat was logged.</summary>
         public readonly Dictionary<string, RollupFloorFailure> Failing = new(StringComparer.Ordinal);
@@ -10679,11 +10986,13 @@ LEFT JOIN LATERAL (
     /// the OID of the database the floor was measured in, so a database dropped and recreated under the same name
     /// never matches the entry its predecessor left (0 when the catalog read did not return one).
     /// </summary>
-    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling measured in the SAME
-    /// cycle as <see cref="Floor"/> — re-read whenever the floor is (the ceiling moves every refresh, so
-    /// piggybacking on the floor's re-measure cadence, rather than a separate TTL, is the cheap answer: a
-    /// view whose floor is trusted from cache almost never has a stale-enough ceiling to matter, and a
-    /// dedicated per-request re-read would be the expensive scan #4539 already exists to avoid).</para>
+    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling as of the cycle that measured
+    /// <see cref="Floor"/>. It is no longer what a probe reports (#7240). The ceiling moves with every refresh, and a floor
+    /// is trusted from cache for an hour and then served as it is while the drain re-measures it, so after a quiet spell a
+    /// cached ceiling was hours old and sent a fleet read to raw. Every probe now reads each present rollup's
+    /// <c>cagg_watermark</c> in one catalog statement (<see cref="RollupMaterializationWatermark.GetManyAsync"/>), and this
+    /// value is used only for a view that statement did not return: the whole statement failed, or it returned no watermark
+    /// for that view.</para>
     /// <para><see cref="NoFloor"/> (#5808): the view was measured and holds nothing, so <see cref="Floor"/> means nothing.
     /// Cached like a floor, so an empty view is not measured again until its identity changes.</para>
     internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc, DateTime? Ceiling = null, long DatabaseOid = 0, bool NoFloor = false);
@@ -11207,7 +11516,7 @@ LEFT JOIN LATERAL (
            lands the fresh floor serves it. */
         var floorsPending = cold.Count > 0;
 
-        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var withFloors = new Dictionary<string, RollupFloorCacheEntry>(StringComparer.Ordinal);
         foreach (var (view, entry) in served.Concat(newEntries))
         {
             if (entry.NoFloor)
@@ -11216,11 +11525,37 @@ LEFT JOIN LATERAL (
             }
 
             floors[view] = entry.Floor;
-            if (entry.Ceiling is DateTime ceiling)
+            withFloors[view] = entry;
+        }
+
+        /* #7240: the ceiling is read on every probe, for the views served from the cache too. It moves with every refresh,
+           while a cached floor is trusted for an hour and then served as it is, so a ceiling kept with the floor was hours old
+           after a quiet spell and a fleet read of a 24 hour window fell to raw. One catalog statement for all of them. A store
+           where that statement does not resolve (a TimescaleDB older than 2.12 has no _timescaledb_functions schema, or the
+           role cannot use it) is read view by view the way GetAsync always read it, max(bucket) plus the bucket width, which is
+           still fresh on every probe. Only a store where that fails too falls back to the ceiling cached with the floor. */
+        Dictionary<string, DateTime>? freshCeilings = null;
+        if (withFloors.Count > 0)
+        {
+            try
             {
-                ceilings[view] = ceiling;
+                freshCeilings = await RollupMaterializationWatermark.GetManyAsync(dataSource, withFloors.Keys.ToArray(), JobCatalogReadTimeoutSeconds, cancellationToken);
+                lock (cache.Lock)
+                {
+                    cache.CeilingReadWarnedAt = null;
+                }
+            }
+            catch (PostgresException batchFailure)
+            {
+                freshCeilings = await ReadRollupCeilingsPerViewAsync(dataSource, cache, withFloors.Keys, now, batchFailure, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogRollupCeilingReadFailure(cache, now, ex);
             }
         }
+
+        var ceilings = ComposeRollupCeilings(withFloors, freshCeilings);
 
         var rawOldest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         foreach (var (table, entry) in rawSnapshot)
@@ -11299,6 +11634,126 @@ LEFT JOIN LATERAL (
             logger?.LogDebug(
                 "Rollup coverage floor measure for {View} failed ({Count} in a row); retrying in {RetryMinutes} min: {ExceptionType}: {Message}",
                 job.View, failure.Count, (long)RollupFloorRetryDelay(failure.Count).TotalMinutes, ex.GetType().Name, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #7240: the ceilings a probe reports. A view's ceiling is the watermark this probe read for it
+    /// (<paramref name="fresh"/>). A view that read did not return (<paramref name="fresh"/> is null when the whole statement
+    /// failed) keeps the ceiling cached with its floor, if it has one.
+    /// </summary>
+    internal static Dictionary<string, DateTime> ComposeRollupCeilings(
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> held, IReadOnlyDictionary<string, DateTime>? fresh)
+    {
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var (view, entry) in held)
+        {
+            if (fresh is not null && fresh.TryGetValue(view, out var watermark))
+            {
+                ceilings[view] = watermark;
+            }
+            else if (entry.Ceiling is DateTime cached)
+            {
+                ceilings[view] = cached;
+            }
+        }
+
+        return ceilings;
+    }
+
+    /// <summary>
+    /// #7240: the fallback for a store where the one-statement watermark read (<see cref="RollupMaterializationWatermark.GetManyAsync"/>)
+    /// fails with a <see cref="PostgresException"/>: each view's ceiling from <see cref="RollupMaterializationWatermark.GetAsync"/>,
+    /// which answers <c>max(bucket)</c> plus the bucket width when <c>cagg_watermark</c> does not resolve. That is an expected store
+    /// shape and the answer is fresh, so it logs at Debug. A view that read does not answer keeps the ceiling cached with its floor,
+    /// and when none answers the original failure is logged at Warning as it was before.
+    /// </summary>
+    private static async Task<Dictionary<string, DateTime>?> ReadRollupCeilingsPerViewAsync(
+        NpgsqlDataSource dataSource, RollupFloorCache cache, IEnumerable<string> views, DateTime now,
+        PostgresException batchFailure, CancellationToken cancellationToken)
+    {
+        var widths = new Dictionary<string, TimeSpan>(StringComparer.Ordinal);
+        foreach (var (view, _, _, _, width) in RollupViews)
+        {
+            widths[view] = width;
+        }
+
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var asked = 0;
+        try
+        {
+            foreach (var view in views)
+            {
+                if (!widths.TryGetValue(view, out var width))
+                {
+                    continue;
+                }
+
+                asked++;
+                if (await RollupMaterializationWatermark.GetAsync(dataSource, view, width, JobCatalogReadTimeoutSeconds, cancellationToken) is DateTime ceiling)
+                {
+                    ceilings[view] = ceiling;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogRollupCeilingReadFailure(cache, now, ex);
+            return null;
+        }
+
+        if (asked > 0 && ceilings.Count == 0)
+        {
+            LogRollupCeilingReadFailure(cache, now, batchFailure);
+            return null;
+        }
+
+        ILogger? logger;
+        lock (cache.Lock)
+        {
+            cache.CeilingReadWarnedAt = null;
+            logger = cache.Logger;
+        }
+
+        logger?.LogDebug(
+            "Rollup coverage watermark batch read failed, so the ceilings are read per view as max(bucket) plus the bucket width: {ExceptionType}: {Message}",
+            batchFailure.GetType().Name, batchFailure.Message);
+        return ceilings;
+    }
+
+    /// <summary>
+    /// #7240: logs a failed per-probe watermark read, at Warning on the first failure and again each hour
+    /// (<see cref="RollupFloorMaxReuse"/>) it persists, at Debug in between. A successful read resets it. Each view then reports
+    /// the ceiling cached with its floor.
+    /// </summary>
+    private static void LogRollupCeilingReadFailure(RollupFloorCache cache, DateTime now, Exception ex)
+    {
+        ILogger? logger;
+        bool warn;
+        lock (cache.Lock)
+        {
+            logger = cache.Logger;
+            warn = cache.CeilingReadWarnedAt is not DateTime warnedAt || now - warnedAt >= RollupFloorMaxReuse;
+            if (warn)
+            {
+                cache.CeilingReadWarnedAt = now;
+            }
+        }
+
+        if (logger is null)
+        {
+            return;
+        }
+
+        if (warn)
+        {
+            logger.LogWarning(
+                "Rollup coverage watermark read failed, so each rollup reports the ceiling cached with its floor, which can be hours old (#7240): {ExceptionType}: {Message}",
+                ex.GetType().Name, ex.Message);
+        }
+        else
+        {
+            logger.LogDebug("Rollup coverage watermark read failed again: {ExceptionType}: {Message}", ex.GetType().Name, ex.Message);
         }
     }
 
@@ -13032,7 +13487,7 @@ END $$;";
     public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
-        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
         [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
@@ -16958,6 +17413,47 @@ FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_f
       FROM _timescaledb_catalog.continuous_agg
       WHERE user_view_schema = 'collect'
       AND   user_view_name = '" + view + @"') x";
+
+    /// <summary>#7240: the watermarks of every view in <c>$1</c> in one statement, one row per continuous aggregate the catalog
+    /// lists, with the same finite-sentinel guard as <see cref="WatermarkSql"/>. Reads <c>_timescaledb_catalog.continuous_agg</c> only.</summary>
+    public const string WatermarksSql = @"
+SELECT user_view_name, CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
+FROM (SELECT user_view_name, _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
+      FROM _timescaledb_catalog.continuous_agg
+      WHERE user_view_schema = 'collect'
+      AND   user_view_name = ANY($1)) x";
+
+    /// <summary>
+    /// #7240: <paramref name="views"/>' watermarks from one catalog statement. A view with no row, or a NULL watermark (nothing
+    /// materialized yet), is absent from the answer. Unlike <see cref="GetAsync"/> this has no <c>max(bucket)</c> fallback and it
+    /// throws on a failed statement: the caller decides what a view without a watermark reports.
+    /// </summary>
+    public static async Task<Dictionary<string, DateTime>> GetManyAsync(
+        NpgsqlDataSource dataSource, IReadOnlyCollection<string> views, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(views);
+
+        var watermarks = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        if (views.Count == 0)
+        {
+            return watermarks;
+        }
+
+        await using var command = dataSource.CreateCommand(WatermarksSql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter { Value = views.ToArray(), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!await reader.IsDBNullAsync(1, cancellationToken))
+            {
+                watermarks[reader.GetString(0)] = reader.GetDateTime(1);
+            }
+        }
+
+        return watermarks;
+    }
 
     /// <summary>The fallback: the newest bucket <paramref name="view"/> actually holds a row for. Ordinary
     /// SELECT against the view itself, no catalog access. The caller adds one bucket width (this is the last

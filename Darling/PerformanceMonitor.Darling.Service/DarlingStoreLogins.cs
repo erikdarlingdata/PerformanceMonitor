@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// The store login the web dashboard and the MCP server connect with on a store the service does not manage
 /// (#3914). On a managed store each host derives its least-privilege login from its DPAPI credential file and
 /// never comes here. Everywhere else both used to connect with <c>postgres.connectionString</c>, the collection
-/// login, which is the store OWNER, so none of the <c>viewer</c>/<c>mcp</c> roles' protections applied to a web
+/// login, which is the store OWNER, so none of the <c>web</c>/<c>mcp</c> roles' protections applied to a web
 /// session or an MCP token-holder: not the secret-column carve, not the narrow write grants, not the
 /// <c>statement_timeout</c> backstop. Now, in order:
 /// <list type="number">
@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>postgres.connectionString</c> (a literal, or an <c>env:</c>/<c>file:</c> reference), resolved here when the
 /// host starts rather than when the config is parsed, so an unreadable reference keeps that one surface down with
 /// the reason logged instead of stopping collection.</description></item>
-/// <item><description>On the Linux compose distribution's own store, the <c>viewer</c>/<c>mcp</c> role the service
+/// <item><description>On the Linux compose distribution's own store, the <c>web</c>/<c>mcp</c> role the service
 /// provisioned there itself (<see cref="DarlingManagedRoles.EnsureComposeStoreProvisionedAsync"/>). The worker
 /// publishes that verdict once the batch has committed, so a host never starts on a login the store does not
 /// accept yet; a host in a container waits for it.</description></item>
@@ -51,7 +51,7 @@ internal static class DarlingStoreLogins
     /// <summary>The two network surfaces with a store login of their own.</summary>
     internal enum Surface
     {
-        /// <summary>The web dashboard: the <c>viewer</c> role's surface.</summary>
+        /// <summary>The web dashboard: the <c>web</c> role's surface (its own login, not the read-only <c>viewer</c> one).</summary>
         Web,
 
         /// <summary>The MCP server: the <c>mcp</c> role's surface.</summary>
@@ -70,6 +70,10 @@ internal static class DarlingStoreLogins
         /// <summary>The same role, with the credential an earlier start gave it: this start did not provision the
         /// roles.</summary>
         ComposeStoreRoleFromEarlierStart,
+
+        /// <summary>The web host on the <c>viewer</c> credential an earlier start gave that role, because this start did
+        /// not provision the roles and no <c>web</c> credential exists yet: reads work, every write is refused.</summary>
+        ComposeStoreViewerFromEarlierStart,
 
         /// <summary><c>postgres.connectionString</c>: the owner.</summary>
         Owner,
@@ -97,10 +101,11 @@ internal static class DarlingStoreLogins
     internal sealed class ComposeStoreVerdict
     {
         private ComposeStoreVerdict(
-            string? viewerConnectionString, string? mcpConnectionString, string? notProvisionedReason, int appliedSeconds,
-            string? credentialDirectory)
+            string? viewerConnectionString, string? mcpConnectionString, string? webConnectionString, string? notProvisionedReason,
+            int appliedSeconds, string? credentialDirectory)
         {
             ViewerConnectionString = viewerConnectionString;
+            WebConnectionString = webConnectionString;
             McpConnectionString = mcpConnectionString;
             NotProvisionedReason = notProvisionedReason;
             AppliedComposeStatementTimeoutSeconds = appliedSeconds;
@@ -114,6 +119,9 @@ internal static class DarlingStoreLogins
 
         internal string? McpConnectionString { get; }
 
+        /// <summary>The <c>web</c> role's login: the web dashboard's own, the one that holds its writes.</summary>
+        internal string? WebConnectionString { get; }
+
         /// <summary>Why this start did not provision the roles; null when it did.</summary>
         internal string? NotProvisionedReason { get; }
 
@@ -126,13 +134,14 @@ internal static class DarlingStoreLogins
         internal int AppliedComposeStatementTimeoutSeconds { get; }
 
         internal string? ConnectionStringFor(Surface surface) =>
-            surface == Surface.Web ? ViewerConnectionString : McpConnectionString;
+            surface == Surface.Web ? WebConnectionString : McpConnectionString;
 
-        internal static ComposeStoreVerdict ProvisionedWith(string viewerConnectionString, string mcpConnectionString, int appliedSeconds) =>
-            new(viewerConnectionString, mcpConnectionString, null, appliedSeconds, null);
+        internal static ComposeStoreVerdict ProvisionedWith(
+            string viewerConnectionString, string mcpConnectionString, int appliedSeconds, string webConnectionString) =>
+            new(viewerConnectionString, mcpConnectionString, webConnectionString, null, appliedSeconds, null);
 
         internal static ComposeStoreVerdict NotProvisioned(string reason, string? credentialDirectory = null) =>
-            new(null, null, reason, DarlingManagedRoles.ComposeStatementTimeoutUnknown,
+            new(null, null, null, reason, DarlingManagedRoles.ComposeStatementTimeoutUnknown,
                 credentialDirectory ?? DarlingManagedRoles.ComposeStoreCredentialDirectory);
     }
 
@@ -214,9 +223,10 @@ internal static class DarlingStoreLogins
                 verdict = ComposeStoreVerdict.ProvisionedWith(
                     BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, result.ViewerPassword!),
                     BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.McpRoleName, result.McpPassword!),
-                    result.AppliedComposeStatementTimeoutSeconds);
+                    result.AppliedComposeStatementTimeoutSeconds,
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.WebRoleName, result.WebPassword!));
                 logger.LogInformation(
-                    "Compose store: the service provisioned its own least-privilege roles, so the web dashboard connects as viewer and the MCP server as mcp, not as the owner (#3914)");
+                    "Compose store: the service provisioned its own least-privilege roles, so the web dashboard connects as web and the MCP server as mcp, not as the owner (#3914)");
             }
             else
             {
@@ -274,7 +284,7 @@ internal static class DarlingStoreLogins
                itself in the store's pg_stat_activity exactly like the managed one does. Role names are fixed
                to viewer/mcp on this path (DarlingManagedPostgres.ViewerRoleName / McpRoleName are the only
                callers), so the role name alone picks the surface. */
-            ApplicationName = role == DarlingManagedPostgres.ViewerRoleName
+            ApplicationName = role == DarlingManagedPostgres.ViewerRoleName || role == DarlingManagedPostgres.WebRoleName
                 ? DarlingManagedPostgres.WebApplicationName
                 : role == DarlingManagedPostgres.McpRoleName
                     ? DarlingManagedPostgres.McpApplicationName
@@ -320,15 +330,17 @@ internal static class DarlingStoreLogins
             return null;
         }
 
-        var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+        /* The evaluator runs as the web login: it writes the resolution row through record_custom_alert_resolution, which only the
+           web and mcp logins can execute (viewer is read-only). */
+        var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.WebRoleName, logger);
         if (earlier.Password is not { } password)
         {
             return null;
         }
 
-        var candidate = BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, password);
+        var candidate = BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.WebRoleName, password);
         return await AcceptsLoginAsync(
-            candidate, "Custom alert evaluator", DarlingManagedPostgres.ViewerRoleName, logger, cancellationToken)
+            candidate, "Custom alert evaluator", DarlingManagedPostgres.WebRoleName, logger, cancellationToken)
             ? candidate
             : null;
     }
@@ -386,24 +398,29 @@ internal static class DarlingStoreLogins
         }
 
         EarlierComposeCredential? earlier = null;
+        EarlierComposeCredential? earlierViewer = null;
         if (configured is null && inContainer && verdict is { Provisioned: false, CredentialDirectory: { } directory })
         {
-            earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, role, logger);
+            earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, ComposeRole(surface), logger);
+            if (surface == Surface.Web && earlier.Password is null)
+            {
+                earlierViewer = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+            }
         }
 
-        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier);
+        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier, earlierViewer);
         if (surface == Surface.Mcp)
         {
             RecordMcpLoginSource(login.Source);
         }
 
-        if (login.Warning is { } warning)
-        {
-            WarnOnce(surface, warning, logger);
-        }
+        LogLoginWarnings(surface, login, verdict, logger);
 
-        if (login.Source == LoginSource.ComposeStoreRoleFromEarlierStart
-            && !await AcceptsLoginAsync(login.ConnectionString, what, role, logger, cancellationToken))
+        if (login.Source is LoginSource.ComposeStoreRoleFromEarlierStart or LoginSource.ComposeStoreViewerFromEarlierStart
+            && !await AcceptsLoginAsync(
+                login.ConnectionString, what,
+                login.Source == LoginSource.ComposeStoreViewerFromEarlierStart ? DarlingManagedPostgres.ViewerRoleName : ComposeRole(surface),
+                logger, cancellationToken))
         {
             return null;
         }
@@ -419,7 +436,7 @@ internal static class DarlingStoreLogins
     /// </summary>
     internal static StoreLogin Resolve(
         Surface surface, string ownerConnectionString, string? configuredConnectionString, bool inContainer,
-        ComposeStoreVerdict? verdict, EarlierComposeCredential? earlier = null)
+        ComposeStoreVerdict? verdict, EarlierComposeCredential? earlier = null, EarlierComposeCredential? earlierViewer = null)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))
         {
@@ -438,16 +455,31 @@ internal static class DarlingStoreLogins
             if (earlier?.Password is { } password)
             {
                 return new StoreLogin(
-                    BuildComposeStoreRoleConnectionString(ownerConnectionString, Describe(surface).Role, password),
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, ComposeRole(surface), password),
                     LoginSource.ComposeStoreRoleFromEarlierStart,
                     EarlierCredentialWarning(surface, verdict.NotProvisionedReason));
+            }
+
+            /* The web host with no web credential yet: the viewer login an earlier start gave that role comes before
+               the owner, the way the managed path falls back. Reads work; the store refuses every write, which the web
+               answers as a refused change. The owner stays the last resort, where dev used it. */
+            if (surface == Surface.Web && earlierViewer?.Password is { } viewerPassword)
+            {
+                return new StoreLogin(
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, viewerPassword),
+                    LoginSource.ComposeStoreViewerFromEarlierStart,
+                    EarlierViewerWarning(verdict.NotProvisionedReason));
             }
         }
 
         var reason = inContainer ? verdict?.NotProvisionedReason : null;
         if (reason is not null && earlier?.MissingReason is { } missing)
         {
-            reason += $" No {Describe(surface).Role} credential from an earlier start can stand in: {missing}.";
+            reason += $" No {ComposeRole(surface)} credential from an earlier start can stand in: {missing}.";
+            if (surface == Surface.Web && earlierViewer?.MissingReason is { } viewerMissing)
+            {
+                reason += $" No viewer credential from an earlier start can stand in either: {viewerMissing}.";
+            }
         }
 
         return new StoreLogin(ownerConnectionString, LoginSource.Owner, OwnerFallbackWarning(surface, reason));
@@ -462,7 +494,8 @@ internal static class DarlingStoreLogins
     /// </summary>
     internal static string EarlierCredentialWarning(Surface surface, string? reason)
     {
-        var (what, _, role) = Describe(surface);
+        var (what, _, _) = Describe(surface);
+        var role = ComposeRole(surface);
         var warning =
             $"{what} connects to the store as the {role} role with the credential an earlier start provisioned, not as the owner: "
             + "the store's least-privilege roles were not provisioned this start.";
@@ -474,6 +507,24 @@ internal static class DarlingStoreLogins
         return warning
             + $" If the store refuses that login (the {role} role was dropped, or its password changed by hand), {char.ToLowerInvariant(what[0])}{what[1..]} "
             + "stays down with the store's error until a start provisions the roles again; it never falls back to the owner login.";
+    }
+
+    /// <summary>The startup warning for the web host on the read-only viewer login an earlier start provisioned: the store's
+    /// roles were not provisioned this start (<paramref name="reason"/> says why) and no web credential exists, so the
+    /// pages read but every change is refused until the web role exists.</summary>
+    internal static string EarlierViewerWarning(string? reason)
+    {
+        var warning =
+            "The web dashboard connects to the store as the read-only viewer role with the credential an earlier start provisioned, not as the owner: "
+            + "the store's least-privilege roles were not provisioned this start and no web credential exists yet.";
+        if (reason is not null)
+        {
+            warning += " " + reason;
+        }
+
+        return warning
+            + " Pages read, and every change (mute rules, dismissals, custom alerts, server edits) is refused until a start provisions the web role. "
+            + "If the store refuses the viewer login, the web dashboard stays down with the store's error; it never falls back to the owner login.";
     }
 
     /// <summary>
@@ -564,6 +615,7 @@ internal static class DarlingStoreLogins
         if (verdict?.Provisioned == true
             && (string.Equals(configuredUser, DarlingManagedPostgres.AdminRoleName, StringComparison.Ordinal)
                 || string.Equals(configuredUser, DarlingManagedPostgres.ViewerRoleName, StringComparison.Ordinal)
+                || string.Equals(configuredUser, DarlingManagedPostgres.WebRoleName, StringComparison.Ordinal)
                 || string.Equals(configuredUser, DarlingManagedPostgres.McpRoleName, StringComparison.Ordinal)))
         {
             return $"{setting} names the '{configuredUser}' role, which the service provisions on this compose store and re-keys "
@@ -571,12 +623,54 @@ internal static class DarlingStoreLogins
                 + $"and {char.ToLowerInvariant(what[0])}{what[1..]} connects as the {role} role the service provisions.";
         }
 
+        /* The web dashboard's writes belong to the web login. A webConnectionString that names viewer (what the script's example
+           and the docs said before the web role existed) is the read-only seat login: once the script has been run again the
+           web pages' writes are refused for it, and on a store not yet moved it can still write, which a seat login must not. */
+        if (surface == Surface.Web
+            && string.Equals(configuredUser, DarlingManagedPostgres.ViewerRoleName, StringComparison.Ordinal))
+        {
+            return $"{setting} logs in as '{configuredUser}', the read-only login meant for remote and locked-down Viewer seats. "
+                + $"The web dashboard has its own '{role}' login that holds the writes its pages make (mute rules, dismissals, custom alerts, "
+                + $"server changes and the run-now buttons). Set a password for the {role} role in tools/provision-roles.sql, run the script again, "
+                + $"and point {setting} at the {role} login. Until then, once the script has been run again, those writes are refused.";
+        }
+
         return null;
     }
 
+    /// <summary>The role the service provisions on the compose store for a surface: the web dashboard's own <c>web</c> login (the one that holds its
+    /// writes; <c>viewer</c> is read-only) or <c>mcp</c>.</summary>
+    private static string ComposeRole(Surface surface) =>
+        surface == Surface.Web ? DarlingManagedPostgres.WebRoleName : DarlingManagedPostgres.McpRoleName;
+
     private static (string What, string Setting, string Role) Describe(Surface surface) => surface == Surface.Web
-        ? ("The web dashboard", "postgres.webConnectionString", DarlingManagedPostgres.ViewerRoleName)
+        ? ("The web dashboard", "postgres.webConnectionString", DarlingManagedPostgres.WebRoleName)
         : ("The MCP server", "postgres.mcpConnectionString", DarlingManagedPostgres.McpRoleName);
+
+    /// <summary>
+    /// The startup warnings for a resolved login. The login's own warning comes first. The web host on the owner
+    /// because the role named <c>web</c> is one Darling did not create (no viewer login was saved either, so there is
+    /// nothing nearer to fall back to) gets one more line that says so in operator terms and what to run.
+    /// </summary>
+    internal static void LogLoginWarnings(Surface surface, StoreLogin login, ComposeStoreVerdict? verdict, ILogger logger)
+    {
+        if (login.Warning is { } warning)
+        {
+            WarnOnce(surface, warning, logger);
+        }
+
+        if (surface == Surface.Web && login.Source == LoginSource.Owner
+            && DarlingManagedRoles.RefusalNamesForeignRole(verdict?.NotProvisionedReason, DarlingManagedPostgres.WebRoleName))
+        {
+            WarnOnce(surface, ForeignWebRoleWarning, logger);
+        }
+    }
+
+    /// <summary>The line for a foreign <c>web</c> role (see <see cref="LogLoginWarnings"/>).</summary>
+    internal const string ForeignWebRoleWarning =
+        "The role named web in this store was not created by Darling, so Darling left it alone and created none of its own roles. "
+        + "The web dashboard is using the store owner login (postgres.connectionString) until that role is renamed or dropped. "
+        + "To fix it, run ALTER ROLE web RENAME TO <another name>; or DROP ROLE web; as the store's superuser, then restart the service so it creates its own web role.";
 
     /// <summary>The warning is stated once per distinct text per surface, not on every supervisor restart.</summary>
     private static void WarnOnce(Surface surface, string warning, ILogger logger)

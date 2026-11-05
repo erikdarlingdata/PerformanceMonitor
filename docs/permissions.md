@@ -81,7 +81,7 @@ The principal is the SQL login that the server entry uses. With Windows authenti
 
 The connection test also names each of the four required grants that the login does not have: `VIEW SERVER STATE`, `CONNECT ANY DATABASE`, `VIEW ANY DEFINITION` and `ALTER ANY EVENT SESSION`. On Amazon RDS it checks the other three, because RDS refuses `CONNECT ANY DATABASE`. Beside a successful test, it shows a warning with the statement that adds each missing grant. With Windows authentication, only the service's own test does this check: the Viewer, the MCP tools and `test_connect`. `--test-connection` runs as the console user, so it skips the check.
 
-Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md).
+Darling uses the same target-server grants. Its bundled PostgreSQL store and service account are covered in the [Darling operator guide](../Darling/README.md). Darling can also monitor PostgreSQL servers, which need different grants (see [PostgreSQL targets](#postgresql-targets-darling)), and it has two optional extra logins (see [Optional Darling logins](#optional-darling-logins)). The deprecated Full edition's install/least-privilege grants are in the Dashboard README inside the [frozen source zip](../deprecated/README.md).
 
 ### FinOps Index Analysis (per-database grants)
 
@@ -209,7 +209,7 @@ For a large fleet, grant an Entra **group** instead of provisioning each identit
 
 ### Azure SQL Managed Instance
 
-Works like on-premises. Use server-level logins with `VIEW SERVER STATE`. SQL Agent is available.
+Works like on-premises. Use server-level logins and run the on-premises grant block above unchanged. It has the four required server grants and the optional msdb reads. SQL Agent is available.
 
 ### AWS RDS for SQL Server
 
@@ -258,5 +258,5 @@ The exact statements are in the Darling operator guide, in [Permissions on a Pos
 
 Darling can use two more logins, each with its own grants. Neither is part of the grant block above. The monitoring login stays read-only.
 
-- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array-at-least-one-entry), under "Least privilege for the remediation credential".
+- The remediation login runs the changes that an operator or an agent starts. These are: force or unforce a Query Store plan, evict a cached plan, and kill a session. Its grants are in the Darling operator guide, in [Configuration Reference](darling/configuration.md#servers-array), under "Least privilege for the remediation credential".
 - The "Test an index" login is for PostgreSQL targets only. The check never runs under the monitoring login. The setup is in [Testing an index on PostgreSQL](darling/configuration.md#testing-an-index-on-postgresql).

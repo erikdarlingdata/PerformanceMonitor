@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -36,7 +37,7 @@ public partial class KnownPatternsWindow : Window
 
         if (dataService.IsReadOnly)
         {
-            ShowOnly("Read-only connection (postgres.connectAs = \"viewer\"): known patterns can be viewed but not changed here. Set connectAs to \"admin\" and restart the viewer to edit them.");
+            ShowOnly("Read-only connection: known patterns can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin);
         }
 
         Loaded += async (_, _) => await LoadAsync();
@@ -153,7 +154,14 @@ public partial class KnownPatternsWindow : Window
         }
     }
 
-    private void PatternsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => Edit_Click(sender, e);
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void PatternsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            Edit_Click(sender, e);
+        }
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 

@@ -416,7 +416,7 @@ public sealed class ExternalAlertDrainLifecycleLiveTests
     [Fact]
     public void TheDrainRunsOnItsOwnLoop_StartedWithTheService_AndNeverInsideTheFleetLoop()
     {
-        var worker = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var worker = RepoFile.ReadRepoFile(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
         var calls = Regex.Matches(worker, @"\bRunPassAsync\(").Count;
         Assert.Equal(1, calls);

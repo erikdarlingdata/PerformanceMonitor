@@ -42,8 +42,8 @@ public static class AgentActionEvents
 public sealed record AgentActionContext(AgentActionCall Call, int RequestServerId, string RequestServerName, int ClaimNo);
 
 /// <summary>
-/// The tool's part of a Level 2 change (#5912). <see cref="LoadLevels"/> reads the live routes ONCE, on the gate's own
-/// connection and transaction, and answers a resolver over that one list (<c>NotificationRouter.ResolveAgent</c>'s level
+/// The tool's part of a Level 2 change (#5912). <see cref="LoadRoutes"/> reads the live routes ONCE, on the gate's own
+/// connection and transaction, and answers a resolver over that one list (the route <c>NotificationRouter.ResolveAgent</c> picks
 /// for a metric, null when no route sends it to an agent). <see cref="KindRule"/> is
 /// check 7, run inside the gate's transaction; null has none. <see cref="ReadBefore"/> reads the before image (JSON, or
 /// null when the object does not exist yet) inside the gate's transaction. <see cref="Write"/> makes the change inside
@@ -59,11 +59,12 @@ public sealed class AgentActionHooks
 
     /// <summary>
     /// Reads the live routes once, inside the gate's own transaction (check 5), and answers the resolver every metric of the
-    /// request is read against: the level the routes send <c>metric</c> on server <c>serverId</c> at, null when none does. Called
-    /// at most once per gate pass, so a request with several metrics does not read the route table (and its scope inputs) again
-    /// for each one.
+    /// request is read against: the route <c>NotificationRouter.ResolveAgent</c> picks for <c>metric</c> on server <c>serverId</c>,
+    /// null when none sends it to an agent. Its level is the level, and its <c>action_approval</c> decides whether a Level 3 action
+    /// needs a person's approval (#7109). Called at most once per gate pass, so a request with several metrics does not read the
+    /// route table (and its scope inputs) again for each one.
     /// </summary>
-    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> LoadLevels { get; init; }
+    public required Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> LoadRoutes { get; init; }
 
     /// <summary>Check 7, the kind rule; null when the kind has none.</summary>
     public Func<NpgsqlConnection, NpgsqlTransaction, AgentActionContext, CancellationToken, Task<AgentActionRefusal?>>? KindRule { get; init; }
@@ -154,7 +155,7 @@ public sealed partial class InvestigationRequestStore
     /// release or claim (each takes the row <c>FOR UPDATE</c> or updates it) waits for the gate, and the gate for them.</summary>
     internal const string AgentActionRequestSql = @"
 SELECT state, claim_id, claimed_by, lease_until, expires_at, server_id, server_name, practice_of, autonomy_level,
-       claim_count, first_metric
+       claim_count, first_metric, trigger_kind
 FROM config.investigation_requests
 WHERE request_id = $1
 FOR SHARE";
@@ -459,7 +460,7 @@ RETURNING journal_id";
         return serverAction is null
             ? await LiveChecksAsync(connection, transaction, request, call, hooks, now, cancellationToken, practice: false)
             : await ServerActionConditionsRefusalAsync(connection, transaction, request, serverAction, call.Action, call.Target,
-                hooks.LoadLevels, now, practice: false, cancellationToken);
+                hooks.LoadRoutes, now, practice: false, refuseNeedsApproval: true, cancellationToken);
     }
 
     /// <summary>Check 2: the service's agent switch (<c>config_service.agent_actions_enabled</c>). Null when it is on. Read in the gate and again before the write
@@ -485,7 +486,7 @@ RETURNING journal_id";
             return claimRefusal;
         var live = request!;
 
-        var level = await ResolveRequestLevelAsync(connection, transaction, live, hooks.LoadLevels, 2, cancellationToken);
+        var level = (await ResolveRequestRoutesAsync(connection, transaction, live, hooks.LoadRoutes, 2, cancellationToken)).Level;
 
         /* Level 3 (#5632, step 5) includes everything Level 2 allows, so a Level 3 request passes this check. The routes' lowest level
            still wins above, and a stamped level above 3 is not a level. */
@@ -524,32 +525,40 @@ RETURNING journal_id";
     }
 
     /// <summary>
-    /// The level the request holds now: its stamp, lowered to the level the live routes send each of its metrics on. The routes
+    /// The level the request holds now: its stamp, lowered to the level the live routes send each of its metrics on, and whether a Level 3
+    /// action on it needs a person's approval (#7109, <see cref="ActionApprovalRules.ForRequest"/> over the same routes). The routes
     /// are read once per pass, and only when the stamp is at least <paramref name="floor"/>. A metric whose route was deleted
-    /// after the request opened resolves to null and lowers the request to 0: fail closed (pinned live).
+    /// after the request opened resolves to null and lowers the request to 0: fail closed (pinned live). The approval is read only
+    /// when the level holds: below it the action is refused anyway.
     /// </summary>
-    private static async Task<int> ResolveRequestLevelAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
-        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, int?>>> loadLevels,
+    private static async Task<RequestRouteView> ResolveRequestRoutesAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        AgentActionRequest request, Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task<Func<string, int, AlertSeverityLevel?, NotificationRoute?>>> loadRoutes,
         int floor, CancellationToken cancellationToken)
     {
         var level = request.AutonomyLevel;
+        var routes = new List<NotificationRoute?>();
         if (level >= floor)
         {
-            var resolve = await loadLevels(connection, transaction, cancellationToken);
+            var resolve = await loadRoutes(connection, transaction, cancellationToken);
             foreach (var (metric, severity) in request.Metrics)
             {
                 if (level < floor)
                     break;
-                level = Math.Min(level, resolve(metric, request.ServerId, severity) ?? 0);
+                var route = resolve(metric, request.ServerId, severity);
+                routes.Add(route);
+                level = Math.Min(level, route?.AgentLevel ?? 0);
             }
         }
 
-        return level;
+        return new RequestRouteView(level, ActionApprovalRules.ForRequest(routes, request.TriggerKind));
     }
+
+    /// <summary>What the live routes say about a request: its level now and whether a Level 3 action on it needs approval.</summary>
+    private sealed record RequestRouteView(int Level, ActionApprovalState Approval);
 
     private sealed record AgentActionRequest(string State, Guid? ClaimId, string? ClaimedBy, DateTime? LeaseUntil,
         DateTime ExpiresAt, int ServerId, string ServerName, Guid? PracticeOf, int AutonomyLevel, int ClaimCount,
-        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics);
+        IReadOnlyList<(string Metric, AlertSeverityLevel? Severity)> Metrics, string TriggerKind, Guid RequestId);
 
     private async Task<AgentActionRequest?> ReadAgentActionRequestAsync(NpgsqlConnection connection,
         NpgsqlTransaction transaction, Guid requestId, CancellationToken cancellationToken)
@@ -573,7 +582,9 @@ RETURNING journal_id";
                 reader.IsDBNull(7) ? null : reader.GetGuid(7),
                 reader.GetInt16(8),
                 reader.GetInt32(9),
-                Array.Empty<(string, AlertSeverityLevel?)>());
+                Array.Empty<(string, AlertSeverityLevel?)>(),
+                reader.GetString(11),
+                requestId);
         }
 
         /* #6928: each alert's metric at the tier it arrived at, so the live routes are read at the tier dispatch used: a Critical alert
@@ -610,6 +621,71 @@ RETURNING journal_id";
             $"agent_refused:{(requestId is Guid id ? id.ToString() : "unknown")}:{tokenName ?? RefusalUnboundKey}:{tool}:{code}:{now:yyyy-MM-ddTHH}");
         return JournalAsync(connection, transaction, now, requestId, null, serverId, "refused", actor, code,
             new JsonObject { ["tool"] = tool }.ToJsonString(), onceKey, cancellationToken);
+    }
+
+    /// <summary>
+    /// Journals a store change a tool made on the writes arm (#7185), where no investigation request, claim or agent is behind it: an
+    /// <c>action_called</c> row with the tool, the kind, the target and no before image (the change created the row), then the
+    /// <c>action_done</c> row with the after image, in the caller's transaction so the change and its journal commit together. The Agent
+    /// changes list then shows it and its undo works, exactly as for a gated change. Both rows carry no request id. The connection must be
+    /// the store owner's: the journal keeps these events to it. Answers the <c>action_called</c> journal id.
+    /// </summary>
+    public static Task<long> JournalDirectChangeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string actor, string reason, string tool, string kind, string targetId, string afterJson, CancellationToken cancellationToken) =>
+        JournalDirectChangeAsync(connection, transaction, now, serverId, actor, reason, tool, kind, targetId, null, afterJson, cancellationToken);
+
+    /// <summary>
+    /// The same two rows with a before image (#7414): an agent that changes or deletes a rule with no claim behind it journals the rule as it
+    /// was, so the Agent changes list shows what moved and its undo puts the rule back. A null <paramref name="beforeJson"/> is a change that
+    /// created the row. <paramref name="actor"/> is <c>agent:&lt;id&gt;</c> there. Both rows carry no request id, so no new column is needed.
+    /// </summary>
+    public static async Task<long> JournalDirectChangeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string actor, string reason, string tool, string kind, string targetId, string? beforeJson, string afterJson,
+        CancellationToken cancellationToken)
+    {
+        var called = new JsonObject
+        {
+            ["tool"] = tool,
+            ["kind"] = kind,
+            ["target"] = new JsonObject { ["id"] = targetId, ["server_id"] = serverId, ["database"] = null },
+            ["before"] = beforeJson is null ? null : JsonNode.Parse(beforeJson),
+        }.ToJsonString();
+        var calledId = await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_called", actor, reason, called, cancellationToken);
+        var done = new JsonObject { ["called_id"] = calledId, ["after"] = JsonNode.Parse(afterJson) }.ToJsonString();
+        await InsertDirectJournalAsync(connection, transaction, now, serverId, "action_done", actor, null, done, cancellationToken);
+        return calledId;
+    }
+
+    /// <summary>
+    /// The service's agent switch for a change that has no request behind it (#7414), read in the change's own transaction and held
+    /// <c>FOR NO KEY UPDATE</c> to its end, as the gate holds it for a store write: a person turning agent changes off waits for the
+    /// change in flight, and a change that starts after it reads it off. Null when agent changes are on (a store with no row reads as on).
+    /// </summary>
+    public static async Task<AgentActionRefusal?> DirectChangeSwitchRefusalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(AgentActionsEnabledStoreWriteLockedSql, connection, transaction)
+        {
+            CommandTimeout = DeadlockSignatureStore.MergeCommandTimeoutSeconds,
+        };
+        var enabled = await command.ExecuteScalarAsync(cancellationToken) is not bool on || on;
+        return enabled ? null
+            : new AgentActionRefusal(AgentActionCodes.ActionsOff,
+                "Agent changes are turned off for this service (config_service.agent_actions_enabled). Report what you would change instead.");
+    }
+
+    private static async Task<long> InsertDirectJournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,
+        int? serverId, string journalEvent, string actor, string? reason, string detailJson, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(AgentActionJournalSql, connection, transaction) { CommandTimeout = DeadlockSignatureStore.MergeCommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlDbType.TimestampTz });
+        command.Parameters.Add(new NpgsqlParameter<Guid?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Uuid });
+        command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = journalEvent });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = actor });
+        command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = reason });
+        command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = detailJson });
+        return (long)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
     private async Task<long> JournalReturningAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime now,

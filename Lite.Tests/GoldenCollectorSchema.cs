@@ -388,7 +388,8 @@ internal static class GoldenCollectorSchema
     wait_duration_ms BIGINT,
     blocking_session_id INTEGER,
     resource_description VARCHAR,
-    database_name VARCHAR
+    database_name VARCHAR,
+    program_name VARCHAR
 )",
         ["procedure_stats"] = @"CREATE TABLE IF NOT EXISTS procedure_stats (
     collection_id BIGINT PRIMARY KEY,
@@ -790,7 +791,8 @@ internal static class GoldenCollectorSchema
     contentious_object VARCHAR,
     monitor_loop INTEGER,
     blocked_query_plan_xml VARCHAR,
-    blocking_query_plan_xml VARCHAR
+    blocking_query_plan_xml VARCHAR,
+    blocking_open_transaction_count INTEGER
 )",
         ["long_query_completions"] = @"CREATE TABLE IF NOT EXISTS long_query_completions (
     long_query_completion_id BIGINT PRIMARY KEY,

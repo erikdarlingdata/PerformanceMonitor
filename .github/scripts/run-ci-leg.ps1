@@ -61,8 +61,10 @@ if ($AllLegs -and -not $DryRun) { throw '-AllLegs is only for -DryRun' }
 if (-not $AllLegs -and ($Leg -lt 1 -or $Leg -gt $LegCount)) { throw "-Leg must be 1..$LegCount, got $Leg" }
 
 $scripts = $PSScriptRoot
-$darlingProject = 'Darling/Darling.Tests/Darling.Tests.csproj'
-$liteProject = 'Lite.Tests/Lite.Tests.csproj'
+# The built test executables (#7098): they run on the runner image's .NET with no SDK, so a leg does not install the one
+# global.json pins. `dotnet run --no-build` needed that SDK although it compiled nothing.
+$darlingExe = 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.exe'
+$liteExe = 'Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.exe'
 $darlingDll = 'Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll'
 $liteWeights = Join-Path $scripts 'lite-shard-weights.json'
 $darlingWeights = Join-Path $scripts 'darling-shard-weights.json'
@@ -95,17 +97,18 @@ function Get-WeightedNames([string] $weightsFile, [string] $prefix) {
 }
 
 # One test host listing: the same `-list classes/json` call the shard scripts make (see run-darling-pg-shard.ps1).
-function Get-ListedClasses([string] $project, [string[]] $extra) {
-    $lines = @(dotnet run --project $project -c Release --no-build -- -list classes/json @extra)
-    if ($LASTEXITCODE -ne 0) { throw "class listing of $project failed with exit code $LASTEXITCODE" }
+function Get-ListedClasses([string] $exe, [string[]] $extra) {
+    if (-not (Test-Path -LiteralPath $exe)) { throw "no built test executable at $exe - the build artifact was not unpacked" }
+    $lines = @(& $exe -list classes/json @extra)
+    if ($LASTEXITCODE -ne 0) { throw "class listing of $exe failed with exit code $LASTEXITCODE" }
     $json = @($lines | Where-Object { $_ -match '^\s*\[' })
-    if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing of $project, got $($json.Count)" }
+    if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing of $exe, got $($json.Count)" }
     return @($json[0] | ConvertFrom-Json)
 }
 
 function Get-DarlingClasses {
     if ($Areas -eq 'classes') {
-        if (Test-Path -LiteralPath $darlingDll) { return @(Select-ByKey @(Get-ListedClasses $darlingProject @()) $OnlyDarlingClasses) }
+        if (Test-Path -LiteralPath $darlingDll) { return @(Select-ByKey @(Get-ListedClasses $darlingExe @()) $OnlyDarlingClasses) }
         if (-not $DryRun) { throw "no built Darling.Tests at $darlingDll - the build artifact was not unpacked" }
         return @(Select-ByKey @(Get-WeightedNames $darlingWeights 'Darling.Tests.') $OnlyDarlingClasses)
     }
@@ -121,9 +124,9 @@ function Get-DarlingClasses {
         }
         return $names
     }
-    if ($Areas -ne 'lite') { return @(Get-ListedClasses $darlingProject @()) }
-    $every = @(Get-ListedClasses $darlingProject @())
-    $guard = @(Get-ListedClasses $darlingProject @('-trait', 'Stage=Guard'))
+    if ($Areas -ne 'lite') { return @(Get-ListedClasses $darlingExe @()) }
+    $every = @(Get-ListedClasses $darlingExe @())
+    $guard = @(Get-ListedClasses $darlingExe @('-trait', 'Stage=Guard'))
     $reads = @(python -I (Join-Path $scripts 'ci-select.py') reads-classes --suite darling | Where-Object { $_ })
     if ($LASTEXITCODE -ne 0) { throw 'ci-select.py reads-classes failed' }
     return @($every | Where-Object { $reads -contains $_ -or $guard -contains $_ })
@@ -141,7 +144,7 @@ function Get-LiteClasses {
         Write-Host '(dry run, no built Lite.Tests: Lite classes read from lite-shard-weights.json)'
         $names = @(Get-WeightedNames $liteWeights '')
     }
-    else { $names = @(Get-ListedClasses $liteProject @()) }
+    else { $names = @(Get-ListedClasses $liteExe @()) }
     if ($Areas -eq 'classes') { return @(Select-ByKey $names $OnlyLiteClasses) }
     if ($Areas -ne 'darling') { return $names }
     Write-Host "(darling scope: only the Lite classes that read a Darling file, $($reads.Count) named by the source scan)"
@@ -205,8 +208,9 @@ $shard = $Leg - 1
 New-Item -ItemType Directory -Force -Path TestResults | Out-Null
 Write-Host "leg $Leg of ${LegCount}: areas $Areas, shard $shard"
 
-# The slices first, so a log that dies early still names what the leg was to run. Both are recomputed by the callees below
-# from the same inputs with the same deterministic packer; this print is for the reader.
+# The slices first, so a log that dies early still names what the leg was to run. The Darling list is handed to the shard
+# script below, which would otherwise list the classes again (one test host start each, 10 s a listing, #7098); both cut it
+# with the same deterministic packer. The Lite list is recomputed by the Lite chunk loop below from the same slice.
 $darlingClasses = @()
 $liteClasses = @()
 if ($runDarling) {
@@ -245,7 +249,7 @@ if ($Leg -eq 1 -and $runDarling -and $Areas -notin 'lite', 'classes' -and -not $
         $saved = @{}
         foreach ($n in (Get-ChildItem Env: | Where-Object { $_.Name -like 'DARLING_TEST_*' }).Name) { $saved[$n] = [Environment]::GetEnvironmentVariable($n); Remove-Item "Env:$n" }
         try {
-            dotnet run --project $darlingProject -c Release --no-build -- -trx "TestResults/$ResultPrefix-treeguards.trx" -xml "TestResults/darling-timing-treeguards-a$RunAttempt.xml" -longRunning 300 | Tee-Object -FilePath 'TestResults/darling-runner-treeguards.log' -Append
+            & $darlingExe -trx "TestResults/$ResultPrefix-treeguards.trx" -xml "TestResults/darling-timing-treeguards-a$RunAttempt.xml" -longRunning 300 | Tee-Object -FilePath 'TestResults/darling-runner-treeguards.log' -Append
         }
         finally { foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) } }
     }
@@ -254,7 +258,7 @@ if ($Leg -eq 1 -and $runDarling -and $Areas -notin 'lite', 'classes' -and -not $
 if ($runDarling) {
     foreach ($line in $testEnv) { $kv = $line -split '=', 2; [Environment]::SetEnvironmentVariable($kv[0], $kv[1]) }
     Invoke-Piece "Darling.Tests slice $Leg of $LegCount" {
-        $shardParams = @{ Shard = $shard; ShardCount = $LegCount; ResultPrefix = $ResultPrefix; RunAttempt = $RunAttempt }
+        $shardParams = @{ Shard = $shard; ShardCount = $LegCount; ResultPrefix = $ResultPrefix; RunAttempt = $RunAttempt; ClassList = $darlingClasses }
         if ($darlingScopeFilter) { $shardParams.ScopeFilter = $darlingScopeFilter }
         if ($Areas -eq 'classes') { $shardParams.OnlyClasses = $OnlyDarlingClasses }
         & (Join-Path $scripts 'run-darling-pg-shard.ps1') @shardParams
@@ -286,7 +290,7 @@ if ($runLite) {
             $n++
             $chunkArgs = foreach ($class in $chunk) { '-class'; $class }
             Write-Host "lite shard $shard chunk $n of $($chunks.Count): $($chunk.Count) classes"
-            dotnet run --project $liteProject -c Release --no-build -- @chunkArgs -xml "TestResults/lite-timing-$shard-$n-a$RunAttempt.xml" -longRunning 300 | Tee-Object -FilePath "TestResults/lite-runner-$shard.log" -Append
+            & $liteExe @chunkArgs -xml "TestResults/lite-timing-$shard-$n-a$RunAttempt.xml" -longRunning 300 | Tee-Object -FilePath "TestResults/lite-runner-$shard.log" -Append
             if ($LASTEXITCODE -ne 0) { $failedChunks++; Write-Host "lite shard $shard chunk $n failed with exit code $LASTEXITCODE" }
         }
         # Piece-level exit status: the Invoke-Piece check reads $LASTEXITCODE.

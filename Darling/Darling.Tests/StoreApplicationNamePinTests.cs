@@ -93,7 +93,7 @@ public sealed class StoreApplicationNamePinTests
         var ct = TestContext.Current.CancellationToken;
         var bodySucceeded = false;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
 
         try
         {
@@ -133,7 +133,7 @@ public sealed class StoreApplicationNamePinTests
         var ct = TestContext.Current.CancellationToken;
         var bodySucceeded = false;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
 
         try
         {

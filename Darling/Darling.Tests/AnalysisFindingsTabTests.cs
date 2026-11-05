@@ -144,6 +144,85 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void AStandingStateCard_GetsNoQueriesLink_AndAnIncidentCardGetsOneThatNamesTheTab()
+    {
+        var groups = Run("standingLink").EnumerateArray().ToDictionary(g => g.GetProperty("head").GetString()!, g => Strings(g.GetProperty("links")));
+        Assert.Empty(groups.Single(g => g.Key.StartsWith("VolumeLow", StringComparison.Ordinal)).Value);
+        Assert.Equal(new[] { "Open Queries tab" }, groups.Single(g => g.Key.StartsWith("WaitSpike", StringComparison.Ordinal)).Value);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRootWithTwoSentences_AreOneCard_WithTheNewestChainsFigures_AndTheOtherChainNamedUnderIt()
+    {
+        var r = Run("sameRootOtherSentence");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
+        Assert.Contains("also seen as: Latch ex, then Tempdb usage (Info, last seen", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("TEMPDB_USAGE", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoChainsOnOneRootWithOneSentence_AreOneCard_WithTheOccurrencesAddedUp_AndEachChainNamedInWords()
+    {
+        var r = Run("sameRoot");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, Strings(r.GetProperty("cards")).Length);
+        Assert.Contains("Seen 7×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Latch ex, then Cxpacket · Warning · 5 occurrences; Latch ex, then Tempdb usage · Info · 2 occurrences", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OneSentenceOnTwoIncidents_IsOneCard_AtTheWorstSeverity_WithTheOccurrencesAddedUp()
+    {
+        var r = Run("sameSentence");
+        var headers = Strings(r.GetProperty("headers"));
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(new[] { "Read latency spiked to 155 ms · CRITICAL", "Something else · INFO" }, headers);
+        Assert.Contains("Seen 21×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Anomaly read latency, then Lck m s · Critical · 4 occurrences; Anomaly read latency · Warning · 17 occurrences", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoCards_EachWithItsOwnRemediation_AndNoHash()
+    {
+        var r = Run("pileupTwoStatements");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(2, r.GetProperty("cards").GetInt32());
+        Assert.Contains("Fix statement A", text, StringComparison.Ordinal);
+        Assert.Contains("Fix statement B", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupOfOneStatement_OnTwoIncidents_IsOneCard()
+    {
+        var r = Run("pileupSameStatement");
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.DoesNotContain("0x", r.GetProperty("text").GetString()!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThePileupsAlsoSeenLine_NamesTheChainInWords_WithNoHash()
+    {
+        var r = Run("pileupAlsoSeen");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("cards").GetInt32());
+        Assert.Contains("also seen as: Same statement pileup (", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("→", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowWhosePeakWasWarning_ButWhoseNewestOccurrenceWasInfo_ReadsWarning()
+    {
+        Assert.Equal(new[] { "Wait profile shifted · WARNING" }, Strings(Run("peakSeverity").GetProperty("headers")));
+    }
+
+    [Fact]
     public void ANullSeverity_RendersTheLabelAlone_NotNaN()
     {
         var text = Run("nullSeverity").GetProperty("text").GetString()!;
@@ -158,7 +237,16 @@ public sealed class AnalysisFindingsTabTests
         var text = Run("scoreWording").GetProperty("text").GetString()!;
         Assert.Contains("(score 0.80)", text, StringComparison.Ordinal);
         Assert.DoesNotContain("0.80 waits", text, StringComparison.Ordinal);
-        Assert.Contains("waits", text, StringComparison.Ordinal);
+        Assert.Contains("Waits", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCard_ShowsThePlainCategoryName_AndAnUnknownCategoryAsItIs()
+    {
+        var text = Run("categoryNames").GetProperty("text").GetString()!;
+        Assert.Contains("Expensive query", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", text, StringComparison.Ordinal);
+        Assert.Contains("weird_new_source", text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -11,11 +11,43 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>True when the hot table (not its archive view) holds a row for the server. <paramref name="table"/> is a literal from this file, never user text.</summary>
+    private static async Task<bool> HotTableHasServerAsync(LockedConnection connection, string table, int serverId)
+    {
+        using var probe = connection.CreateCommand();
+        probe.CommandText = "SELECT EXISTS (SELECT 1 FROM " + table + " WHERE server_id = $1)";
+        probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return Convert.ToBoolean(await probe.ExecuteScalarAsync());
+    }
+
+    /// <summary>#7216: the relation that answers "the newest server_properties row that carries a utc_offset_minutes". Archival moves
+    /// only OLDER rows out, so when the hot table holds a non-NULL offset for the server, the newest such row is in it and the view
+    /// need not be read. Otherwise (a pre-v42 store whose rows predate the column, or a server whose rows are all archived) the view
+    /// answers, as before. A bare hot-row probe would not decide this: a hot row with a NULL offset says nothing about the archive.</summary>
+    internal static string ServerPropertiesWithOffsetRelation(bool hotHasOffset) => hotHasOffset ? "server_properties" : "v_server_properties";
+
+    private static Task<string> ServerPropertiesWithOffsetRelationAsync(LockedConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    internal static Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBConnection connection, int serverId)
+        => ServerPropertiesWithOffsetRelationAsync(connection.CreateCommand(), serverId);
+
+    private static async Task<string> ServerPropertiesWithOffsetRelationAsync(DuckDBCommand probe, int serverId)
+    {
+        using (probe)
+        {
+            probe.CommandText = "SELECT EXISTS (SELECT 1 FROM server_properties WHERE server_id = $1 AND utc_offset_minutes IS NOT NULL)";
+            probe.Parameters.Add(new DuckDBParameter { Value = serverId });
+            return ServerPropertiesWithOffsetRelation(Convert.ToBoolean(await probe.ExecuteScalarAsync()));
+        }
+    }
+
     /// <summary>
     /// Computes utilization efficiency from cpu_utilization_stats + memory_stats (last 24 hours).
     /// </summary>
@@ -26,6 +58,14 @@ public partial class LocalDataService
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
+
+        /* #7000: the two "newest row" lookups below have no time bound, so through the v_ view they scanned every archived row of
+           memory_stats and server_properties (96 rows with one archived day, 768 with eight, on a field-shaped store: it grows with
+           the archive, not the window). The hot table holds the newest row of any server that is still being collected, so the
+           view is read only for a server with no hot row (collection stopped and archival moved every row out), which still shows
+           the last values it had. */
+        var memoryRelation = await HotTableHasServerAsync(connection, "memory_stats", serverId) ? "memory_stats" : "v_memory_stats";
+        var propertiesRelation = await HotTableHasServerAsync(connection, "server_properties", serverId) ? "server_properties" : "v_server_properties";
 
         command.CommandText = @"
 WITH cpu_stats AS (
@@ -47,7 +87,7 @@ mem_latest AS (
         max_workers_count,
         current_workers_count,
         CAST(total_server_memory_mb AS DECIMAL(10,2)) / NULLIF(target_server_memory_mb, 0) AS memory_ratio
-    FROM v_memory_stats
+    FROM " + memoryRelation + @"
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1
@@ -58,7 +98,7 @@ mem_latest AS (
    or an elastic pool): never the scheduler count. Every other edition reads as it always did. The same CASE is in the Darling read. */
 server_info AS (
     SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, cpu_count) END AS cpu_count, engine_edition, edition
-    FROM v_server_properties
+    FROM " + propertiesRelation + @"
     WHERE server_id = $1
     ORDER BY collection_time DESC
     LIMIT 1

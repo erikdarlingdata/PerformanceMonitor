@@ -59,7 +59,7 @@ namespace Darling.Tests;
 [Collection("live-postgres")]
 public sealed class McpReadToolBudgetLiveTests
 {
-    private const string ServerName = "mcp-read-tool-budget";
+    internal const string ServerName = "mcp-read-tool-budget";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
 
     private const int DbCount = 12;
@@ -209,14 +209,14 @@ public sealed class McpReadToolBudgetLiveTests
         name == "audit_config" ||
         WriteToolRoster.Contains(name);
 
-    private static (string Name, MethodInfo Method)[] ReadToolMethods() =>
+    internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>
         AllToolMethods().Where(x => !IsExcluded(x.Name)).ToArray();
 
     /// <summary>Binds one tool's parameters: its DI services, <c>server_name</c> at the seeded server, every
     /// other optional parameter at its declared default. A required parameter that is none of those gets a
     /// placeholder and a <paramref name="gaps"/> note -- see the class remarks' "Known gaps".</summary>
-    private static object?[] BindArgs(MethodInfo method, NpgsqlDataSource postgres, DarlingAnalysisService analysisService,
-        McpToolGuideCatalog catalog, List<string> gaps, string toolName)
+    internal static object?[] BindArgs(MethodInfo method, NpgsqlDataSource postgres, DarlingAnalysisService analysisService,
+        McpToolGuideCatalog catalog, List<string> gaps, string toolName, IReadOnlyDictionary<string, object?>? overrides = null)
     {
         var parameters = method.GetParameters();
         var args = new object?[parameters.Length];
@@ -226,6 +226,7 @@ public sealed class McpReadToolBudgetLiveTests
             if (p.ParameterType == typeof(NpgsqlDataSource)) { args[i] = postgres; continue; }
             if (p.ParameterType == typeof(DarlingAnalysisService)) { args[i] = analysisService; continue; }
             if (p.ParameterType == typeof(McpToolGuideCatalog)) { args[i] = catalog; continue; }
+            if (overrides is not null && p.Name is { } overridden && overrides.TryGetValue(overridden, out var value)) { args[i] = value; continue; }
             if (p.Name == "server_name") { args[i] = ServerName; continue; }
             if (p.HasDefaultValue) { args[i] = p.DefaultValue; continue; }
 
@@ -237,7 +238,7 @@ public sealed class McpReadToolBudgetLiveTests
 
     /// <summary>Every MCP tool method returns either <c>string</c> (<c>get_tool_guide</c>) or <c>Task&lt;string&gt;</c>
     /// (everything else); this is the reply an MCP client would receive either way.</summary>
-    private static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
+    internal static async Task<string> InvokeAsync(MethodInfo method, object?[] args)
     {
         var result = method.Invoke(null, args);
         return result switch

@@ -89,7 +89,7 @@ public sealed class DarlingWebSignInHardeningTests
             trustedProxies: trustedProxies,
             sendHsts: sendHsts,
             utcNow: clock.Now,
-            mcpToken: mcpToken);
+            mcpTokens: mcpToken is null ? null : new[] { mcpToken });
 
         await app.StartAsync();
         return app.GetTestServer();

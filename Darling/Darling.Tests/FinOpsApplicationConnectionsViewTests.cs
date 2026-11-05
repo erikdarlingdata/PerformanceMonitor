@@ -260,10 +260,27 @@ public sealed class FinOpsApplicationConnectionsViewLiveTests
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* #7010: the empty answer carries the window notice under hints (a server the store holds no collection for is not a true negative). */
         var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", EmptyServerName, 24, 10, cancellationToken: ct);
-        Assert.Equal(
-            McpHelpers.Status("empty", "No session statistics were collected for this server in the last 24 hours, so there is no per-application connection data to show."),
-            body);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("No session statistics were collected for this server in the last 24 hours, so there is no per-application connection data to show.",
+            doc.RootElement.GetProperty("message").GetString());
+        Assert.True(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+    }
+
+    /// <summary>#7010: a window that starts before the first session sample says so, and a window the samples cover does not.</summary>
+    [Fact]
+    public async Task WindowPastTheData_SaysWindowTruncated_AndACoveredWindowDoesNot()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var wide = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 24, 10, cancellationToken: ct));
+        Assert.True(wide.RootElement.GetProperty("window_truncated").GetBoolean());
+        using var covered = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "application_connections", ServerName, 4, 10, cancellationToken: ct));
+        Assert.False(covered.RootElement.GetProperty("window_truncated").GetBoolean());
     }
 
     [Fact]

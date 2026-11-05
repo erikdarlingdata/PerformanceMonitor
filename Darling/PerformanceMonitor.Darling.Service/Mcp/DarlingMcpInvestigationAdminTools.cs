@@ -43,7 +43,7 @@ public sealed class DarlingMcpInvestigationAdminTools
 {
     internal const string PreconditionMessage =
         "The service's mcp store role may not write the investigation tables this tool changes. A bring-your-own store needs " +
-        "Darling/tools/provision-roles.sql re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
+        DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
 
     private const string NotPendingSentence = "That note is not pending: it was already decided, or it is gone.";
     private const string NotOpenSentence = "That request is not open: it is already closed or expired, or it is gone.";
@@ -161,7 +161,7 @@ public sealed class DarlingMcpInvestigationAdminTools
         {
             if (!Guid.TryParse(request_id, out var request))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             if (InvestigationPersonWrites.ValidateCloseReason(reason) is { } reasonRefusal)

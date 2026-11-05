@@ -72,7 +72,7 @@ public sealed partial class ViewerDataService
         public long? UniqueQueries { get; init; }
         public long DeadlockCount { get; init; }
         public long BlockingEvents { get; init; }
-        public long BlockingReports { get; init; }
+        public long PeakSnapshotWaitMs { get; init; }
         public long HighCpuEvents { get; init; }
         public long CollectionErrors { get; init; }
         public long MemoryPressureEvents { get; init; }
@@ -298,8 +298,8 @@ public sealed partial class ViewerDataService
         /* #3541 A9 / #3653: the aggregate's LAST column, how many of the seven signal sources hold a row for
            the day — the fact that tells a purged shell from a day the purge has not reached. */
         SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
-        /* #5644: the report count the band reads (blocking_events counts WAITS), after signal_sources_present. */
-        BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+        /* #7028: the blocking band's snapshot arm (ms), after signal_sources_present. */
+        PeakSnapshotWaitMs = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
     };
 
     /// <summary>#4232: the banding half of the old ReadDailySummaryRow — stamps a raw parsed day with the
@@ -316,7 +316,7 @@ public sealed partial class ViewerDataService
             UniqueQueries = raw.UniqueQueries,
             DeadlockCount = raw.DeadlockCount,
             BlockingEvents = raw.BlockingEvents,
-            BlockingReports = raw.BlockingReports,
+            PeakSnapshotWaitMs = raw.PeakSnapshotWaitMs,
             HighCpuEvents = raw.HighCpuEvents,
             CollectionErrors = raw.CollectionErrors,
             MemoryPressureEvents = raw.MemoryPressureEvents,
@@ -359,11 +359,10 @@ public class DailySummaryRow
     public long DeadlockCount { get; set; }
     public long BlockingEvents { get; set; }
 
-    /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644). The band's count tiers were
-    /// measured in reports, so <see cref="ToSignals"/> carries this for the band while every display keeps
-    /// <see cref="BlockingEvents"/>, the count of WAITS. <c>null</c> on a hand-built row, which bands its
-    /// <see cref="BlockingEvents"/>.</summary>
-    public long? BlockingReports { get; set; }
+    /// <summary>#7028: the blocking band's snapshot arm in milliseconds, the largest total blocked wait of one DMV
+    /// snapshot in the day after the Blocking Wait Time alert's persistence gate. <c>null</c> on a hand-built row,
+    /// which carries no snapshot arm. <see cref="BlockingEvents"/>, the count of WAITS, is what the count arm bands.</summary>
+    public long? PeakSnapshotWaitMs { get; set; }
     public long HighCpuEvents { get; set; }
     public long MemoryPressureEvents { get; set; }
     public long MemoryCriticalEvents { get; set; }
@@ -424,7 +423,7 @@ public class DailySummaryRow
         CollectionRuns = CollectionRuns,
         HighCpuEvents = HighCpuEvents,
         BlockingEvents = BlockingEvents,
-        BlockingReports = BlockingReports,
+        PeakSnapshotWaitMs = PeakSnapshotWaitMs,
         /* #3539 A2: the blocking band's wait arm reads the longest block, so the peak rides in the signals. */
         PeakBlockWaitMs = MaxBlockDurationMs,
         MemoryPressureEvents = MemoryPressureEvents,

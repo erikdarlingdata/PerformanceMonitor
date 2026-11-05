@@ -48,9 +48,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpHealthTools
 {
     /// <summary>get_server_summary's description, VERBATIM Lite's (#3541 A10); the cross-SKU census pins them
-    /// equal. Names the three clocks the payload carries, because the payload used to carry one.</summary>
+    /// equal (so the PostgreSQL not_collected answer, #7159, is not named here: Lite has no PostgreSQL targets; the envelope itself says it). Names the three clocks the payload carries, because the payload used to carry one.</summary>
     internal const string ServerSummaryDescription =
-        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above, which can be far older when their own collectors have stopped. blocking_count and deadlock_count cover the counts_window_hours ending now.";
+        "Gets a quick health overview for a SQL Server instance: current CPU %, memory usage, recent blocking count, and deadlock count. Use this for a fast health check before drilling into specific areas. THREE CLOCKS, NAMED: cpu_percent is the newest CPU snapshot and cpu_captured_at is its instant; memory_mb is the newest memory snapshot and memory_captured_at is its instant; last_collection is the newest collection of ANY collector for this server - the store's freshness, NOT the age of the two figures above. cpu_percent is null, and cpu_captured_at with it, when the newest CPU snapshot is older than the freshness bound; memory_mb is still the newest memory snapshot at any age. blocking_count and deadlock_count cover the counts_window_hours ending now.";
 
     [McpServerTool(Name = "get_server_summary"), Description(ServerSummaryDescription)]
     public static async Task<string> GetServerSummary(
@@ -62,6 +62,10 @@ public sealed class DarlingMcpHealthTools
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
+
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_server_summary", cancellationToken);
+        if (postgresGate != null) return postgresGate;
 
         try
         {
@@ -121,7 +125,7 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary"), Description("Gets one day's health band (Healthy/Warning/Critical/NoData), wait time (sec), top wait, unique queries, deadlocks, blocking, high-CPU samples, memory pressure, errors, alerts for summary_date (UTC day, default today). status empty: no row for that day. Before retention_horizon: status unavailable, data_state purged, zeros are absences, no verdict; past_horizon if a signal table still holds the day (band NoData, non-zero counts real). Inside retention (collected or no_run_record) the band stands on real zeros, no_run_record too; only its collection-error share has no denominator. <<GUIDE>> Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. reasons lists the lines that say why the day has its band (the desktop calendar's day detail) and drills names the drill-downs that fit the day (Deadlocks, Blocking, TopQueries). A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows - the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded - banded on the counts as read, which are measurements there; the collection-error share has no denominator). unique_queries is null (NOT 0) when the rollup tier that answers a day older than the raw window never materialized this server's day while the rollup's source still holds the day's rows - 'not carried at this tier', not 'no queries ran' - and days_missing names that day (empty otherwise); the service repairs such a day at its next start, and the band does not read this count.")]
+    [McpServerTool(Name = "get_daily_summary"), Description("Gets one day's health band (Healthy/Warning/Critical/NoData), wait time (sec), top wait, unique queries, deadlocks, blocking, high-CPU samples, memory pressure, errors, alerts for summary_date (UTC day, default today). status unavailable: nothing collected that day. Before retention_horizon: same, data_state purged, zeros are absences, no verdict; past_horizon if a signal table still holds the day (band NoData, non-zero counts real). Inside retention (collected or no_run_record) the band stands on real zeros, no_run_record too; only its collection-error share has no denominator. <<GUIDE>> Gets a daily health summary: overall composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count (distinct statements with a stored row: a collection stores at most the top 200 by each ranking, so on a busy server this is a lower bound), deadlocks, blocking events, memory pressure (and severe memory pressure), high-CPU samples, collection errors, and actionable alert count for one day. Use this for a quick overview to decide which areas need investigation. reasons lists the lines that say why the day has its band (the desktop calendar's day detail) and drills names the drill-downs that fit the day (Deadlocks, Blocking, TopQueries). A day before the store's retention_horizon (the oldest day the shortest-lived signal table still holds) returns status=unavailable with data_state=purged rather than a health band: its per-signal counts would be COALESCEd zeros, not measurements, and a zero is only a measurement inside retention. A returned day carries data_state=collected (a verdict), past_horizon (before the horizon but some signal table still holds rows - the purge has not reached it; health_band=NoData, non-zero counts real) or no_run_record (inside retention, no collector run recorded - banded on the counts as read, which are measurements there; the collection-error share has no denominator). unique_queries is null (NOT 0) when the rollup tier that answers a day older than the raw window never materialized this server's day while the rollup's source still holds the day's rows - 'not carried at this tier', not 'no queries ran' - and days_missing names that day (empty otherwise); the service repairs such a day at its next start, and the band does not read this count.")]
     public static async Task<string> GetDailySummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -137,6 +141,10 @@ public sealed class DarlingMcpHealthTools
            parse this replaced was the wrong tool in a file that already held as_of's strict allowlist. */
         var dateError = McpHelpers.ParseSummaryDate(summary_date, out var date);
         if (dateError != null) return dateError;
+
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_daily_summary", cancellationToken);
+        if (postgresGate != null) return postgresGate;
 
         try
         {
@@ -162,10 +170,14 @@ public sealed class DarlingMcpHealthTools
                         alert_count = row.AlertCount,
                     });
 
+            /* #7193: HasData is false only when the spine holds nothing for the day, no run and no signal row.
+               That is a day the service was down or the server was not yet registered: nothing was observed, so
+               "empty" (we looked and found nothing) was the wrong word. This server could have the day and does
+               not, which is "unavailable", and it sends the caller to collection health. */
             if (!row.HasData)
                 return McpHelpers.Status(
-                    "empty",
-                    $"No data collected for {resolved.DisplayName} on {row.SummaryDate:yyyy-MM-dd}.",
+                    "unavailable",
+                    $"No data collected for {resolved.DisplayName} on {row.SummaryDate:yyyy-MM-dd}. Nothing was collected that day, so this is a gap in collection, not a quiet day: check get_collection_health.",
                     new { summary_date = row.SummaryDate.ToString("yyyy-MM-dd"), overall_health = row.HealthBand.ToString() });
 
             return JsonSerializer.Serialize(new
@@ -199,6 +211,9 @@ public sealed class DarlingMcpHealthTools
                 collection_errors = row.CollectionErrors,
                 alert_count = row.AlertCount,
                 max_block_duration_ms = row.MaxBlockDurationMs,
+                /* #7028, additive: the blocking band's snapshot arm in ms, the Blocking Wait Time alert's own measure (the
+                   largest total blocked wait of one DMV snapshot after the alert's persistence gate). */
+                peak_snapshot_wait_ms = row.PeakSnapshotWaitMs,
                 /* #3539 A2/A3, additive: the figures the band read that the counts alone cannot show — the
                    run total the error share is a share OF, and the blocking rate over the day's window (null
                    when the window was too short to normalise). The window is the row's own clamp against
@@ -225,7 +240,7 @@ public sealed class DarlingMcpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets one row per day over a span ending at as_of (default now), same per-day fields as get_daily_summary: health band, wait time (sec), queries, deadlocks, blocking, CPU, memory, errors, alerts. A day with ANY collection appears here even if quiet (Healthy), so a gap is a COLLECTION gap. status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected. Before retention_horizon: data_state purged rows' zeros are absences; past_horizon rows are real but a zero may be either; both health_band NoData, never Healthy. <<GUIDE>> Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count, deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went - scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION - INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do - the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy - a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record - it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict. A window older than the raw query window answers unique_queries from a rollup tier; a day that tier never materialized for this server while the rollup's source still holds the day's rows carries unique_queries=null (NOT 0 - 'not carried at this tier', not 'no queries ran') and is listed in days_missing (empty when every day was carried); the service repairs such days at its next start, and the band does not read this count.")]
+    [McpServerTool(Name = "get_daily_summary_range"), Description("Gets one row per day over a span ending at as_of (default now), same per-day fields as get_daily_summary: health band, wait time (sec), queries, deadlocks, blocking, CPU, memory, errors, alerts. A day with ANY collection appears here even if quiet (Healthy), so a gap is a COLLECTION gap. status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected. Before retention_horizon: data_state purged rows' zeros are absences; past_horizon rows are real but a zero may be either; both health_band NoData, never Healthy. <<GUIDE>> Gets the daily health summary for a SPAN of days rather than one: one row per collected day, each with its composite health band (Healthy/Warning/Critical), total wait time, top wait type, unique query count (distinct statements with a stored row: a collection stores at most the top 200 by each ranking, so on a busy server this is a lower bound), deadlocks, blocking events with the peak block wait, high-CPU samples, memory pressure, collection errors and actionable alert count. This is what the desktop viewer's Performance Calendar month grid draws, and it is the read to use when the question is WHICH day rather than how one day went - scan the bands, then call get_daily_summary for the day that stands out. A day on which anything at all was collected appears here even if every signal was quiet (that day is Healthy, not missing), so a gap in the returned days is a gap in COLLECTION - INSIDE RETENTION. The per-signal tables age out at the store's shortest retention while the collection log and alert log live longer, so retention_horizon is the oldest day every signal can still answer for; a returned day before it carries data_state=purged (no signal table holds it) or past_horizon (some still do - the purge has not reached it), health_band=NoData and a data_note, NEVER Healthy - a purged day's zeros are absences, and days_before_horizon counts both kinds. A day inside retention with no collector run recorded is data_state=no_run_record - it keeps its band (an alert-only day is Warning), with the caveat that the error share has no denominator. Purged and past_horizon rows carry no verdict. A window older than the raw query window answers unique_queries from a rollup tier; a day that tier never materialized for this server while the rollup's source still holds the day's rows carries unique_queries=null (NOT 0 - 'not carried at this tier', not 'no queries ran') and is listed in days_missing (empty when every day was carried); the service repairs such days at its next start, and the band does not read this count.")]
     public static async Task<string> GetDailySummaryRange(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -252,6 +267,10 @@ public sealed class DarlingMcpHealthTools
         var anchorError = McpHelpers.ResolveAsOf(as_of, out var windowEnd);
         if (anchorError != null) return anchorError;
 
+        /* #7159: every figure below comes from a SQL Server table, so a PostgreSQL target would read as measured zeros and Healthy days. */
+        var postgresGate = await DarlingEngineCapability.PostgresTargetSqlServerReadStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "get_daily_summary_range", cancellationToken);
+        if (postgresGate != null) return postgresGate;
+
         try
         {
             /* Days, not hours: the anchor names a DAY here and only its UTC date is used, because the
@@ -264,12 +283,13 @@ public sealed class DarlingMcpHealthTools
             ReadScope.NoteWindow(fromDate, toDate); // #5814: the whole days this range reads, ending on the anchor day
 
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
-               a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
+               a backdated as_of must clamp its own "today" against ITSELF, not the process clock. Only its date
+               counts, so that means the end of its date (#7504). */
             /* #4232 ruling item 5: only a read "as of now" (no as_of given) uses the closed-day cache — a
                caller who pinned an explicit end time gets an unmemoized read of exactly that moment every time. */
             var separatelyMonitored = await ResolveSeparatelyMonitoredAsync(postgres, resolved.ServerId, registryState, logger, cancellationToken);
             var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null,
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: McpHelpers.DayAnchorClock(as_of, windowEnd), asOfNow: as_of is null,
                 separatelyMonitored: separatelyMonitored, logger: logger, cancellationToken: cancellationToken);
             var rows = range.Rows;
 
@@ -336,6 +356,7 @@ public sealed class DarlingMcpHealthTools
                     collection_errors = row.CollectionErrors,
                     alert_count = row.AlertCount,
                     max_block_duration_ms = row.MaxBlockDurationMs,
+                    peak_snapshot_wait_ms = row.PeakSnapshotWaitMs,
                     /* #3539 A2/A3, additive — see get_daily_summary's members of the same names. */
                     collection_runs = row.CollectionRuns,
                     blocking_rate_per_hour = ServerHealthClassifier.BlockingRatePerHour(row.BlockingEvents, row.ToSignals().Window),

@@ -138,7 +138,7 @@ WHERE server_id = $1
   AND sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY database_name, query_hash, query_plan_hash";
 
-    internal const string ActiveRequestsSql = @"
+    internal const string ActiveRequestsSql = $@"
 WITH snaps AS (
     SELECT host_name, program_name, login_name, session_id, COALESCE(request_id, 0) AS request_id, collection_time, cpu_time_ms,
            collection_time - to_milliseconds(CAST(COALESCE(total_elapsed_time_ms, 0) AS BIGINT)) AS started_at
@@ -146,6 +146,7 @@ WITH snaps AS (
     WHERE server_id = $1
       AND collection_time >= $2
       AND collection_time <= $3
+      AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ), marked AS (
     SELECT s.*,
            CASE WHEN LAG(s.collection_time) OVER w IS NULL THEN 1
@@ -471,6 +472,19 @@ ORDER BY collection_time DESC";
         }
     }
 
+    /// <summary>
+    /// The same read for statements over archived views (#7256). Which of <paramref name="windows"/> can read the hot table
+    /// alone is decided before the read lock is taken, and <paramref name="read"/> passes each statement's text through
+    /// <see cref="ArchiveReadPlan.Apply"/> with the lock held. A table whose view stays (the archive holds rows in the window,
+    /// or its span is unknown) reads exactly as before.
+    /// </summary>
+    private async Task<T> WithConnectionAsync<T>(
+        Func<DuckDBConnection, ArchiveReadPlan, Task<T>> read, ArchiveWindow[] windows, CancellationToken cancellationToken)
+    {
+        var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken, windows).ConfigureAwait(false);
+        return await WithConnectionAsync(connection => read(connection, plan), cancellationToken).ConfigureAwait(false);
+    }
+
     private static DuckDBCommand Command(DuckDBConnection connection, string sql, params object?[] values)
     {
         var command = connection.CreateCommand();
@@ -495,33 +509,33 @@ ORDER BY collection_time DESC";
         return rows;
     }
 
-    private Task<List<JsonObject>> ReadAsync(string sql, int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
-        WithConnectionAsync(async connection =>
+    private Task<List<JsonObject>> ReadAsync(string table, string sql, int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
+        WithConnectionAsync(async (connection, plan) =>
         {
-            using var command = Command(connection, sql, serverId, from, to);
+            using var command = Command(connection, plan.Apply(sql), serverId, from, to);
             return await ReadRowsAsync(command, cancellationToken).ConfigureAwait(false);
-        }, cancellationToken);
+        }, [new ArchiveWindow(table, "collection_time", from)], cancellationToken);
 
     private Task<HashSet<string>> ReadCollectorRunsAsync(int serverId, DateTime since, CancellationToken cancellationToken) =>
-        WithConnectionAsync(async connection =>
+        WithConnectionAsync(async (connection, plan) =>
         {
             var ran = new HashSet<string>(StringComparer.Ordinal);
-            using var command = Command(connection, CollectorRunsSql, serverId, since);
+            using var command = Command(connection, plan.Apply(CollectorRunsSql), serverId, since);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
                 ran.Add(reader.GetString(0));
             return ran;
-        }, cancellationToken);
+        }, [new ArchiveWindow("collection_log", "collection_time", since)], cancellationToken);
 
     private async Task<SectionRead> ReadSectionAsync(
         string section, LiteEvidenceCandidate request, DateTime from, DateTime to, CancellationToken cancellationToken) =>
         section switch
         {
             "top_statements" => new SectionRead(await ReadTopStatementsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
-            "active_requests" => new SectionRead(await ReadAsync(ActiveRequestsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "active_requests" => new SectionRead(await ReadAsync("query_snapshots", ActiveRequestsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "query_store" => await ReadQueryStoreAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
-            "jobs" => new SectionRead(await ReadAsync(JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
-            "waits" => new SectionRead(await ReadAsync(WaitsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "jobs" => new SectionRead(await ReadAsync("running_jobs", JobsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
+            "waits" => new SectionRead(await ReadAsync("wait_stats", WaitsSql, request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "deadlocks" => new SectionRead(await ReadDeadlocksAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
             "blocking_chains" => await ReadBlockingChainsAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false),
             "head_blocker" => new SectionRead(await ReadHeadBlockersAsync(request.ServerId, from, to, cancellationToken).ConfigureAwait(false)),
@@ -534,10 +548,10 @@ ORDER BY collection_time DESC";
     /// and the cheapest per execution), ranked here over one read of the per-plan sums (Darling ranks the same in SQL).</summary>
     private async Task<List<JsonObject>> ReadTopStatementsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
-        var plans = await WithConnectionAsync(async connection =>
+        var plans = await WithConnectionAsync(async (connection, plan) =>
         {
             var list = new List<(string? Db, string? Hash, string? PlanHash, long Cpu, long Exec, long Elapsed, long Reads, DateTime FirstSeen)>();
-            using var command = Command(connection, TopStatementsSql, serverId, from, to);
+            using var command = Command(connection, plan.Apply(TopStatementsSql), serverId, from, to);
             using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -547,7 +561,7 @@ ORDER BY collection_time DESC";
             }
 
             return list;
-        }, cancellationToken).ConfigureAwait(false);
+        }, [new ArchiveWindow("query_stats", "collection_time", from)], cancellationToken).ConfigureAwait(false);
 
         var top = plans.GroupBy(p => (p.Db, p.Hash))
             .Select(g => (g.Key, Cpu: g.Sum(p => p.Cpu), Exec: g.Sum(p => p.Exec), Elapsed: g.Sum(p => p.Elapsed), Reads: g.Sum(p => p.Reads),
@@ -594,7 +608,7 @@ ORDER BY collection_time DESC";
     private async Task<SectionRead> ReadQueryStoreAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
         var windowCpu = new Dictionary<string, long>(StringComparer.Ordinal);
-        foreach (var row in await ReadAsync(WindowCpuByDatabaseSql, serverId, from, to, cancellationToken).ConfigureAwait(false))
+        foreach (var row in await ReadAsync("query_stats", WindowCpuByDatabaseSql, serverId, from, to, cancellationToken).ConfigureAwait(false))
         {
             if (row["database_name"] is JsonValue name && row["window_cpu_us"] is JsonValue cpu)
                 windowCpu[name.GetValue<string>()] = cpu.GetValue<long>();
@@ -757,11 +771,11 @@ ORDER BY collection_time DESC";
         foreach (var frame in heads.Where(h => h.Process.SqlHandle is not null).Select(h => h.Process).Distinct())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var text = await WithConnectionAsync(async connection =>
+            var text = await WithConnectionAsync(async (connection, plan) =>
             {
-                using var command = Command(connection, StatementByOffsetSql, serverId, frame.SqlHandle, frame.StmtStart, frame.StmtEnd, from - StatementLookback);
+                using var command = Command(connection, plan.Apply(StatementByOffsetSql), serverId, frame.SqlHandle, frame.StmtStart, frame.StmtEnd, from - StatementLookback);
                 return await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) as string;
-            }, cancellationToken).ConfigureAwait(false);
+            }, [new ArchiveWindow("query_stats", "collection_time", from - StatementLookback)], cancellationToken).ConfigureAwait(false);
             if (text is not null)
                 statements[(frame.SqlHandle!, frame.StmtStart, frame.StmtEnd)] = text;
         }
@@ -800,11 +814,11 @@ ORDER BY collection_time DESC";
 
     private async Task<List<JsonObject>> ReadRegressionTargetsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken)
     {
-        var targets = await WithConnectionAsync(async connection =>
+        var targets = await WithConnectionAsync(async (connection, plan) =>
         {
-            using var command = Command(connection, RegressionTargetsSql, serverId, to - RegressionLookback, from, to, (double)RegressionFactor, SectionRows);
+            using var command = Command(connection, plan.Apply(RegressionTargetsSql), serverId, to - RegressionLookback, from, to, (double)RegressionFactor, SectionRows);
             return await ReadRowsAsync(command, cancellationToken).ConfigureAwait(false);
-        }, cancellationToken).ConfigureAwait(false);
+        }, [new ArchiveWindow("query_store_stats", "collection_time", to - RegressionLookback)], cancellationToken).ConfigureAwait(false);
 
         foreach (var target in targets)
         {
@@ -1155,8 +1169,9 @@ ORDER BY collection_time DESC";
     /// event is a true negative: an empty list.
     /// </summary>
     private Task<List<JsonObject>> ReadClientTimeoutsAsync(int serverId, DateTime from, DateTime to, CancellationToken cancellationToken) =>
-        WithConnectionAsync(async connection =>
+        WithConnectionAsync(async (connection, plan) =>
         {
+            var events = plan.IsHot("attention_events") ? "attention_events" : "v_attention_events";
             async Task<List<T>> Query<T>(string sql, Func<DuckDBDataReader, T> map)
             {
                 using var command = Command(connection, sql, serverId, from, to);
@@ -1167,11 +1182,11 @@ ORDER BY collection_time DESC";
                 return result;
             }
 
-            var count = (await Query(AttentionWindowSql.Counts("v_attention_events", bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
-            var apps = await Query(AttentionWindowSql.TopBy("v_attention_events", "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-            var hosts = await Query(AttentionWindowSql.TopBy("v_attention_events", "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-            var databases = await Query(AttentionWindowSql.TopBy("v_attention_events", "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
-            var statements = await Query(AttentionWindowSql.TopStatements("v_attention_events", bounded: true),
+            var count = (await Query(AttentionWindowSql.Counts(events, bounded: true), r => r.GetInt64(1)).ConfigureAwait(false)).Sum();
+            var apps = await Query(AttentionWindowSql.TopBy(events, "client_app_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var hosts = await Query(AttentionWindowSql.TopBy(events, "client_hostname", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var databases = await Query(AttentionWindowSql.TopBy(events, "database_name", bounded: true), r => (Name: r.GetString(0), Events: r.GetInt64(1))).ConfigureAwait(false);
+            var statements = await Query(AttentionWindowSql.TopStatements(events, bounded: true),
                 r => (Fingerprint: r.GetString(0), Events: r.GetInt64(1), Text: r.IsDBNull(2) ? null : r.GetString(2))).ConfigureAwait(false);
             if (count == 0 && apps.Count == 0 && hosts.Count == 0 && databases.Count == 0 && statements.Count == 0)
                 return new List<JsonObject>();
@@ -1196,7 +1211,7 @@ ORDER BY collection_time DESC";
                     ["note"] = "count is exact (the session's event_counter). The lists come from sampled ring-buffer events, a subset: they show who and what was timing out, never how many.",
                 },
             };
-        }, cancellationToken);
+        }, [new ArchiveWindow("attention_events", "collection_time", from)], cancellationToken);
 
     /* #6579: cut at a text-element boundary, like ClientTimeoutsRead, so a surrogate pair or combining sequence is never split. */
     private static string? Cut(string? text, int max) =>

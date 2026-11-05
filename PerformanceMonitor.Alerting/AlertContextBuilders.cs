@@ -444,6 +444,9 @@ public static class AlertContextBuilders
 
         var context = new AlertContext();
         var shown = files.GetRange(0, Math.Min(5, files.Count));
+        /* #7068: the card lists five, but every breached file was announced by this fire. The standing-state seed after
+           a restart reads this list, so file six of eight is not announced again. */
+        context.FileGrowthFiles = files.ConvertAll(f => new AlertFileIdentity(f.DatabaseName, f.FileName));
         foreach (var f in shown)
         {
             var fields = new List<(string, string)>
@@ -782,6 +785,18 @@ public static class AlertContextBuilders
         {
             reading.Fields.Add(("Excluded", string.Create(CultureInfo.InvariantCulture,
                 $"{finding.ExcludedSamples:N0} of {finding.SampledEvents:N0} sampled events came from {AttentionEvaluator.ExcludedToolNames(finding.ExcludedSsmsSamples > 0, finding.ExcludedVsCodeSamples > 0)} cancelling their own metadata queries; they are left out of the rate judged")));
+        }
+
+        if (finding.ShortSamples > 0)
+        {
+            reading.Fields.Add(("Under 1 ms", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under 1 ms (a cancel on a command that had already finished); they are left out of the rate judged")));
+        }
+
+        if (finding.AzdataMetadataSamples > 0)
+        {
+            reading.Fields.Add(("Azure Data Studio", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.AzdataMetadataSamples:N0} of {finding.SampledEvents:N0} sampled events were Azure Data Studio metadata queries; they are left out of the rate judged")));
         }
 
         if (finding.Bars is not null)

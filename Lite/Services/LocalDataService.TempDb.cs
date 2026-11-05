@@ -138,7 +138,12 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        command.CommandText = @"
+        /* #7216: the newest-row read has no time bound, so through the v_ view it ordered every archived row of tempdb_stats.
+           The hot table holds the newest row of any server still being collected; the view is read only for a server with no
+           hot row (collection stopped and archival moved every row out), which still shows the last values it had. */
+        var tempDbRelation = await HotTableHasServerAsync(connection, "tempdb_stats", serverId) ? "tempdb_stats" : "v_tempdb_stats";
+
+        command.CommandText = $@"
 SELECT
     total_reserved_mb,
     unallocated_mb,
@@ -149,7 +154,7 @@ SELECT
     top_session_id,
     max_size_mb,
     collection_time
-FROM v_tempdb_stats
+FROM {tempDbRelation}
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";

@@ -92,6 +92,15 @@ public sealed class PgNotificationRouteStore
         /// <summary>The severity filter (V229, #6928): both, critical or warning.</summary>
         public string Severities { get; init; } = NotificationRouteKinds.SeveritiesBoth;
 
+        /// <summary>Whether the route posts a chat notice when an agent files a report (V233, #6979): off, needs_person_or_change or all.</summary>
+        public string ReportNotice { get; init; } = NotificationRouteKinds.ReportNoticeOff;
+
+        /// <summary>Whether a Level 3 action on the route waits for a person's approval (V238, #7109): required or off.</summary>
+        public string ActionApproval { get; init; } = NotificationRouteKinds.ActionApprovalRequired;
+
+        /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109).</summary>
+        public bool ApprovalSinglePerson { get; init; }
+
         /// <summary>The fallback route's name (its <c>metric_match</c>), or null when there is no fallback.</summary>
         public string? FallbackRouteName { get; init; }
 
@@ -106,7 +115,8 @@ public sealed class PgNotificationRouteStore
     /// the one a superuser-run test never notices.</summary>
     public const string SelectSummariesSql = @"
 SELECT route_id, metric_match, configured_channels, smtp_recipients, enabled, modified_at, scope_server_id, scope_tag_id,
-       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities
+       agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, send_resolutions, fallback_route_id, severities, report_notice,
+       action_approval, approval_single_person
 FROM config_notification_routes
 ORDER BY route_id";
 
@@ -129,12 +139,16 @@ UPDATE config_notification_routes
  WHERE route_id = $1
    AND (agent_level IS NULL OR (agent_level = 0 AND $2))";
 
-    /// <summary>The fallback write (#6036): the id and the stamp, nothing else.</summary>
+    /// <summary>The fallback write (#6036): the id and the stamp, nothing else. Like <see cref="SetEnabledSql"/> and <see cref="DeleteSql"/> it
+    /// holds back a route that has an agent setting above Off in its own statement, so one a person gave a setting after the tool read it is
+    /// not written (#7199). The column has no foreign key, so a fallback that is not a route (deleted since the read) is not written either.</summary>
     public const string SetFallbackSql = @"
 UPDATE config_notification_routes
    SET fallback_route_id = $2,
        modified_at = (now() AT TIME ZONE 'UTC')
- WHERE route_id = $1";
+ WHERE route_id = $1
+   AND (agent_level IS NULL OR agent_level < 1)
+   AND ($2 IS NULL OR EXISTS (SELECT 1 FROM config_notification_routes f WHERE f.route_id = $2))";
 
     /// <summary>The fallback column has no foreign key (V193 adds the column and a not-itself CHECK only), so a delete clears
     /// every reference to the deleted route first, in the same transaction (#6036).</summary>
@@ -174,6 +188,9 @@ UPDATE config_notification_routes
                 SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
                 FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
                 Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(15)),
+                ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(16)),
+                ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(17)),
+                ApprovalSinglePerson = reader.GetBoolean(18),
             });
         }
 

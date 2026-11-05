@@ -483,6 +483,34 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
     }
 
     [Fact]
+    public async Task ManyServers_OneGeneration_CostExactlyOneArchiveRead_PerWatermarkShape()
+    {
+        /* #7256: the watermark of each monitored server used to open every Parquet file of the table once per server and
+           generation. Server 1 and 2 are archived, server 3 is not: the one grouped read answers all three as the per-server
+           read did (the archived maximum, or none). */
+        await SeedHotAndParquetAsync();
+        var reads = new Reads(_duckDb);
+
+        var one = await reads.TimeAsync(1, Table, "collection_time", TestContext.Current.CancellationToken);
+        var two = await reads.TimeAsync(2, Table, "collection_time", TestContext.Current.CancellationToken);
+        var three = await reads.TimeAsync(3, Table, "collection_time", TestContext.Current.CancellationToken);
+
+        Assert.Equal(Now.AddMinutes(-5), one);
+        Assert.Equal(Now.AddHours(-6), two);
+        Assert.Null(three);
+        Assert.Equal(1, reads.ArchiveViewReadsForTests);
+
+        var (frameOne, _) = await reads.FrameAsync(1, TestContext.Current.CancellationToken);
+        var (frameTwo, _) = await reads.FrameAsync(2, TestContext.Current.CancellationToken);
+        var (frameThree, _) = await reads.FrameAsync(3, TestContext.Current.CancellationToken);
+
+        Assert.Equal(one, frameOne);
+        Assert.Equal(two, frameTwo);
+        Assert.Null(frameThree);
+        Assert.Equal(2, reads.ArchiveViewReadsForTests);
+    }
+
+    [Fact]
     public async Task AGenerationBump_ReReadsOnce()
     {
         await SeedHotAndParquetAsync();
@@ -912,14 +940,41 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
 }
 
 /// <summary>#5377: the forced-plan alert's read of <c>v_query_store_stats</c> shares the archive-read limit.</summary>
-public sealed class ForcePlanArchiveReadLimitTests : IClassFixture<SharedDuckDbFixture>
+public sealed class ForcePlanArchiveReadLimitTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private readonly DuckDbInitializer _duckDb;
+    private readonly string _archiveFile;
 
+    /* #7256: a read whose window the archive holds nothing from no longer touches the archive, so no longer takes a slot. The
+       limit applies to a read that does reach the archive: this store's archive has a row 30 minutes old, inside the window. */
     public ForcePlanArchiveReadLimitTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
+        _archiveFile = Path.Combine(_duckDb.ArchivePath, "20260101_000000_query_store_stats.parquet").Replace("\\", "/");
+        Directory.CreateDirectory(_duckDb.ArchivePath);
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        connection.Open();
+        foreach (var sql in new[]
+        {
+            $"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name) VALUES (1, TIMESTAMP '{DateTime.UtcNow.AddMinutes(-30):yyyy-MM-dd HH:mm:ss}', 1, 'S1', 'Db')",
+            $"COPY query_store_stats TO '{DuckDbInitializer.EscapeSqlPath(_archiveFile)}' (FORMAT PARQUET)",
+            "DELETE FROM query_store_stats"
+        })
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
+        readLock.Dispose();
+        _duckDb.CreateArchiveViewsAsync().GetAwaiter().GetResult();
+    }
+
+    public void Dispose()
+    {
+        File.Delete(_archiveFile);
+        _duckDb.CreateArchiveViewsAsync().GetAwaiter().GetResult();
     }
 
     [Fact]

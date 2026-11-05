@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -240,7 +241,9 @@ public sealed class LatestValueLookbackSqlTests
     public void TheLiteTwin_CarriesTheSameStatement(string name, string liteFile)
     {
         var darling = Normalize(SqlFor(name)).Trim();
-        var lite = Normalize(File.ReadAllText(Path.Combine(RepoRoot(), liteFile)));
+        /* Lite's source interpolates the shared compiled-plan predicate (#7445); Darling's const already holds its value. */
+        var lite = Normalize(File.ReadAllText(Path.Combine(RepoRoot(), liteFile)))
+            .Replace("{PlanCacheBloatRule.CompiledPredicateSql}", PlanCacheBloatRule.CompiledPredicateSql, StringComparison.Ordinal);
 
         /* Map Darling's base-table references onto the v_ views Lite reads; a v_ reference is left alone. */
         var asLite = Regex.Replace(darling, @"\bFROM (?!v_)(\w+)", m =>
@@ -318,12 +321,13 @@ public sealed class LatestValueLookbackLivePostgresTests
     private const int PlanShapeDailyServerId = -389_611;
     private const int TraceFlagClearServerId = -389_612;
     private const int TraceFlagAllOffServerId = -389_613;
+    private const int TightestVolumeServerId = -389_614;
 
     private static readonly int[] s_serverIds =
     {
         LiveServerId, StaleServerId, PlanShapeServerId, DailyServerId, DailyStaleServerId, DefaultCadenceServerId,
         OnLoadServerId, FleetServerId, FleetOverriddenServerId, PlanShapeDailyServerId,
-        TraceFlagClearServerId, TraceFlagAllOffServerId,
+        TraceFlagClearServerId, TraceFlagAllOffServerId, TightestVolumeServerId,
     };
 
     /// <summary>The collector the fleet-wide override test takes over for the whole store, and hands back.</summary>
@@ -334,6 +338,52 @@ public sealed class LatestValueLookbackLivePostgresTests
         "file_io_stats", "database_size_stats", "memory_clerks", "plan_cache_stats", "memory_stats", "database_config",
         "trace_flags",
     };
+
+    /// <summary>
+    /// #7179: the DISK_SPACE card quotes the free MB of the volume that scored (lowest percent free), not the
+    /// smallest MB figure on another volume.
+    /// </summary>
+    [Fact]
+    public async Task TheDiskCard_QuotesTheFreeMbOfTheVolumeThatScored_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live tightest-volume test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
+            /* C: 100 GB with 25 GB free (25%). D: 2 TB with 150 GB free (7.5%): D: scores, C: has the smaller MB. */
+            await InsertSizeAsync(connection, TightestVolumeServerId, end.AddMinutes(-5), "master", 1, "ROWS", "master_data", 100, percentGrowth: false, "C:\\", 100_000, 25_000, ct);
+            await InsertSizeAsync(connection, TightestVolumeServerId, end.AddMinutes(-5), "SalesDb", 1, "ROWS", "SalesDb_data", 100_000, percentGrowth: false, "D:\\", 2_000_000, 150_000, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = (await new PgFactCollector(postgres).CollectFactsAsync(Context(TightestVolumeServerId, end))).ToDictionary(f => f.Key);
+
+            var disk = facts["DISK_SPACE"];
+            Assert.Equal(0.075, disk.Value, precision: 6);
+            Assert.Equal(150_000, disk.Metadata["min_free_mb"]);
+            Assert.Equal("D:\\", disk.ObjectName);
+
+            var card = FactAdvice.Compose("DISK_SPACE", facts);
+            Assert.NotNull(card);
+            Assert.Contains("(D:\\) is down to 150,000 MB free", card!.Investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain("25,000", card.Investigation, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
 
     [Fact]
     public async Task ALiveServer_ReportsOnlyWhatItStillHas_AndTheDrillDownListsTheSameFiles_AgainstDevPostgres()

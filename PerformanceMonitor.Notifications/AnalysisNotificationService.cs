@@ -38,7 +38,7 @@ namespace PerformanceMonitor.Notifications;
 ///
 /// <para><b>#3712: confidence chooses the channel.</b> Crossing the severity floor makes a finding
 /// notify-worthy; it does not by itself earn a PAGE. Each notify-worthy incident is routed by
-/// <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute)"/> on its members' corroboration
+/// <see cref="FindingRouting.Classify(AnalysisFinding, FindingRoute, double)"/> on its members' corroboration
 /// components: an incident with a corroborated member takes the page road (the channels, Lite's tray),
 /// an incident of uncorroborated singles takes the digest road — persisted as a finding, recorded in the
 /// ledger with the <see cref="AlertContext.Routing"/> decision and <see cref="AlertDelivery.RoutedToDigest"/>,
@@ -80,6 +80,7 @@ public sealed class AnalysisNotificationService : IDisposable
     private readonly Action<string, string>? _showTrayNotification;
     private readonly Func<int, string, Task<bool>>? _isStoryMuted;
     private readonly TimeSpan _holdBack;
+    private readonly Func<string, DateTime, Task<AlertAttachedToDto?>>? _findOpenEngineAlert;
 
     /// <summary>
     /// The page road's hold-back queue (#3916), keyed by the LEAD's page bucket key: a re-report of a
@@ -183,6 +184,13 @@ public sealed class AnalysisNotificationService : IDisposable
     /// pipeline's own mute filter would have dropped the finding had the rule existed a pass earlier. Null
     /// means no re-check (the pipeline's filter is the only one).
     /// </param>
+    /// <param name="findOpenEngineAlert">
+    /// Optional <c>(serverId, nowUtc)</c> read (#7084 part 4): the newest delivered High CPU, Blocking Detected, Blocking Wait
+    /// Time or Deadlocks Detected row on that server in the last <see cref="OpenEngineAlerts.Window"/> that no resolution row
+    /// followed, or null. A page-routed incident that finds one is recorded as a digest row naming it instead of paging. Null
+    /// means no attach (the finding pages as the gate routed it); a read that throws also pages, because a missed attach
+    /// costs one extra page and a swallowed page costs the operator the finding.
+    /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
         IAlertSettings settings,
@@ -190,9 +198,10 @@ public sealed class AnalysisNotificationService : IDisposable
         ILogger<AnalysisNotificationService> logger,
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
-        Func<int, string, Task<bool>>? isStoryMuted = null)
+        Func<int, string, Task<bool>>? isStoryMuted = null,
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
         : this(sender, settings, serverIdResolver, logger, PageHoldBackWindow,
-               isServerSilenced, showTrayNotification, isStoryMuted)
+               isServerSilenced, showTrayNotification, isStoryMuted, findOpenEngineAlert)
     {
     }
 
@@ -206,7 +215,8 @@ public sealed class AnalysisNotificationService : IDisposable
         TimeSpan holdBack,
         Func<string, bool>? isServerSilenced = null,
         Action<string, string>? showTrayNotification = null,
-        Func<int, string, Task<bool>>? isStoryMuted = null)
+        Func<int, string, Task<bool>>? isStoryMuted = null,
+        Func<string, DateTime, Task<AlertAttachedToDto?>>? findOpenEngineAlert = null)
     {
         _sender = sender;
         _settings = settings;
@@ -216,6 +226,7 @@ public sealed class AnalysisNotificationService : IDisposable
         _isServerSilenced = isServerSilenced;
         _showTrayNotification = showTrayNotification;
         _isStoryMuted = isStoryMuted;
+        _findOpenEngineAlert = findOpenEngineAlert;
     }
 
     /// <summary>
@@ -264,8 +275,32 @@ public sealed class AnalysisNotificationService : IDisposable
            stable. The severity floor stays UPSTREAM of the routing gate: a finding below it is not
            notify-worthy on any channel, and the gate only ever decides between the channels a
            notify-worthy finding may reach. */
-        var incidents = findings
-            .Where(f => f is not null && f.Severity >= threshold)
+        /* #7084: the measured-cost floors. A finding under its floor is a finding still (persisted, shown on every read
+           surface) but not a page candidate, so it neither pages nor spends a bucket. The wait-profile cap is the one stateful
+           floor: one page per server per story per 24 hours, read from this process's own stamp or, after a restart, from the
+           alert log's last delivered page of that story (the seed read the page buckets use). */
+        var eligible = new List<AnalysisFinding>();
+        foreach (var f in findings)
+        {
+            if (f is null || f.Severity < threshold)
+                continue;
+
+            if (FindingPageFloor.HoldReason(f) is { } heldFor)
+            {
+                _logger.LogDebug($"AnalysisNotificationService: {f.RootFactKey} on {f.ServerName} not paged: {heldFor}");
+                continue;
+            }
+
+            if (FindingPageFloor.IsCappedWaitProfile(f) && await IsCappedAsync(f, now))
+            {
+                _logger.LogDebug($"AnalysisNotificationService: {f.RootFactKey} on {f.ServerName} not paged: a page for this story went out in the last 24 hours.");
+                continue;
+            }
+
+            eligible.Add(f);
+        }
+
+        var incidents = eligible
             .GroupBy(f => $"{f.ServerId}:{IncidentToken(f)}");
 
         foreach (var incident in incidents)
@@ -297,10 +332,30 @@ public sealed class AnalysisNotificationService : IDisposable
                redundant" shape the live batch was made of. */
             var decisions = new Dictionary<AnalysisFinding, FindingRouteDecision>(ReferenceEqualityComparer.Instance);
             foreach (var m in members)
-                decisions[m] = FindingRouting.Classify(m, uncorroboratedRoute);
+                decisions[m] = FindingRouting.Classify(m, uncorroboratedRoute, threshold);
 
             var anyPage = members.Any(m => decisions[m].Route == FindingRoute.Page);
             var route = anyPage ? FindingRoute.Page : FindingRoute.Digest;
+
+            /* #7084 part 4: an engine alert already open on this server reached the operator, so a finding that would
+               page attaches to it instead. The incident then takes the DIGEST road, which is exactly a held row: no channel,
+               its own cooldown namespace (so the page buckets stay untouched and the finding pages as new the day the engine
+               alert resolves), and one row per cooldown. */
+            AlertAttachedToDto? attachedTo = null;
+            if (route == FindingRoute.Page && _findOpenEngineAlert is not null)
+            {
+                try
+                {
+                    attachedTo = await _findOpenEngineAlert(serverId, now);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"AnalysisNotificationService: could not read the open engine alerts for {members[0].ServerName}: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (attachedTo is not null)
+                    route = FindingRoute.Digest;
+            }
 
             /* Per-member re-notification bucket (escalate-on-CRITICAL): a CRITICAL-band member
                (severity >= the shared >= 1.5 cutoff) gets its OWN per-finding bucket keyed on its
@@ -428,6 +483,11 @@ public sealed class AnalysisNotificationService : IDisposable
                    channel: BuildContext's card is unchanged, and the digest road reaches no card. */
                 var decision = decisions[lead];
                 context.Routing = new AlertRoutingDto(decision.RouteText, decision.Reason);
+                if (attachedTo is not null)
+                {
+                    context.Routing = new AlertRoutingDto(FindingRouting.RouteText(FindingRoute.Digest), OpenEngineAlerts.Reason(attachedTo));
+                    context.AttachedTo = attachedTo;
+                }
 
                 /* Name the OTHER findings that co-fired in THIS incident, in the one message, so the
                    single alert still accounts for everything the incident surfaced. Reuses the shared
@@ -533,6 +593,34 @@ public sealed class AnalysisNotificationService : IDisposable
                     $"AnalysisNotificationService: failed to notify on incident {incident.Key}: {ex.GetType().Name}: {ex.Message}");
             }
         }
+    }
+
+    /// <summary>#7084: when each capped wait-profile story (server and story hash) last had a page DELIVERED, in this process
+    /// (stamped by the flush with the buckets, never at enqueue). Seeded lazily
+    /// from the alert log, so a restart does not open a second page inside the 24 hours.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> _waitProfilePagedAt = new();
+
+    private string CapKey(AnalysisFinding f) => $"{_resolveServerId(f)}|{f.StoryPathHash}";
+
+    /// <summary>#7084: true when this capped story paged inside <see cref="FindingPageFloor.WaitProfileCap"/>. A first
+    /// lookup in this process reads the last DELIVERED page from the alert log (digest rows excluded, as for the page buckets).</summary>
+    private async Task<bool> IsCappedAsync(AnalysisFinding f, DateTime now)
+    {
+        var key = CapKey(f);
+        if (!_waitProfilePagedAt.TryGetValue(key, out var last))
+        {
+            var persisted = await _sender.GetLastDeliveredPageUtcAsync(_resolveServerId(f), FindingMessageFormatter.MetricName(f));
+            if (persisted is not { } p)
+                return false;
+            last = p > now ? now : p;
+            _waitProfilePagedAt[key] = last;
+        }
+
+        if (now - last < FindingPageFloor.WaitProfileCap)
+            return true;
+
+        _waitProfilePagedAt.TryRemove(key, out _);
+        return false;
     }
 
     /// <summary>Queues one page for the hold-back window (#3916); the first enqueue of a window arms the
@@ -678,6 +766,12 @@ public sealed class AnalysisNotificationService : IDisposable
     /// </summary>
     private void Stamp(PendingPage page, bool delivered, DateTime at)
     {
+        /* #7084: a capped wait-profile story's 24 hours start when its page was DELIVERED, the same stamp the #2054 hold
+           follows, not when it was queued. A page that reached no channel leaves the story open to re-attempt after one
+           cooldown, which is also what the restart seed (the last delivered page in the alert log) answers. */
+        if (delivered && FindingPageFloor.IsCappedWaitProfile(page.Lead))
+            _waitProfilePagedAt[CapKey(page.Lead)] = at;
+
         var stamped = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (m, key) in page.Members)
         {
@@ -724,7 +818,7 @@ public sealed class AnalysisNotificationService : IDisposable
     /// </summary>
     private static string FindingTitle(AnalysisFinding f) =>
         FactAdvice.GetForFinding(f)?.Headline
-            ?? (string.IsNullOrEmpty(f.RootFactKey) ? f.Category : f.RootFactKey);
+            ?? (string.IsNullOrEmpty(f.RootFactKey) ? FindingCategoryNames.DisplayName(f.Category) : f.RootFactKey);
 }
 
 /// <summary>
@@ -754,7 +848,7 @@ internal static class FindingMessageFormatter
     /// </summary>
     public static string CurrentValue(AnalysisFinding finding)
     {
-        var root = string.IsNullOrEmpty(finding.RootFactKey) ? finding.Category : finding.RootFactKey;
+        var root = string.IsNullOrEmpty(finding.RootFactKey) ? FindingCategoryNames.DisplayName(finding.Category) : finding.RootFactKey;
         var sb = new StringBuilder(root);
 
         if (finding.RootFactValue.HasValue)
@@ -780,7 +874,7 @@ internal static class FindingMessageFormatter
     /// </summary>
     public static (string Title, string Message) BalloonText(AnalysisFinding finding)
     {
-        var category = string.IsNullOrEmpty(finding.Category) ? "Performance finding" : finding.Category;
+        var category = string.IsNullOrEmpty(finding.Category) ? "Performance finding" : FindingCategoryNames.DisplayName(finding.Category);
         var server = string.IsNullOrEmpty(finding.ServerName) ? "this server" : finding.ServerName;
         var title = $"Analysis: {category} on {server}";
 
@@ -906,44 +1000,6 @@ internal static class FindingMessageFormatter
                 {
                     Heading = "RCSI — risks of changing / not changing",
                     Body = risksBody
-                });
-            }
-        }
-
-        /* Clear-cached-plan (§5/§6, PR-B): the DESTRUCTIVE "Clear cached plan (advanced)"
-           affordance is a SEPARATE detail item from the CPU finding's always-safe advice
-           — its own view with its own singular Remediation (FactKey "CLEAR_PLAN"), so it
-           can never cross the force-plan / DB-config / RCSI affordances (each keys on a
-           distinct FactKey). Emitted on a CPU finding (CPU_SQL_PERCENT / CPU_SPIKE) that
-           carries an abnormal_cpu_plans drill-down with >= 1 qualifying row (BuildClearPlanAction
-           returns non-null); returns null otherwise → NO item. Mirrors the RCSI second-item
-           pattern exactly. The risk-of-not-changing figures (the anomaly ratio / per-exec
-           CPU / window CPU%) are captured HERE onto the action so the in-app dialog renders
-           the REAL numbers at apply time; the in-app consent gate is what makes it live. */
-        var clearPlanAction = FactRemediation.BuildClearPlanAction(finding);
-        if (clearPlanAction is not null)
-        {
-            context.Details.Add(new AlertDetailItem
-            {
-                Heading = "Clear cached plan (advanced)",
-                Body = FactRemediation.GenerateClearPlanPreview(finding),
-                IsCodeBlock = true,
-                Remediation = clearPlanAction
-            });
-
-            /* Cross-surface disclosure (§5): the two-sided CLEAR_PLAN risk renders as
-               READ-ONLY prose on email (both bodies) / webhook (all flow from
-               context.Details). You cannot consent through an email, so there is NO
-               checkbox gate off-app; the in-app dialog renders the SAME RiskDisclosure as
-               acknowledge-each-risk checkboxes. Built from advice.Risks (FactAdvice.GetForFinding),
-               which the MCP findings output also reads. */
-            var clearRisksBody = RenderRiskDisclosureBody(advice?.Risks);
-            if (clearRisksBody is not null)
-            {
-                context.Details.Add(new AlertDetailItem
-                {
-                    Heading = "Clear cached plan — risks of changing / not changing",
-                    Body = clearRisksBody
                 });
             }
         }

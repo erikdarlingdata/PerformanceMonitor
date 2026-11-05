@@ -1,0 +1,203 @@
+/* #7410: runs the web dashboard's real empty-reply path (wwwroot/js/panels.js panelEmptyStrip, VIZ.stat, util.js plainEmptyStrip and
+   fmtMbFit) on a small fake DOM and prints what it drew as one line of JSON. WebPlainEmptyMessageBehaviourTests starts it as
+       node web-plain-empty-harness.mjs <path to the js folder>
+   Only the DOM is a stand-in. */
+import { pathToFileURL } from "node:url";
+
+class FakeNode {
+  constructor(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.attrs = {};
+    this.parent = null;
+    this._text = "";
+    this.className = "";
+    this.dataset = {};
+    this.style = {};
+    const set = new Set();
+    this.classList = { add: (c) => set.add(c), remove: (c) => set.delete(c), toggle: (c, on) => (on ? set.add(c) : set.delete(c)), contains: (c) => set.has(c) };
+  }
+  get textContent() { return this._text + this.children.map((c) => c.textContent).join(""); }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k === "class") this.className = String(v); }
+  getAttribute(k) { return this.attrs[k]; }
+  appendChild(c) { c.parent = this; this.children.push(c); return c; }
+  get firstChild() { return this.children[0] || null; }
+  removeChild(c) { this.children = this.children.filter((x) => x !== c); c.parent = null; return c; }
+  addEventListener() {}
+  findAll(pred, out = []) { if (pred(this)) out.push(this); this.children.forEach((c) => c.findAll(pred, out)); return out; }
+}
+class FakeText extends FakeNode { constructor(t) { super("#text"); this._text = t; } }
+globalThis.Node = FakeNode;
+globalThis.document = { createElement: (t) => new FakeNode(t), createElementNS: (_ns, t) => new FakeNode(t), createTextNode: (t) => new FakeText(t) };
+globalThis.location = { hash: "#/server/a/vacuum" };
+
+const root = process.argv[2];
+const { panelEmptyStrip, VIZ } = await import(pathToFileURL(root + "/panels.js").href);
+const { applyFormat } = await import(pathToFileURL(root + "/util.js").href);
+const { fanout } = await import(pathToFileURL(root + "/pages/server-tabs/shared.js").href);
+
+const longMessage =
+  "The pg_buffer_usage collector is running against example-pg-01 but the PostgreSQL extension it reads is not installed there: " +
+  "its last run was recorded as a named non-fatal skip, so nothing from the buffer cache is being stored. relation \"pg_buffercache\" does not exist (SQLSTATE 42P01). " +
+  "The stored sentence names the extension and the database to create it in.";
+
+const describe = (strip) => {
+  const details = strip.findAll((n) => n.tag === "details");
+  const summaries = strip.findAll((n) => n.tag === "summary");
+  const bodies = strip.findAll((n) => String(n.className).includes("disc-body"));
+  return {
+    cls: strip.className,
+    text: strip.textContent,
+    hasDetails: details.length,
+    summary: summaries.length ? summaries[0].textContent : null,
+    detailBody: bodies.length ? bodies[0].textContent : null,
+  };
+};
+
+const out = {};
+out.message = longMessage;
+out.extension = describe(panelEmptyStrip({}, {
+  kind: "empty", status: "precondition", message: longMessage,
+  hints: { reason: "extension_missing", collector: "pg_buffer_usage", extensions: ["pg_buffercache"], restart_required: false },
+}));
+out.extensionRestart = describe(panelEmptyStrip({}, {
+  kind: "empty", status: "precondition", message: longMessage,
+  hints: { reason: "extension_missing", extensions: ["pg_qualstats"], restart_required: true },
+}));
+out.panelOwnLine = describe(panelEmptyStrip({ extensionMissingLine: "pg_stat_kcache is not installed on this server, so per-query OS CPU is not collected." }, {
+  kind: "empty", status: "precondition", message: longMessage,
+  hints: { reason: "extension_missing", extensions: ["pg_stat_kcache"], restart_required: true },
+}));
+out.sourceUnreadable = describe(panelEmptyStrip({}, {
+  kind: "empty", status: "precondition", message: longMessage, hints: { reason: "source_unreadable", collector: "pg_column_stats" },
+}));
+out.planCapture = describe(panelEmptyStrip({}, {
+  kind: "empty", status: "precondition", message: "This server cannot capture execution plans yet. Unsatisfied precondition(s): capture_threshold = -1 | extension_available = false",
+  hints: { reason: "plan_capture_not_ready", unsatisfied_count: 2 },
+}));
+/* A reply with no structured reason keeps its own text, with nothing behind a click. */
+out.noReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: "No query statistics in this window.", hints: null }));
+out.unknownReason = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: "Plain text.", hints: { reason: "something_new" } }));
+/* A panel's agreed sentence (emptyWins) still replaces an empty reply's message. */
+out.emptyWins = describe(panelEmptyStrip({ emptyWins: true, emptyText: "No deadlocks." }, { kind: "empty", status: "empty", message: "Long tool text about deadlocks.", hints: null }));
+
+/* #7410: `emptyLine: true` says the panel's own empty sentence for a true negative and keeps the tool's text behind a click. A reply that is not a true negative keeps the tool's text. */
+out.emptyLineTrue = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "empty", message: longMessage, hints: null }));
+out.emptyLineUnavailable = describe(panelEmptyStrip({ emptyLine: true, emptyText: "No lock activity was sampled in this window." }, { kind: "empty", status: "unavailable", message: longMessage, hints: null }));
+
+/* #7410: Top Queries on a window that stored snapshots but no measured delta builds its sentence from the hints (no `reason`). */
+const deltaMessage = "Snapshots exist in this window but none has a measured delta. Pass as_of and hours_back to reach one.";
+out.noDelta = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0, suggested_hours_back: 6 } }));
+out.noDeltaOneHour = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0, suggested_hours_back: 1 } }));
+out.noDeltaNoHours = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 0 } }));
+out.deltaMeasured = describe(panelEmptyStrip({}, { kind: "empty", status: "empty", message: deltaMessage, hints: { snapshots_in_window: 5, snapshots_with_measured_delta: 2 } }));
+out.deltaMessage = deltaMessage;
+
+/* #7410: the Query Heatmap's "nothing collected IN the window" reply says a collector that stopped looks exactly like this. The real card must show that, not a sentence that says the server was idle. */
+const heatmapStopped = "example-pg-01 has query stats from outside this window but nothing collected IN the last 6 hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health - a collector that stopped looks exactly like this.";
+{
+  const { queryHeatmapCard } = await import(pathToFileURL(root + "/pages/query-heatmap.js").href);
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ status: "empty", message: heatmapStopped, hints: null }) });
+  const card = queryHeatmapCard({ server: "example-pg-01", hours: 6, label: "last 6 hours", columns: [], emptyText: "No query activity." });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  out.heatmapStopped = card.findAll((n) => String(n.className).includes("panel-body"))[0].textContent;
+  out.heatmapStoppedMessage = heatmapStopped;
+}
+
+/* The page-cut flag is a sentence under the tiles, not a tile. */
+const stats = [
+  { key: "database_count", label: "Databases active", format: "int" },
+  { key: "truncated", label: "Window held more", pageCut: "The window held more databases than the grid below lists.", format: "bool" },
+];
+const tiles = (data) => {
+  const node = VIZ.stat(data, { stats, title: "Database Activity" });
+  const labels = node.findAll((n) => n.className === "label").map((n) => n.textContent);
+  const notices = node.findAll((n) => String(n.className).includes("notice")).map((n) => n.textContent);
+  return { labels, notices };
+};
+out.cut = tiles({ database_count: 30, truncated: true });
+out.notCut = tiles({ database_count: 3, truncated: false });
+
+out.fit = { small: applyFormat("mbfit", 0.14), whole: applyFormat("mbfit", 2), large: applyFormat("mbfit", 4096), none: applyFormat("mbfit", null), zero: applyFormat("mbfit", 0) };
+
+/* fanout (server-tabs/shared.js): several panels over one read. The canned reply is the wire body the page would get; only fetch is a stand-in. */
+let fanoutRead = 0;
+const runFanout = async (specs, reply) => {
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(reply) });
+  const panels = fanout("get_fanout_probe_" + ++fanoutRead, { hours: 24 }, specs);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  return panels.map((p) => p.findAll((n) => String(n.className).includes("panel-body"))[0].textContent);
+};
+const table = (title, extra) => ({ title, viz: "table", emptyText: "Nothing for " + title + ".", ...extra });
+const fanoutMessage = "No rows came back for this read in the window.";
+const emptyReply = { status: "empty", message: fanoutMessage, hints: null };
+out.fanoutThreeEmpty = await runFanout([table("A"), table("B"), table("C")], emptyReply);
+/* A panel with its own agreed sentence (emptyWins) does not say the read's message, so it neither stands in for it nor is it shortened. */
+out.fanoutEmptyWinsFirst = await runFanout([table("A", { emptyWins: true }), table("B"), table("C")], emptyReply);
+out.fanoutEmptyWinsBetween = await runFanout([table("A"), table("B", { emptyWins: true }), table("C")], emptyReply);
+/* A reply that is not a true negative keeps the read's message even on an emptyWins panel, so that panel is the one that says it. */
+out.fanoutNotEmptyStatus = await runFanout([table("A", { emptyWins: true }), table("B")], { status: "unavailable", message: fanoutMessage, hints: null });
+out.fanoutMessage = fanoutMessage;
+
+/* #7410: the real PostgreSQL trend specs. A true negative says the panel's plain sentence with the tool's text behind "More detail"; an
+   answer that is not a true negative keeps the tool's text. */
+const { pgWaitTrendSpecs } = await import(pathToFileURL(root + "/pages/server-tabs/pg-waits.js").href);
+const { pgQueryDurationTrendSpecs } = await import(pathToFileURL(root + "/pages/server-tabs/pg-activity.js").href);
+const trendMessage = "Nothing gained samples on this server in the window, so there is nothing to follow. A single collection cannot be differenced.";
+out.trendMessage = trendMessage;
+out.waitTrendEmpty = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { status: "empty", message: trendMessage, hints: null });
+out.waitTrendUnavailable = await runFanout(pgWaitTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
+out.durationTrendEmpty = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "empty", message: trendMessage, hints: null });
+out.durationTrendUnavailable = await runFanout(pgQueryDurationTrendSpecs({ label: "last 6h" }), { status: "unavailable", message: trendMessage, hints: null });
+/* #7410 pass 4: the real Queries tab on a SQL Server. One fetch answers every panel; the Query Store clutter read gets a payload whose memory clerk
+   never appeared, the heatmap read gets a true negative. Only fetch is a stand-in. */
+{
+  const { SERVER_TABS } = await import(pathToFileURL(root + "/pages/server-tabs.js").href);
+  const clerkNote = "The clerk never appeared in the window. memory_clerks stores the top 25 clerks over 1 MB per capture, so this is a RANK, not a zero.";
+  const overviewNote = "The excluded types are sleep waits - Query Store's background tasks idling - dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one. The proxy is a proxy.";
+  const heatmapMessage = "Query stats WERE collected for example-sql-01 in the last 6 hour(s), but no capture recorded an execution. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.";
+  const clutter = { databases: [{ database_name: "d", verdict: "Healthy" }], server_note: null, qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X", total_wait_ms: 5 }], excluded_note: overviewNote }, memory_clerk: { latest_memory_mb: null, max_memory_mb_in_window: null, latest_clerk_captured_at: null, note: clerkNote } } };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const body = u.includes("get_query_store_clutter") ? clutter : u.includes("get_query_heatmap") ? { status: "empty", message: heatmapMessage, hints: null } : { status: "unavailable", message: "n/a" };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+  };
+  const tab = SERVER_TABS.find((t) => t.id === "queries");
+  const panels = tab.build("example-sql-01", { hours: 6, label: "last 6 hours", server: "example-sql-01" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const flat = [];
+  const walk = (n) => { if (!n) return; if (Array.isArray(n)) return n.forEach(walk); flat.push(n); };
+  walk(panels);
+  const bodyOf = (title) => {
+    const p = flat.flatMap((n) => n.findAll((x) => x.attrs && x.attrs["data-title"] === title))[0];
+    if (!p) return null;
+    const b = p.findAll((x) => String(x.className).includes("panel-body"))[0];
+    return { text: b.textContent, details: b.findAll((x) => x.tag === "details").length, empties: b.findAll((x) => String(x.className).includes("strip empty")).length };
+  };
+  out.qsClerk = bodyOf("Query Store Memory Clerk");
+  out.qsOverview = bodyOf("Query Store Overhead (per server)");
+  out.heatmapEmpty = bodyOf("Query Heatmap");
+  out.heatmapEmptyMessage = heatmapMessage;
+}
+
+/* #7410 pass 4: an empty alert list that hid dismissed alerts says so in words; any other empty reply keeps its text. */
+{
+  const { emptyAlertsStrip } = await import(pathToFileURL(root + "/pages/alerts.js").href);
+  const toolSaid = "No undismissed alerts found in the specified time range, but 3 dismissed alerts were excluded by the default filter. Re-run with include_dismissed = true to see them.";
+  out.alertsDismissed = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: toolSaid, hints: { dismissed_excluded_count: 3 } }));
+  out.alertsDismissedOne = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: toolSaid, hints: { dismissed_excluded_count: 1 } }));
+  out.alertsQuiet = describe(emptyAlertsStrip({ kind: "empty", status: "empty", message: "No alerts found in the specified time range.", hints: null }));
+  out.alertsToolSaid = toolSaid;
+}
+
+/* #7410 pass 4b: the Admin Settings tab, when the store holds no alert settings yet. */
+{
+  const { settingsUnavailableStrip } = await import(pathToFileURL(root + "/pages/admin.js").href);
+  const toolSaid = "No alert-settings row is present in the store yet. The service seeds it on startup (or the Viewer's Settings window writes it); until then the service runs on its darling.json defaults.";
+  out.settingsUnavailable = describe(settingsUnavailableStrip({ kind: "empty", status: "unavailable", message: toolSaid, hints: null }));
+  out.settingsToolSaid = toolSaid;
+  out.settingsOtherReply = settingsUnavailableStrip({ kind: "empty", status: "empty", message: "x", hints: null }) === null;
+}
+
+console.log(JSON.stringify(out));

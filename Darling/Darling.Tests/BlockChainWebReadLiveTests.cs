@@ -144,7 +144,7 @@ public sealed class BlockChainWebReadLiveTests
         var ct = TestContext.Current.CancellationToken;
 
         // #1776 own-store: a scratch database, so no other class's chunks shape the store under test (#4650).
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var cs = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(ct);

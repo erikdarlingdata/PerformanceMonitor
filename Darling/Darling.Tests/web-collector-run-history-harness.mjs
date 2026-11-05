@@ -69,6 +69,13 @@ const logSignals = [];
    fetch does). A read that finished by itself can no longer be aborted, so only an in-flight read shows that a newer pick
    cancels the older one (the shared in-flight reads of util.js cancel the request when the last waiter is gone). */
 let holdLogReads = false;
+let serveRuns = false;
+const STORED_RUNS = [
+  { collection_time: "2026-11-01T10:00:00", collector: "wait_stats", status: "SUCCESS", duration_ms: 5, rows_collected: 3 },
+  { collection_time: "2026-11-01T09:59:00", collector: "query_store", status: "SUCCESS", duration_ms: 7, rows_collected: 4 },
+  { collection_time: "2026-11-01T09:00:00", collector: "query_store", status: "ERROR", duration_ms: 9, rows_collected: 0, error_message: "login failed" },
+  { collection_time: "2026-11-01T08:00:00", collector: "wait_stats", status: "SKIPPED", duration_ms: 0, rows_collected: 0 },
+];
 globalThis.fetch = async (url, opts) => {
   const u = new URL(String(url), "http://viewer.test");
   fetches.push(u.pathname.replace("/api/read/", "") + "?" + u.searchParams.toString());
@@ -77,7 +84,13 @@ globalThis.fetch = async (url, opts) => {
     return new Promise((_, reject) => opts.signal.addEventListener("abort", () => reject(Object.assign(new Error("The operation was aborted."), { name: "AbortError" })), { once: true }));
   }
   if (healthHangs && u.pathname.endsWith("/get_collection_health")) return new Promise(() => {});
-  const body = u.pathname.endsWith("/get_collection_health") ? healthBody : {};
+  /* #7416 item 28: the log read answers like the real one. A status argument filters the stored runs BEFORE the cap, so the scripted answer
+     holds only the runs of that status; without it, every run. A page that filtered afterward would send no argument and get the mixed list. */
+  const body = u.pathname.endsWith("/get_collection_health")
+    ? healthBody
+    : serveRuns && u.pathname.endsWith("/get_collection_log")
+    ? { runs: STORED_RUNS.filter((x) => !u.searchParams.get("status") || x.status === u.searchParams.get("status")) }
+    : {};
   return { status: 200, ok: true, text: async () => JSON.stringify(body) };
 };
 process.on("unhandledRejection", () => {});
@@ -156,7 +169,41 @@ try {
   for (const h of (chip && chip.handlers.click) || []) h({});
   await settle();
   const afterClear = logReads();
-  console.log(JSON.stringify({ before, clickable, afterClick, chipAfterClick, afterRebuild, rebuildChips, afterClear, pickSignals, selectionReads, enterPick, prevented, rowRole, chipStyle }));
+  /* #7416 item 28: the status bar above the log. "Failures" re-reads the log with status=ERROR (the read's own argument, so the filter applies before
+     the 200-row cap), the select reaches any other status, the pick survives a rebuild of the tab, and "All runs" clears it. */
+  serveRuns = true;
+  const statusPanels = await build();
+  const statusControls = (ps) => {
+    const root = { tag: "root", children: ps };
+    return {
+      all: collect(root, (n) => n.tag === "button" && n.textContent === "All runs")[0],
+      failures: collect(root, (n) => n.tag === "button" && n.textContent === "Failures")[0],
+      select: collect(root, (n) => n.tag === "select")[0],
+    };
+  };
+  const logStatuses = (ps) => collect({ tag: "root", children: ps }, (n) => n.tag === "td").map((n) => n.textContent).filter((t) => /^(SUCCESS|ERROR|SKIPPED)$/.test(t));
+  const clickAndRead = async (btn) => { fetches.length = 0; for (const h of (btn && btn.handlers.click) || []) h({ type: "click" }); await settle(); return logReads(); };
+  const unfiltered = { reads: logReads(), shown: logStatuses(statusPanels) };
+  const failuresReads = await clickAndRead(statusControls(statusPanels).failures);
+  const failuresShown = logStatuses(statusPanels);
+  const failuresPressed = statusControls(statusPanels).failures?.getAttribute("aria-pressed") ?? null;
+  const rebuiltStatus = await build();
+  const afterStatusRebuild = logReads();
+  const picker = statusControls(rebuiltStatus).select;
+  fetches.length = 0;
+  if (picker) picker.value = "SKIPPED";
+  for (const h of (picker && picker.handlers.change) || []) h({});
+  await settle();
+  const selectReads = logReads();
+  const selectShown = logStatuses(rebuiltStatus);
+  const allReads = await clickAndRead(statusControls(rebuiltStatus).all);
+  const allShown = logStatuses(rebuiltStatus);
+  serveRuns = false;
+  const statusFlow = {
+    options: (picker ? picker.children : []).map((o) => o.attrs.value ?? null),
+    unfiltered, failuresReads, failuresShown, failuresPressed, afterStatusRebuild, selectReads, selectShown, allReads, allShown,
+  };
+  console.log(JSON.stringify({ statusFlow, before, clickable, afterClick, chipAfterClick, afterRebuild, rebuildChips, afterClear, pickSignals, selectionReads, enterPick, prevented, rowRole, chipStyle }));
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

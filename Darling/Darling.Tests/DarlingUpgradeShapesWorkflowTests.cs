@@ -20,9 +20,9 @@ namespace Darling.Tests;
 /// upgrade scripts over installs that real releases made.
 ///
 /// <para><b>Why it is pinned.</b> The check only protects anyone while it runs. Since #6656 it runs in the nightly
-/// and by manual dispatch, not on pull requests; a trigger edited away, a shape dropped from the matrix, one of
-/// the two Windows images lost, or the nightly job unwired leaves a workflow that still looks like a check and
-/// gates nothing. None of those turns a test red by itself, so this class reads the workflow text and says so.</para>
+/// and by manual dispatch, and since #6982 a pull request that changes the scripts runs only the three PowerShell 7
+/// legs; a trigger edited away, a shape dropped from the matrix, one of the two Windows images lost, or the nightly job
+/// unwired leaves a workflow that still looks like a check and gates nothing. None of those turns a test red by itself, so this class reads the workflow text and says so.</para>
 ///
 /// <para>The workflow must not gain a <c>pull_request_target</c> trigger: the legs run the checked-out scripts,
 /// and <c>pull_request_target</c> would run them with a write token and the repository's secrets.</para>
@@ -64,6 +64,16 @@ public sealed class DarlingUpgradeShapesWorkflowTests
         return string.Join('\n', body);
     }
 
+    /// <summary>The two lists of the matrix's <c>leg</c> expression (#6982): the legs a pull request runs and the legs every
+    /// other trigger runs.</summary>
+    private static (List<string> PullRequest, List<string> All) LegLists(string yaml)
+    {
+        var m = Regex.Match(yaml, @"(?m)^\s+leg: \$\{\{ fromJSON\(github\.event_name == 'pull_request' && '(?<pr>\[[^']*\])' \|\| '(?<all>\[[^']*\])'\) \}\}\s*$");
+        Assert.True(m.Success, "the matrix's leg is no longer a fromJSON(github.event_name == 'pull_request' && '[...]' || '[...]') expression.");
+        List<string> Items(string json) => Regex.Matches(json, "\"([^\"]+)\"").Select(i => i.Groups[1].Value).ToList();
+        return (Items(m.Groups["pr"].Value), Items(m.Groups["all"].Value));
+    }
+
     private static List<string> MatrixList(string yaml, string name)
     {
         var m = Regex.Match(yaml, @"(?m)^\s+" + Regex.Escape(name) + @":\s*\[(?<items>[^\]]*)\]");
@@ -72,13 +82,22 @@ public sealed class DarlingUpgradeShapesWorkflowTests
     }
 
     [Fact]
-    public void TheTriggers_AreTheNightlyCall_AndAManualRun_AndNotPullRequests()
+    public void TheTriggers_AreTheNightlyCall_AManualRun_AndAPathFilteredPullRequest()
     {
         var code = Code(Workflow());
         var on = Block(code, "on");
 
-        // #6656: pr.yml is the one per-PR CI system, so neither pull-request trigger may come back here.
-        Assert.DoesNotContain("pull_request", on, StringComparison.Ordinal);
+        // #6982: a pull request runs the three PowerShell 7 legs, and only when it changes the scripts or this check, so a pull
+        // request that touches none of them gets no check from this workflow (and the branch rule is pr.yml's `CI result`).
+        // pull_request_target never: the legs run the checked-out scripts.
+        var pullRequest = Regex.Match("\n" + on, @"\n  pull_request:\n(?<body>(?:    .*\n?)*)");
+        Assert.True(pullRequest.Success, "the workflow has no pull_request trigger.");
+        foreach (var path in new[] { "Darling/tools/*.ps1", ".github/scripts/darling-upgrade-shapes.ps1", ".github/workflows/darling-upgrade-shapes.yml" })
+        {
+            Assert.Contains($"- '{path}'", pullRequest.Groups["body"].Value, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("paths:", pullRequest.Groups["body"].Value, StringComparison.Ordinal);
         Assert.DoesNotContain("pull_request_target", code, StringComparison.Ordinal);
         Assert.Contains("\n  workflow_call:", "\n" + on, StringComparison.Ordinal);
         Assert.Contains("\n  workflow_dispatch:", "\n" + on, StringComparison.Ordinal);
@@ -92,16 +111,24 @@ public sealed class DarlingUpgradeShapesWorkflowTests
         var os = MatrixList(yaml, "os");
         Assert.Equal(new[] { "windows-2022", "windows-2025" }, os.OrderBy(o => o, StringComparer.Ordinal));
 
-        var legs = MatrixList(yaml, "leg");
+        var (pullRequestLegs, legs) = LegLists(yaml);
         foreach (var shape in new[] { "U1", "U2", "U3", "U4" })
         {
             Assert.Contains(legs, l => l.StartsWith(shape + "-", StringComparison.Ordinal));
         }
 
-        // Install AND upgrade for the three shapes that keep a service; U4 is the install refusal.
-        foreach (var leg in new[] { "U1-install", "U1-upgrade", "U2-install", "U2-upgrade", "U3-install", "U3-upgrade", "U4-install" })
+        // Install AND upgrade for the three shapes that keep a service; U4 is the install refusal. Then the three PowerShell 7 legs (#6982).
+        foreach (var leg in new[] { "U1-install", "U1-upgrade", "U2-install", "U2-upgrade", "U3-install", "U3-upgrade", "U4-install", "U1-install-pwsh", "U1-upgrade-pwsh", "U2-upgrade-pwsh" })
         {
             Assert.Contains(leg, legs);
+        }
+
+        // A pull request runs the PowerShell 7 legs and nothing else, and those legs run on windows-2025 only.
+        var pwshLegs = new[] { "U1-install-pwsh", "U1-upgrade-pwsh", "U2-upgrade-pwsh" };
+        Assert.Equal(pwshLegs.OrderBy(l => l, StringComparer.Ordinal), pullRequestLegs.OrderBy(l => l, StringComparer.Ordinal));
+        foreach (var leg in pwshLegs)
+        {
+            Assert.Matches(@"(?m)^\s+- \{ os: windows-2022, leg: " + Regex.Escape(leg) + @" \}\s*$", yaml);
         }
 
         /* A leg the workflow names but the script's ValidateSet does not accept fails at its first line, and a leg

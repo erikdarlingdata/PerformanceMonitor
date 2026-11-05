@@ -87,6 +87,7 @@ internal sealed class SystemHealthChartRenderer
         /* The tiles are borderless (no in-panel title), so the descriptive Y-axis label is the chart's
            identifier — the same convention the File I/O charts use ("Read Latency (ms)"). */
         chart.Plot.YLabel(label);
+        ChartStyle.UseCountAxis(chart); // #7606: every counter chart counts events
         chart.Plot.Axes.SetLimitsY(0, max > 0 ? max * 1.15 : 1);
         chart.Refresh();
     }
@@ -145,6 +146,7 @@ internal sealed class SystemHealthChartRenderer
         ChartStyle.ReapplyAxisColors(chart);
         chart.Plot.Axes.SetLimitsX(xMin, xMax);
         chart.Plot.YLabel("Sick Spinlocks (backoffs)");
+        ChartStyle.UseCountAxis(chart); // #7606: a count, whole-number ticks
         ChartStyle.SetChartYLimitsWithLegendPadding(chart, 0, max);
         chart.Refresh();
     }
@@ -168,13 +170,19 @@ internal sealed class SystemHealthChartRenderer
         {
             var xs = data.Select(d => PlotX(d.EventTime!.Value)).ToArray();
 
-            var sysScatter = chart.Plot.Add.TimeSeries(xs, data.Select(d => (double)(d.SystemCpuUtilization ?? 0)).ToArray());
-            sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(0));
-            ChartStyle.StyleScatter(sysScatter);
-            sysScatter.LegendText = "System CPU %";
-            hover?.Add(sysScatter, "System CPU %");
+            /* #7416 item 1: a reading the server could not give (System CPU on SQL Server on Linux) is a gap, never a flat zero,
+               and a series with no reading at all is not drawn. */
+            var systemCpu = CpuSeriesValues(data.Select(d => d.SystemCpuUtilization));
+            if (systemCpu.Any(v => !double.IsNaN(v)))
+            {
+                var sysScatter = chart.Plot.Add.TimeSeries(xs, systemCpu);
+                sysScatter.Color = ScottPlot.Color.FromHex(ChartPalette.CyclingColor(0));
+                ChartStyle.StyleScatter(sysScatter);
+                sysScatter.LegendText = "System CPU %";
+                hover?.Add(sysScatter, "System CPU %");
+            }
 
-            var sqlScatter = chart.Plot.Add.TimeSeries(xs, data.Select(d => (double)(d.SqlCpuUtilization ?? 0)).ToArray());
+            var sqlScatter = chart.Plot.Add.TimeSeries(xs, CpuSeriesValues(data.Select(d => d.SqlCpuUtilization)));
             sqlScatter.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("SqlCpu"));
             ChartStyle.StyleScatter(sqlScatter);
             sqlScatter.LegendText = "SQL CPU %";
@@ -190,6 +198,10 @@ internal sealed class SystemHealthChartRenderer
         chart.Plot.Axes.SetLimitsY(0, 100);
         chart.Refresh();
     }
+
+    /// <summary>A CPU reading per snapshot as plot values: a missing reading is NaN (a gap), never 0 (#7416 item 1).</summary>
+    internal static double[] CpuSeriesValues(IEnumerable<long?> readings) =>
+        readings.Select(v => v.HasValue ? (double)v.Value : double.NaN).ToArray();
 
     /// <summary>Centered "No data for selected time range" annotation for an empty counter chart.</summary>
     private static void AddNoDataText(ScottPlot.WPF.WpfPlot chart, double xMin, double xMax)

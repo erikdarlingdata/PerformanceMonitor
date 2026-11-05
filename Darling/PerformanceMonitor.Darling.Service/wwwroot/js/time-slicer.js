@@ -26,8 +26,9 @@
  * without a clock.
  */
 
-import { el, localTime, TRIM_TO } from "./util.js";
+import { el, localTime, parseUtc, TRIM_TO } from "./util.js";
 import { MINIMUM_SPAN_MS } from "./time-range.js";
+import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
 
 const HOUR_MS = 3600000;
 const MINUTE_MS = 60000;
@@ -174,16 +175,63 @@ export function dragSelection(mode, anchor, cur, sel, minFrac) {
   return { a, b };
 }
 
-/** The SVG path d strings (area and line) for points [{ t, v }] over a window, scaled to their own peak. */
-export function stripPaths(points, win, peak = null) {
+/**
+ * One strip row's value as a number, or NaN when the row has none (#7544). `Number(null)` is 0, which counted a row with no figure (a bucket the read
+ * returned empty) as a sample at zero: a strip with one dot at zero and the "Whole range" text over grids with no rows.
+ */
+export function stripValue(v) {
+  return v == null || v === "" ? NaN : Number(v);
+}
+
+/**
+ * What breaks a strip's line (#7544): a step between two samples longer than the series' normal step, the line charts' rule (chart-gaps.js).
+ * A strip names its step itself (`stepMs`: the blocking and deadlock trends are per-minute counts that exist only where something happened, and
+ * their reply states no bucket), else (null) the cadence the samples show for themselves. The reply's `bucket_minutes` is not used: it is the chart's
+ * width (1 minute for a day), not the collector's cadence, and a collector scheduled slower than that would draw every step as a stem. A strip that
+ * joins two grains (`seam`, the Query Store duration trend's routing.raw_from) is judged on each side of it. Returns what stripPaths takes as its `gap`.
+ */
+export function stripGap(strip, data) {
+  if (strip && strip.stepMs > 0) return strip.stepMs;
+  const seam = strip && strip.seam ? parseUtc(strip.seam(data)) : null;
+  return seam ? { seamMs: seam.getTime() } : null;
+}
+
+/**
+ * The SVG path d strings (area and line) for points [{ t, v }] over a window, scaled to their own peak. `gap` (see stripGap) is the longest
+ * step that still joins two samples: a number in ms, `{ seamMs }` for a series with two grains, Infinity for never, null to take the cadence
+ * the samples show. A longer step ends one run and starts the next, so neither the line nor the area under it crosses a stretch with no
+ * samples; a run that is one sample (or several at one instant) is the #7416 stem and dot.
+ */
+export function stripPaths(points, win, peak = null, gap = null) {
   const span = win.endMs - win.startMs;
   const usable = (points || []).filter((p) => p && Number.isFinite(p.t) && Number.isFinite(p.v) && p.t >= win.startMs - 1 && p.t <= win.endMs + 1).sort((x, y) => x.t - y.t);
-  if (!usable.length || !(span > 0)) return { line: "", area: "", peak: 0 };
+  if (!usable.length || !(span > 0)) return { line: "", area: "", peak: 0, dots: [] };
   const top = peak || Math.max(...usable.map((p) => p.v), 0) || 1;
+  /* #7416: ONE sample (or several at one instant) has no line to draw: "M x y" alone paints nothing. It is a stem from the baseline up to the
+     sample, with a mark on top (`dots`, drawn by the control as a round dot, since this SVG is stretched and would squash a circle). */
+  if (usable.every((p) => p.t === usable[0].t)) {
+    const x = ((usable[0].t - win.startMs) / span) * VB_W;
+    const y = VB_H - 2 - Math.max(0, Math.max(...usable.map((p) => p.v)) / top) * (VB_H - 6);
+    return { line: "M" + x.toFixed(2) + " " + VB_H + " L" + x.toFixed(2) + " " + y.toFixed(2), area: "", peak: top, dots: [{ x, y }] };
+  }
+  const times = usable.map((p) => p.t);
+  const threshold = gap && typeof gap === "object" ? gapThresholdMs(times, gap.seamMs) : typeof gap === "number" ? gap : gapThresholdMs(times);
   const xy = usable.map((p) => [((p.t - win.startMs) / span) * VB_W, VB_H - 2 - Math.max(0, p.v / top) * (VB_H - 6)]);
-  const line = xy.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(2) + " " + y.toFixed(2)).join(" ");
-  const area = line + " L" + xy[xy.length - 1][0].toFixed(2) + " " + VB_H + " L" + xy[0][0].toFixed(2) + " " + VB_H + " Z";
-  return { line, area, peak: top };
+  const lines = [];
+  const areas = [];
+  const dots = [];
+  for (const run of splitAtGaps(xy.map((_, i) => i), times, threshold)) {
+    if (times[run[0]] === times[run[run.length - 1]]) {
+      const [x, y] = [xy[run[0]][0], Math.min(...run.map((i) => xy[i][1]))];
+      lines.push("M" + x.toFixed(2) + " " + VB_H + " L" + x.toFixed(2) + " " + y.toFixed(2));
+      dots.push({ x, y });
+      continue;
+    }
+    const line = run.map((i, k) => (k ? "L" : "M") + xy[i][0].toFixed(2) + " " + xy[i][1].toFixed(2)).join(" ");
+    lines.push(line);
+    areas.push(line + " L" + xy[run[run.length - 1]][0].toFixed(2) + " " + VB_H + " L" + xy[run[0]][0].toFixed(2) + " " + VB_H + " Z");
+  }
+  return { line: lines.join(" "), area: areas.join(" "), peak: top, dots };
 }
 
 /* ───────────────────────────── the control ───────────────────────────── */
@@ -220,6 +268,7 @@ export function timeSlicer(o) {
   let frac = { a: 0, b: 1 };
   let narrowed = false;
   let points = [];
+  let gap = null;
   let overlay = null;
   let overlayLabel = "";
   let keyTimer = null;
@@ -230,6 +279,7 @@ export function timeSlicer(o) {
   const line = svgNode("path", { class: "slicer-line" });
   const area = svgNode("path", { class: "slicer-area" });
   const overlayLine = svgNode("path", { class: "slicer-overlay" });
+  const dotLayer = el("div", { class: "slicer-dots" });
   const svg = svgNode("svg", { class: "slicer-svg", viewBox: "0 0 " + VB_W + " " + VB_H, preserveAspectRatio: "none", "aria-hidden": "true", focusable: "false" });
   svg.appendChild(area);
   svg.appendChild(line);
@@ -240,7 +290,7 @@ export function timeSlicer(o) {
   const hStart = el("div", { class: "slicer-handle slicer-handle-start", role: "slider", tabindex: "0", "aria-label": "Start of the narrowed range" });
   const hEnd = el("div", { class: "slicer-handle slicer-handle-end", role: "slider", tabindex: "0", "aria-label": "End of the narrowed range" });
   const body = el("div", { class: "slicer-sel", role: "group", tabindex: "0", "aria-label": "Narrowed range. Arrow keys move it, Home and End jump it, Escape resets it." }, [hStart, hEnd]);
-  const track = el("div", { class: "slicer-track" }, [svg, shadeL, shadeR, body]);
+  const track = el("div", { class: "slicer-track" }, [svg, dotLayer, shadeL, shadeR, body]);
   const readout = el("span", { class: "slicer-readout", role: "status", "aria-live": "polite" });
   const reset = el("button", { type: "button", class: "btn slicer-reset", text: "Reset", title: "Back to the whole range" });
   const overlayNote = el("span", { class: "slicer-overlay-note" });
@@ -276,10 +326,19 @@ export function timeSlicer(o) {
     hEnd.setAttribute("aria-valuetext", timeText(sel.endMs));
   };
   const paintStrip = () => {
-    const p = stripPaths(points, win);
+    const p = stripPaths(points, win, null, gap);
     line.setAttribute("d", p.line);
     area.setAttribute("d", p.area);
-    const q = overlay ? stripPaths(overlay, win) : { line: "" };
+    /* #7416: a single sample's mark. */
+    dotLayer.textContent = "";
+    for (const d of p.dots || []) {
+      const dot = el("span", { class: "slicer-dot", title: "One sample" });
+      dot.style.left = (d.x / VB_W) * 100 + "%";
+      dot.style.top = (d.y / VB_H) * 100 + "%";
+      dotLayer.appendChild(dot);
+    }
+    /* A row's own timeline is an event series (the executions of one query): it is not broken. */
+    const q = overlay ? stripPaths(overlay, win, null, Infinity) : { line: "" };
     overlayLine.setAttribute("d", q.line);
     overlayNote.textContent = overlay && q.line ? "Overlay: " + overlayLabel : "";
   };
@@ -415,9 +474,10 @@ export function timeSlicer(o) {
 
   return {
     node,
-    /** The activity the strip draws: [{ t: epoch ms, v: number }]. */
-    setPoints(next) {
+    /** The activity the strip draws: [{ t: epoch ms, v: number }]. `nextGap` is what breaks its line (stripGap). */
+    setPoints(next, nextGap = null) {
       points = next || [];
+      gap = nextGap;
       paintStrip();
     },
     /** One row's timeline over the strip, scaled to its own peak, with the name it is shown under. */

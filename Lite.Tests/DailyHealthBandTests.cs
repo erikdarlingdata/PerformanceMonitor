@@ -284,7 +284,7 @@ public class DailyHealthBandTests
 
         /* Still countable: the drill is offered and the tooltip lists it with its rate. */
         Assert.Contains(DayDrillTarget.Blocking, DailyHealthBandCalculator.AvailableDrills(day));
-        Assert.Contains("11 blocking events (0.5/hr)", DailyHealthBandCalculator.Describe(day));
+        Assert.Contains("11 blocking events (0.5 waits/hr)", DailyHealthBandCalculator.Describe(day));
     }
 
     /// <summary>The day's peak block is the wait arm: a 60-second block is a Critical day and a 10-second
@@ -562,7 +562,7 @@ public class DailyHealthBandTests
         Assert.Contains("Top wait: CXPACKET", line);
         Assert.Contains("High-CPU samples: 4", line);
         Assert.Contains("Total wait: 150.0 s", line);
-        Assert.Contains("Unique queries: 87", line);
+        Assert.Contains("Queries stored: 87", line);
     }
 
     [Fact]
@@ -584,12 +584,12 @@ public class DailyHealthBandTests
     public void BuildKeyMetricsLine_NullUniqueQueries_SaysNotMaterialized_NotZero()
     {
         var notCarried = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, null);
-        Assert.Contains("Unique queries: " + DailyHealthBandCalculator.UniqueQueriesNotMaterialized, notCarried);
-        Assert.DoesNotContain("Unique queries: 0", notCarried);
+        Assert.Contains("Queries stored: " + DailyHealthBandCalculator.UniqueQueriesNotMaterialized, notCarried);
+        Assert.DoesNotContain("Queries stored: 0", notCarried);
         Assert.Equal("not materialized at this tier", DailyHealthBandCalculator.UniqueQueriesNotMaterialized);
 
         var measuredZero = DailyHealthBandCalculator.BuildKeyMetricsLine("CXPACKET", 4, 150m, 0);
-        Assert.Contains("Unique queries: 0", measuredZero);
+        Assert.Contains("Queries stored: 0", measuredZero);
         Assert.DoesNotContain(DailyHealthBandCalculator.UniqueQueriesNotMaterialized, measuredZero);
     }
 

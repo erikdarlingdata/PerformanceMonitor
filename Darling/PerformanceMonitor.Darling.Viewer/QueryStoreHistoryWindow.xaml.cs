@@ -8,14 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -230,24 +227,12 @@ public partial class QueryStoreHistoryWindow : Window
                 return;
             }
 
-            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
-            if (WithheldPlanGuard.RefuseSave(plan)) return;
-
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"qs_plan_{_queryId}_{rowPlanId}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = "Saved";
+            if (FileSaveHelper.SavePlanFile(plan, $"qs_plan_{_queryId}_{rowPlanId}")) btn.Content = "Saved";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read this Query Store plan from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -272,7 +257,7 @@ public partial class QueryStoreHistoryWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read this Query Store plan from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 

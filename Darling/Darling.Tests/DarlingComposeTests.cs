@@ -3025,9 +3025,8 @@ public sealed class DarlingComposeTests
             StringComparison.Ordinal);
 
         /* And the residual must be held out of BOTH places a synthetic series would otherwise be mistaken for a
-           real one: the drill path and the series cap. */
+           real one: the drill path and the series cap (the cap half is run by SeriesColorBehaviourTests). */
         Assert.Contains("drills.set(key, null);", composeJs, StringComparison.Ordinal);
-        Assert.Contains("const realKeys = order.filter((k) => !residual.has(k));", composeJs, StringComparison.Ordinal);
 
         /* But that recognition MUST be gated on the panel actually carrying a residual, which only a
            rank-then-bucket panel with includeOther does. pivotTimeSeries serves EVERY grouped time series, and
@@ -3526,7 +3525,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $5", compiled.Sql);
         Assert.Contains("collect.procedure_stats", compiled.Sql, StringComparison.Ordinal);
         Assert.DoesNotContain("module_map", compiled.Sql, StringComparison.Ordinal);
@@ -3586,7 +3585,7 @@ public sealed class DarlingComposeTests
             + "WHERE f.collection_time >= $1\n"
             + "  AND f.collection_time <= $2\n"
             + "GROUP BY f.database_name, COALESCE(m.object_name, '(ad hoc)')\n"
-            + "ORDER BY value DESC NULLS LAST\n"
+            + "ORDER BY value DESC NULLS LAST, database_name, object_name\n"
             + "LIMIT $6", compiled.Sql);
         Assert.Contains("collect.module_map AS mm", compiled.Sql, StringComparison.Ordinal);
         Assert.Contains("LEAST(last_ps.collection_time, $5)", compiled.Sql, StringComparison.Ordinal);

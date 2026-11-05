@@ -48,8 +48,10 @@ jobs:
       darling_classes: ${{ steps.plan.outputs.darling_classes }}
       lite_classes: ${{ steps.plan.outputs.lite_classes }}
       build: ${{ steps.plan.outputs.build }}
+      pg_old_targets: ${{ steps.plan.outputs.pg_old_targets }}
       legs: ${{ steps.plan.outputs.legs }}
       legs_json: ${{ steps.plan.outputs.legs_json }}
+      exporter: ${{ steps.exporter.outputs.exporter }}
     steps:
       - uses: actions/checkout@v7
 
@@ -101,6 +103,37 @@ jobs:
 
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
             --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+
+      # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
+      # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
+      # trusted all run it. Root files (the solution, Directory.*.props, global.json, nuget.config) are in the `root` filter.
+      - name: Decide whether the exporter job runs
+        id: exporter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python -I - <<'PY' >> "${GITHUB_OUTPUT}"
+          import importlib.util, os, sys
+          spec = importlib.util.spec_from_file_location("ci_select", ".github/scripts/ci-select.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["ci_select"] = mod
+          spec.loader.exec_module(mod)
+          files = [ln.strip() for ln in open("changed.txt", encoding="utf-8") if ln.strip()]
+          areas = mod.Rules().areas(files)
+          run = (
+              os.environ["EVENT_NAME"] != "pull_request"
+              or os.environ["BASE_REF"] != "dev"
+              or any(f.startswith("unknown/") for f in files)
+              or areas["exporter"]
+              or areas["root"]
+              or "Directory.Packages.props" in files
+          )
+          print("exporter=" + ("true" if run else "false"))
+          PY
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
       # says so in one notice), and a draft sets nothing.
@@ -285,7 +318,7 @@ jobs:
         env:
           THIS_WORKSPACE: ${{ github.workspace }}
           THIS_SHA: ${{ github.sha }}
-          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Lite.Tests/obj/project.assets.json
+          REQUIRED_FILES: Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll;Darling/Darling.Tests/obj/project.assets.json;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.dll;Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.exe;Lite.Tests/bin/Release/net10.0-windows/Lite.Tests.exe;Lite.Tests/obj/project.assets.json
         run: |
           $ErrorActionPreference = 'Stop'
           $origin = @{}
@@ -303,21 +336,10 @@ jobs:
             }
           }
 
-      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
-      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
-      # With an exact version the install script downloads from the release feed and never asks aka.ms.
-      - name: Read the SDK version from global.json
-        id: globaljson_sdk
-        shell: pwsh
-        run: |
-          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
-          if (-not $version) { throw 'global.json names no sdk.version' }
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET 10.0
-        uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+      # No .NET SDK install here (#7098): the legs run the built Darling.Tests.exe and Lite.Tests.exe on the runner image's
+      # own .NET 10, so they do not reinstall the SDK global.json pins (the image's patch is older, and a leg compiles
+      # nothing). The legs therefore run on the image's .NET 10 patch, not the pinned one. The pg-old-targets job below
+      # still runs `dotnet run`, so it keeps its own install.
 
       # Same cache key as build.yml and nightly.yml (the fetch script's own content hash), so a warm cache from any of
       # them means no ~340MB download here. Every leg that runs any Darling class needs the runtime: a 'full' scope runs
@@ -388,10 +410,218 @@ jobs:
           overwrite: true
           if-no-files-found: ignore
 
+  # The Darling export tool (Exporter/): restore in locked mode, build, and run its tests. It is a plain net10.0 console app,
+  # so it runs on Linux, where Docker is available for the tests that start a real PostgreSQL (they skip themselves without
+  # Docker). The verdict job folds the result into `CI result`, so this adds no required check of its own.
+  exporter:
+    name: Exporter build and test
+    needs: plan
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.exporter == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # The exact SDK version from global.json, for the reason the build job gives.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(python3 -c "import json; print(json.load(open('global.json'))['sdk']['version'])")
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore the exporter projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore Exporter/PerformanceMonitor.Exporter/PerformanceMonitor.Exporter.csproj --locked-mode
+          dotnet restore Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj --locked-mode
+
+      - name: Build the exporter tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet build Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-restore
+
+      - name: Test the exporter (fast)
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category!=Slow" --blame-hang-timeout 300s
+
+      # The two million-row state store tests take about a minute each on a developer machine and about three minutes
+      # each on this runner (3 m 4 s and 3 m 19 s, measured on #7581's CI), which is close to a 300 s hang timeout. 900 s still stops a real hang well inside the step.
+      # Normal verbosity prints each test's duration, so a test that grows slower shows in the log before it times out.
+      - name: Test the exporter (slow)
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet test Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj -c Release --no-build --filter "Category=Slow" --blame-hang-timeout 900s --blame-hang-dump-type full --logger "console;verbosity=normal"
+
+      # A hang leaves its dumps and the blame sequence file in TestResults/. Without this upload they die with the runner.
+      - name: Upload the exporter test results
+        if: failure()
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: exporter-test-results
+          path: Exporter/PerformanceMonitor.Exporter.Tests/TestResults/
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # #6985: every PostgreSQL collector against a REAL PostgreSQL 10, 13, 14, 16 and 17, so a NULL an old server sends or a
+  # column a supported version lacks (#6206, #6836) turns the pull request red. Runs only when the plan says a file it covers
+  # changed (ci-plan.py's PG_OLD_TARGET_PATHS); the nightly runs it every night. Reuses the build job's artifact.
+  pg-old-targets:
+    name: PostgreSQL collectors on old targets
+    needs: [plan, build]
+    if: ${{ needs.plan.outputs.run == 'true' && needs.plan.outputs.build == 'true' && needs.plan.outputs.pg_old_targets == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check the runner can start a process
+        timeout-minutes: 2
+        shell: bash
+        run: dotnet --version
+
+      - uses: actions/checkout@v7
+
+      - name: Fetch the build
+        uses: actions/download-artifact@v8
+        with:
+          name: ci-test-build
+          path: .
+
+      # The tests find the repo root through [CallerFilePath], so a binary built at another path would read another tree.
+      - name: Check the fetched build is for this workspace and commit
+        shell: pwsh
+        env:
+          THIS_WORKSPACE: ${{ github.workspace }}
+          THIS_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $origin = @{}
+          if (Test-Path guard-build-origin.txt) {
+            foreach ($line in Get-Content guard-build-origin.txt) { if ($line -match '^(\w+)=(.*)$') { $origin[$Matches[1]] = $Matches[2] } }
+          }
+          if ($origin['workspace'] -ne $env:THIS_WORKSPACE -or $origin['sha'] -ne $env:THIS_SHA) {
+            Write-Host "::error title=Build is for another workspace or commit::The fetched build says workspace '$($origin['workspace'])' at '$($origin['sha'])'; this job is at '$env:THIS_WORKSPACE' at '$env:THIS_SHA'."
+            exit 1
+          }
+          foreach ($file in @('Darling/Darling.Tests/bin/Release/net10.0-windows/Darling.Tests.dll', 'Darling/Darling.Tests/obj/project.assets.json')) {
+            if (-not (Test-Path $file)) { Write-Host "::error title=Build is incomplete::The fetched build has no $file."; exit 1 }
+          }
+
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      # The same key as every other job (the fetch script's own content hash): a warm cache means no ~340MB download.
+      - name: Cache Darling pg-runtime.zip
+        id: cache-pg-runtime
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/pg-runtime.zip
+          key: pg-runtime-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-runtime.ps1') }}
+
+      - name: Build Darling pg-runtime.zip (cache miss only)
+        if: steps.cache-pg-runtime.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./Darling/tools/fetch-pg-runtime.ps1
+
+      - name: Extract pg-runtime
+        shell: pwsh
+        run: |
+          $zip  = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime.zip"
+          $dest = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
+
+      # Fetch the five old servers (cached on the fetch script's own hash; the shared download cache stays out of it, five
+      # 320 MB zips), start the 5541 store through the shared script, then one trust-auth loopback cluster per major.
+      - name: Cache the old PostgreSQL targets
+        uses: actions/cache@v6
+        with:
+          path: |
+            Darling/artifacts/pg-targets
+            !Darling/artifacts/pg-targets/downloads
+          key: pg-targets-${{ runner.os }}-${{ hashFiles('Darling/tools/fetch-pg-target.ps1') }}
+
+      - name: Start the store and the old PostgreSQL targets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./.github/scripts/start-test-pg.ps1 -Mode Start
+          ./.github/scripts/start-test-pg.ps1 -Mode StartTargets -Majors 10,13,14,16,17
+
+      # DARLING_TEST_PG_TARGETS_REQUIRED turns a missing target variable into a failure instead of a skip. A run that
+      # matched no test exits 0, so the step also fails on a total of zero.
+      - name: Run the collectors against the old targets
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($line in @(./.github/scripts/start-test-pg.ps1 -Mode Env -Majors 10,13,14,16,17)) {
+            $name, $value = $line -split '=', 2
+            [Environment]::SetEnvironmentVariable($name, $value)
+          }
+          $env:DARLING_TEST_PG_TARGETS_REQUIRED = '1'
+          New-Item -ItemType Directory -Force -Path TestResults | Out-Null
+          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -class "*PgCollectorsOnOldTargetsLiveTests*" -longRunning 300 2>&1 | Tee-Object -FilePath TestResults/pg-old-targets.log
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) { exit $exit }
+          if (-not (Select-String -Path TestResults/pg-old-targets.log -Pattern 'Total:\s+[1-9]' -Quiet)) { throw 'the run reported no tests: the class filter matched nothing' }
+
+      - name: Stop PostgreSQL
+        if: always()
+        shell: pwsh
+        run: ./.github/scripts/start-test-pg.ps1 -Mode Stop
+
+      - name: Upload the logs
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v6
+        with:
+          name: pg-old-targets-results
+          path: |
+            TestResults/
+            ${{ runner.temp }}/darling-pg*.log
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
   # Named "CI verdict", never "CI result": `CI result` is the commit status this job sets.
   verdict:
     name: CI verdict
-    needs: [plan, build, test]
+    needs: [plan, build, test, pg-old-targets, exporter]
     # Nothing to say for a draft, which sets no status: skip the runner too.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
@@ -410,6 +640,11 @@ jobs:
           PLAN_LEGS: ${{ needs.plan.outputs.legs }}
           BUILD_RESULT: ${{ needs.build.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          PLAN_PG_OLD: ${{ needs.plan.outputs.pg_old_targets }}
+          PG_OLD_RESULT: ${{ needs.pg-old-targets.result }}
+          PLAN_RUN: ${{ needs.plan.outputs.run }}
+          PLAN_EXPORTER: ${{ needs.plan.outputs.exporter }}
+          EXPORTER_RESULT: ${{ needs.exporter.result }}
           TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
@@ -432,6 +667,10 @@ jobs:
             want_test=skipped;  [ "${PLAN_LEGS}" != "0" ] && want_test=success
             [ "${BUILD_RESULT}" = "${want_build}" ] || { state=failure; failed="${failed} build (${BUILD_RESULT})"; }
             [ "${TEST_RESULT}" = "${want_test}" ]   || { state=failure; failed="${failed} test (${TEST_RESULT})"; }
+            want_pg=skipped;    [ "${PLAN_PG_OLD}" = "true" ] && [ "${PLAN_BUILD}" = "true" ] && want_pg=success
+            [ "${PG_OLD_RESULT}" = "${want_pg}" ]   || { state=failure; failed="${failed} pg-old-targets (${PG_OLD_RESULT})"; }
+            want_exporter=skipped; [ "${PLAN_RUN}" = "true" ] && [ "${PLAN_EXPORTER}" = "true" ] && want_exporter=success
+            [ "${EXPORTER_RESULT}" = "${want_exporter}" ] || { state=failure; failed="${failed} exporter (${EXPORTER_RESULT})"; }
           fi
           # #6656: a run that a newer push or ready-for-review replaced is cancelled, but cancelled() inside this job reports the
           # job's own state, so the step cannot tell. Ask the API instead: when a newer run of this workflow exists for this pull

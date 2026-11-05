@@ -240,7 +240,7 @@ WHERE  dismissed = FALSE";
         var liveAffected = await updateCmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         Assert.Equal(2, liveAffected);
 
-        // Insert archived alert into sidecar (simulates what DismissAllVisibleAlertsAsync does)
+        // Insert archived alert into sidecar (simulates what DismissAllVisibleAlertsWindowAsync does)
         using var sidecarCmd = connection.CreateCommand();
         sidecarCmd.CommandText = @"
 INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)

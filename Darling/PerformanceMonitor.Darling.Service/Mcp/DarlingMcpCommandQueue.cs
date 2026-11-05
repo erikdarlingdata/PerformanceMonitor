@@ -57,7 +57,7 @@ internal static class DarlingMcpCommandQueue
         catch (PostgresException ex) when (ex.SqlState is "42883" or "42501")
         {
             return new Queued(0, "store_not_ready",
-                "The store has no queue function for this tool yet, or the mcp login may not call it. Restart the Darling service so it re-provisions the store roles, or re-run tools/provision-roles.sql on a self-managed store. Nothing was queued.");
+                "The store has no queue function for this tool yet, or the mcp login may not call it. Restart the Darling service so it re-provisions the store roles, or re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on a self-managed store. Nothing was queued.");
         }
     }
 }

@@ -143,6 +143,7 @@ public sealed class DarlingAnalysisPipelineTests
         "CollectPlanAdvisoryDetail",
         "CollectPlanAnalysis",
         "CollectQueriesAtSpike",
+        "CollectRcsiInactionFigures",
         "CollectReconstructedBlockingChains",
         "CollectRegressedQueries",
         "CollectTempDbBreakdown",
@@ -178,8 +179,10 @@ public sealed class DarlingAnalysisPipelineTests
            store for: its DuckDB keeps no latest-snapshot interval table. And the parameter-sensitivity
            drill-down's text read (#4821): its main read runs before the cap, so resolving text there would
            resolve it for every plan its rough filter passes; Lite carries that text inline and has no such
-           second statement. #5794 adds the per-day twin of the table read, which Lite has no store for either. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 4, PgDrillDownCollector.AllSql.Count);
+           second statement. #5794 adds the per-day twin of the table read, which Lite has no store for either.
+           #7448's CollectRcsiInactionFigures runs two reads (blocked-process waits, deadlocks), one more than a
+           method's one. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 5, PgDrillDownCollector.AllSql.Count);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesDailySql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
         Assert.Contains(PgDrillDownCollector.ParameterSensitiveTextSql, PgDrillDownCollector.AllSql);
@@ -508,7 +511,7 @@ public sealed class DarlingAnalysisPipelineTests
             {
                 Assert.Equal(5, anomaly.DefinedAmplifiers);
             }
-            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest);
+            var expectedDecision = FindingRouting.Classify(anomaly, FindingRoute.Digest, 0.3);
             Assert.Equal(expectedDecision.Route, sentAnomaly.Route);
             Assert.NotNull(sentAnomaly.Context.Routing);
             Assert.Equal(expectedDecision.RouteText, sentAnomaly.Context.Routing!.Route);

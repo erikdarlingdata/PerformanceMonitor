@@ -182,6 +182,20 @@ try {
       out.calls = detailReadsOf().length;
       out.pres = s.pres.length; out.fields = s.fields; out.headings = s.headings;
     },
+    /* #7084 part 4: the page keeps no list of attachable metrics. Any non-Analysis row asks once on open, and the findings the
+       reply carries in attached_findings are listed; the reply with none (or a failed read) leaves the list off. */
+    async attachedFindings() {
+      alertsReply = { alerts: [row(1, { metric_name: "Some Future Engine Alert", server_id: 6, detail_text: "It is high.\n  Total CPU: 97%" })], truncated: false };
+      detailsReply = () => ({ status: 200, body: { details: [], attached_findings: [
+        { alert_time: new Date(T0 - 30000).toISOString(), metric_name: "Analysis: wait_profile [aaaa]", routing_reason: "attached to High CPU fired 11:59" },
+      ] } });
+      const main = newMain(); await renderAlerts(main);
+      const d = await open(main);
+      const s = shape(d);
+      out.calls = detailReadsOf().length;
+      out.request = detailReadsOf()[0];
+      out.fields = s.fields;
+    },
     async failedFetch() {
       alertsReply = { alerts: [analysisRow({ server_id: 3 })], truncated: false };
       detailsReply = () => ({ status: 500, body: { error: "read failed" } });

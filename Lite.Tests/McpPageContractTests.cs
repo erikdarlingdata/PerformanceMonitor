@@ -420,6 +420,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var message = root.GetProperty("message").GetString()!;
         Assert.Contains("2 dismissed alerts were excluded", message, StringComparison.Ordinal);
         Assert.Contains("include_dismissed", message, StringComparison.Ordinal);
+        /* #7410: the count as a field at hints.dismissed_excluded_count, the path Darling's twin sends; the window notice shares the hints object. */
+        Assert.Equal(2L, root.GetProperty("hints").GetProperty("dismissed_excluded_count").GetInt64());
 
         /* And with nothing dismissed either, the plain sentence — the count is a measurement, not a hedge. */
         await ExecAsync("DELETE FROM config_alert_log");
@@ -461,7 +463,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 /* #5654: Darling's external-alert source for the row; always null in Lite. */
                 "external_source", "current_value", "threshold_value", "alert_sent",
                 "notification_type", "send_error", "muted", "dismissed", "severity", "severity_source", "route", "routing",
-                "routing_reason", "detail_text",
+                "routing_reason",
+                /* #7084 part 4: the engine alert an analysis finding was attached to; null on every other row. */
+                "attached_to", "detail_text",
                 /* #5642: the newest sample the alert judged and its age at fire time, read from the persisted context. */
                 "newest_sample",
             },
@@ -746,6 +750,14 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
         var tooHigh = Parse(await McpQueryTools.GetTopQueriesByCpu(_dataService, _serverManager, ServerName, 1, 2, min_dop: 16));
         Assert.Equal("empty", tooHigh.GetProperty("status").GetString());
         Assert.Contains("max_dop >= 16", tooHigh.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        /* #7522: Lite keeps no plans, so analyze_query_plan always answers not_collected there. The empty answer
+           must send the reader to a step that works on Lite instead. */
+        var tooHighMessage = tooHigh.GetProperty("message").GetString()!;
+        Assert.DoesNotContain("confirm current parallelism with analyze_query_plan", tooHighMessage, StringComparison.Ordinal);
+        Assert.Contains("analyze_query_store_plan", tooHighMessage, StringComparison.Ordinal);
+        /* The page gives no plan_id, so the message names the read that does. */
+        Assert.Contains("get_query_store_top", tooHighMessage, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -815,6 +827,34 @@ VALUES ($1, $2, $3, $4, $5, 'attention', 'Db', '0', NULL)",
         Assert.StartsWith("Invalid hours_back value '-24'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetCollectionLog(_dataService, _serverManager, ServerName, -24)), StringComparison.Ordinal);
         Assert.StartsWith("Invalid hours_back value '0'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetCurrentWaitsTrend(_dataService, _serverManager, ServerName, 0)), StringComparison.Ordinal);
         Assert.StartsWith("Invalid hours_back value '-1'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetBlockingStats(_dataService, _serverManager, ServerName, -1)), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7502: in a chain of 80, blocked by 81, blocked by 82, only 82 is the head. 81 blocks 80 and stays on the page, with
+    /// its own blocker named.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_InABlockingChain_OnlyTheTopIsTheHeadBlocker()
+    {
+        var t = WholeSecondsNow().AddMinutes(-2);
+        await SeedSnapshotAsync(t, 80, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 81, cpuMs: 10);
+        await SeedSnapshotAsync(t, 81, "Db", "UPDATE Users SET Reputation = 0", blockingSessionId: 82, cpuMs: 10);
+        await SeedSnapshotAsync(t, 82, "Db", "WAITFOR DELAY '00:05'", blockingSessionId: 0, cpuMs: 1);
+        /* A session naming itself has nothing above it: with a victim it is the head, and alone it blocks nobody. */
+        await SeedSnapshotAsync(t, 90, "Db", "UPDATE Votes SET BountyAmount = 1", blockingSessionId: 91, cpuMs: 10);
+        await SeedSnapshotAsync(t, 91, "Db", "UPDATE Badges SET Name = N'x'", blockingSessionId: 91, cpuMs: 10);
+        await SeedSnapshotAsync(t, 92, "Db", "UPDATE Comments SET Score = 1", blockingSessionId: 92, cpuMs: 10);
+
+        var reply = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
+        var rows = reply.GetProperty("queries").EnumerateArray().ToArray();
+
+        Assert.True(Row(rows, 91).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 90).GetProperty("is_head_blocker").ValueKind);
+        Assert.Equal(JsonValueKind.Null, Row(rows, 92).GetProperty("is_head_blocker").ValueKind);
+        Assert.True(Row(rows, 82).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 81).GetProperty("is_head_blocker").ValueKind);
+        Assert.Equal(82, Row(rows, 81).GetProperty("blocking_session_id").GetInt32());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 80).GetProperty("is_head_blocker").ValueKind);
     }
 
     /// <summary>
@@ -1099,6 +1139,30 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7193: a day inside retention that nothing was collected on (the app was closed all day) answers
+    /// <c>unavailable</c>, not <c>empty</c>: nothing was observed, so it is not a true negative. A day that was
+    /// collected stays a returned band, quiet or not.
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_ADayNothingWasCollected_IsUnavailable_NotEmpty()
+    {
+        var today = DateTime.UtcNow.Date;
+        var collectedDay = today.AddDays(-1);
+        var gapDay = today.AddDays(-2);
+
+        await SeedRunAsync(collectedDay.AddHours(12));
+
+        var gap = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, gapDay.ToString("yyyy-MM-dd")));
+        Assert.Equal("unavailable", gap.GetProperty("status").GetString());
+        Assert.Contains("check get_collection_health", gap.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var collected = Parse(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, collectedDay.ToString("yyyy-MM-dd")));
+        Assert.False(collected.TryGetProperty("status", out var status) && status.GetString() is "empty" or "unavailable", collected.ToString());
+        Assert.Equal("collected", collected.GetProperty("data_state").GetString());
+        Assert.Equal("Healthy", collected.GetProperty("health_band").GetString());
+    }
+
     /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock, rounded
     /// up to the month start the whole-file archive cleanup actually keeps: the cutoff's own month is deleted
     /// with its file, so a mid-month cutoff holds nothing until the next month begins.</summary>
@@ -1329,13 +1393,43 @@ VALUES ($1, $2, $3, $4, 'Db', $5, '0xPLANHASH', $6, '0xPLANH', $7, $2, $2, 10, $
 
     /// <summary>One query_snapshots row. <paramref name="waitType"/> is the row's own wait; left null it is the old default, LCK_M_X for a
     /// blocked row and no wait for the rest (#5235 lets a test name any wait, a trailing space included).</summary>
-    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs, string? waitType = null) => ExecAsync(@"
+    private Task SeedSnapshotAsync(DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs, string? waitType = null, string? programName = null) => ExecAsync(@"
 INSERT INTO query_snapshots
     (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id,
-     wait_type, cpu_time_ms, total_elapsed_time_ms)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+     wait_type, cpu_time_ms, total_elapsed_time_ms, program_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         _nextId--, Naive(at), _serverId, ServerName, sessionId, database, text,
-        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, waitType ?? (blockingSessionId > 0 ? "LCK_M_X" : null), cpuMs, cpuMs * 2);
+        blockingSessionId > 0 ? "suspended" : "running", blockingSessionId, waitType ?? (blockingSessionId > 0 ? "LCK_M_X" : null), cpuMs, cpuMs * 2, programName);
+
+    /* #7573 review: a monitor query that heads a blocking chain stays on the default page, as a WAITFOR head does, so the application session stuck
+       behind it can name its blocker. Session 50 (the monitor's) blocks 60 (an application's); 70 is monitor noise that blocks nobody. */
+    [Fact]
+    public async Task AMonitorSessionThatHeadsABlockingChain_StaysOnTheDefaultPage_AndItsVictimNamesIt()
+    {
+        var t = DateTime.UtcNow.AddMinutes(-5);
+        await SeedSnapshotAsync(t, 50, "Db", "SELECT head", blockingSessionId: 0, cpuMs: 10, programName: "PerformanceMonitorLite");
+        await SeedSnapshotAsync(t, 60, "Db", "UPDATE Posts SET Score = 1", blockingSessionId: 50, cpuMs: 500, programName: "Orders.Api");
+        await SeedSnapshotAsync(t, 70, "Db", "SELECT noise", blockingSessionId: 0, cpuMs: 5, programName: "PerformanceMonitorDarling");
+
+        var root = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, limit: 50));
+        var rows = root.GetProperty("queries").EnumerateArray().ToArray();
+        Assert.Equal(new[] { 50, 60 }, rows.Select(r => r.GetProperty("session_id").GetInt32()).OrderBy(s => s).ToArray());
+        Assert.True(Row(rows, 50).GetProperty("is_head_blocker").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, Row(rows, 60).GetProperty("blocker_not_shown").ValueKind);
+    }
+
+    /* #7573 review: an empty answer under a filter says the monitor's statements were left out, as the unfiltered empty answer does. */
+    [Fact]
+    public async Task AnEmptyAnswerUnderAFilter_SaysTheMonitorsStatementsWereLeftOut_WhenTheSwitchIsOff()
+    {
+        await SeedSnapshotAsync(DateTime.UtcNow.AddMinutes(-5), 50, "Db", "SELECT head", blockingSessionId: 0, cpuMs: 10, programName: "PerformanceMonitorLite");
+
+        var filtered = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "NoSuchDb"));
+        Assert.Contains("monitor's own statements are left out", filtered.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var asked = Parse(await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, 1, "NoSuchDb", include_monitor: true));
+        Assert.DoesNotContain("monitor's own statements are left out", asked.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
 
     private Task SeedRunAsync(DateTime at) => ExecAsync(@"
 INSERT INTO collection_log

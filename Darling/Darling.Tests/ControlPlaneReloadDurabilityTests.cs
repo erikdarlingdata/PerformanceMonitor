@@ -61,15 +61,17 @@ public sealed class ControlPlaneReloadDurabilityTests
     public void AnUnreadableComposeTimeout_LeavesTheRolesHorizonAlone()
     {
         var readable = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 120);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 120,
+            webVerifier: ProvisioningTestSecrets.Web);
 
         var unreadable = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, null);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, null,
+            webVerifier: ProvisioningTestSecrets.Web);
 
         /* Positive control FIRST, through the identical regex the negative below uses: a scan that cannot
            see the statements it is asserting the absence of would pass on any input. */
         var grants = s_statementTimeoutGrant.Matches(readable);
-        Assert.Equal(2, grants.Count);
+        Assert.Equal(3, grants.Count);
         Assert.All(grants, m => Assert.Equal("120", m.Groups[1].Value));
 
         Assert.Empty(s_statementTimeoutGrant.Matches(unreadable));
@@ -285,7 +287,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         Assert.True(File.Exists(path), $"source not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(path);
     }
 
     private static int LineOf(string text, int index) => text.Take(index).Count(c => c == '\n') + 1;

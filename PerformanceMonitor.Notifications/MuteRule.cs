@@ -8,9 +8,33 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Notifications;
+
+/// <summary>What a mute rule does to an alert it matches (#7083): <see cref="Mute"/> records the alert as muted and sends nothing,
+/// <see cref="Digest"/> records it as a digest row and sends nothing, so it reaches the daily digest instead of a page. Stored as text.</summary>
+public static class MuteRuleActions
+{
+    public const string Mute = "mute";
+    public const string Digest = "digest";
+
+    /// <summary>The stored word for <paramref name="action"/>: <see cref="Digest"/> when it says so (any case), else <see cref="Mute"/>.
+    /// A value no build knows reads as a mute, the effect every rule had before the action existed.</summary>
+    public static string Normalize(string? action) =>
+        string.Equals(action?.Trim(), Digest, StringComparison.OrdinalIgnoreCase) ? Digest : Mute;
+
+    /// <summary>Whether <paramref name="action"/> is one of the two words a write may carry (blank counts as the default, a mute).</summary>
+    public static bool IsValid(string? action) =>
+        string.IsNullOrWhiteSpace(action)
+        || string.Equals(action.Trim(), Mute, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(action.Trim(), Digest, StringComparison.OrdinalIgnoreCase);
+
+    public const string InvalidActionMessage = "action must be 'mute' or 'digest'.";
+}
 
 public class MuteRule
 {
@@ -24,6 +48,87 @@ public class MuteRule
     /// the start passes, <see cref="MatchesAt"/> declines every alert, so the rule is stored and listed but mutes nothing. Lite's
     /// store does not persist it, so a Lite rule never carries one.</summary>
     public DateTime? StartsAtUtc { get; set; }
+
+    /// <summary>What the rule does to a matching alert (#7083): <c>mute</c> (the default, and every rule stored before this field) or
+    /// <c>digest</c>, which holds the alert back from paging and records it as a digest row. A digest rule is meant for a scheduled
+    /// window (a nightly delete job), so it normally carries a recurring schedule. Darling only; Lite never sets it. See <see cref="MuteRuleActions"/>.</summary>
+    public string Action { get; set; } = MuteRuleActions.Mute;
+
+    /// <summary>Whether the rule sends a matching alert to the digest rather than muting it.</summary>
+    public bool IsDigestAction => string.Equals(Action, MuteRuleActions.Digest, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The days of the week a recurring schedule (#7040) runs on, as a bit mask (bit n = <see cref="DayOfWeek"/> value n,
+    /// Sunday = bit 0), or null for every day. Meaningful only with <see cref="RecurStartTime"/> and <see cref="RecurEndTime"/>.
+    /// Darling only; Lite never sets any of the four recurrence fields, so a Lite rule is never recurring.</summary>
+    public int? RecurDays { get; set; }
+
+    /// <summary>The daily time the recurring window opens, in <see cref="RecurTimeZone"/>, or null for a rule with no schedule.
+    /// Set together with <see cref="RecurEndTime"/>; a window that crosses midnight has the end earlier than the start.</summary>
+    public TimeOnly? RecurStartTime { get; set; }
+
+    /// <summary>The daily time the recurring window closes (exclusive); see <see cref="RecurStartTime"/>.</summary>
+    public TimeOnly? RecurEndTime { get; set; }
+
+    /// <summary>The IANA id of the zone the recurring times are read in. Set whenever the times are.</summary>
+    public string? RecurTimeZone { get; set; }
+
+    /// <summary>Whether the rule carries a recurring schedule.</summary>
+    public bool IsRecurring => RecurStartTime.HasValue;
+
+    /// <summary>Checks the rule's recurrence fields and normalises <see cref="RecurTimeZone"/> to an IANA id (the host's own zone
+    /// when times are given with none). The one check every write path (MCP, web, Viewer) runs; see <see cref="MuteRecurrence.TryNormalize"/>.</summary>
+    public bool TryNormalizeRecurrence(out string? error)
+    {
+        var zone = RecurTimeZone;
+        if (!MuteRecurrence.TryNormalize(RecurDays, RecurStartTime, RecurEndTime, ref zone, out error)) return false;
+        RecurTimeZone = zone;
+        return true;
+    }
+
+    /// <summary>Whether the recurring schedule is inside a window at <paramref name="nowUtc"/>; always true for a rule with none.
+    /// This is the schedule alone: the rule's start, expiry and enabled flag are separate (see <see cref="IsInEffectAt"/>).</summary>
+    public bool IsInWindowAt(DateTime nowUtc) =>
+        MuteRecurrence.IsInWindowAt(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+
+    /// <summary>The UTC start of the next recurring window after <paramref name="nowUtc"/> that falls inside the rule's span, or
+    /// null for a rule with no schedule or no later window. A rule that has not started yet is searched from its
+    /// <see cref="StartsAtUtc"/>: it reports the first window after it begins, or the start itself when a window is already open then.</summary>
+    public DateTime? NextWindowStartUtc(DateTime nowUtc)
+    {
+        DateTime? next;
+        if (StartsAtUtc.HasValue && StartsAtUtc.Value > nowUtc)
+        {
+            /* The rule mutes nothing before it starts. If a window is open at that moment (it opened before the start, or opens exactly then),
+               the rule begins muting at the start; otherwise the first window after the start is the next one. */
+            next = IsRecurring && IsInWindowAt(StartsAtUtc.Value)
+                ? StartsAtUtc.Value
+                : MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, StartsAtUtc.Value);
+        }
+        else
+        {
+            next = MuteRecurrence.NextWindowStartUtc(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone, nowUtc);
+        }
+
+        if (next is null) return null;
+        if (ExpiresAtUtc.HasValue && next.Value >= ExpiresAtUtc.Value) return null;
+        return next;
+    }
+
+    /// <summary>Whether both rules carry the same schedule: the same days, times and zone (the zone compared ignoring case), or neither has one.</summary>
+    public bool HasSameSchedule(MuteRule other) =>
+        RecurDays == other.RecurDays
+        && RecurStartTime == other.RecurStartTime
+        && RecurEndTime == other.RecurEndTime
+        && string.Equals(RecurTimeZone, other.RecurTimeZone, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The schedule as one line (<c>Mon,Tue 22:00-02:00 America/New_York</c>), or null for a rule with none.</summary>
+    public string? ScheduleText => MuteRecurrence.Describe(RecurDays, RecurStartTime, RecurEndTime, RecurTimeZone);
+
+    /// <summary>Whether the rule applies at <paramref name="nowUtc"/>: enabled, past its start, before its expiry, and (for a
+    /// recurring rule) inside a window. The single "is this rule active now" check, so every path that mutes uses the schedule.
+    /// Match fields are separate (see <see cref="MatchesAt"/>).</summary>
+    public bool IsInEffectAt(DateTime nowUtc) =>
+        Enabled && !IsExpiredAt(nowUtc) && !IsUpcomingAt(nowUtc) && IsInWindowAt(nowUtc);
 
     public string? Reason { get; set; }
 
@@ -101,10 +206,15 @@ public class MuteRule
     public MuteRule Clone() => new()
     {
         Id = Id,
+        Action = Action,
         Enabled = Enabled,
         CreatedAtUtc = CreatedAtUtc,
         ExpiresAtUtc = ExpiresAtUtc,
         StartsAtUtc = StartsAtUtc,
+        RecurDays = RecurDays,
+        RecurStartTime = RecurStartTime,
+        RecurEndTime = RecurEndTime,
+        RecurTimeZone = RecurTimeZone,
         Reason = Reason,
         ServerName = ServerName,
         ServerId = ServerId,
@@ -116,6 +226,9 @@ public class MuteRule
         JobNamePattern = JobNamePattern,
         ClientAppPattern = ClientAppPattern
     };
+
+    /// <summary>The Action column (#7122): what the rule does with a matching alert, in the Viewer's own label. (The web list has no Action column: it marks a digest rule with "(to the daily digest)" on its scope cell and shows nothing for a mute rule.)</summary>
+    public string ActionDisplay => IsDigestAction ? "Daily digest" : "Mute";
 
     /// <summary>The Starts column (#6231): "At once" for a rule with no start, the local start time otherwise, marked while it is still ahead.</summary>
     public string StartsDisplay => StartsAtUtc.HasValue
@@ -190,13 +303,84 @@ public class MuteRule
 
     public bool Matches(AlertMuteContext context) => MatchesAt(context, DateTime.UtcNow);
 
+    /// <summary>Whether this is a digest rule (#7083) that applies to <paramref name="context"/> at <paramref name="nowUtc"/>:
+    /// <see cref="MatchesAt"/>'s test, for the rules <see cref="MatchesAt"/> declines because they send to the digest instead of muting.</summary>
+    public bool MatchesDigestAt(AlertMuteContext context, DateTime nowUtc) => IsDigestAction && MatchesDimensions(context, nowUtc);
+
+    /// <summary>The line a held fire's history row carries as its reason: which digest rule held it, and the window it was in.</summary>
+    public string DigestHoldReason()
+    {
+        var name = string.IsNullOrWhiteSpace(Reason) ? Summary : HoldReasonName(Reason);
+        var window = ScheduleText;
+        return window is null
+            ? $"Held for the daily digest by a digest rule ({name})"
+            : $"Held for the daily digest by a digest rule ({name}) inside its window {window}";
+    }
+
+    /// <summary>#7414: how many characters of an operator's rule reason a hold line carries.</summary>
+    public const int HoldReasonOperatorChars = 200;
+
+    /// <summary>#7414: how many characters of an agent-written rule reason a hold line carries. The hold line goes into the daily digest
+    /// notification and the alert history, so an agent's text is kept short and labelled as the agent's.</summary>
+    public const int HoldReasonAgentChars = 100;
+
+    /// <summary>The suffix an agent's write appends to a rule reason: <c>[agent:&lt;id&gt;]</c>, or <c>[agent:&lt;id&gt; request &lt;uuid&gt;]</c> for a claimed write.</summary>
+    private static readonly Regex s_agentSuffix = new(
+        @"(\s*\[agent:[^\]\s]+( request [0-9a-fA-F-]{36})?\])+\s*$", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>The rule reason as a hold line names it: one line (line breaks, control and invisible characters become a space or are dropped, so the
+    /// text cannot start a line of its own in a notification body), cut to a fixed length, and labelled when an agent wrote it.</summary>
+    internal static string HoldReasonName(string reason)
+    {
+        var trimmed = reason.Trim();
+        var agent = s_agentSuffix.IsMatch(trimmed);
+        var text = OneLine(agent ? s_agentSuffix.Replace(trimmed, string.Empty) : trimmed, agent ? HoldReasonAgentChars : HoldReasonOperatorChars);
+        return agent ? "agent-written reason: " + text : text;
+    }
+
+    private static string OneLine(string value, int maxChars)
+    {
+        var builder = new StringBuilder(Math.Min(value.Length, maxChars));
+        var pendingSpace = false;
+        var cut = false;
+        foreach (var rune in value.EnumerateRunes())
+        {
+            var category = Rune.GetUnicodeCategory(rune);
+            if (category == UnicodeCategory.Format)
+                continue;
+            if (Rune.IsControl(rune) || Rune.IsWhiteSpace(rune) || category is UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+
+            var needed = (pendingSpace ? 1 : 0) + rune.Utf16SequenceLength;
+            if (builder.Length + needed > maxChars)
+            {
+                cut = true;
+                break;
+            }
+
+            if (pendingSpace)
+                builder.Append(' ');
+            pendingSpace = false;
+            builder.Append(rune.ToString());
+        }
+
+        return cut ? builder.ToString() + "..." : builder.ToString();
+    }
+
     /// <summary>
     /// <see cref="Matches"/> judged against a caller-supplied instant rather than the ambient clock, so a
     /// caller that already holds one decides the whole question on a single "now". Pure: no clock, no I/O.
     /// </summary>
-    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc)
+    public bool MatchesAt(AlertMuteContext context, DateTime nowUtc) => !IsDigestAction && MatchesDimensions(context, nowUtc);
+
+    /* The rule's own test, whatever its action: in effect now, and every dimension it constrains matches. A digest rule (#7083) is
+       judged by MatchesDigestAt and never by MatchesAt, so the one check that mutes cannot be reached by a rule that does not mute. */
+    private bool MatchesDimensions(AlertMuteContext context, DateTime nowUtc)
     {
-        if (!Enabled || IsExpiredAt(nowUtc) || IsUpcomingAt(nowUtc)) return false;
+        if (!IsInEffectAt(nowUtc)) return false;
 
         /* An id-keyed rule is decided on the id ALONE: the name is only the label the rule lists under, so a
            same-named sibling does not match and a renamed server does not escape. A context with no id never

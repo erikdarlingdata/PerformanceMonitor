@@ -192,7 +192,16 @@ try {
   await settle();
   out.range.thirtyMinutes = { calls: historyCalls().map((c) => c.q), shown: all(main, "div").filter((d) => d.className === "muted").map((d) => d.textContent) };
   historyBody = JSON.stringify(run);
-  out.range.items = pickerItems(main, "Window").filter((i) => i.disabled).map((i) => i.name);
+  /* Which periods the popup greys out depends on the date: Month to Date is a real, reachable range for the first 7 days of a month
+     (and Year to Date for the first 7 days of January), so on the real clock the list changed with the day the suite ran (#7055).
+     The clock is pinned to mid-June so the list is the same on every day. */
+  const realNow = Date.now;
+  Date.now = () => Date.UTC(2026, 5, 15, 12, 0, 0);
+  try {
+    out.range.items = pickerItems(main, "Window").filter((i) => i.disabled).map((i) => i.name);
+  } finally {
+    Date.now = realNow;
+  }
   out.range.shape = popupShape(main, "Window");
   pickRange(main, "Window", "1d");
   await settle();

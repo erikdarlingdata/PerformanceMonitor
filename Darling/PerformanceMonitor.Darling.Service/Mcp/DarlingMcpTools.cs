@@ -351,6 +351,18 @@ public sealed class DarlingMcpTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
+               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
+            {
+                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                return await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+            }
+
             if (facts.Count == 0)
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
@@ -362,7 +374,9 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
-                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    DarlingMcpWindowNotice.AttachToHints(
+                        collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true)));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -379,7 +393,9 @@ public sealed class DarlingMcpTools
                     $"{facts.Count} point-in-time fact(s) — configuration and current state — could still be read; audit_config reports those. " +
                     "Check get_collection_health to see when each collector last succeeded." +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
-                    collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
+                    DarlingMcpWindowNotice.AttachToHints(
+                        collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true)));
             }
 
             var filtered = facts.AsEnumerable();
@@ -425,7 +441,8 @@ public sealed class DarlingMcpTools
                 }, f, McpHelpers.JsonOptions), f.Ranked, McpHelpers.JsonOptions))
                 .ToList();
 
-            return JsonSerializer.Serialize(collection.Attach(new
+            var dataNotice = await NoticeAsync(emptyAnswer: false);
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -443,7 +460,7 @@ public sealed class DarlingMcpTools
                     collectionCaveat),
                 coverage = coverage.ToPayload(),
                 facts = result
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions), dataNotice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -451,7 +468,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "compare_analysis"), Description("Compares two windows: comparison (hours_back long, ends at as_of/now) vs an earlier same-length baseline, baseline_hours_back back (>= 2 x hours_back, else refused). Verdicts band worse/better/stable: sigma where a per-server baseline exists, else ladder position; band_source/band_rules say which. Grouped by physical cause; BAD_ACTOR_<hash> is plan_cache_churn, never new/resolved. N=1 vs N=1: never proves causation. unavailable = BOTH windows had zero facts, not \"unchanged\". coverage_caveat flags a partly-collected side. For 30-day anomaly baselines use analyze_server. <<GUIDE>> Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons. baseline_hours_back also fixes the baseline period's length: it is always the same duration as the comparison period.")]
+    [McpServerTool(Name = "compare_analysis"), Description("Compares two windows: comparison (hours_back long, ends at as_of/now) vs an earlier baseline, baseline_hours_back back (>= 2 x hours_back, else refused). Verdicts band worse/better/stable: sigma where a per-server baseline exists, else ladder position; band_source/band_rules say which. Grouped by cause; BAD_ACTOR_<hash> is plan_cache_churn, never new/resolved. N=1 vs N=1: never proves causation. unavailable = BOTH windows had zero facts. coverage_caveat flags a partly-collected side. Unobserved side: comparable=false, rows not_compared. For 30-day baselines use analyze_server. <<GUIDE>> Compares two time periods by running the inference engine's fact collection and scoring on each, then showing what changed. Use this to compare peak vs off-peak, yesterday vs today, or the windows around a change. Returns facts from both periods side-by-side, each banded worse / better / stable by how far the VALUE moved on the server's own scale, not by the severity formula's slope: a key with a stored per-server baseline (SQL Server: CPU %, read latency, connections; PostgreSQL: transactions/sec, session count, deadlocks/hour, CPU as % of capacity, read latency, replay lag bytes, WAL bytes/sec) is banded in that baseline's robust sigma for the comparison hour (delta_sigma, band_source \"baseline\"); every other key changes status only when the value moved at least a quarter of the larger side AND registers at least a quarter of the way up its own severity ladder (band_source \"absolute\"); the rules are stated in band_rules. Rows are grouped into physical-cause families (one I/O stall is one family row, not four worse keys), and BAD_ACTOR_<hash> appearances are reported as plan_cache_churn rather than as new or resolved issues. What \"worse\" does NOT mean: this is one window against one window — same-hour-yesterday at N=1 vs N=1 cannot show that a change CAUSED anything (DB time on an unchanged server routinely varies severalfold day to day), and a partly collected side flags every verdict with coverage_caveat. A side the collector never observed (coverage unobserved: true) is not compared at all: the reply has comparable false and a caveat that names the window, every row keeps its values with status not_compared, summary and families count worse, better, new_issues and resolved_issues as 0 and add not_compared, and plan_cache_churn is empty. Point-in-time facts such as a setting's current value stay visible and are still true. Note: for routine anomaly detection, use analyze_server instead — it automatically compares against 30-day time-bucketed baselines (hour-of-day x day-of-week). This tool is for explicit window-to-window comparisons. baseline_hours_back also fixes the baseline period's length: it is always the same duration as the comparison period.")]
     public static async Task<string> CompareAnalysis(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -508,6 +525,11 @@ public sealed class DarlingMcpTools
             */
             var baselinePartial = baselineCoverage is not null && (baselineCoverage.IsPartial || !baselineCoverage.IsObserved);
             var comparisonPartial = comparisonCoverage is not null && (comparisonCoverage.IsPartial || !comparisonCoverage.IsObserved);
+            /* #7458: a side the collector never observed is not a partly collected side. There is nothing on
+               it to compare against, so no row gets a direction (ComparisonBanding.Compare, notCompared). */
+            var baselineUnobserved = baselineCoverage is { IsObserved: false };
+            var comparisonUnobserved = comparisonCoverage is { IsObserved: false };
+            var notCompared = baselineUnobserved || comparisonUnobserved;
 
             /*
                 Every verdict — sigma-banded where a per-server baseline exists, ladder-banded where it
@@ -517,7 +539,8 @@ public sealed class DarlingMcpTools
             */
             var comparison = ComparisonBanding.Compare(
                 baselineServerFacts, comparisonServerFacts, dispersion,
-                coverageCaveat: baselinePartial || comparisonPartial);
+                coverageCaveat: baselinePartial || comparisonPartial,
+                notCompared: notCompared);
 
             if (comparison.IsEmpty)
             {
@@ -569,19 +592,30 @@ public sealed class DarlingMcpTools
                 collection log without saying what they will find there. Both sides can earn one.
             */
             var emptyCaveat =
-                baselineServerFacts.Count == 0
+                notCompared
+                    ? null
+                    : baselineServerFacts.Count == 0
                     ? "The BASELINE window produced no facts at all, so every fact below counts as a new issue only because there was nothing to compare it against. Confirm collection covered the baseline window (get_collection_log) before reading new_issues as a regression."
                     : comparisonServerFacts.Count == 0
                         ? "The COMPARISON window produced no facts at all, so every fact below counts as a resolved issue only because there is nothing in the recent window to compare against. Confirm collection is running (get_collection_log) before reading resolved_issues as an improvement."
                         : null;
 
-            var coverageCaveats = new List<string>(2);
-            if (baselinePartial)
+            var coverageCaveats = new List<string>(4);
+            /* #7458: the unobserved sentence leads, says the window was not collected at all and names it, and
+               says what the reply does about it. "Only partly collected" is for the partial case alone. */
+            if (baselineUnobserved)
+                coverageCaveats.Add($"The BASELINE window ({baselineStart:o} to {baselineEnd:o}) was not collected at all: {baselineCoverage!.Describe()}.");
+            if (comparisonUnobserved)
+                coverageCaveats.Add($"The COMPARISON window ({comparisonStart:o} to {comparisonEnd:o}) was not collected at all: {comparisonCoverage!.Describe()}.");
+            if (notCompared)
+                coverageCaveats.Add("Nothing is compared: there is no data on that side to compare against. Every row keeps its values with status not_compared, and worse, better, new_issues and resolved_issues count 0. A point-in-time fact (a setting's current value) is still true on its own.");
+            var partlyCollectedFromHere = coverageCaveats.Count;
+            if (baselinePartial && !baselineUnobserved)
                 coverageCaveats.Add($"The BASELINE window was only partly collected: {baselineCoverage!.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
-            if (comparisonPartial)
+            if (comparisonPartial && !comparisonUnobserved)
                 coverageCaveats.Add($"The COMPARISON window was only partly collected: {comparisonCoverage!.Describe()}. Its rates are per observed time, and its windowed facts are absent where nothing was observed.");
-            if (coverageCaveats.Count > 0)
-                coverageCaveats.Add("A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/resolved_issues as change.");
+            if (coverageCaveats.Count > partlyCollectedFromHere)
+                coverageCaveats.Add("A side that was not fully observed cannot be read as the whole period: a wait that is absent because the collector was down is not a wait that resolved. Confirm coverage (get_collection_log, get_collection_health) before reading worse/better/new_issues/resolved_issues as change.");
 
             var caveat = emptyCaveat is null && coverageCaveats.Count == 0
                 ? null
@@ -597,6 +631,8 @@ public sealed class DarlingMcpTools
                 /* Null when both windows produced facts at full coverage — the ordinary case, where
                    nothing needs saying. */
                 caveat,
+                /* #7458: false when a side was never collected; every row is then not_compared. */
+                comparable = !notCompared,
                 /* #3538 A3: what a verdict can and cannot carry, stated on every payload because the tool's
                    description is not in front of the reader when the numbers are. */
                 reading = "Each row is banded by how far its VALUE moved on this server's own scale (band_source says which rule; band_rules states them), not by the severity formula's slope. One window against one window cannot show that a change caused anything: a same-hour-yesterday comparison at N=1 vs N=1 is a difference, not an experiment. Count families, not rows, to count causes.",
@@ -624,7 +660,7 @@ public sealed class DarlingMcpTools
                 facts_returned = factCount,
                 facts_total = factRows.Count,
                 size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end (the lowest-ranked: stable rows come last) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
                     : null,
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
@@ -635,7 +671,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns current values, recommended values, and reasoning. Edition is reported for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). Darling also audits PostgreSQL targets. <<GUIDE>> Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. A row with status ok only states the setting and its value, and advice appears on the rows that fired plus the context settings (checkpoint_timeout, wal_compression, work_mem). get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -720,30 +756,30 @@ public sealed class DarlingMcpTools
                         var notApplicable = fact.Metadata.GetValueOrDefault("not_applicable") > 0
                             || (isAurora && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout);
 
+                        var settingName = PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key;
+                        var currentValue = FormatConfigPgValue(fact);
+
                         return new PgConfigRecommendation(
-                            Setting: PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key,
+                            Setting: settingName,
                             FactKey: fact.Key,
-                            CurrentValue: FormatConfigPgValue(fact),
+                            CurrentValue: currentValue,
                             Status: notApplicable ? "not_applicable"
                                 : fact.Severity >= 0.5 ? "warning"
                                 : fact.Severity > 0 ? "review"
                                 : "ok",
-                            /* Headline + remediation. max_wal_size needs no special case: lane 15 composed the
-                               not-applicable sentence INTO its advice block, so the same two fields carry it.
-                               checkpoint_timeout's block is the base-0 context one ("tune it with
-                               max_wal_size"), which has no Aurora arm — so the sentence is appended here, where
-                               the headline still states the value the parameter group holds and the rider says
-                               who actually decides it. The discriminator is the KEY, not the stamp: #3868
-                               stamped the fact, so "unstamped" would have silently stopped appending the one
-                               sentence rider 1 exists to guarantee. A key with no composed block (none today;
-                               a future key added without an advice arm) says so rather than rendering an empty
-                               sentence. */
-                            Recommendation: advice is null
-                                ? $"No composed advice for {fact.Key} in this build — get_analysis_facts carries the fact and its metadata."
-                                : advice.Headline + " " + advice.Remediation
-                                    + (notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout
-                                        ? " Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead."
-                                        : string.Empty),
+                            /* #7447: a row at severity 0 states the setting and its value in plain words, because most
+                               advice blocks are written for the fired case and would say something false beside a healthy
+                               value. The three context-by-design blocks, the not_applicable rows and every fired row keep
+                               their advice, joined with a full stop. max_wal_size needs no special case: lane 15 composed
+                               the not-applicable sentence INTO its advice block. checkpoint_timeout's block is the base-0
+                               context one ("tune it with max_wal_size"), which has no Aurora arm, so the sentence is
+                               appended here, where the headline still states the value the parameter group holds and the
+                               rider says who actually decides it. The discriminator is the KEY, not the stamp: #3868
+                               stamped the fact, so "unstamped" would have silently stopped appending the one sentence
+                               rider 1 exists to guarantee. */
+                            Recommendation: PgConfigAuditText.Compose(
+                                fact, settingName, currentValue, advice, notApplicable,
+                                isAuroraCheckpointTimeout: notApplicable && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout),
                             /* The fact's own lineage stamp, passed through: 0 = the bar was chosen, not
                                measured; 1 = measured against the dogfood PostgreSQL fleet. ABSENT (null) is
                                the config family's normal case and means neither — the bar IS PostgreSQL's own
@@ -858,10 +894,7 @@ public sealed class DarlingMcpTools
                 if (maxdop == 0)
                 {
                     recommendations.Add(new("max degree of parallelism", maxdop, recommended, "warning",
-                        $"MAXDOP is 0 (unlimited). This lets one query fan out across all schedulers, " +
-                        $"leading to CXPACKET waits and thread exhaustion under load. Microsoft's guidance is " +
-                        $"topology-based: keep MAXDOP at or under the logical processors in a single NUMA node, capped at 8. " +
-                        $"Start with {recommended} ({(maxdopBasis.FromVcores ? "this database's vCores" : "this server's cores-per-socket")}, capped at 8) and adjust to the workload."));
+                        ConfigAuditGuidance.MaxdopUnlimitedMessage(recommended, maxdopBasis)));
                 }
                 else if (maxdop == 1 && recommended > 1)
                 {
@@ -872,9 +905,7 @@ public sealed class DarlingMcpTools
                 else if (maxdop > recommended)
                 {
                     recommendations.Add(new("max degree of parallelism", maxdop, recommended, "review",
-                        $"MAXDOP {maxdop} is above the topology-based guidance of {recommended} " +
-                        $"(logical processors in a single NUMA node, capped at 8). Review whether queries here genuinely " +
-                        $"benefit from the higher degree, or lower it to {recommended}."));
+                        ConfigAuditGuidance.MaxdopAboveMessage(maxdop, recommended, maxdopBasis)));
                 }
                 else
                 {
@@ -888,54 +919,10 @@ public sealed class DarlingMcpTools
             {
                 var maxMemory = (int)maxMemFact.Value;
 
-                if (maxMemory == 2147483647) // Default — unlimited
-                {
-                    if (totalMemoryMb > 0)
-                    {
-                        var osReserve = Math.Max(4096, totalMemoryMb * 0.10);
-                        var suggested = (int)(totalMemoryMb - osReserve);
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "warning",
-                            $"Max server memory is at the default (unlimited). SQL Server will consume all available RAM, " +
-                            $"starving the OS and other processes. With {totalMemoryMb:N0} MB physical RAM, set max server memory to " +
-                            $"~{suggested:N0} MB (leaving {osReserve:N0} MB for the OS)."));
-                    }
-                    else
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "warning",
-                            "Max server memory is at the default (unlimited). SQL Server will consume all available RAM. " +
-                            "Set this to total physical memory minus 4 GB (or 10%, whichever is larger) to leave room for the OS."));
-                    }
-                }
-                else if (totalMemoryMb > 0)
-                {
-                    var ratio = maxMemory / totalMemoryMb;
-                    var osReserve = Math.Max(4096, totalMemoryMb * 0.10);
-                    var suggested = (int)(totalMemoryMb - osReserve);
-
-                    if (ratio > 0.95)
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "review",
-                            $"Max server memory ({maxMemory:N0} MB) is {ratio:P0} of physical RAM ({totalMemoryMb:N0} MB). " +
-                            $"Consider reducing to ~{suggested:N0} MB to leave room for the OS."));
-                    }
-                    else if (ratio < 0.50 && totalMemoryMb > 8192)
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, suggested, "review",
-                            $"Max server memory ({maxMemory:N0} MB) is only {ratio:P0} of physical RAM ({totalMemoryMb:N0} MB). " +
-                            $"SQL Server may be under-utilizing available memory. Consider raising to ~{suggested:N0} MB unless other " +
-                            "applications need the remaining RAM."));
-                    }
-                    else
-                    {
-                        recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "ok",
-                            $"Max server memory ({maxMemory:N0} MB) looks reasonable for {totalMemoryMb:N0} MB physical RAM."));
-                    }
-                }
-                else
-                {
-                    recommendations.Add(new("max server memory (MB)", maxMemory, maxMemory, "ok",
-                        $"Max server memory is set to {maxMemory:N0} MB."));
-                }
+                /* #7400: one shared reserve (never more than half of RAM), so a server under 4 GB no longer gets a negative
+                   suggestion, and the text states the reserve it used. */
+                var memAudit = ConfigAuditGuidance.AuditMaxMemory(maxMemory, totalMemoryMb);
+                recommendations.Add(new("max server memory (MB)", maxMemory, memAudit.Suggested, memAudit.Status, memAudit.Message));
             }
 
             // Max worker threads audit
@@ -1191,12 +1178,22 @@ public sealed class DarlingMcpTools
                (their per-database findings are the primary's). Null when none; the same sentence on every surface. */
             var secondaryReplicaNote = await PgSecondaryReplicaScope.NoteAsync(postgres, resolved.ServerId, null, cancellationToken, anchor);
 
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored finding: a quiet analysis
+               pass stores nothing, so a findings floor would call a quiet week truncated. Same floor as get_analysis_facts. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+            var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                noticeStart, windowEnd, coverageTable, emptyAnswer: findings.Count == 0, cancellationToken: cancellationToken);
+
             if (findings.Count == 0)
             {
-                return McpHelpers.Status(
+                return await DarlingMcpWindowNotice.FinishEmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status(
                     "empty",
                     "No findings in the requested time range. Run analyze_server to generate new findings."
-                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote));
+                    + (secondaryReplicaNote is null ? "" : " " + secondaryReplicaNote),
+                    notice.AsHints()), notice, cancellationToken);
             }
 
             /* #2000: collapse to one entry per (story_path_hash, incident_id). Measured 27.9x
@@ -1236,9 +1233,13 @@ public sealed class DarlingMcpTools
             var (forcePlanStates, forcePlanStateNote) =
                 await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger, cancellationToken: cancellationToken);
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
+                /* #7010: the window-floor keys. This payload's own truncation_note is the read-cap sentence below, so the floor's sentence is
+                   appended to it (Lite's twin does the same) and the two stay one key. */
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
                 // finding_count is what's IN THIS RESPONSE (limit may have cut it); total_finding_count is
                 // how many distinct chains the window held before that cut — see findings_truncated.
                 finding_count = groups.Count,
@@ -1250,9 +1251,9 @@ public sealed class DarlingMcpTools
                 // letting first_seen quietly lie. truncated is the #3594 flag (observed above); the note
                 // says what was cut and what to do about it.
                 truncated,
-                truncation_note = truncated
+                truncation_note = DarlingMcpWindowNotice.JoinNotes(truncated
                     ? $"TRUNCATED: the window held more than the {FindingOccurrences.WindowCoveringLimit}-row read cap; the oldest occurrences in the window were dropped, so total_occurrences, occurrences and first_seen may under-report. Use a smaller hours_back for exact stats."
-                    : null,
+                    : null, notice.TruncationNote),
                 // #4198: a DIFFERENT cut from truncated above — this is the group PAGE (limit), not the raw
                 // store read. Independent flag because the two say different things: truncated warns
                 // occurrence stats may under-report, findings_truncated warns other chains exist but are not
@@ -1298,6 +1299,7 @@ public sealed class DarlingMcpTools
                         confidence_basis = full_text ? confidenceBasis : McpHelpers.Truncate(confidenceBasis, FindingTextPreviewLength),
                         confidence_basis_truncated = !full_text && confidenceBasis.Length > FindingTextPreviewLength,
                         category = f.Category,
+                        category_name = FindingCategoryNames.DisplayName(f.Category),
                         root_fact = new { key = f.RootFactKey, value = f.RootFactValue },
                         leaf_fact = f.LeafFactKey != null
                             ? new { key = f.LeafFactKey, value = f.LeafFactValue }
@@ -1353,10 +1355,13 @@ public sealed class DarlingMcpTools
                         // #2138: the machine-first projection — see analyze_server's twin field.
                         structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote),
                         // A standing config fix (database/RCSI/autogrowth/server config), not an incident: the viewer's rule.
-                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation)
+                        is_config_fix = FactRemediation.IsConfigFix(f.Remediation),
+                        // #7416: the root is a standing state (a setting, a volume's free space), true at every hour
+                        // whatever is running, so no running query explains the card and the Queries link is not offered.
+                        standing_state = FactKinds.IsStandingStateKey(f.RootFactKey)
                     };
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1535,7 +1540,7 @@ public sealed class DarlingMcpTools
                 {
                     status = "error",
                     message = removed == 0
-                        ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run provision-roles.sql, or restart a managed store so its roles are re-provisioned."
+                        ? "The unmute could not be written to the monitoring store (see the service log); the mute is still in force. If the log says permission denied, the mcp role lacks DELETE on config.analysis_muted: re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + ", or restart a managed store so its roles are re-provisioned."
                         : $"The unmute removed {removed} mute row(s) and then failed on {write.Failed} more (see the service log); the rest of the mute is still in force. Call again to retry.",
                     story_path_hash,
                     server = scope.Label,
@@ -1855,7 +1860,7 @@ internal static class ToolRecommendations
         ["PLAN_REGRESSION"] =
         [
             new("analyze_query_store_plan", "Compare the regressed plan against the prior plan to see what the optimizer changed"),
-            new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse"),
+            new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse. Where plan_count is above 1 at a point, query_plan_hash is null there: use get_query_store_top to see the plans apart"),
             new("get_query_store_top", "Pull the full Query Store entry including plan_id and forced-plan history before considering a force")
         ],
         // #4149: LATCH_EX/LATCH_SH are non-buffer latches; the class from get_latch_stats decides the
@@ -1953,6 +1958,154 @@ internal static class ToolRecommendations
             new("get_top_queries_by_cpu", "Find which queries account for the new batch volume"),
             new("get_active_queries", "See what's actually running at the elevated rate")
         ],
+        /* #7449: every root key whose advice the engine composes now has a next_tools row. Before, these arrived
+           with "next_tools":[] and the card named a tab or a read the agent could not reach from the reply. */
+        ["MEMORY_PRESSURE_EVENTS"] =
+        [
+            new("get_memory_pressure_events", "Pull the RING_BUFFER_RESOURCE_MONITOR notifications behind the finding: event times and the process and system indicators"),
+            new("get_memory_stats", "Compare target and total server memory and available physical memory around the event times"),
+            new("get_memory_clerks", "Find which clerks are holding the memory SQL Server is being asked to give back")
+        ],
+        ["MEMORY_CLERKS"] =
+        [
+            new("get_memory_clerks", "See the clerk sizes the finding is built from"),
+            new("get_memory_trend", "Track memory growth over time"),
+            new("get_memory_stats", "Check target vs total server memory")
+        ],
+        ["BLOCKING_CHAIN"] =
+        [
+            new("get_blocking", "Get the blocking chains with lead blocker, victims and query text"),
+            new("get_blocking_trend", "Track blocking frequency over time"),
+            new("get_lock_wait_trend", "Track lock wait time over the window")
+        ],
+        ["LCK_RANGE"] =
+        [
+            new("get_blocking", "Get the blocking reports that carry the range locks"),
+            new("get_object_locking", "See which objects the range locks sit on"),
+            new("get_lock_wait_trend", "Track range-lock wait time over the window")
+        ],
+        ["THREADPOOL_BLOCKING"] =
+        [
+            new("get_blocking", "Find the lead blocker holding worker threads"),
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_blocking_trend", "Track blocking frequency over time")
+        ],
+        ["THREADPOOL_PARALLEL"] =
+        [
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("audit_config", "Check CTFP and MAXDOP settings"),
+            new("get_wait_trend", "Track the THREADPOOL wait over time", new() { ["wait_type"] = "THREADPOOL" })
+        ],
+        ["THREADPOOL_MIXED"] =
+        [
+            new("get_waiting_tasks", "See what is waiting for a worker thread"),
+            new("get_top_queries_by_cpu", "Find parallel queries consuming worker threads", new() { ["parallel_only"] = "true" }),
+            new("get_blocking", "Check whether blocking is holding worker threads")
+        ],
+        ["RESOURCE_SEMAPHORE_QUERY_COMPILE"] =
+        [
+            new("get_memory_grants", "Check active and pending memory grants"),
+            new("get_resource_semaphore", "See the compile-gateway and grant semaphore state"),
+            new("get_wait_trend", "Track the compile wait over time", new() { ["wait_type"] = "RESOURCE_SEMAPHORE_QUERY_COMPILE" })
+        ],
+        ["RUNNABLE_TASKS"] =
+        [
+            new("get_cpu_scheduler_pressure", "See runnable-queue depth per scheduler"),
+            new("get_cpu_utilization", "See CPU trend over time"),
+            new("get_top_queries_by_cpu", "Find the queries consuming the CPU")
+        ],
+        ["PAGELATCH_EX"] =
+        [
+            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
+            new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
+        ],
+        ["PAGELATCH_UP"] =
+        [
+            new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
+            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
+        ],
+        ["MISSING_INDEX"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries the missing index would help"),
+            new("get_index_usage", "Check how the existing indexes on the table are used before adding another"),
+            new("get_table_index_sizes", "See the table and index sizes the new index would join")
+        ],
+        ["PLAN_WARNING"] =
+        [
+            new("get_top_queries_by_cpu", "Find the queries whose cached plans carry the warnings"),
+            new("analyze_plan_xml", "Pass the plan XML of a query that carries these warnings to see them statement by statement: spills, implicit conversions, missing statistics")
+        ],
+        ["PLAN_CACHE_BLOAT"] =
+        [
+            new("get_plan_cache_bloat", "See single-use plan counts and size by database"),
+            new("get_memory_clerks", "See how much memory the plan cache clerks hold"),
+            new("audit_config", "Check the optimize for ad hoc workloads setting")
+        ],
+        ["CONFIG_MAXDOP"] =
+        [
+            new("audit_config", "Grade MAXDOP against the core count"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_CTFP"] =
+        [
+            new("audit_config", "Grade cost threshold for parallelism"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_MAX_MEMORY_MB"] =
+        [
+            new("audit_config", "Grade max server memory against physical RAM"),
+            new("get_memory_stats", "Check target vs total server memory and available physical memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_MIN_MAX_MEMORY_NARROW"] =
+        [
+            new("audit_config", "Grade min and max server memory"),
+            new("get_memory_stats", "Check target vs total server memory"),
+            new("get_server_config", "See the configured and in-use values")
+        ],
+        ["CONFIG_LIGHTWEIGHT_POOLING"] =
+        [
+            new("audit_config", "Check the lightweight pooling setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_PRIORITY_BOOST"] =
+        [
+            new("audit_config", "Check the priority boost setting"),
+            new("get_server_config", "See the configured and in-use values"),
+            new("get_server_config_changes", "See when the setting last changed")
+        ],
+        ["CONFIG_IFI_DISABLED"] =
+        [
+            new("audit_config", "Check instant file initialization and the service account"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["CONFIG_LPIM_DISABLED"] =
+        [
+            new("audit_config", "Check lock pages in memory and the service account"),
+            new("get_memory_stats", "Check whether the OS is taking memory back from SQL Server"),
+            new("get_server_properties", "See the instance properties the finding reads")
+        ],
+        ["SERVER_MEMORY_DUMPS"] =
+        [
+            new("get_health_parser_severe_errors", "Look for severe errors logged near the dump times"),
+            new("get_default_trace_events", "Look for events recorded around the dump times")
+        ],
+        ["ANOMALY_OBJECT_GROWTH"] =
+        [
+            new("get_table_index_sizes", "See per-table and per-index sizes and which grew"),
+            new("get_database_sizes", "See per-file sizes and autogrowth settings")
+        ],
+        ["ANOMALY_OBJECT_CONTENTION"] =
+        [
+            new("get_object_locking", "See which objects the contention sits on"),
+            new("get_lock_wait_trend", "Track lock wait time over the window"),
+            new("get_blocking", "Check whether the contention shows up as blocking")
+        ],
         ["BAD_ACTOR"] =
         [
             new("get_top_queries_by_cpu", "See full query stats for this query"),
@@ -1994,6 +2147,12 @@ internal static class ToolRecommendations
                 // Handle dynamic keys by checking prefix
                 else if (key.StartsWith("BAD_ACTOR_", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("BAD_ACTOR", out recommendations);
+                /* #7449: the range-lock waits (LCK_M_RS_*, LCK_M_RIn_*, LCK_M_RX_*) are each their own fact key
+                   (FactCollectorHelpers keeps them out of the grouped LCK), and none is named LCK_RANGE. FactAdvice
+                   routes the same prefix to one card; this routes it to that card's reads. No other key starts with
+                   LCK_M_R. */
+                else if (key.StartsWith("LCK_M_R", StringComparison.Ordinal))
+                    ByFactKey.TryGetValue("LCK_RANGE", out recommendations);
                 else if (key.StartsWith("ANOMALY_CPU", StringComparison.OrdinalIgnoreCase))
                     ByFactKey.TryGetValue("ANOMALY_CPU", out recommendations);
                 else if (key.StartsWith("ANOMALY_WAIT_", StringComparison.OrdinalIgnoreCase))

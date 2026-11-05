@@ -57,7 +57,7 @@ public sealed class ServerTagViewerRoleLiveTests
             .Split('\n')
             .Select(line => line.Trim())
             .Where(line => line.StartsWith("GRANT ", StringComparison.Ordinal)
-                && line.EndsWith(" TO " + "viewer" + ";", StringComparison.Ordinal)
+                && line.EndsWith(" TO " + "web" + ";", StringComparison.Ordinal)
                 && (line.Contains("config.server_tags ", StringComparison.Ordinal)
                     || line.Contains("config.server_tag_map ", StringComparison.Ordinal)
                     || line.Contains("config.config_service ", StringComparison.Ordinal)))
@@ -66,7 +66,7 @@ public sealed class ServerTagViewerRoleLiveTests
            config_bump_version() as the writing role (SECURITY INVOKER), which UPDATEs config_service.config_version. */
         Assert.Equal(3, tagGrants.Count);
         tagGrants = tagGrants
-            .Select(line => line[..^(" TO " + "viewer" + ";").Length] + " TO " + RoleName + ";")
+            .Select(line => line[..^(" TO " + "web" + ";").Length] + " TO " + RoleName + ";")
             .ToList();
 
         await ExecAsync(owner, $"CREATE ROLE {RoleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
@@ -122,7 +122,7 @@ public sealed class ServerTagViewerRoleLiveTests
             await PgMigrations.MigrateAsync(connection, null, ct);
         }
 
-        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName);
+        var viewerStatements = ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "web");
 
         /* The viewer's table-wide config SELECT and its column carve must both be in what we replay. */
         Assert.Contains(viewerStatements, x => x.Contains("SELECT ON ALL TABLES IN SCHEMA config", StringComparison.Ordinal));

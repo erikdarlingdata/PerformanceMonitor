@@ -105,6 +105,13 @@ public sealed class ViewerAlertRow
             MultiServerTime.EffectiveMode(ViewerTimeHelper.CurrentDisplayMode, MixedServers), Clock ?? ViewerTimeHelper.ActiveServerClock),
         "yyyy-MM-dd HH:mm:ss");
 
+    /// <summary>A stored naive-UTC instant of another row on this row's server, in the same display zone as <see cref="TimeLocal"/>
+    /// (#7084 part 4: the attached findings of an engine alert read on the alert's own clock).</summary>
+    public string FormatSameZone(DateTime storedUtc) => ViewerTimeHelper.FormatForDisplay(
+        storedUtc, ViewerTimeHelper.DisplayZoneFor(
+            MultiServerTime.EffectiveMode(ViewerTimeHelper.CurrentDisplayMode, MixedServers), Clock ?? ViewerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
+
     /// <summary>True when the list this row sits in holds rows of several servers (#6137), set by
     /// <see cref="ViewerDataService.GetAlertHistoryWindowAsync"/>. Server time cannot apply across servers, so the row then
     /// reads in the viewer's local time like every other row of the list (<see cref="MultiServerTime"/>).</summary>
@@ -136,6 +143,25 @@ public sealed class ViewerAlertRow
     public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
 
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
+
+    /* #7124: why the alert was held for the digest or paged, the status text's tooltip (the web's alerts.js does the same).
+       The tooltip binding is read when the grid realizes the row, not on hover, so the parse is cached: a row parses its
+       context at most once, however often scrolling realizes it again. */
+    private bool _routingReasonRead;
+    private string? _routingReason;
+
+    public string? RoutingReason
+    {
+        get
+        {
+            if (!_routingReasonRead)
+            {
+                _routingReason = AlertDetailText.RoutingReasonFromJson(ContextJson);
+                _routingReasonRead = true;
+            }
+            return _routingReason;
+        }
+    }
 
     /* #5642: how old the newest sample was when the alert FIRED, the Newest Sample column. Read off the persisted context
        (the carrier the engine stamped), never measured against the clock now; empty on a row without one, as Lite's row. */
@@ -328,6 +354,38 @@ AND    dismissed = FALSE";
         return rows;
     }
 
+    /// <summary>
+    /// The findings attached to an engine alert, one display line each, oldest first (#7084 part 4): read when the alert's detail
+    /// opens, by the alert's own identity (server, metric, time). Empty for a metric no finding attaches to, with no read.
+    /// A line is the finding's time on the alert's clock, then its metric name (its story).
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetAttachedFindingsAsync(ViewerAlertRow alert, CancellationToken cancellationToken = default)
+    {
+        var lines = new List<string>();
+        if (!OpenEngineAlerts.IsAttachable(alert.MetricName))
+        {
+            return lines;
+        }
+
+        var alertUtc = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Utc);
+        await using var command = _dataSource.CreateCommand(OpenEngineAlerts.AttachedFindingsSql("config_alert_log"));
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = alert.ServerId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(OpenEngineAlerts.AttachedUntil(alertUtc), DateTimeKind.Unspecified) });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (OpenEngineAlerts.Names(
+                    AlertContextSerializer.TryReadAttachedTo(reader.IsDBNull(2) ? null : reader.GetString(2)), alert.MetricName, alertUtc))
+            {
+                lines.Add(alert.FormatSameZone(reader.GetDateTime(0)) + "  " + reader.GetString(1));
+            }
+        }
+
+        return lines;
+    }
+
     /// <summary>Marks every row of a list that holds several servers (#6137), so each reads on the one clock the header names.</summary>
     internal static void StampMixedServers(List<ViewerAlertRow> rows)
     {
@@ -339,7 +397,7 @@ AND    dismissed = FALSE";
     }
 
     /* ── Dismiss write path (W2a) ──────────────────────────────────────────────────────────────────
-       Ports Lite's DismissAlertsAsync / DismissAllVisibleAlertsAsync UPDATE semantics (mark
+       Ports Lite's DismissAlertsAsync / DismissAllVisibleAlertsWindowAsync UPDATE semantics (mark
        dismissed = TRUE so the row drops out of the default read). Lite wrapped the update in a
        transaction because it also wrote a dismissed_archive_alerts sidecar for rows that had aged into
        parquet; Darling is a single Postgres store with NO archive tier, so the sidecar is dropped and

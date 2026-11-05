@@ -197,7 +197,7 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
         /* Rank by total duration = executions * avg duration, candidate limit (top + 5 on the first round, #5313), cap at top (Lite's shape). */
-        Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY " + QueryStoreWeightedAverage.RankByDuration + " DESC", sql, StringComparison.Ordinal);  /* #7169: total duration, not SUM x AVG */
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         /* #5815: the page sorts the candidates before the text lateral, on sort_cost (executions * avg duration),
@@ -215,11 +215,11 @@ public sealed class ViewerQueriesSqlTests
     {
         var sql = ViewerDataService.QueryStoreTopSql;
         Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_duration_us AS double precision)) / 1000.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.DurationUs + " / 1000.0", sql, StringComparison.Ordinal);
         /* Postgres has no MAX(boolean); the forced-plan flag folds through bool_or. */
         Assert.Contains("bool_or(is_forced_plan)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(CASE WHEN is_forced_plan", sql, StringComparison.Ordinal);
-        Assert.Contains("AVG(CAST(avg_query_max_used_memory AS double precision)) * 8.0 / 1024.0", sql, StringComparison.Ordinal);
+        Assert.Contains(QueryStoreWeightedAverage.QueryMaxUsedMemory + " * 8.0 / 1024.0", sql, StringComparison.Ordinal);
         /* View-Plan deferred: the collected query_plan_text column is not read this wave. */
         Assert.DoesNotContain("query_plan_text", sql, StringComparison.Ordinal);
     }
@@ -623,6 +623,7 @@ public sealed class ViewerQueriesLivePostgresTests
     private const int ComparisonServerId = -970804;
     private const int SlicerServerId = -970805;
     private const int ProcedureStatsPlanServerId = -970806;
+    private const int ProcedureStatsRecompiledServerId = -971175;
     private const int RegressionsServerId = -970807;
     private const int ModuleAttributionServerId = -970808;
     private const int DedupServerId = -970809;
@@ -816,6 +817,61 @@ public sealed class ViewerQueriesLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "procedure_stats", ProcedureStatsPlanServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7175: a procedure that recompiled has a row per plan_handle. The history window's per-row Download and View
+    /// Stored Plan pass the row's own plan_handle, so an older snapshot reads its own plan, not the newest one.
+    /// </summary>
+    [Fact]
+    public async Task ProcedureStatsPlan_RowPlanHandle_ReturnsThatRowsPlan_NotTheNewest_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live row-plan test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "procedure_stats", ProcedureStatsRecompiledServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var t = TruncateToSeconds(DateTime.UtcNow).AddHours(-2);
+
+        var bodySucceeded = false;
+        try
+        {
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t, "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>old</ShowPlanXML>", planHandle: "0xOLDHANDLE");
+            await InsertProcedureStatsAsync(connection, ProcedureStatsRecompiledServerId, t.AddMinutes(30), "StackOverflow", "dbo", "usp_Recompiled", "PROC",
+                deltaExec: 1, deltaWorker: 10_000, deltaElapsed: 20_000, deltaReads: 100, planXml: "<ShowPlanXML>new</ShowPlanXML>", planHandle: "0xNEWHANDLE");
+
+            Assert.Equal("<ShowPlanXML>old</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEWHANDLE"));
+            /* The read names the snapshot it picked, and flags a substitution (#7175): the window files the
+               plan under that snapshot's time, not the clicked row's. */
+            var own = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xOLDHANDLE");
+            Assert.NotNull(own);
+            Assert.False(own.IsFallback);
+            Assert.Equal(t, own.CollectionTime);
+            var substituted = await viewer.GetProcedureStatsPlanAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED");
+            Assert.NotNull(substituted);
+            Assert.True(substituted.IsFallback);
+            Assert.Equal(t.AddMinutes(30), substituted.CollectionTime); /* the newest plan's snapshot, not the asked-for one */
+            /* No handle (the Top Procedures row) and a handle with no stored plan both read the newest plan. */
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled"));
+            Assert.Equal("<ShowPlanXML>new</ShowPlanXML>",
+                await viewer.GetProcedureStatsPlanXmlAsync(ProcedureStatsRecompiledServerId, "StackOverflow", "dbo", "usp_Recompiled", "0xNEVERSTORED"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "procedure_stats", ProcedureStatsRecompiledServerId, cleanupCt));
         }
     }
 
@@ -1272,7 +1328,8 @@ public sealed class ViewerQueriesLivePostgresTests
 
             var r = Assert.Single(rows);                    /* only query 100: 200 below gate, 300 no baseline ever, 400 baseline outside the 7-day bound */
             Assert.Equal(100, r.QueryId);
-            Assert.Equal("CRITICAL", r.Severity);
+            /* +200% is the CRITICAL band by percent, but 2 s added and 4 ms a run is under the #7592 grade floor, so LOW. */
+            Assert.Equal("LOW", r.Severity);
             Assert.Equal(2.0, r.BaselineDurationMs, 3);
             Assert.Equal(6.0, r.RecentDurationMs, 3);
             Assert.Equal(200.0, r.DurationRegressionPercent, 1);
@@ -1436,7 +1493,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     private static async Task InsertProcedureStatsAsync(
         NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc,
         string databaseName, string schemaName, string objectName, string objectType,
-        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE")
+        long deltaExec, long deltaWorker, long deltaElapsed, long deltaReads, string? planXml = null, string sqlHandle = "0xSQLHANDLE", string planHandle = "0xPLANHANDLE")
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO procedure_stats
@@ -1457,7 +1514,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc.AddHours(-1), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlHandle);
-        command.Parameters.AddWithValue("0xPLANHANDLE");
+        command.Parameters.AddWithValue(planHandle);
         command.Parameters.AddWithValue(deltaExec);
         command.Parameters.AddWithValue(deltaWorker);
         command.Parameters.AddWithValue(deltaElapsed);

@@ -34,7 +34,7 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("get_store_metrics", "no server_name"),
         ("get_store_metrics", "Daily points are each day's LAST snapshot"),
         ("get_store_metrics", "job_history is ownership-filtered"),
-        ("get_store_metrics", "arming by hand drops history's only copy"),
+        ("get_store_metrics", "arming by hand drops history a short consumer lacks"),
         ("get_store_metrics", "inventory.reconciled=false flags bytes no row explains"),
         ("get_store_log", "no server_name"),
         ("get_store_log", "not_collected (captures=0) means nobody read the log"),

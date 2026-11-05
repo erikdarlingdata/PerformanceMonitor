@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -122,14 +123,17 @@ public sealed class StaTestThreadTests
     }
 
     /// <summary>
-    /// #6632: a body the guard gave up on may still return later (a cold first WPF start under a loaded runner), or never. The later
-    /// tests' refusals say which, and when, so the next CI report tells a slow start from a body blocked for good.
+    /// #6632, #7600: a body the guard gave up on may still return later (the two 11-04 hangs returned after 68 s and 126 s), or never.
+    /// While it is inside the body a later test is refused at once and told so. Once it has returned and its drain is done the thread
+    /// is free, so the next test runs: only the slow body's own test fails, not every WPF test after it in the process. A second
+    /// body that then hangs is caught the same way.
     /// </summary>
     [Fact]
-    public void ALaterRefusal_SaysWhetherTheStrandedBodyReturned_AndHowLongAfterItStarted()
+    public void AfterTheStrandedBodyReturns_TheNextBodyRuns_AndASecondHangIsStillCaught()
     {
         var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
         using var release = new ManualResetEventSlim();
+        using var releaseSecond = new ManualResetEventSlim();
         using var returned = new ManualResetEventSlim();
         try
         {
@@ -144,19 +148,37 @@ public sealed class StaTestThreadTests
 
             release.Set();
             Assert.True(returned.Wait(TimeSpan.FromSeconds(10)), "the released body did not return");
-            /* The record is written when the host's job finishes, just after its drain; poll the refusal until it shows. */
-            Assert.True(SpinWait.SpinUntil(() => Refusal(host).Contains("did return", StringComparison.Ordinal), TimeSpan.FromSeconds(10)),
-                "a refusal after the stranded body returned must say that it did, and when: " + Refusal(host));
-            Assert.Matches(@"That body did return, \d+ ms after it started", Refusal(host));
+            /* The job finishes just after the body, when the drain is done; a call in that gap is still refused, so poll. */
+            var ran = false;
+            Assert.True(SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => ran = true), TimeSpan.FromSeconds(10)),
+                "once the stranded body has returned, the next body must run instead of being refused for the rest of the process");
+            Assert.True(ran);
+            Assert.Null(host.StuckTest);
+
+            Assert.Throws<TimeoutException>(() => host.Run(() => releaseSecond.Wait()));
+            Assert.Contains("has not returned yet (#6632)", Assert.Throws<InvalidOperationException>(() => host.Run(() => { })).Message, StringComparison.Ordinal);
         }
         finally
         {
             release.Set();
+            releaseSecond.Set();
             host.Shutdown();
         }
     }
 
-    private static string Refusal(StaHost host) => Assert.Throws<InvalidOperationException>(() => host.Run(() => { })).Message;
+    /// <summary>Tries one body: true when it ran, false when the host refused it because the stranded body was still inside.</summary>
+    private static bool RunsAfterRefusals(StaHost host, Action body)
+    {
+        try
+        {
+            host.Run(body);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>#6216: a stuck body leaves no stack to read, so the guard's message names the last step the body reached and what the thread and dispatcher were doing.</summary>
     [Fact]
@@ -174,6 +196,45 @@ public sealed class StaTestThreadTests
 
             Assert.Contains("tab 3, waiting for the release", timedOut.Message);
             Assert.Contains("it is waiting, and the dispatcher has nothing to run", timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// #7600: two CI hangs showed a body waiting with no CPU and nothing on the dispatcher, and the step names could not say what it waited on
+    /// (the bodies returned after 126 s and 68 s). The message now carries the runtime's state for the thread, its native stack (the leaf names
+    /// the wait call) and the process counters around it, so the next hang names its wait.
+    /// </summary>
+    [Fact]
+    public void TheHangGuardsMessage_NamesTheNativeWaitCall_TheRuntimeState_AndTheProcessCounters()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                host.Step("waiting on an event");
+                release.Wait();
+            }));
+
+            Assert.Contains("The runtime's state for the thread is", timedOut.Message);
+            Assert.Contains("WaitSleepJoin", timedOut.Message);
+            /* A sub-second guard reads in ms: "within 0 s" named nothing. */
+            Assert.Contains("did not return within 300 ms:", timedOut.Message);
+
+            /* A frame of the stack is a wait call, in whatever module holds it: an STA thread's wait pumps messages, so the leaf can be
+               ntdll!NtWaitFor... on one machine and win32u!NtUserMsgWaitFor... on another. The whole message is the failure text: xunit cuts a long value. */
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"Its native stack, leaf first, was [^\r\n]*?[\w.]+!\w*Wait\w*\+0x"),
+                timedOut.Message);
+            Assert.Contains("file reads", timedOut.Message);
+            Assert.Contains("page faults", timedOut.Message);
+            Assert.Contains("MB of memory free", timedOut.Message);
         }
         finally
         {

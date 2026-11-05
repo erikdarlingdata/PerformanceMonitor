@@ -223,8 +223,13 @@ public sealed record CustomAlertRuleDefinition(
     /// <summary>
     /// Parses and validates a rule definition JSON. Returns the typed definition, or a human-readable error
     /// (which the create/validate tools surface to the author and the evaluator logs as a broken rule).
+    /// <para><paramref name="enforcePerfmonRate"/> (#7565): the write paths (create, update, validate) leave it true, so a metric
+    /// on <c>perfmon_value_per_second</c> without an <c>eq</c> pin on counter_name and instance_name is refused (see
+    /// <see cref="PerfmonRate"/>). A path that LOADS an already-saved rule (the evaluator, the notebook builder, test-now) passes
+    /// false, so a rule saved before this check keeps evaluating instead of being dropped as broken; it is refused only when
+    /// someone next saves it.</para>
     /// </summary>
-    public static (CustomAlertRuleDefinition? Definition, string? Error) TryParse(string definitionJson)
+    public static (CustomAlertRuleDefinition? Definition, string? Error) TryParse(string definitionJson, bool enforcePerfmonRate = true)
     {
         JsonObject? root;
         try
@@ -287,6 +292,11 @@ public sealed record CustomAlertRuleDefinition(
         if (plan.Mode != PanelMode.Scalar)
         {
             return (null, "an alert metric must be a single value — remove 'timeBucket' and 'topN' from the metric.");
+        }
+
+        if (enforcePerfmonRate && PerfmonRate.Error(plan, Array.Empty<ComposeVariable>(), "metric", forAlert: true) is string rateError)
+        {
+            return (null, $"invalid metric: {rateError}");
         }
 
         // ---- predicate ----

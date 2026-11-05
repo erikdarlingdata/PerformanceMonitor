@@ -82,11 +82,9 @@ also reports "nothing to do" for each once it holds.
 
 ## What this does NOT do
 
-- It does not change routing. Nothing reads these three successor dailies yet — that is #3653 A6 lane LA
-  (the stitched reads) and lane LC (the freeze). Until those land, this backfill only fills history that sits
-  unread.
-- It does not touch compression. The three successor dailies are excluded from aggregate compression by
-  `TimescaleSupport.CompressionDeferredUntilFreeze` until lane LC frees the daily compression band's slots (it
-  is full at 23 members today; three more would overflow it to 26).
-- It does not release any retention hold. The raw-purge and retention gates stay pointed at the legacy trio
-  until lane LC re-points them.
+- It does not change routing. The daily-tier reads already stitch in these three successor dailies (#4184), so
+  this backfill fills history that those reads use.
+- It does not touch compression. The three successor dailies are in the daily compression band now, in the slots
+  that the frozen legacy trio freed (#4186).
+- It does not release any retention hold. The raw-purge and retention gates follow the successor rollups since the
+  legacy trio was frozen (#4186).

@@ -33,8 +33,10 @@ using Xunit;
 /// </para>
 /// <para>
 /// <b>Hang guard.</b> A body that does not return within <see cref="HangGuard"/> fails the calling test, naming it. The shared
-/// thread is then stuck inside that body and cannot be freed, so every later WPF test in the process fails at once with a
-/// message naming the stuck test, instead of each waiting out its own 60 s.
+/// thread is then stuck inside that body and cannot be freed, so every later WPF test that asks while the body is still inside
+/// it fails at once with a message naming the stuck test, instead of each waiting out its own 60 s. A body that does return
+/// (it was slow, not blocked for good: #6632, and the two 11-04 hangs of #7600 returned after 68 s and 126 s) frees the thread
+/// again once its drain is done, and the tests after that run; only the slow body's own test fails (#7600).
 /// </para>
 /// <para>
 /// <b>Where it stuck (#6216).</b> .NET Core cannot capture another thread's stack, so the timeout message carries what can be read from
@@ -172,9 +174,10 @@ internal sealed class StaHost
     private Dispatcher? _dispatcher;
     private volatile string? _stuckTest;
 
-    /* #6632: how long after it started the body the guard gave up on did return, or 0 while it has not. A body that returns late was
-       slow (a cold first WPF start under load); one that never returns is blocked for good. The later tests' refusals say which. */
-    private long _stuckReturnedAfterMs;
+    /* #7600: the job the guard gave up on. It completes when the body AND the host's drain have returned, which is when the thread is
+       free again, so FailIfStuck lifts the refusal then. Read and written under _stuckLock together with _stuckTest. */
+    private Task? _stuckJob;
+    private readonly object _stuckLock = new();
 
     /* #6216: what the hang guard reports about a body that did not return. The host thread writes the dispatcher counters (the hooks run
        on it); the body writes the step; the caller reads them all once the guard expires. */
@@ -185,6 +188,7 @@ internal sealed class StaHost
     private long _lastStartedTick;
     private volatile DispatcherOperation? _lastStarted;
     private int _nativeThreadId;
+    private volatile Thread? _thread;
 
     internal string? StuckTest => _stuckTest;
 
@@ -260,13 +264,15 @@ internal sealed class StaHost
             if (!finished.Wait(HangGuard))
             {
                 var name = CurrentTestName();
-                _stuckTest = name;
-                _ = finished.ContinueWith(
-                    _ => Interlocked.Exchange(ref _stuckReturnedAfterMs, Math.Max(1, Environment.TickCount64 - began)),
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                lock (_stuckLock)
+                {
+                    _stuckJob = finished;
+                    _stuckTest = name;
+                }
+
                 throw new TimeoutException(
-                    $"WPF test body did not return within {HangGuard.TotalSeconds:0} s: {name}. The shared STA test thread is stuck inside it, "
-                    + "so every later WPF test in this process fails at once naming this test (#5602). "
+                    $"WPF test body did not return within {(HangGuard < TimeSpan.FromSeconds(1) ? $"{HangGuard.TotalMilliseconds:0} ms" : $"{HangGuard.TotalSeconds:0} s")}: {name}. The shared STA test thread is stuck inside it, "
+                    + "so every WPF test that starts while it is still inside fails at once naming this test (#5602). "
                     + DescribeStuckBody(opsAtStart));
             }
 
@@ -330,12 +336,23 @@ internal sealed class StaHost
         var stuck = _stuckTest;
         if (stuck is not null)
         {
-            var returnedAfter = Interlocked.Read(ref _stuckReturnedAfterMs);
-            var since = returnedAfter > 0
-                ? $" That body did return, {returnedAfter} ms after it started, so it was slow, not blocked for good (#6632)."
-                : " That body has not returned yet (#6632).";
+            /* #7600: a body that returns late (two PR runs on 11-04: 68 s and 126 s, in bodies that normally take well under a second)
+               leaves the thread free again, its dispatcher drained. Refusing every later test for the rest of the process turned one slow
+               body into a whole leg of failures. The slow body's own test still fails at the guard, naming itself, and a test that asks
+               while the body is still inside it is still refused at once. */
+            lock (_stuckLock)
+            {
+                if (_stuckJob is { IsCompleted: true })
+                {
+                    _stuckJob = null;
+                    _stuckTest = null;
+                    return;
+                }
+            }
+
             throw new InvalidOperationException(
-                $"The shared WPF STA test thread was stranded by a body that did not return within its hang guard: {stuck}. This test did not run (#5602)." + since);
+                $"The shared WPF STA test thread was stranded by a body that did not return within its hang guard: {stuck}. This test did not run (#5602). "
+                + "That body has not returned yet (#6632), and a later test runs once it does (#7600).");
         }
     }
 
@@ -361,10 +378,14 @@ internal sealed class StaHost
             var step = _step;
             var stepAgo = Environment.TickCount64 - Interlocked.Read(ref _stepTick);
             var startedBefore = Interlocked.Read(ref _opsStarted);
-            var cpuBefore = ReadThread(out _);
+            var cpuBefore = ReadThread(out _, out _);
+            var countersBefore = ReadProbe(StaThreadProbe.ReadCounters);
+            var stackBefore = ReadText(() => StaThreadProbe.NativeStack(_nativeThreadId));
             Darling.Tests.TestWait.Elapse(s_sampleWindow);
             var startedAfter = Interlocked.Read(ref _opsStarted);
-            var cpuAfter = ReadThread(out var threadState);
+            var cpuAfter = ReadThread(out var threadState, out var inWait);
+            var countersAfter = ReadProbe(StaThreadProbe.ReadCounters);
+            var stackAfter = ReadText(() => StaThreadProbe.NativeStack(_nativeThreadId));
             var running = startedAfter - Interlocked.Read(ref _opsCompleted);
             var last = _lastStarted;
             var lastName = last is null
@@ -373,13 +394,20 @@ internal sealed class StaHost
                     + $"{Environment.TickCount64 - Interlocked.Read(ref _lastStartedTick)} ms ago";
             var cpu = cpuAfter - cpuBefore;
             var ran = startedAfter - startedBefore;
-            var verdict = cpu.TotalMilliseconds >= s_sampleWindow.TotalMilliseconds / 2
-                ? (ran > 0 ? "it is still running dispatcher work that does not end" : "it is spinning inside one call")
-                : (ran > 0 ? "it is mostly waiting while the dispatcher still runs operations" : "it is waiting, and the dispatcher has nothing to run");
+            /* #7081: operations started during the sample are the proof the dispatcher is still working, whatever CPU the thread got. Under load a
+               pumping thread can get well under half of the window's CPU, and the CPU reading alone called that a wait. CPU only tells the
+               two no-progress cases apart: one call burning CPU, or a thread with nothing to do. A spinner the scheduler kept off the CPU for the
+               sample is not in the wait state, so a thread that is not waiting counts as spinning too. */
+            var verdict = ran > 0
+                ? "it is still running dispatcher work that does not end"
+                : (cpu.TotalMilliseconds >= s_sampleWindow.TotalMilliseconds / 2 || !inWait
+                    ? "it is spinning inside one call"
+                    : "it is waiting, and the dispatcher has nothing to run");
             return $"Where it was: the body's last step was \"{step}\", named {stepAgo} ms ago. "
                 + $"The dispatcher started {startedBefore - opsAtStart} operations during the body and {ran} more in the next {s_sampleWindow.TotalMilliseconds:0} ms, "
                 + $"{running} of them still running; the last it started was {lastName}. "
-                + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216).";
+                + $"The thread is {threadState} and used {cpu.TotalMilliseconds:0} ms of CPU in those {s_sampleWindow.TotalMilliseconds:0} ms, so {verdict} (#6216). "
+                + DescribeWhere(stackBefore, stackAfter, countersBefore, countersAfter);
         }
         catch (Exception ex)
         {
@@ -387,19 +415,63 @@ internal sealed class StaHost
         }
     }
 
+    /// <summary>
+    /// #7600: the two hangs of 11-04 were slow bodies (126 s and 68 s, then they returned) waiting with no CPU, which the step names could not
+    /// explain. This adds what names the wait: the runtime's own state for the thread (WaitSleepJoin is a .NET wait on a lock, an event or a
+    /// task; Running with an operating-system wait is a native call or a message wait), its native stack at the start and the end of the
+    /// sample (the same frames twice is a thread parked in one call, not one that makes slow progress), and the process counters around it.
+    /// </summary>
+    private string DescribeWhere(string stackBefore, string stackAfter, Result<StaThreadProbe.Counters> before, Result<StaThreadProbe.Counters> after)
+    {
+        var managed = _thread is { } thread ? thread.ThreadState.ToString() : "(the thread object was not kept)";
+        var counters = before.Failure is null && after.Failure is null
+            ? StaThreadProbe.Describe(before.Value, after.Value, s_sampleWindow)
+            : $"(the process counters could not be read: {before.Failure ?? after.Failure})";
+        var moved = stackBefore == stackAfter ? "the same at the start of the sample" : $"different at the start of the sample: {stackBefore}";
+        return $"The runtime's state for the thread is {managed}. Its native stack, leaf first, was {stackAfter}, and it was {moved}. {counters}";
+    }
+
+    private static string ReadText(Func<string> read)
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception ex)
+        {
+            return $"(could not be read: {ex.GetType().Name}: {ex.Message})";
+        }
+    }
+
+    private static Result<T> ReadProbe<T>(Func<T> read)
+    {
+        try
+        {
+            return new Result<T>(read(), null);
+        }
+        catch (Exception ex)
+        {
+            return new Result<T>(default!, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private readonly record struct Result<T>(T Value, string? Failure);
+
     /// <summary>The host thread's CPU time and state, read from the process's thread list by the native id taken when the thread started.</summary>
-    private TimeSpan ReadThread(out string state)
+    private TimeSpan ReadThread(out string state, out bool inWait)
     {
         using var process = System.Diagnostics.Process.GetCurrentProcess();
         foreach (System.Diagnostics.ProcessThread thread in process.Threads)
         {
             if (thread.Id == _nativeThreadId)
             {
-                state = thread.ThreadState == System.Diagnostics.ThreadState.Wait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
+                inWait = thread.ThreadState == System.Diagnostics.ThreadState.Wait;
+                state = inWait ? $"Wait ({thread.WaitReason})" : thread.ThreadState.ToString();
                 return thread.TotalProcessorTime;
             }
         }
 
+        inWait = true;
         state = "not in the process's thread list";
         return TimeSpan.Zero;
     }
@@ -445,6 +517,7 @@ internal sealed class StaHost
                     Interlocked.Increment(ref _opsCompleted);
                 };
                 _nativeThreadId = (int)GetCurrentThreadId();
+                _thread = Thread.CurrentThread;
                 made = dispatcher;
                 ready.Set();
                 Dispatcher.Run();

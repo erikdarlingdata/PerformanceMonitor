@@ -270,7 +270,30 @@ public class BaselineSupplyTests
             }
         }
 
+        /* pg_statement_text (#7567) is read by the own-statement exclusion in the statement arms, but it is the store's own text
+           lookup, not a collector table: it has no schedule row and no collector name, so it cannot be in the collector floor
+           set this list maps onto. Its floor is the prune cutoff itself (DarlingRetention.ComputeStatementTextCutoff), pinned
+           by PgStatementTextPrune_IsFlooredAtTheBaselineWindow_ForTheOwnStatementExclusion below. */
+        tablesRead.Remove(StatementTextLookup);
+
         return tablesRead.OrderBy(t => t, StringComparer.Ordinal).ToList();
+    }
+
+    private const string StatementTextLookup = "pg_statement_text";
+
+    /// <summary>The statement arms read <c>pg_statement_text</c> for every row of the baseline window (the own-statement
+    /// exclusion, #7567), so its prune must keep that text for the window however short the schedule is set. Without the
+    /// floor the widest retention (7 days here) would put the cutoff at 9 days, while <c>pg_statement_stats</c> keeps 30.</summary>
+    [Fact]
+    public void PgStatementTextPrune_IsFlooredAtTheBaselineWindow_ForTheOwnStatementExclusion()
+    {
+        var now = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
+        var floored = now.AddDays(-(BaselineMath.BaselineWindowDays + PgStatementText.PruneMarginDays));
+
+        Assert.Equal(floored, DarlingRetention.ComputeStatementTextCutoff(now, 7));
+        Assert.Equal(floored, DarlingRetention.ComputeStatementTextCutoff(now, 1));
+        /* A retention above the window is honoured: the floor never shortens. */
+        Assert.Equal(now.AddDays(-(90 + PgStatementText.PruneMarginDays)), DarlingRetention.ComputeStatementTextCutoff(now, 90));
     }
 
     /// <summary>The keyed half of the derivation is not vacuous (#3691 lane 33): the two statement arms read
@@ -794,6 +817,6 @@ public class BaselineSupplyTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relative));
     }
 }

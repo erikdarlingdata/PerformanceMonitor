@@ -43,6 +43,8 @@ public sealed class MuteRulesPageTests
             .Select(p => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>(p)!.Name)
             .ToHashSet(StringComparer.Ordinal);
         Assert.Contains("match_summary", returned);
+        /* #7040: get_mute_rules adds the schedule's read-time answers to each row; they are not stored, so they are not on the record. */
+        returned.UnionWith(["schedule", "in_window_now", "next_window_start_utc"]);
 
         var read = Regex.Matches(Page(), @"\b(?:r|rule)\.([a-z_]+)\b").Select(m => m.Groups[1].Value).Distinct(StringComparer.Ordinal).ToList();
         Assert.Contains("match_summary", read);

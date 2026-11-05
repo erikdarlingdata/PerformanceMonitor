@@ -58,6 +58,13 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     private readonly ShowToast _showToast;
     private readonly SendAlert _sendAlert;
     private readonly Func<int, AlertNotificationMode?> _resolveServerDeliveryOverride;
+    private readonly RecordHeld? _recordHeld;
+
+    /* #7086: writes the digest row of a held fire. A seam of its own so the existing test constructor keeps its shape. */
+    internal delegate Task<AlertDelivery?> RecordHeld(
+        string metricName, string serverName, string currentValue, string thresholdValue,
+        int serverId, AlertContext? context, double? numericCurrentValue, double? numericThresholdValue,
+        string? detailText, AlertHold hold, CancellationToken cancellationToken);
 
     public LiteAlertDeliverer(
         EmailAlertService emailAlertService,
@@ -108,17 +115,25 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
            ServerManager rather than here because the connection-edge and AG alerts, which bypass this
            deliverer entirely, have to reach the same answer. */
         _resolveServerDeliveryOverride = serverManager.ResolveAlertDeliveryModeOverride;
+
+        _recordHeld = (metricName, serverName, currentValue, thresholdValue, serverId, context,
+                numericCurrentValue, numericThresholdValue, detailText, hold, cancellationToken) =>
+            emailAlertService.RecordHeldAlertAsync(
+                metricName, serverName, currentValue, thresholdValue, serverId, context,
+                numericCurrentValue, numericThresholdValue, detailText, hold, cancellationToken);
     }
 
     /// <summary>Test ctor: injected toast/send/override seams, no WPF or SMTP dependencies.</summary>
     internal LiteAlertDeliverer(
         ShowToast showToast,
         SendAlert sendAlert,
-        Func<int, AlertNotificationMode?> resolveServerDeliveryOverride)
+        Func<int, AlertNotificationMode?> resolveServerDeliveryOverride,
+        RecordHeld? recordHeld = null)
     {
         _showToast = showToast;
         _sendAlert = sendAlert;
         _resolveServerDeliveryOverride = resolveServerDeliveryOverride;
+        _recordHeld = recordHeld;
     }
 
     /// <summary>
@@ -164,6 +179,21 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
         try
         {
             var serverId = int.Parse(outcome.ServerKey, CultureInfo.InvariantCulture);
+
+            /* #7086: the evaluator held this fire back from paging. No toast, no send, no per-event split: one digest row,
+               with the reason on its routing record. A mute rule wins: a muted and held fire takes the muted road below. */
+            if (outcome.Hold is { } hold && !outcome.Muted)
+            {
+                if (_recordHeld is null)
+                {
+                    return AlertDelivery.RoutedToDigest();
+                }
+
+                return await _recordHeld(
+                    outcome.MetricName, outcome.ServerName, outcome.CurrentValue, outcome.ThresholdValue,
+                    serverId, outcome.Context, outcome.NumericCurrentValue, outcome.NumericThresholdValue,
+                    AlertDetailText.WithSampleAge(outcome.DetailText, outcome.Context), hold, cancellationToken);
+            }
 
             /* Toast BEFORE the send, matching the old loop's order in every branch. */
             if (!outcome.Muted)

@@ -97,6 +97,183 @@ public sealed class AttentionWindowReadLiveTests
         });
     }
 
+    /* #7061: the same plan, assertions and numbers as Lite's AttentionWindowReadTests twin, so the two stores leave out the same sampled events. */
+
+    [Fact]
+    public async Task TheDurationFloor_AndTheAzdataMetadataShape_SplitTheSampleGroupsTheSameWayInBothStores()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 700;
+            var server = ServerId;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, server, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            var at = now.AddSeconds(-28);
+            await RowAsync(connection, id++, server, at, "count", 100, null, null, null, null, ct);
+            for (var i = 0; i < 6; i++)
+            {
+                await RowAsync(connection, id++, server, at, "sample", 0, "db1", "Core Microsoft SqlClient Data Provider", null, null, ct, durationUs: 30);
+            }
+
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 999);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 1000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-none", "SELECT no duration", ct, durationUs: null);
+            for (var i = 0; i < 3; i++)
+            {
+                await RowAsync(connection, id++, server, at, "sample", 0, "master", "azdata", "fp-ver", "create table #SVer(ID int, Name sysname)", ct, durationUs: 5_000_000);
+            }
+
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "azdata", "fp-col", "SELECT clmns.name AS [Name] FROM sys.all_columns AS clmns", ct, durationUs: 5_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "azdata", "fp-editor", "SELECT * FROM dbo.Orders", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "azdata", null, null, ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "master", "azdata", "fp-ver", "create table #SVer(ID int)", ct, durationUs: 20);
+
+            var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            /* 6 + 4 + 3 + 1 + 3 = 17 samples. Short: the six SqlClient ones, the 999 us one and the azdata #SVer at 20 us = 8. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
+            Assert.Equal(17, window.SampleGroups.Sum(g => g.Samples));
+            Assert.Equal(8, window.SampleGroups.Sum(g => g.ShortSamples));
+            Assert.Equal(4, window.SampleGroups.Sum(g => g.AzdataMetadataSamples));
+
+            var reading = AttentionEvaluator.Read(window, now)!;
+            Assert.Equal(8, reading.ShortSamples);
+            Assert.Equal(4, reading.AzdataMetadataSamples);
+
+            var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
+            Assert.NotNull(finding);
+            Assert.Equal(100d * 5 / 17, finding!.JudgedCount, 6);
+        });
+    }
+
+    /// <summary>The names the C# rule decides on: excluded and counted, edge shapes included (trailing and leading spaces, mixed case, a name that
+    /// only starts with the SSMS prefix, the VS Code names without their suffix, a quote and LIKE wildcards).</summary>
+    public static readonly string?[] ExcludedAppNames =
+    {
+        AttentionEvaluator.IntelliSenseClientApp,
+        AttentionEvaluator.IntelliSenseClientApp + "   ",
+        AttentionEvaluator.IntelliSenseClientApp.ToUpperInvariant(),
+        AttentionEvaluator.IntelliSenseClientApp.ToLowerInvariant(),
+        "Microsoft SQL Server Management Studio 21 - Transact-SQL IntelliSense",
+        "Microsoft SQL Server Management Studio IntelliSense",
+        "Microsoft SQL Server Management Studio - Query",
+        "Microsoft SQL Server Management Studio",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense - Query",
+        "Contoso Management Studio - Transact-SQL IntelliSense",
+        "IntelliSense",
+        "Microsoft_SQL Server Management Studio - Transact-SQL IntelliSense",
+        "Microsoft%SQL Server Management Studio - Transact-SQL IntelliSense",
+        "vscode-mssql-GeneralConnection",
+        "VSCODE-MSSQL-GENERALCONNECTION-LANGUAGESERVICE",
+        "  vscode-mssql-ObjectExplorer  ",
+        /* #7061: trim and rtrim strip only spaces in both stores, so the C# rule strips only spaces too. A tab is part of the name. */
+        "vscode-mssql-ObjectExplorer\t",
+        "vscode-mssql-ObjectExplorer ",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense ",
+        "Microsoft SQL Server Management Studio - Transact-SQL IntelliSense\t",
+        "vscode-mssql-ObjectExplorer-languageService",
+        "vscode-mssql-languageService",
+        "vscode-mssql",
+        "vscode-mssql-Query",
+        "vscode-mssql-ObjectExplorer-x",
+        "vscode_mssql-ObjectExplorer",
+        "vscode-mssql-%",
+        "O'Brien",
+        "azdata",
+        "SQLAgent - Job Manager",
+        "",
+        " ",
+        null,
+    };
+
+    [Fact]
+    public async Task TheExcludedAppPredicate_GivesTheSameAnswerAsTheCSharpRule_ForEveryName()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var names = ExcludedAppNames.Concat(AttentionWindowSql.VsCodeMetadataApps).ToArray();
+            for (var i = 0; i < names.Length; i++)
+            {
+                using var command = new NpgsqlCommand(
+                    $"SELECT COALESCE({AttentionWindowSql.ExcludedAppPredicate}, FALSE) FROM (SELECT $1::text AS client_app_name) AS t", connection);
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)names[i] ?? DBNull.Value });
+                var sql = (bool)(await command.ExecuteScalarAsync(ct))!;
+                Assert.True(
+                    AttentionEvaluator.IsExcludedApp(names[i]) == sql,
+                    $"'{names[i]}': C# says {AttentionEvaluator.IsExcludedApp(names[i])}, SQL says {sql}");
+            }
+
+            Assert.Contains(names, n => AttentionEvaluator.IsExcludedApp(n));
+            Assert.Contains(names, n => !AttentionEvaluator.IsExcludedApp(n));
+        });
+    }
+
+    [Fact]
+    public async Task TheBaseline_IsMadeOfTheSameEvents_TheSampledShareThatPassesScalesEachMinute()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var server = ServerId;
+            var t0 = DateTime.UtcNow.Date.AddDays(-2).AddHours(12);
+            long id = 800;
+            for (var m = 0; m < 6; m++)
+            {
+                await LogAsync(connection, id++, server, t0.AddMinutes(m), "SUCCESS", ct);
+            }
+
+            var rows = new (int Minute, long Count, int Short, int Passing)[]
+            {
+                (0, 100, 3, 1),   /* 100 x 1/4 = 25 */
+                (1, 50, 0, 0),    /* no samples: the full 50 */
+                (2, 80, 0, 4),    /* every sample passes: the full 80 */
+                (3, 40, 2, 0),    /* every sample is short: 0 */
+                (4, 10, 0, 1),    /* a sample with no recorded duration passes: the full 10 */
+            };
+            foreach (var (minute, count, shortOnes, passing) in rows)
+            {
+                var at = t0.AddMinutes(minute).AddSeconds(2);
+                await RowAsync(connection, id++, server, at, "count", count, null, null, null, null, ct);
+                for (var i = 0; i < shortOnes; i++)
+                {
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 25);
+                }
+
+                for (var i = 0; i < passing; i++)
+                {
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: minute == 4 ? null : 30_000_000);
+                }
+            }
+
+            /* Minute 5: the applications the evaluator leaves out by name (SSMS IntelliSense, a VS Code metadata connection) are left out of the
+               baseline too, with a long duration so only the name tells them apart: 60 x 1/4 = 15. */
+            var namedAt = t0.AddMinutes(5).AddSeconds(2);
+            await RowAsync(connection, id++, server, namedAt, "count", 60, null, null, null, null, ct);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL IntelliSense", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL IntelliSense ", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "VSCODE-mssql-ObjectExplorer", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+
+            using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection);
+            command.Parameters.AddWithValue(NpgsqlDbType.Integer, server);
+            command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(t0, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(t0.AddMinutes(10), DateTimeKind.Unspecified));
+            var got = new System.Collections.Generic.List<long>();
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    got.Add(reader.GetInt64(1));
+                }
+            }
+
+            Assert.Equal(new long[] { 25, 50, 80, 0, 10, 15 }, got.ToArray());
+        });
+    }
+
     [Fact]
     public async Task TheTopLists_CoverTheSpansSamples_NotTheWholeLookback()
     {
@@ -278,12 +455,12 @@ public sealed class AttentionWindowReadLiveTests
 
     private static async Task RowAsync(
         NpgsqlConnection connection, long id, int serverId, DateTime time, string kind, long count,
-        string? db, string? app, string? fingerprint, string? text, CancellationToken ct)
+        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null)
     {
         using var command = new NpgsqlCommand(
             @"INSERT INTO attention_events
-                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text)
-              VALUES ($1, $2, $3, 'attention-live', $4, $5, $6, $7, $8, $9)", connection);
+                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us)
+              VALUES ($1, $2, $3, 'attention-live', $4, $5, $6, $7, $8, $9, $10)", connection);
         command.Parameters.AddWithValue(NpgsqlDbType.Bigint, id);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(time, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
@@ -293,6 +470,7 @@ public sealed class AttentionWindowReadLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)app ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)text ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)durationUs ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

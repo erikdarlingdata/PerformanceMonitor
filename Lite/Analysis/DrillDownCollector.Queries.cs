@@ -19,6 +19,7 @@ public partial class DrillDownCollector
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
+        var plan = await _duckDb.PlanArchiveReadAsync(context.CancellationToken, new ArchiveWindow("cpu_utilization_stats", "collection_time", context.TimeRangeStart), new ArchiveWindow("query_snapshots", "collection_time", context.TimeRangeStart.AddMinutes(-2)));
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -38,6 +39,7 @@ LIMIT 1";
 
         DateTime? peakTime = null;
         int peakCpu = 0;
+        peakCmd.CommandText = plan.Apply(peakCmd.CommandText);
         using (var peakReader = await peakCmd.ExecuteReaderAsync(context.CancellationToken))
         {
             if (await peakReader.ReadAsync(context.CancellationToken))
@@ -51,7 +53,7 @@ LIMIT 1";
 
         // Step 2: Get queries active within 2 minutes of peak
         using var queryCmd = connection.CreateCommand();
-        queryCmd.CommandText = @"
+        queryCmd.CommandText = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
@@ -61,6 +63,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 
@@ -69,6 +72,7 @@ LIMIT 5";
         queryCmd.Parameters.Add(new DuckDBParameter { Value = peakTime.Value.AddMinutes(2) });
 
         var items = new List<object>();
+        queryCmd.CommandText = plan.Apply(queryCmd.CommandText);
         using (var reader = await queryCmd.ExecuteReaderAsync(context.CancellationToken))
         {
             while (await reader.ReadAsync(context.CancellationToken))
@@ -103,6 +107,7 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -211,6 +216,7 @@ ORDER BY t.total_cpu_us DESC";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -241,6 +247,7 @@ ORDER BY t.total_cpu_us DESC";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -263,6 +270,7 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -289,6 +297,7 @@ LIMIT 5";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -379,6 +388,7 @@ ORDER BY worker_ratio DESC";
 
         var kept = new List<ParameterSensitivePlan>();
         /* Closed before the text read below: a connection runs one reader at a time. */
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
             while (await reader.ReadAsync(context.CancellationToken))
@@ -416,7 +426,7 @@ ORDER BY worker_ratio DESC";
 
         /* #5361: the whole text of the plans that print, not of every plan the read above ranked. One read; a plan whose
            newest row has no text, or whose row is gone by now, prints empty text, as a row with no text did. */
-        var text = await ReadParameterSensitiveTextAsync(connection, kept.Select(p => p.Key).Distinct().ToList(), context);
+        var text = await ReadParameterSensitiveTextAsync(connection, kept.Select(p => p.Key).Distinct().ToList(), context, plan);
 
         finding.DrillDown!["parameter_sensitive_queries"] = kept.Select(p => (object)new
         {
@@ -471,7 +481,7 @@ QUALIFY ROW_NUMBER() OVER
 ) = 1";
 
     private async Task<Dictionary<PlanKey, string>> ReadParameterSensitiveTextAsync(
-        DuckDBConnection connection, IReadOnlyList<PlanKey> plans, AnalysisContext context)
+        DuckDBConnection connection, IReadOnlyList<PlanKey> plans, AnalysisContext context, ArchiveReadPlan archivePlan)
     {
         using var cmd = connection.CreateCommand();
         var keys = new List<string>();
@@ -489,7 +499,7 @@ QUALIFY ROW_NUMBER() OVER
             cmd.Parameters.Add(new DuckDBParameter { Value = (object?)plan.QueryPlanHash ?? DBNull.Value });
         }
 
-        cmd.CommandText = ParameterSensitiveTextSql.Replace("{KEYS}", string.Join(" OR ", keys));
+        cmd.CommandText = archivePlan.Apply(ParameterSensitiveTextSql.Replace("{KEYS}", string.Join(" OR ", keys)));
 
         var text = new Dictionary<PlanKey, string>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -517,6 +527,7 @@ QUALIFY ROW_NUMBER() OVER
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync(context.CancellationToken, new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart), new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -627,7 +638,7 @@ deduped AS
     -- returns are the head of the ranking the fact has already computed -- the same detection over the same
     -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
     -- read run twice. The two reads fold plans the same way (plan_agg, then plan_dedup) and rank the same
-    -- way, so this read's top five are among the fact's twenty. The lists are matched independently, which
+    -- way (the CPU the regression lost, then the factor: PlanRegressionRanking, #7417), so this read's top five are among the fact's twenty. The lists are matched independently, which
     -- admits every pairing of the listed databases and query ids: a superset of the offenders, never a
     -- subset.
     AND   ($5::VARCHAR[] IS NULL
@@ -719,6 +730,9 @@ compared AS
         END AS regression_factor,
         l.replica_role,
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost, the PLAN_REGRESSION fact's ranking key (PlanRegressionRanking). The force
+        -- statement is built from the rows of this read in order, so it must rank them the way the fact does.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
@@ -758,9 +772,11 @@ FROM compared
 CROSS JOIN svr
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #7417: the fact's lost-CPU floor on the CPU path, and its order. The first row is the fact's lead offender.
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY regression_factor DESC
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
 LIMIT 5";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -792,6 +808,7 @@ LIMIT 5";
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 8);
 
         var items = new List<object>();
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -835,6 +852,7 @@ LIMIT 5";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
+        var plan = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -890,6 +908,7 @@ GROUP BY database_name, query_hash";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
 
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (await reader.ReadAsync(context.CancellationToken))
         {
@@ -921,6 +940,7 @@ GROUP BY database_name, query_hash";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
+        var plan = await _duckDb.PlanArchiveReadAsync("memory_grant_stats", "collection_time", context.TimeRangeStart, context.CancellationToken);
         using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(context.CancellationToken);
@@ -944,6 +964,7 @@ LIMIT 5";
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
         var items = new List<object>();
+        cmd.CommandText = plan.Apply(cmd.CommandText);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {

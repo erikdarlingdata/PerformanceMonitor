@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PerformanceMonitor.Analysis;
@@ -32,6 +33,20 @@ public class AlertContext
     public List<AlertDetailItem> Details { get; set; } = new();
     public string? AttachmentXml { get; set; }
     public string? AttachmentFileName { get; set; }
+
+    /// <summary>
+    /// #7041: a finished HTML email body, for a scheduled report that renders its own page (the Daily Health Report).
+    /// <see cref="EmailSendCore"/> sends it as the HTML view in place of the shared alert template when it is set; the
+    /// plain view stays the alert's own detail text. Unpersisted like <see cref="AttachmentXml"/>: live-render data,
+    /// not row data, so the alert-history context JSON never carries a page.
+    /// </summary>
+    public string? EmailHtmlBody { get; set; }
+
+    /// <summary>
+    /// #7041: the email subject line to use in place of the shared <c>[SQL Monitor Alert] ... on ...</c> subject
+    /// when it is set. Unpersisted for the same reason as <see cref="EmailHtmlBody"/>.
+    /// </summary>
+    public string? EmailSubject { get; set; }
 
     /// <summary>
     /// Forces the rendered severity tier (email badge/color, Teams/Slack accent) regardless of
@@ -96,6 +111,14 @@ public class AlertContext
     public AlertRoutingDto? Routing { get; set; }
 
     /// <summary>
+    /// The open engine alert an analysis finding was attached to instead of paging (#7084 part 4), or null: every other
+    /// row, and every row written before the member existed. An alert-history row has no id, so the reference is the
+    /// server (the finding's own row), the engine alert's metric and its fire time. Persisted as the trailing
+    /// <c>AttachedTo</c> member of the JSON projection.
+    /// </summary>
+    public AlertAttachedToDto? AttachedTo { get; set; }
+
+    /// <summary>
     /// The wait type this firing is ABOUT (#4223 Poison Wait notebook), as structured data rather than
     /// something a reader has to regex out of <see cref="Details"/>'s prose heading or <c>DetailText</c>.
     /// Set by the Poison Wait fire sites on both engines — the SQL Server evaluator's worst-graded
@@ -130,6 +153,24 @@ public class AlertContext
     /// exactly the shape consumers can reason about — see the helper for why.
     /// </summary>
     public string? AgReplicaIdentity { get; set; }
+
+    /// <summary>
+    /// Every file this Database File Growth firing is about (#7068), as (database, file) pairs, where the card lists only
+    /// the first five breached files in <see cref="Details"/>. It is stored with the context so the standing-state seed after a
+    /// restart can tell that a sixth or eighth file of a tempdb layout was already announced. Read only through
+    /// <see cref="AlertContextSerializer.ContextJsonNamesFile"/>. No renderer shows it. Null on every other alert and on any
+    /// row written before this member existed, which the seed answers from <see cref="Details"/>.
+    /// </summary>
+    public List<AlertFileIdentity>? FileGrowthFiles { get; set; }
+
+    /// <summary>
+    /// The step a TimescaleDB policy job alert announced (#7076): <see cref="AlertContextSerializer.PolicyJobStepReArmed"/> for the
+    /// first-detection page after the automatic re-arm, <see cref="AlertContextSerializer.PolicyJobStepEscalated"/> for the escalation
+    /// and every repeat after it. The restart seed reads it to tell a job that is owed its "re-hung" page from one already escalated.
+    /// Read only through <see cref="AlertContextSerializer.TryReadPolicyJobStep"/>. No renderer shows it. Null on every other alert
+    /// and on any row written before this member existed, which the seed treats as escalated.
+    /// </summary>
+    public string? PolicyJobStep { get; set; }
 
     /// <summary>The newest source sample behind this alert (#5642): its source label, its UTC instant, and its
     /// age computed ONCE at fire time. Null when the alert has no UTC instant to age (a pre-V134 local stamp, a
@@ -362,6 +403,9 @@ public class AlertDetailItem
 /// </summary>
 public sealed record AlertDetailRecord(int Ordinal, string Summary, List<(string Label, string Text)> Texts);
 
+/// <summary>One file a Database File Growth firing is about (#7068): the database and file name, matched by exact equality. Doubles as the persisted shape.</summary>
+public record AlertFileIdentity(string Database, string File);
+
 /// <summary>
 /// Serialization DTO for persisting <see cref="AlertContext"/> as JSON.
 /// <see cref="AlertDetailItem.Fields"/> is a <c>List&lt;(string,string)&gt;</c>
@@ -396,7 +440,23 @@ public record AlertContextDto(
     AlertNewestSampleDto? NewestSample = null,
     /* #5654 external alerts: trailing and nullable like NewestSample, so a row written before this member
        existed rehydrates to null ("this row came from no external source"). */
-    AlertExternalDto? External = null);
+    AlertExternalDto? External = null,
+    /* #7068 file growth: trailing and nullable like External, so a row written before this member existed rehydrates
+       to null ("this row lists no files beyond its details"). */
+    List<AlertFileIdentity>? FileGrowthFiles = null,
+    /* #7076 policy job step: trailing and nullable like FileGrowthFiles, so a row written before this member existed rehydrates
+       to null ("this row does not say which step it announced"). */
+    string? PolicyJobStep = null,
+    /* #7084 part 4: trailing and nullable like External, so a row written before this member existed rehydrates to
+       null ("this finding is not attached to an engine alert"). */
+    AlertAttachedToDto? AttachedTo = null);
+
+/// <summary>
+/// The engine alert a held analysis finding was attached to (#7084 part 4): the metric of the delivered row (High CPU,
+/// Blocking Detected, Blocking Wait Time or Deadlocks Detected) and its fire time, UTC at the store's microsecond
+/// precision. With the server id of the finding's own row it names the engine alert, since the log has no row id.
+/// </summary>
+public record AlertAttachedToDto(string Metric, DateTime AlertTimeUtc);
 
 /// <summary>JSON mirror of <see cref="AlertExternalOrigin"/> (#5654). <c>PendingId</c> is the LAST member on purpose:
 /// <see cref="AlertContextSerializer.BuildPendingIdLikePattern"/> anchors on <c>"PendingId":&lt;n&gt;}</c>.</summary>
@@ -509,11 +569,8 @@ public record RemediationActionDto(
     List<ForcePlanTargetDto> Targets,
     List<DbConfigTargetDto>? DbConfigTargets = null,
     RcsiInactionFiguresDto? RcsiFigures = null,
-    List<ClearPlanTargetDto>? ClearPlanTargets = null,
-    ClearPlanFiguresDto? ClearPlanFigures = null,
     List<FileGrowthTargetDto>? FileGrowthTargets = null,
     List<RcsiTargetDto>? RcsiTargets = null,
-    List<ServerConfigTargetDto>? ServerConfigTargets = null,
     List<MissingIndexTargetDto>? MissingIndexTargets = null);
 
 /// <summary>
@@ -527,35 +584,6 @@ public record RemediationActionDto(
 public record RcsiTargetDto(
     string Database,
     RcsiInactionFiguresDto Figures);
-
-/// <summary>
-/// JSON mirror of <see cref="ClearPlanTarget"/> (clear-cached-plan, PR-B). The
-/// <c>QueryHash</c> is the only execution input; the remaining members are display/
-/// disclosure only. The trailing optional <c>ClearPlanTargets</c> member on
-/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/
-/// non-CLEAR_PLAN contextJson without it deserializes to null.
-/// </summary>
-public record ClearPlanTargetDto(
-    string Database,
-    string QueryHash,
-    double CurrentCpuPerExecMs,
-    double BaselineCpuPerExecMs,
-    double AnomalyRatio,
-    string? LatestPlanHandle);
-
-/// <summary>
-/// JSON mirror of <see cref="ClearPlanFigures"/> (clear-cached-plan, PR-B). Carried on
-/// the persisted CLEAR_PLAN action so the informed-consent dialog shows the REAL anomaly
-/// figures (incl. the window CPU%, LOW-1) at apply time, when the UI apply call site has
-/// no finding. Trailing optional → backward-compatible.
-/// </summary>
-public record ClearPlanFiguresDto(
-    double CurrentCpuPerExecMs,
-    double BaselineCpuPerExecMs,
-    double AnomalyRatio,
-    int CpuPercent,
-    bool PlanRegressionCoFired,
-    bool ParameterSensitivityCoFired);
 
 /// <summary>
 /// JSON mirror of <see cref="RcsiInactionFigures"/> (B3 Phase 3). Carried on the
@@ -627,19 +655,6 @@ public record FileGrowthTargetDto(
     int RecommendedGrowthMb);
 
 /// <summary>
-/// JSON mirror of <see cref="ServerConfigTarget"/> (WS3 server-level config). <see cref="Setting"/>
-/// is persisted as the enum's int value. The trailing optional <c>ServerConfigTargets</c> member on
-/// <see cref="RemediationActionDto"/> keeps the round-trip backward-compatible: legacy/non-
-/// SERVER_CONFIG contextJson without it deserializes to null. Carried so the Recommendations reader
-/// can fan the server-config cards on read (the drill-down is ephemeral); MAXDOP/CTFP drive Apply,
-/// the two memory targets are copy-paste only.
-/// </summary>
-public record ServerConfigTargetDto(
-    int Setting,
-    long CurrentValue,
-    long RecommendedValue);
-
-/// <summary>
 /// JSON mirror of <see cref="MissingIndexTarget"/> (WS4 missing-index advisory). The trailing
 /// optional <c>MissingIndexTargets</c> member on <see cref="RemediationActionDto"/> keeps the
 /// round-trip backward-compatible: legacy/non-MISSING_INDEX contextJson without it deserializes to
@@ -680,6 +695,65 @@ public static class AlertContextSerializer
         if (string.IsNullOrEmpty(contextJson) || string.IsNullOrEmpty(dedupKey))
             return false;
         return contextJson.Contains(BuildDedupKeyJsonFragment(dedupKey), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #7068: true when ONE detail item of the persisted <paramref name="contextJson"/> carries every one of
+    /// <paramref name="fields"/> as a field whose label and value EQUAL the given ones (ordinal). Equality, not a substring
+    /// match: a context that names database <c>Sales2</c> does not name <c>Sales</c>, and a card that lists database A's file
+    /// <c>data</c> beside database B's file <c>log</c> does not name database A's <c>log</c>. False on null, blank or unparseable
+    /// JSON and on a context with no details.
+    /// </summary>
+    public static bool ContextJsonHasDetailFields(string? contextJson, params (string Label, string Value)[] fields)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson) || fields.Length == 0)
+            return false;
+
+        try
+        {
+            return DetailsHaveFields(JsonSerializer.Deserialize<AlertContextDto>(contextJson), fields);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool DetailsHaveFields(AlertContextDto? dto, params (string Label, string Value)[] fields) =>
+        dto?.Details is { } details
+        && details.Any(item => item.Fields is { } present
+            && fields.All(want => present.Any(f =>
+                string.Equals(f.Label, want.Label, StringComparison.Ordinal)
+                && string.Equals(f.Value, want.Value, StringComparison.Ordinal))));
+
+    /// <summary>
+    /// #7068: true when the persisted Database File Growth <paramref name="contextJson"/> names the file
+    /// <paramref name="fileName"/> of database <paramref name="databaseName"/> (both equal, ordinal). A row that stores its
+    /// full file list (<see cref="AlertContext.FileGrowthFiles"/>) is answered from that list, because its card shows only
+    /// five files. A row written before the list existed is answered from its detail items, the way
+    /// <see cref="ContextJsonHasDetailFields"/> reads them. False on null, blank or unparseable JSON.
+    /// </summary>
+    public static bool ContextJsonNamesFile(string? contextJson, string databaseName, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return false;
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<AlertContextDto>(contextJson);
+            if (dto?.FileGrowthFiles is { } files)
+            {
+                return files.Any(f =>
+                    string.Equals(f.Database, databaseName, StringComparison.Ordinal)
+                    && string.Equals(f.File, fileName, StringComparison.Ordinal));
+            }
+
+            return DetailsHaveFields(dto, ("Database", databaseName), ("File", fileName));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -787,7 +861,13 @@ public static class AlertContextSerializer
                 ? new AlertNewestSampleDto(sample.Source, DateTime.SpecifyKind(sample.InstantUtc, DateTimeKind.Utc), sample.Age.TotalSeconds)
                 : null,
             /* #5654: the external source, key and queue row. */
-            context.External is { } external ? new AlertExternalDto(external.Source, external.Key, external.PendingId) : null);
+            context.External is { } external ? new AlertExternalDto(external.Source, external.Key, external.PendingId) : null,
+            /* #7068: every file a file growth firing is about, beyond the five its card lists. */
+            context.FileGrowthFiles,
+            /* #7076: the policy job step this firing announced. */
+            context.PolicyJobStep,
+            /* #7084 part 4: the open engine alert this finding was attached to. Already the persisted shape. */
+            context.AttachedTo);
         return JsonSerializer.Serialize(dto);
     }
 
@@ -820,6 +900,40 @@ public static class AlertContextSerializer
         }
     }
 
+    /// <summary>The <see cref="AlertContext.PolicyJobStep"/> of a job that was automatically re-armed and announced (#7076).</summary>
+    public const string PolicyJobStepReArmed = "ReArmed";
+
+    /// <summary>The <see cref="AlertContext.PolicyJobStep"/> of a job that was escalated, or whose repeat page was sent (#7076).</summary>
+    public const string PolicyJobStepEscalated = "Escalated";
+
+    /// <summary>
+    /// The policy job step a persisted alert-history row carries (#7076), or <c>null</c> when it carries none: any other alert, a row
+    /// written before the member existed, or unparseable JSON. Reads the one property rather than rehydrating the whole context, for
+    /// the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadPolicyJobStep(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.PolicyJobStep), out var step)
+                || step.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return step.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// The collector name a persisted alert-history row carries (#4223 self-monitor notebook), or
     /// <c>null</c> when it carries none — any non-Collector-Cost-Regression alert, a row written before the
@@ -842,6 +956,35 @@ public static class AlertContextSerializer
             }
 
             return collectorName.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The engine alert a persisted analysis-finding row was attached to (#7084 part 4), or <c>null</c> when it carries
+    /// none: every other row, a row written before the member existed, or unparseable JSON. Reads the one property, for
+    /// the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static AlertAttachedToDto? TryReadAttachedTo(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.AttachedTo), out var attached)
+                || attached.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var dto = attached.Deserialize<AlertAttachedToDto>();
+            return dto is { Metric: not null } ? dto : null;
         }
         catch (JsonException)
         {
@@ -1011,7 +1154,7 @@ public static class AlertContextSerializer
     /// finding row (recommendations rebuild D2). Reuses the SAME private
     /// <see cref="ToDto(RemediationAction?)"/> projection the alert-context write already
     /// uses, so a finding's persisted action round-trips byte-identically to one carried
-    /// in an alert's ContextJson (incl. RcsiInactionFigures / ClearPlanFigures / all
+    /// in an alert's ContextJson (incl. RcsiInactionFigures / all
     /// target lists). Returns null when the action is null.
     /// </summary>
     public static string? SerializeAction(RemediationAction? action)
@@ -1079,11 +1222,23 @@ public static class AlertContextSerializer
                     TimeSpan.FromSeconds(Math.Max(0, newest.AgeSeconds)))
                 : null;
 
+            /* #7068: the files a file growth firing is about, null on every other alert and every row written before this
+               member existed. */
+            context.FileGrowthFiles = dto.FileGrowthFiles;
+
+            /* #7076: the policy job step this firing announced, null on every other alert and every row written before this
+               member existed. */
+            context.PolicyJobStep = dto.PolicyJobStep;
+
             /* #5654: the external source that raised this firing, null on every alert not raised through the store's
                submission function and every row written before this member existed. */
             context.External = dto.External is { } external && !string.IsNullOrWhiteSpace(external.Source)
                 ? new AlertExternalOrigin(external.Source, external.Key, external.PendingId)
                 : null;
+
+            /* #7084 part 4: the engine alert this finding was attached to, null on every other row and every row
+               written before this member existed. */
+            context.AttachedTo = dto.AttachedTo is { } attached && !string.IsNullOrWhiteSpace(attached.Metric) ? attached : null;
 
             foreach (var d in dto.Details)
             {
@@ -1161,23 +1316,6 @@ public static class AlertContextSerializer
             ? new RcsiInactionFiguresDto(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
             : null;
 
-        // Clear-cached-plan (PR-B): persist the targets + carried figures so the affordance
-        // survives the contextJson round-trip and the dialog shows the REAL numbers at apply.
-        List<ClearPlanTargetDto>? clearPlanTargets = null;
-        if (action.ClearPlanTargets is not null)
-        {
-            clearPlanTargets = new List<ClearPlanTargetDto>(action.ClearPlanTargets.Count);
-            foreach (var t in action.ClearPlanTargets)
-                clearPlanTargets.Add(new ClearPlanTargetDto(
-                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
-                    t.AnomalyRatio, t.LatestPlanHandle));
-        }
-
-        var clearPlanFigures = action.ClearPlanFigures is { } cf
-            ? new ClearPlanFiguresDto(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
-                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
-            : null;
-
         // WS3 (percent-autogrowth advisory): persist the file targets so the Recommendations
         // reader can render the copy-paste MODIFY FILE statements on read (the drill-down is
         // ephemeral). Null for every other fact key -> backward-compatible.
@@ -1204,17 +1342,6 @@ public static class AlertContextSerializer
                     new RcsiInactionFiguresDto(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
         }
 
-        // WS3 (server-level config): persist the targets so the Recommendations reader can fan the
-        // server-config cards on read (the drill-down is ephemeral) AND the ServerConfigHandler can
-        // re-derive the MAXDOP/CTFP target at apply. Null for every other fact key -> backward-compatible.
-        List<ServerConfigTargetDto>? serverConfigTargets = null;
-        if (action.ServerConfigTargets is not null)
-        {
-            serverConfigTargets = new List<ServerConfigTargetDto>(action.ServerConfigTargets.Count);
-            foreach (var t in action.ServerConfigTargets)
-                serverConfigTargets.Add(new ServerConfigTargetDto((int)t.Setting, t.CurrentValue, t.RecommendedValue));
-        }
-
         // WS4 (missing-index advisory): persist the suggested CREATE statements so the Recommendations
         // reader can render them as copy-paste on read (the drill-down is ephemeral). Copy-paste only —
         // no handler, never Apply. Null for every other fact key -> backward-compatible.
@@ -1227,8 +1354,7 @@ public static class AlertContextSerializer
         }
 
         return new RemediationActionDto(action.FactKey, action.Action, targets, dbConfigTargets,
-            rcsiFigures, clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets,
-            serverConfigTargets, missingIndexTargets);
+            rcsiFigures, fileGrowthTargets, rcsiTargets, missingIndexTargets);
     }
 
     private static RemediationAction? FromDto(RemediationActionDto? dto)
@@ -1278,25 +1404,6 @@ public static class AlertContextSerializer
             ? new RcsiInactionFigures(f.BlockingEvents, f.Deadlocks, f.ReaderWriterPct)
             : null;
 
-        // Clear-cached-plan (PR-B): rebuild the targets + carried figures from the DTO and
-        // PASS them to the ctor (the trailing ClearPlan* members default to null, so a short
-        // call would silently drop a CLEAR_PLAN action's targets on the round-trip). Legacy
-        // JSON without the fields deserializes to null → backward-compatible.
-        List<ClearPlanTarget>? clearPlanTargets = null;
-        if (dto.ClearPlanTargets is not null)
-        {
-            clearPlanTargets = new List<ClearPlanTarget>(dto.ClearPlanTargets.Count);
-            foreach (var t in dto.ClearPlanTargets)
-                clearPlanTargets.Add(new ClearPlanTarget(
-                    t.Database, t.QueryHash, t.CurrentCpuPerExecMs, t.BaselineCpuPerExecMs,
-                    t.AnomalyRatio, t.LatestPlanHandle));
-        }
-
-        var clearPlanFigures = dto.ClearPlanFigures is { } cf
-            ? new ClearPlanFigures(cf.CurrentCpuPerExecMs, cf.BaselineCpuPerExecMs, cf.AnomalyRatio,
-                cf.CpuPercent, cf.PlanRegressionCoFired, cf.ParameterSensitivityCoFired)
-            : null;
-
         // WS3: rebuild the percent-autogrowth file targets from the DTO and PASS them to the
         // ctor (the trailing FileGrowthTargets member defaults to null, so a short call would
         // silently drop them on the round-trip). Legacy JSON without the field -> null.
@@ -1323,19 +1430,6 @@ public static class AlertContextSerializer
                     new RcsiInactionFigures(t.Figures.BlockingEvents, t.Figures.Deadlocks, t.Figures.ReaderWriterPct)));
         }
 
-        // WS3: rebuild the server-config targets from the DTO and PASS them to the ctor (the trailing
-        // ServerConfigTargets member defaults to null, so a short call would silently drop them on the
-        // round-trip — the reader would then fan no server-config cards and the handler could not
-        // re-derive the MAXDOP/CTFP target). Legacy JSON without the field deserializes to null →
-        // backward-compatible.
-        List<ServerConfigTarget>? serverConfigTargets = null;
-        if (dto.ServerConfigTargets is not null)
-        {
-            serverConfigTargets = new List<ServerConfigTarget>(dto.ServerConfigTargets.Count);
-            foreach (var t in dto.ServerConfigTargets)
-                serverConfigTargets.Add(new ServerConfigTarget((ServerConfigSetting)t.Setting, t.CurrentValue, t.RecommendedValue));
-        }
-
         // WS4: rebuild the missing-index targets from the DTO and PASS them to the ctor (the trailing
         // MissingIndexTargets member defaults to null, so a short call would silently drop them on the
         // round-trip — the reader would then render no missing-index copy-paste). Legacy JSON without
@@ -1349,7 +1443,6 @@ public static class AlertContextSerializer
         }
 
         return new RemediationAction(dto.FactKey, dto.Action, targets, dbConfigTargets, rcsiFigures,
-            clearPlanTargets, clearPlanFigures, fileGrowthTargets, rcsiTargets, serverConfigTargets,
-            missingIndexTargets);
+            fileGrowthTargets, rcsiTargets, missingIndexTargets);
     }
 }

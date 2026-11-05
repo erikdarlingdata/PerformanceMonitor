@@ -125,13 +125,83 @@ try {
       const root = await run("srv-a", { findings: [forcePlan, config] });
       return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").length }));
     },
+    standingLink: async () => {
+      /* #7416: a setting or a volume's free space is a standing state, so no running query explains it and the Queries link is not offered. */
+      const volume = finding({ finding_id: 1, incident_id: "a", standing_state: true, is_config_fix: false, advice: { headline: "VolumeLow", investigation: "i", remediation: "r" } });
+      const wait = finding({ finding_id: 2, incident_id: "b", standing_state: false, is_config_fix: false, advice: { headline: "WaitSpike", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [volume, wait] });
+      return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").map((a) => a.textContent) }));
+    },
+    sameRoot: async () => {
+      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures and the other chain named under it. */
+      const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, advice: { headline: "Latch contention", investigation: "i", remediation: "r" }, ...over });
+      const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5 });
+      const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2 });
+      const other = finding({ finding_id: 3, incident_id: "inc-1", severity: 0.6, root_fact: { key: "CPU_SPIKE", value: 1 }, advice: { headline: "CPU", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newest, older, other] });
+      const groups = groupsOf(root);
+      return { headers: groups.map(sum), cards: byTag(root, "h4").map((h) => h.textContent), text: root.textContent };
+    },
+    sameRootOtherSentence: async () => {
+      /* #7416 still holds where the headlines differ: two chains on one root with two sentences are one card, the other chain named under it. */
+      const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, ...over });
+      const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5, advice: { headline: "Latch contention", investigation: "i", remediation: "r" } });
+      const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2, advice: { headline: "Tempdb latch contention", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newest, older] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupTwoStatements: async () => {
+      /* #7582: two pileups on different statements print one headline, but each is its own card with its own remediation. */
+      const head = "4 sessions ran one statement for 30 s";
+      const pile = (over) => finding({ root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, ...over });
+      const a = pile({ finding_id: 1, incident_id: "inc-a", story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", occurrences: 3, advice: { headline: head, investigation: "i", remediation: "Fix statement A" } });
+      const b = pile({ finding_id: 2, incident_id: "inc-b", story_path: "SAME_STATEMENT_PILEUP → 0x99887766AABBCCDD", occurrences: 5, advice: { headline: head, investigation: "i", remediation: "Fix statement B" } });
+      const root = await run("srv-a", { findings: [a, b] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupSameStatement: async () => {
+      /* #7582: one statement's pileup on two incidents is still one card. */
+      const pile = (over) => finding({ root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" }, ...over });
+      const root = await run("srv-a", { findings: [pile({ finding_id: 1, incident_id: "inc-a", occurrences: 3 }), pile({ finding_id: 2, incident_id: "inc-b", occurrences: 5 })] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupAlsoSeen: async () => {
+      /* #7582: one incident's pileup read back under two headlines: the other is named under the card as "also seen as", with no hash. */
+      const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", ...over });
+      const newer = pile({ finding_id: 1, last_seen: "2026-01-01T10:00:00Z", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" } });
+      const older = pile({ finding_id: 2, last_seen: "2026-01-01T08:00:00Z", advice: { headline: "3 sessions ran one statement for 20 s", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [newer, older] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    sameSentence: async () => {
+      /* #7582: one sentence on rows of two incidents is one card, Critical, with the occurrences added up, and the chains it covers named in words. */
+      const read = (over) => finding({ advice: { headline: "Read latency spiked to 155 ms", investigation: "i", remediation: "r" }, ...over });
+      const warn = read({ finding_id: 1, incident_id: "inc-1", severity: 0.9, peak_severity: 0.9, occurrences: 17, story_path: "ANOMALY_READ_LATENCY", last_seen: "2026-01-01T07:00:00Z" });
+      const crit = read({ finding_id: 2, incident_id: "inc-2", severity: 1.7, peak_severity: 1.7, occurrences: 4, story_path: "ANOMALY_READ_LATENCY → LCK_M_S", last_seen: "2026-01-01T04:00:00Z" });
+      const other = finding({ finding_id: 3, incident_id: "inc-3", severity: 0.2, peak_severity: 0.2, advice: { headline: "Something else", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [warn, crit, other] });
+      return { headers: groupsOf(root).map(sum), text: root.textContent };
+    },
+    peakSeverity: async () => {
+      /* #7582: the newest occurrence scored 0.62 but the peak was 1.3, so the card reads Warning. */
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.62, peak_severity: 1.3, incident_id: "inc-1", advice: { headline: "Wait profile shifted", investigation: "i", remediation: "r" } })] });
+      return { headers: groupsOf(root).map(sum) };
+    },
     nullSeverity: async () => {
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: null })] });
       return { text: root.textContent };
     },
     scoreWording: async () => {
       /* The severity score is labelled as a score and the category follows a dot: "0.80 waits" read as a count of waits. */
-      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits" })] });
+      const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.8, category: "waits", category_name: "Waits" })] });
+      return { text: root.textContent };
+    },
+    categoryNames: async () => {
+      /* #7486: the card shows the name the reply carries, and a row with no name shows its category as it is. */
+      const root = await run("srv-a", { findings: [
+        finding({ finding_id: 1, category: "bad_actor", category_name: "Expensive query", incident_id: "inc-1", advice: { headline: "First sentence" } }),
+        finding({ finding_id: 2, category: "weird_new_source", incident_id: "inc-2", advice: { headline: "Second sentence" } }),
+      ] });
       return { text: root.textContent };
     },
     truncation: async () => {

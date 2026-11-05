@@ -47,6 +47,10 @@ public partial class AlertsHistoryTab : UserControl
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
 
+    /// <summary>#7211: the newest <see cref="LoadAlertsAsync"/> claims the tab, so a slower read for a server or window the operator
+    /// has since moved off cannot land over a newer one (the Job History tab's rule, #5703).</summary>
+    private readonly ScopedLoadGenerations _loads = new();
+
     /// <summary>The read's row cap (D7): the newest 500 alerts. <see cref="LoadAlertsAsync"/> passes it to the read and
     /// the count text (<see cref="JobHistoryCap.CountText(int, int, int, string)"/>) says "showing the newest 500" when
     /// the read reached it.</summary>
@@ -94,7 +98,7 @@ public partial class AlertsHistoryTab : UserControl
            the read-only message via StatusChanged if used — the reactive backstop. */
         if (dataService.IsReadOnly)
         {
-            const string readOnlyTip = "This viewer is connected read-only (postgres.connectAs = \"viewer\"); alert dismissal is disabled.";
+            const string readOnlyTip = "This viewer is connected read-only, so alert dismissal is disabled. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             DismissAllButton.IsEnabled = false;
             DismissAllButton.ToolTip = readOnlyTip;
             DismissSelectedButton.ToolTip = readOnlyTip;
@@ -132,12 +136,20 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        var gen = _loads.Claim(nameof(LoadAlertsAsync));
+
         try
         {
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
 
             var alerts = await _dataService.GetAlertHistoryWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId, RowCap);
+
+            /* #7211: nothing awaits between this check and the bind below, so an older read never lands over a newer one. */
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen))
+            {
+                return;
+            }
 
             if (_filterManager != null)
             {
@@ -168,30 +180,33 @@ public partial class AlertsHistoryTab : UserControl
     }
 
     /// <summary>
-    /// Rebuilds the Server filter combo from the servers present in the current read (Lite's
-    /// PopulateServerFilter): "All Servers" first, then each distinct server, preserving the selection.
+    /// Brings the Server filter combo up to date after a read (#7211): "All Servers" first, then every server already on offer plus
+    /// those in the read. The list only grows (<see cref="JobHistoryFilterChoices.MergeServers"/>, as on the Job History tab, #5703), so
+    /// a read narrowed to one server, or to a window where the picked server has no alerts, never removes a choice and the operator can
+    /// always pick another server or go back to All. The picked server is kept, and a pick that cannot be found falls back to
+    /// "All Servers" on purpose instead of leaving the combo blank while the grid reads every server.
     /// </summary>
-    private void PopulateServerFilter(List<ViewerAlertRow> alerts)
+    internal void PopulateServerFilter(List<ViewerAlertRow> alerts)
     {
-        var servers = alerts
-            .Select(a => (a.ServerId, a.ServerName))
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
-            .OrderBy(s => s.ServerName)
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _))
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!), i.Content?.ToString() ?? string.Empty))
             .ToList();
 
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
 
-        var existingIds = ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => i.Tag?.ToString())
-            .ToList();
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered,
+            [],
+            alerts.Select(a => new JobHistoryFilterChoices.ServerChoice(a.ServerId, a.ServerName ?? string.Empty)));
 
         var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
-        if (newIds.SequenceEqual(existingIds))
+        var existingIds = offered.Select(o => o.ServerId.ToString()).ToList();
+        if (newIds.SequenceEqual(existingIds) && ServerFilterComboBox.SelectedIndex >= 0)
         {
             return;
         }
@@ -212,18 +227,20 @@ public partial class AlertsHistoryTab : UserControl
             });
         }
 
+        var picked = 0;
         if (currentSelection != null)
         {
             for (var i = 1; i < ServerFilterComboBox.Items.Count; i++)
             {
                 if ((ServerFilterComboBox.Items[i] as ComboBoxItem)?.Tag?.ToString() == currentSelection)
                 {
-                    ServerFilterComboBox.SelectedIndex = i;
+                    picked = i;
                     break;
                 }
             }
         }
 
+        ServerFilterComboBox.SelectedIndex = picked;
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
@@ -239,7 +256,7 @@ public partial class AlertsHistoryTab : UserControl
         return ViewerTimeRangeWindow.HoursBack(startUtc, endUtc);
     }
 
-    private int? GetSelectedServerId()
+    internal int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
             ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
@@ -396,6 +413,10 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
         var result = MessageBox.Show(
             $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the store.",
             "Dismiss All Alerts",
@@ -413,10 +434,12 @@ public partial class AlertsHistoryTab : UserControl
             int? serverId = GetSelectedServerId();
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc, isLive) = GetSelectedWindow();
-            var affected = await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
+            var affected = dismissShownRows
+                ? await _dataService.DismissAlertsAsync(allAlerts)
+                : await _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, isLive ? null : untilUtc, serverId);
             if (LogDismissals)
             {
-                var scope = serverId.HasValue ? $"server {serverId.Value}" : "all servers";
+                var scope = dismissShownRows ? "the rows shown" : serverId.HasValue ? $"server {serverId.Value}" : "all servers";
                 ViewerLogger.Info("AlertsHistory", $"Dismissed all {affected} visible alert(s) ({scope}, last {hoursBack}h)");
             }
             await LoadAlertsAsync();
@@ -452,14 +475,8 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        /* Walk up from the click target to the DataGridRow; ignore header / empty-area clicks. */
-        var source = e.OriginalSource as DependencyObject;
-        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
-        {
-            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-        }
-
-        if (source is not DataGridRow row || row.DataContext is not ViewerAlertRow item)
+        /* Ignore header / scrollbar / empty-area clicks (#7210). */
+        if (DataGridRowHit.RowOf(e.OriginalSource) is not { } row || row.DataContext is not ViewerAlertRow item)
         {
             return;
         }
@@ -482,15 +499,43 @@ public partial class AlertsHistoryTab : UserControl
         ShowDetail(item);
     }
 
-    private void ShowDetail(ViewerAlertRow item)
+    private async void ShowDetail(ViewerAlertRow item)
     {
-        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
+        /* #7084 part 4: an engine alert's detail lists the findings that attached to it instead of paging, read when it
+           opens. A failed read leaves the list off: the rest of the detail is the row's own and is complete without it. */
+        IReadOnlyList<string>? attached = null;
+        if (_dataService is { } data && OpenEngineAlerts.IsAttachable(item.MetricName))
+        {
+            try
+            {
+                attached = await data.GetAttachedFindingsAsync(item);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Error("AlertsHistoryTab", "Could not read the findings attached to " + item.MetricName, ex);
+            }
+        }
+
+        var detailWindow = new AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         var owner = Window.GetWindow(this);
         if (owner != null)
         {
             detailWindow.Owner = owner;
         }
-        detailWindow.ShowDialog();
+        ShowDetailDialog(detailWindow, Dispatcher);
+    }
+
+    /// <summary>
+    /// #7554: shows the Alert Details window, and when its link was clicked runs the link's action only after the dialog has closed
+    /// and focus has gone back to the grid, at input priority so the tab it selects is not taken back by that focus change.
+    /// </summary>
+    internal static void ShowDetailDialog(AlertDetailWindow window, Dispatcher dispatcher)
+    {
+        window.ShowDialog();
+        if (window.DeferredOpen is { } open)
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.Input, open);
+        }
     }
 
     private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)
@@ -539,7 +584,7 @@ public partial class AlertsHistoryTab : UserControl
             return;
         }
 
-        var dialog = new MuteRuleEditDialog(context) { Owner = Window.GetWindow(this) };
+        var dialog = new MuteRuleEditDialog(context, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = Window.GetWindow(this) };
         if (dialog.ShowDialog() != true)
         {
             return;

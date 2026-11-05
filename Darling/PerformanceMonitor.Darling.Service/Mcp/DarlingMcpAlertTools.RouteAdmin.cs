@@ -48,7 +48,7 @@ public sealed partial class DarlingMcpAlertTools
         "Creates a route that decides WHICH alerts it covers and, when you pass them, where they go. " + DestinationsHelp + " " +
         "With no destination field the route is stored with every destination empty, so it has none of its own and each channel goes where it went before: to the next less specific matching route that sets that channel, else to the Settings > Notifications channels. " +
         "What it can set: metric_match (" + MatchHelp + "), a scope of one server or one tag (not both; * only with a scope), enabled, " +
-        "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to), fallback_route_id (an existing route) and severities (" + SeveritiesHelp + "). " +
+        "send_resolutions (inherit, always or never: the clear message to the channels this route resolves to), fallback_route_id (an existing route), severities (" + SeveritiesHelp + ") and report_notice (" + ReportNoticeHelp + "). " +
         "The database role this tool runs as has no INSERT on the routes table and no read or write on a destination column: the route is written by the store's own " +
         "config.create_notification_route function and its destinations by config.set_notification_route_destinations, in one transaction, so a destination that is refused leaves no route behind. " +
         "A destination is sealed for this route's own row, so it cannot be copied to another route. scope_server_id and scope_tag_id are ids from get_notification_routes or the server and tag reads; an id that names nothing is invalid. " +
@@ -67,11 +67,12 @@ public sealed partial class DarlingMcpAlertTools
         [Description("The route's own generic webhook URL (absolute http or https). Sealed for this route; never shown back. Omit for none.")] string? generic_webhook_url = null,
         [Description("The route's own PagerDuty Events API v2 routing key. Sealed for this route; never shown back. Omit for none.")] string? pagerduty_routing_key = null,
         [Description("The route's own email recipients, comma separated plain addresses. Omit for none.")] string? email_recipients = null,
-        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate), 2 (Act) or 3 (Act on servers). Omit to keep.")] int? agent_level = null,
-        [Description("Operator token only: requests per hour, 1 to 60. Omit to keep.")] int? agent_max_per_hour = null,
-        [Description("Operator token only: requests per day, 1 to 500. Omit to keep.")] int? agent_max_per_day = null,
-        [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
-        [Description("Operator token only: expiry minutes, 15 to 1440. Omit to keep.")] int? agent_expiry_minutes = null,
+        [Description("Operator token only: the agent level, 0 (Off), 1 (Investigate), 2 (Act) or 3 (Act on servers). Omit for Inherit (the next level decides).")] int? agent_level = null,
+        [Description("Operator token only: requests per hour, 1 to 60. Omit for the default (20).")] int? agent_max_per_hour = null,
+        [Description("Operator token only: requests per day, 1 to 500. Omit for the default (100).")] int? agent_max_per_day = null,
+        [Description("Operator token only: lease minutes, 5 to 120. Omit for the default (15).")] int? agent_lease_minutes = null,
+        [Description("Operator token only: expiry minutes, 15 to 1440. Omit for the default (240).")] int? agent_expiry_minutes = null,
+        [Description("Whether the route posts a chat notice when an agent files a report: off (default), needs_person_or_change or all (case-insensitive).")] string? report_notice = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
         PostgresConfig? postgresConfig = null,
@@ -81,13 +82,13 @@ public sealed partial class DarlingMcpAlertTools
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
             new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes),
-            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities);
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice);
 
     /// <summary>The create: the route and its destinations in one transaction (a sealed value is bound to the route's id, so the id comes first).</summary>
     internal static async Task<string> CreateNotificationRouteAsync(
         NpgsqlDataSource postgres, string metric_match, bool enabled, int? scope_server_id, int? scope_tag_id, string? send_resolutions,
         int? fallback_route_id, RouteDestinationRequest destinations, IPasswordKeyRing ring, ILogger? logger, CancellationToken cancellationToken,
-        RouteAgentRequest? agent = null, string? operatorActor = null, bool selfManagedStore = true, string? severities = null)
+        RouteAgentRequest? agent = null, string? operatorActor = null, bool selfManagedStore = true, string? severities = null, string? reportNotice = null)
     {
         try
         {
@@ -99,6 +100,11 @@ public sealed partial class DarlingMcpAlertTools
             if (ParseSeverities(severities, out var severitiesWord) is { } badSeverities)
             {
                 return Outcome("invalid", badSeverities);
+            }
+
+            if (ParseReportNotice(reportNotice, out var reportNoticeWord) is { } badReportNotice)
+            {
+                return Outcome("invalid", badReportNotice);
             }
 
             var match = NormalizeRouteMatch(metric_match);
@@ -128,7 +134,7 @@ public sealed partial class DarlingMcpAlertTools
                     : new WebhookProxies("", "", "", "");
                 await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6, $7)";
+                const string createSql = "SELECT config.create_notification_route($1, $2, $3, $4, $5, $6, $7, $8)";
                 await using (var command = new NpgsqlCommand(createSql, connection) { Transaction = transaction })
                 {
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -141,6 +147,7 @@ public sealed partial class DarlingMcpAlertTools
                         : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
                     NotificationRouteWriter.AddNullableInt(command, fallback_route_id);
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severitiesWord });
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reportNoticeWord });
                     routeId = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
                 }
 
@@ -165,7 +172,7 @@ public sealed partial class DarlingMcpAlertTools
                 return Outcome("invalid", ex.Message);
             }
 
-            var fields = "metric_match, enabled, scope, send_resolutions, fallback_route_id, severities" + (change is { Fields.Count: > 0 } ? ", " + DestinationFieldNames(change) : "")
+            var fields = "metric_match, enabled, scope, send_resolutions, fallback_route_id, severities, report_notice" + (change is { Fields.Count: > 0 } ? ", " + DestinationFieldNames(change) : "")
                 + (agent.Any ? ", " + string.Join(", ", agent.Columns) : "");
             LogRouteWrite(logger, "create_notification_route", CallerOf(), routeId, fields);
             var stored = (await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == routeId);
@@ -195,7 +202,7 @@ public sealed partial class DarlingMcpAlertTools
         "An operator token changes any route, an agent route included: its match, scope, enabled flag, send_resolutions, fallback, destinations and agent fields. A change to the agent fields, or to the match, scope or enabled flag of a route with an agent setting, is journaled as route_agent_changed under operator: and the token's name. " +
         "A route's own destinations do not stop a change to what it matches. " +
         "Fields: metric_match (" + MatchHelp + "), enabled, scope (scope_server_id or scope_tag_id, the other is cleared; fleet_wide true clears both), " +
-        "send_resolutions (inherit, always or never), severities (" + SeveritiesHelp + ") and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
+        "send_resolutions (inherit, always or never), severities (" + SeveritiesHelp + "), report_notice (" + ReportNoticeHelp + ") and fallback_route_id (an existing route; clear_fallback true removes it), plus the destination fields. A field left out keeps its stored value. " +
         "An operator token sets agent_level 0 to 3, or clear_agent_level true to put the level back to Inherit (null: the next level decides), not both. Clearing the level keeps the four limits, as the Viewer's Inherit does. " +
         "The same rules the Viewer's route window applies hold: * needs a scope, a route is scoped to one server or one tag, a route is not its own fallback, a webhook is an absolute http or https URL, recipients are plain addresses. " +
         "A route whose generic webhook has a signing key keeps its generic URL until the key is removed (remove_webhook_signing_key, or the Viewer). " +
@@ -204,6 +211,10 @@ public sealed partial class DarlingMcpAlertTools
         "Use set_notification_route_enabled to turn a route off and on without the rest. " +
         "The answer's previous is the route before the change and undo is the update_notification_route call that puts the match, scope, enabled flag, resolution override and fallback back. " +
         "For an operator token undo puts the agent fields back too: agent_level and the four limits, or clear_agent_level true when the level was Inherit. " +
+        "An operator token can turn approval on but never off (#7109): action_approval only to required, approval_single_person only to false. " +
+        "A Level 3 route with action_approval required cannot be disabled, put back to Inherit, or have its match, scope or severities changed (its level can go down to 0, 1 or 2), " +
+        "and a route with action_approval off cannot be raised to Level 3, nor, at Level 3, be enabled or have its match, scope or severities changed. A person makes those changes in the Viewer or on the web dashboard. " +
+        "undo never carries action_approval or approval_single_person: a person undoes a change to them in the Viewer or on the web dashboard. " +
         "A webhook URL or key is never shown, so to put one back pass its earlier value again in its field; destinations.previous says whether one was saved (the host for Teams and Slack). The earlier recipient list is shown, and undo.arguments carries it as email_recipients. " +
         "Returns {status:\"updated\", route, previous, destinations:{changed, now, previous}, undo}, or {status:\"unchanged\", route, previous, undo} when nothing differs.")]
     public static Task<string> UpdateNotificationRoute(
@@ -229,6 +240,9 @@ public sealed partial class DarlingMcpAlertTools
         [Description("Operator token only: lease minutes, 5 to 120. Omit to keep.")] int? agent_lease_minutes = null,
         [Description("Operator token only: expiry minutes, 15 to 1440. Omit to keep.")] int? agent_expiry_minutes = null,
         [Description("Operator token only: true puts agent_level back to Inherit (null), so the next level decides. The limits are kept. Not with agent_level.")] bool? clear_agent_level = null,
+        [Description("Operator token only: required makes a Level 3 action on this route wait for a person's approval. MCP sets only required, never off. Omit to keep.")] string? action_approval = null,
+        [Description("Operator token only: false stops an asker from approving their own request's action on this route. MCP sets only false, never true. Omit to keep.")] bool? approval_single_person = null,
+        [Description("Whether the route posts a chat notice when an agent files a report: off, needs_person_or_change or all (case-insensitive). Omit to keep.")] string? report_notice = null,
         DarlingMcpServedPolicy? served = null,
         ILogger? logger = null,
         PostgresConfig? postgresConfig = null,
@@ -237,20 +251,22 @@ public sealed partial class DarlingMcpAlertTools
             postgres, route_id, metric_match, enabled, scope_server_id, scope_tag_id, fleet_wide, send_resolutions, fallback_route_id, clear_fallback,
             new RouteDestinationRequest(teams_webhook_url, slack_webhook_url, generic_webhook_url, pagerduty_routing_key, email_recipients),
             DarlingPasswordKey.Current, logger, cancellationToken,
-            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true),
-            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities);
+            new RouteAgentRequest(agent_level, agent_max_per_hour, agent_max_per_day, agent_lease_minutes, agent_expiry_minutes, clear_agent_level == true,
+                action_approval, approval_single_person),
+            served?.Policy.OperatorActor, StoreRolesAreRunByOperator(postgresConfig), severities, report_notice);
 
     /// <summary>The edit: the match, scope and flag columns and the destinations in one transaction.</summary>
     internal static async Task<string> UpdateNotificationRouteAsync(
         NpgsqlDataSource postgres, int route_id, string? metric_match, bool? enabled, int? scope_server_id, int? scope_tag_id, bool? fleet_wide,
         string? send_resolutions, int? fallback_route_id, bool? clear_fallback, RouteDestinationRequest destinations, IPasswordKeyRing ring,
         ILogger? logger, CancellationToken cancellationToken, RouteAgentRequest? agent = null, string? operatorActor = null,
-        bool selfManagedStore = true, string? severities = null)
+        bool selfManagedStore = true, string? severities = null, string? reportNotice = null)
     {
         try
         {
             var store = new PgNotificationRouteStore(postgres);
-            var existing = (await store.LoadSummariesAsync(cancellationToken)).FirstOrDefault(r => r.RouteId == route_id);
+            var routes = await store.LoadSummariesAsync(cancellationToken);
+            var existing = routes.FirstOrDefault(r => r.RouteId == route_id);
             if (existing is null)
             {
                 return Outcome("not_found", $"No notification route with route_id {route_id}.");
@@ -270,6 +286,12 @@ public sealed partial class DarlingMcpAlertTools
             if (agent.ClearLevel && agent.Level.HasValue)
             {
                 return Outcome("invalid", "Pass agent_level to set a level, or clear_agent_level true to put it back to Inherit, not both.");
+            }
+
+            if (agent.ActionApproval is { } approvalWord
+                && approvalWord.Trim().ToLowerInvariant() is not (NotificationRouteKinds.ActionApprovalRequired or NotificationRouteKinds.ActionApprovalOff))
+            {
+                return Outcome("invalid", "action_approval is required or off.");
             }
 
             /* Only the agent fields that differ from the stored row are written, so an undo that carries all five (L5 of the #6593 review)
@@ -350,6 +372,21 @@ public sealed partial class DarlingMcpAlertTools
                 }
             }
 
+            var reportNoticeNow = existing.ReportNotice;
+            if (reportNotice is not null)
+            {
+                if (ParseReportNotice(reportNotice, out var parsedReportNotice) is { } badReportNotice)
+                {
+                    return Outcome("invalid", badReportNotice);
+                }
+
+                if (parsedReportNotice != existing.ReportNotice)
+                {
+                    reportNoticeNow = parsedReportNotice;
+                    columns.Add("report_notice");
+                }
+            }
+
             var fallback = existing.FallbackRouteId;
             if (clear_fallback == true)
             {
@@ -370,7 +407,16 @@ public sealed partial class DarlingMcpAlertTools
             /* The Viewer journals a match, scope or enabled change to a route with an agent setting (NotificationRouteWriter.AgentChange), so an
                operator's change to one is journaled too, by the agent function, with the before row the update function returns. */
             var journalsMatchOrFlag = operatorActor is not null && existing.AgentLevel is not null
-                && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities");
+                && columns.Any(c => c is "metric_match" or "scope" or "enabled" or "severities" or "report_notice");
+
+            /* #7109: another enabled Level 3 route with approval off, read from the same list, which a disable or reshape of this route could hand
+               its metrics to. This route itself is left out: moving metrics off it never moves them onto it. */
+            var levelThreeOff = routes.FirstOrDefault(r => r.RouteId != route_id && r.Enabled && r.AgentLevel == NotificationRoute.AgentLevelServerAct
+                && NotificationRouteKinds.NormalizeActionApproval(r.ActionApproval) == NotificationRouteKinds.ActionApprovalOff);
+            if (ApprovalRouteRefusal(existing, agent, columns, enabledNow, "update_notification_route", levelThreeOff) is { } approvalRefusal)
+            {
+                return approvalRefusal;
+            }
 
             if (agent.Any)
             {
@@ -416,7 +462,7 @@ public sealed partial class DarlingMcpAlertTools
                 string? before = null;
                 if (columns.Count > 0)
                 {
-                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)::text";
+                    const string updateSql = "SELECT config.update_notification_route($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)::text";
                     await using var command = new NpgsqlCommand(updateSql, connection) { Transaction = transaction };
                     command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                     command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = route_id });
@@ -431,6 +477,7 @@ public sealed partial class DarlingMcpAlertTools
                         : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
                     NotificationRouteWriter.AddNullableInt(command, fallback);
                     command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severitiesNow });
+                    command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = reportNoticeNow });
                     before = await command.ExecuteScalarAsync(cancellationToken) as string;
                 }
 
@@ -471,6 +518,9 @@ public sealed partial class DarlingMcpAlertTools
                 {
                     tool = "update_notification_route",
                     arguments = UndoArguments(existing, change, operatorActor is not null),
+                    approval = agent.ActionApproval is not null || agent.SinglePerson is not null
+                        ? "undo leaves out action_approval and approval_single_person: MCP turns approval on but never off, so a person undoes a change to them in the Viewer or on the web dashboard."
+                        : null,
                     destinations = change is { Fields.Count: > 0 }
                         ? "A webhook URL or key is never shown. To put one back, pass its earlier value again in the same field (destinations.previous says whether one was saved). The earlier recipient list is in the arguments as email_recipients."
                         : null,
@@ -486,11 +536,15 @@ public sealed partial class DarlingMcpAlertTools
     /// <summary>The agent fields a route write carries (#6542 part 2): each null keeps the stored value. The fallback goes through
     /// config.update_notification_route with the match, scope and flags. <paramref name="ClearLevel"/> (L5 of the #6593 review) puts the
     /// level back to Inherit (NULL) and keeps the limits, as the Viewer's route window saves an Inherit.</summary>
-    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes, bool ClearLevel = false)
+    /// <para><paramref name="ActionApproval"/> and <paramref name="SinglePerson"/> (#7109) are the route's approval columns: MCP sets the first only
+    /// to required and the second only to false (<see cref="ApprovalRouteRefusal"/>, and the agent function again under the row's lock).</para>
+    internal sealed record RouteAgentRequest(int? Level, int? PerHour, int? PerDay, int? LeaseMinutes, int? ExpiryMinutes, bool ClearLevel = false,
+        string? ActionApproval = null, bool? SinglePerson = null)
     {
         internal static readonly RouteAgentRequest None = new(null, null, null, null, null);
 
-        internal bool HasAgentField => Level.HasValue || ClearLevel || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue;
+        internal bool HasAgentField => Level.HasValue || ClearLevel || PerHour.HasValue || PerDay.HasValue || LeaseMinutes.HasValue || ExpiryMinutes.HasValue
+            || ActionApproval is not null || SinglePerson.HasValue;
 
         /// <summary>This request without the fields that already hold the stored value.</summary>
         internal RouteAgentRequest Narrowed(PgNotificationRouteStore.RouteSummary stored) => new(
@@ -499,7 +553,10 @@ public sealed partial class DarlingMcpAlertTools
             PerDay == stored.AgentMaxPerDay ? null : PerDay,
             LeaseMinutes == stored.AgentLeaseMinutes ? null : LeaseMinutes,
             ExpiryMinutes == stored.AgentExpiryMinutes ? null : ExpiryMinutes,
-            ClearLevel && stored.AgentLevel is not null);
+            ClearLevel && stored.AgentLevel is not null,
+            ActionApproval is null || NotificationRouteKinds.NormalizeActionApproval(ActionApproval) == stored.ActionApproval
+                ? null : NotificationRouteKinds.NormalizeActionApproval(ActionApproval),
+            SinglePerson == stored.ApprovalSinglePerson ? null : SinglePerson);
 
         internal bool Any => HasAgentField;
 
@@ -514,6 +571,8 @@ public sealed partial class DarlingMcpAlertTools
                 if (PerDay.HasValue) names.Add("agent_max_per_day");
                 if (LeaseMinutes.HasValue) names.Add("agent_lease_minutes");
                 if (ExpiryMinutes.HasValue) names.Add("agent_expiry_minutes");
+                if (ActionApproval is not null) names.Add("action_approval");
+                if (SinglePerson.HasValue) names.Add("approval_single_person");
                 return names;
             }
         }
@@ -555,7 +614,7 @@ public sealed partial class DarlingMcpAlertTools
     private static async Task SetRouteAgentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int routeId, string operatorActor,
         RouteAgentRequest agent, int? fallback, bool created, CancellationToken cancellationToken, string? before = null)
     {
-        const string sql = "SELECT config.set_notification_route_agent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)";
+        const string sql = "SELECT config.set_notification_route_agent($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)";
         await using var command = new NpgsqlCommand(sql, connection) { Transaction = transaction };
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = routeId });
@@ -571,6 +630,12 @@ public sealed partial class DarlingMcpAlertTools
         command.Parameters.Add(before is null
             ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
             : new NpgsqlParameter<string> { TypedValue = before });
+        command.Parameters.Add(agent.ActionApproval is null
+            ? new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text }
+            : new NpgsqlParameter<string> { TypedValue = agent.ActionApproval });
+        command.Parameters.Add(agent.SinglePerson is { } single
+            ? new NpgsqlParameter<bool> { TypedValue = single }
+            : new NpgsqlParameter { Value = DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean });
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -596,7 +661,7 @@ public sealed partial class DarlingMcpAlertTools
     /// provision-roles.sql creates them). Never PostgreSQL's own text. The web dashboard's route save does not use it: it writes
     /// the table on its own login and maps a 42501 itself (<c>DarlingWebAgentSetup</c>).</summary>
     internal const string RouteStoreNeedsRolesText =
-        "This store's roles predate this route, signing key or notification channel write: re-run Darling/tools/provision-roles.sql on the store, then try again.";
+        "This store's roles predate this route, signing key or notification channel write: re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store, then try again.";
 
     /// <summary>Whether the operator runs provision-roles.sql on this store: false on the managed store and on the compose
     /// distribution's own store (the MCP host connects as a role the service provisioned, this start or an earlier one), where
@@ -643,6 +708,7 @@ public sealed partial class DarlingMcpAlertTools
             ["enabled"] = existing.Enabled,
             ["send_resolutions"] = existing.SendResolutions switch { true => "always", false => "never", _ => "inherit" },
             ["severities"] = existing.Severities,
+            ["report_notice"] = existing.ReportNotice,
         };
         if (existing.ScopeServerId.HasValue)
         {
@@ -717,6 +783,27 @@ public sealed partial class DarlingMcpAlertTools
         }
 
         return "severities is critical, warning or both.";
+    }
+
+    private const string ReportNoticeHelp = "off, needs_person_or_change or all; off is the default and posts nothing. needs_person_or_change posts a Slack or Teams notice for a report with the needs_person verdict or whose request made at least one agent change, and all posts one for every report";
+
+    /// <summary>The report notice word (#6979): off, needs_person_or_change or all, any case. Blank is off. Anything else is refused with the sentence returned.</summary>
+    private static string? ParseReportNotice(string? text, out string word)
+    {
+        word = NotificationRouteKinds.ReportNoticeOff;
+        var trimmed = (text ?? "").Trim().ToLowerInvariant();
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        if (trimmed is NotificationRouteKinds.ReportNoticeOff or NotificationRouteKinds.ReportNoticeNeedsPersonOrChange or NotificationRouteKinds.ReportNoticeAll)
+        {
+            word = trimmed;
+            return null;
+        }
+
+        return "report_notice is off, needs_person_or_change or all.";
     }
 
     private static string? ParseSendResolutions(string? text, out bool? value)

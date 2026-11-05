@@ -52,7 +52,7 @@ public sealed class StoreSessionTimeZoneLiveTests
 
         /* #1776 own-store: a database-level default this test sets must not leak into any other test that
            shares DARLING_TEST_PG's own database. */
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
 
         await using (var admin = new NpgsqlConnection(baseCs))
         {

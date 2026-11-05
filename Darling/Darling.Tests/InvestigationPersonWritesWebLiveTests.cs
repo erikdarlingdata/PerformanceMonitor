@@ -333,7 +333,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_ClosesWritesAndPractisesThroughTheArm_AsThePerson()
     {
-        await WithWebRoutesAsync("viewer", () => "alice", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("web", () => "alice", async (owner, store, Send, ct) =>
         {
             var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), null, ct);
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
@@ -360,7 +360,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", () => "viewer-person", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("web", () => "viewer-person", async (owner, store, Send, ct) =>
         {
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
             var refused = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"viewer tries\"}");
@@ -374,7 +374,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminGets403_NamingTheSwitch()
     {
-        await WithWebRoutesAsync("viewer", () => "alice", async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("web", () => "alice", async (owner, store, Send, ct) =>
         {
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);
             var refused = await Send("PUT", $"/api/investigation-requests/{open}/close", Json, "{\"reason\":\"no switch\"}");
@@ -388,7 +388,7 @@ FROM config.investigation_journal WHERE event = 'note_written'", ct));
     [Fact]
     public async Task AllThreeRoutes_AsTheManagedViewerRole_Answer403_AndChangeNothing()
     {
-        await WithWebRoutesAsync("viewer", () => Lee, async (owner, store, Send, ct) =>
+        await WithWebRoutesAsync("web", () => Lee, async (owner, store, Send, ct) =>
         {
             var judged = await ReportedAsync(store, DateTime.UtcNow.AddHours(-5), null, ct);
             var open = await OpenAsync(store, DateTime.UtcNow.AddHours(-1), ct);

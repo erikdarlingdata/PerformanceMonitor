@@ -29,7 +29,7 @@ Each upgrade folder must contain an `upgrade.txt` file listing the SQL files to 
 
 ## How Upgrades Work
 
-The installer (`deprecated/Installer/`, or the Add Server dialog of the Full Dashboard in `deprecated/Dashboard/`):
+The installer, or the Add Server dialog of the Full Dashboard (source of both frozen in [`deprecated/dashboard-installer-source.zip`](../deprecated/README.md)):
 1. Detects current installed version from `config.installation_history`
 2. Determines which upgrade folders to apply
 3. Executes upgrade folders in sequence

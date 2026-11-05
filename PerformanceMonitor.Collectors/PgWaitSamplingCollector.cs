@@ -57,8 +57,10 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>5. Aggregated away from <c>pid</c>.</b> The raw profile is per-backend, so a busy server
 /// accumulates a row per pid per wait, and pids are transient — the same query appears as many rows that
 /// mean one thing. Grouping by <c>(event_type, event, queryid)</c> is the shape a read actually wants, and
-/// <c>backend_count</c> preserves the one thing the pid dimension was carrying: how many backends were
-/// waiting this way.</para>
+/// <c>backend_count</c> preserves the one thing the pid dimension was carrying: how many distinct backends
+/// were behind the row. It is NOT a current count (#7428): on the extension arm it is the distinct pids in the
+/// module's cumulative profile, which keeps a row per pid until a reset, so it only rises between resets, and on
+/// the sampler arm it is the last window's. A reader must not quote it as how many backends are waiting now.</para>
 ///
 /// <para><b>6. Two arms, one table, one instrument per target (#3604).</b> A stock target WITHOUT the
 /// extension used to get nothing from this collector but an hourly <c>EXTENSION_MISSING</c> skip — and
@@ -241,21 +243,22 @@ WHERE a.pid <> pg_backend_pid()
     public static string SamplerBatchSql(bool hasQueryId)
     {
         var snapshot = SamplerSnapshotSql(hasQueryId);
-        var sb = new System.Text.StringBuilder();
-        sb.Append(snapshot).Append(';');
+        var statements = new System.Collections.Generic.List<string> { snapshot };
         for (var i = 1; i < SamplerSnapshotsPerCycle; i++)
         {
             /* InvariantCulture, like every number this file puts in SQL or state: StringBuilder.Append(double)
                formats under the host's culture, and a half-second period on a comma-decimal host would emit
                pg_sleep(0,5) - a review catch on #3645 before any period but 1.0 ever shipped. */
-            sb.Append("\nSELECT pg_sleep(")
-              .Append((SamplerPeriodMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture))
-              .Append(");")
-              .Append("\nSELECT pg_stat_clear_snapshot();")
-              .Append(snapshot).Append(';');
+            statements.Add("SELECT pg_sleep("
+                + (SamplerPeriodMs / 1000.0).ToString(System.Globalization.CultureInfo.InvariantCulture) + ")");
+            statements.Add("SELECT pg_stat_clear_snapshot()");
+            statements.Add(snapshot);
         }
 
-        return sb.ToString();
+        /* #7567: pg_stat_statements stores each statement of a batch on its own, so each carries its own marker
+           (PgOwnStatement.Marker, trailing: a leading comment is cut from the stored text). Without it the sampler's
+           pg_sleep is the top row of the view on a quiet server and Analysis reads it as the application's. */
+        return PgOwnStatement.MarkBatch(statements);
     }
 
     private static string QueryText => @"

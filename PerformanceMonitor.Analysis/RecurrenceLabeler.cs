@@ -26,9 +26,11 @@ namespace PerformanceMonitor.Analysis;
 /// such. <see cref="StoryText"/> is carried ONLY for <c>RUNNING_JOBS</c>-rooted rows (the store reads it
 /// through <c>MAX(CASE WHEN root_fact_key = 'RUNNING_JOBS' …)</c>) and is null otherwise: the frozen job
 /// card is the one place a prior week's job NAME survives, since <see cref="Fact.ObjectName"/> is not a
-/// finding-row column.
+/// finding-row column. <see cref="ChainFiredHours"/> (#7450) is how many distinct hours of the read window the chain
+/// has a saved row in, and <see cref="ChainSpanHours"/> the hours from its first saved row in the window to its last,
+/// both ends counted. Both are the same for every row of one chain, and 0 when the store did not say.
 /// </summary>
-public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, DateTime LocalBucket, string? StoryText);
+public sealed record PriorOccurrence(string StoryPathHash, string RootFactKey, DateTime LocalBucket, string? StoryText, int ChainFiredHours = 0, int ChainSpanHours = 0);
 
 /// <summary>
 /// What one finding-store read of the prior weeks returns to <see cref="RecurrenceLabeler.Label"/>.
@@ -149,6 +151,18 @@ public static class RecurrenceLabeler
     /// </summary>
     public const int MinimumConsecutiveWeeks = 3;
 
+    /// <summary>
+    /// The largest share of its own span a chain may fire in and still be called recurring at ONE hour (#7450). A chain
+    /// that fired in more than this share of the hours between its first and last saved row in the window fires nearly
+    /// all the time, so its same-slot weeks say nothing about a schedule and the label would send the reader looking
+    /// for a job that does not exist. The span is the chain's own because the store keeps no record of an analysis pass
+    /// that saved nothing: counting "hours the server was watched" from saved rows drops a healthy server whose only
+    /// finding is a weekly job. One half is a JUDGMENT, not a measurement: nobody has measured where a weekly job ends
+    /// and an always-on condition begins. A weekly job fires in a handful of the hundreds of hours its three weeks
+    /// span, so any value from about 0.1 to 0.9 separates the two cases seen so far, and half is the plainest of them.
+    /// </summary>
+    public const double MaximumFiredHourShare = 0.5;
+
     /// <summary>The long-running-job fact key — the maintenance edges' destination (#3632) and the moved-window arm's subject.</summary>
     public const string JobKey = "RUNNING_JOBS";
 
@@ -231,6 +245,7 @@ public static class RecurrenceLabeler
         // carries (the moved-window arm). Week 0 — earlier passes today, in this hour or another — is
         // dropped here: it is this week, not a prior one, on either arm.
         var sameSlotWeeksByChain = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        var firedHoursByChain = new Dictionary<string, (int Fired, int Span)>(StringComparer.Ordinal);
         var priorJobRows = new List<(int WeeksAgo, DateTime Bucket, string? JobName)>();
 
         foreach (var occurrence in prior.Occurrences)
@@ -247,6 +262,7 @@ public static class RecurrenceLabeler
                 if (!sameSlotWeeksByChain.TryGetValue(occurrence.StoryPathHash, out var weeks))
                     sameSlotWeeksByChain[occurrence.StoryPathHash] = weeks = new HashSet<int>();
                 weeks.Add(weeksAgo);
+                firedHoursByChain[occurrence.StoryPathHash] = (occurrence.ChainFiredHours, occurrence.ChainSpanHours);
             }
 
             if (string.Equals(occurrence.RootFactKey, JobKey, StringComparison.Ordinal))
@@ -275,10 +291,11 @@ public static class RecurrenceLabeler
                 lastWeekSlotsForJob = null;
         }
 
-        // Fact key -> whether its collector source is a setting, read once per pass. A story whose every fact is a
-        // setting (#6132) is the same story at every hour, so "recurring at this hour" says nothing true about it:
-        // the hour the pass happens to run in is not part of what it found.
-        var settingsByKey = BuildSettingsByKey(facts);
+        // Fact key -> whether its collector source reads a standing state, read once per pass. A story ROOTED in a
+        // standing state (#6132 settings, #7416 free space) is the same story at every hour, so "recurring at this
+        // hour" says nothing true about it: the hour the pass happens to run in is not part of what it found. The
+        // root decides, not the whole chain: DB_CONFIG -> LCK_M_S is the setting's story with a wait at the end.
+        var standingByKey = BuildStandingByKey(facts);
 
         foreach (var story in stories)
         {
@@ -286,7 +303,9 @@ public static class RecurrenceLabeler
                 continue;
 
             if (!string.IsNullOrEmpty(story.StoryPathHash)
-                && !IsStaticSettingsStory(story, settingsByKey)
+                && !IsConfigRoot(story.RootFactKey)
+                && !IsRootedInStandingState(story, standingByKey)
+                && !FiresMostOfTheTime(firedHoursByChain.GetValueOrDefault(story.StoryPathHash))
                 && sameSlotWeeksByChain.TryGetValue(story.StoryPathHash, out var weeks))
             {
                 // Consecutive from this week backwards: this pass is week 0 and counts; each prior week counts
@@ -305,10 +324,30 @@ public static class RecurrenceLabeler
     }
 
     /// <summary>
-    /// Key -> "this fact is a setting" for every fact of the pass (#6132). A key whose facts disagree counts as a
-    /// setting only when every one of them is.
+    /// A chain rooted in a configuration fact (#7450): <c>DB_CONFIG</c> and the rest of the engine's config advisory
+    /// roots, and any <c>CONFIG_PG_*</c> key. A setting holds its value at every hour, so "the cause keeps a
+    /// schedule" cannot be true of it however often a pass finds it.
     /// </summary>
-    private static Dictionary<string, bool> BuildSettingsByKey(IReadOnlyList<Fact>? facts)
+    private static bool IsConfigRoot(string? rootFactKey) =>
+        !string.IsNullOrEmpty(rootFactKey)
+        && (InferenceEngine.IsConfigAdvisoryRoot(rootFactKey)
+            || rootFactKey.StartsWith("CONFIG_PG_", StringComparison.Ordinal));
+
+    /// <summary>
+    /// True when the chain fired in more than <see cref="MaximumFiredHourShare"/> of the hours from its first saved row
+    /// in the read window to its last (#7450). Both counts come from the one store read. Either one unknown (0) says
+    /// nothing, so a store that does not report them labels as it did before.
+    /// </summary>
+    private static bool FiresMostOfTheTime((int Fired, int Span) hours) =>
+        hours.Fired > 0
+        && hours.Span > 0
+        && hours.Fired > hours.Span * MaximumFiredHourShare;
+
+    /// <summary>
+    /// Key -> "this fact reads a standing state" for every fact of the pass (#6132, #7416). A key whose facts
+    /// disagree counts as standing only when every one of them is.
+    /// </summary>
+    private static Dictionary<string, bool> BuildStandingByKey(IReadOnlyList<Fact>? facts)
     {
         var map = new Dictionary<string, bool>(StringComparer.Ordinal);
         if (facts is null)
@@ -319,29 +358,29 @@ public static class RecurrenceLabeler
             if (fact is null || string.IsNullOrEmpty(fact.Key))
                 continue;
 
-            var isSetting = FactKinds.IsSettingsSource(fact.Source);
-            map[fact.Key] = map.TryGetValue(fact.Key, out var seen) ? seen && isSetting : isSetting;
+            var isStanding = FactKinds.IsStandingStateSource(fact.Source);
+            map[fact.Key] = map.TryGetValue(fact.Key, out var seen) ? seen && isStanding : isStanding;
         }
 
         return map;
     }
 
     /// <summary>
-    /// True when every fact on the story's path is a setting — a configuration or point-in-time fact read from the
-    /// latest row whatever the hour (<see cref="FactKinds.IsSettingsSource"/>). Such a story has no time series
-    /// behind it to recur. A path key with no fact in the pass cannot be classified, so the story stays eligible,
+    /// True when the story's ROOT fact is a standing state: a setting or a free-space level
+    /// (<see cref="FactKinds.IsStandingStateSource"/>), or a key the engine roots as a standing advisory at any
+    /// severity (<see cref="InferenceEngine.IsConfigAdvisoryRoot"/>: a missing index, a plan warning, plan-cache
+    /// bloat). Such a story has no time series behind its root to recur, whatever symptom the chain ends in.
+    /// A root with no fact in the pass and no advisory key cannot be classified, so the story stays eligible,
     /// which is what the labeler did before.
     /// </summary>
-    private static bool IsStaticSettingsStory(AnalysisStory story, Dictionary<string, bool> settingsByKey)
+    private static bool IsRootedInStandingState(AnalysisStory story, Dictionary<string, bool> standingByKey)
     {
-        IReadOnlyList<string> keys = story.Path is { Count: > 0 } ? story.Path : new[] { story.RootFactKey };
-        foreach (var key in keys)
-        {
-            if (string.IsNullOrEmpty(key) || !settingsByKey.TryGetValue(key, out var isSetting) || !isSetting)
-                return false;
-        }
+        var root = story.Path is { Count: > 0 } ? story.Path[0] : story.RootFactKey;
+        if (string.IsNullOrEmpty(root))
+            return false;
 
-        return true;
+        return (standingByKey.TryGetValue(root, out var isStanding) && isStanding)
+            || FactKinds.IsStandingStateKey(root);
     }
 
     /// <summary>

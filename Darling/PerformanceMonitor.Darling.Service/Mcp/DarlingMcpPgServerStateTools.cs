@@ -31,6 +31,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgServerStateTools
 {
+    /// <summary>The collector table get_pg_extensions reads, named in its window notice (#7010).</summary>
+    private const string ExtensionsTable = "pg_extension_availability";
+
     /// <summary>The collector table get_pg_write_stats reads, named in its window notice (#4966).</summary>
     private const string WriteStatsTable = "pg_write_stats";
 
@@ -43,12 +46,13 @@ public sealed class DarlingMcpPgServerStateTools
     /// </summary>
     private const int BuffersBackendRemovedInMajor = 17;
 
-    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly.")]
+    [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
+    [McpServerTool(Name = "get_pg_buffer_usage"), Description("Gets what is actually resident in the PostgreSQL shared buffer pool, per relation, from the pg_buffercache extension: how many buffers each table or index occupies, how many of those are dirty, and the average usage count that PostgreSQL's clock-sweep eviction reads. This answers which objects the cache is actually spent on, which is a different question from which objects are read most - a small hot table and a large one scanned once can produce similar read counts and completely different residency. High dirty counts concentrated in one relation point at write pressure. Note that scanning pg_buffercache takes a lock on the buffer mapping, so the collector runs it sparingly. LATEST IS A TIME: this is the newest buffer pool snapshot in the search span, captured_at is when it was taken and age_seconds is how old it is at the window end. Not a window of snapshots (#7010). Each relation carries buffer_bytes (buffers x 8192, exact) beside the rounded buffer_mb.")]
     public static async Task<string> GetPgBufferUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Hours of history to search for the latest snapshot. Default 24.")] int hours_back = 24,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the snapshot held more relations than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
@@ -79,13 +83,22 @@ public sealed class DarlingMcpPgServerStateTools
             }
 
             var newest = rows[0];
+            var pageBuffers = rows.Sum(r => r.Buffers);
+            /* #7455: counted in the read (relations_in_snapshot), not guessed from a full page. */
+            var truncated = rows.Count < newest.RelationsInSnapshot;
 
             var relations = rows.Select(r => new
             {
                 database_name = r.DatabaseName,
                 relation_name = r.RelationName,
+                /* #7455: a word where the name is missing, null where there is one. relation_display is the
+                   column a table shows: the name when there is one, else the label, never a blank. */
+                relation_label = r.NameLabel,
+                relation_display = r.RelationName ?? r.NameLabel,
                 relation_kind = r.RelationKind,
                 buffers = r.Buffers,
+                /* #7556: the exact size beside the rounded one, so a page shows 0.2 MB of residency as bytes and not as a digit the rounding made up. */
+                buffer_bytes = r.Buffers * 8192L,
                 buffer_mb = Math.Round(r.Buffers * 8.0 / 1024.0, 1),
                 dirty_buffers = r.DirtyBuffers,
                 pct_dirty = Math.Round(r.PctDirty, 1),
@@ -99,14 +112,38 @@ public sealed class DarlingMcpPgServerStateTools
             {
                 server = resolved.DisplayName,
                 hours_back,
+                /* #7010: the snapshot's own stamp and age (the read answers the newest snapshot, not a window). */
+                captured_at = newest.CaptureTime.ToString("o"),
+                age_seconds = LatestSnapshotStamp.AgeSeconds(newest.CaptureTime, windowEnd),
                 relation_count = rows.Count,
+                /* #7455: the real size of the snapshot this page was cut from, counted in the same read before
+                   the cut and never inferred from a full page. A page of `limit` rows is not the pool. Only
+                   relations of 8 buffers or more are stored, so this is the stored set. */
+                relations_in_snapshot = newest.RelationsInSnapshot,
+                truncated,
+                buffers_not_shown = Math.Max(0, newest.SnapshotBuffers - pageBuffers),
                 /* 8 kB is PostgreSQL's near-universal block size but it IS a compile-time setting, so the
                    buffer COUNT is the measurement and the megabyte figure is a convenience beside it. */
                 pool_buffers_total = newest.PoolBuffersTotal,
                 pool_buffers_used = newest.PoolBuffersUsed,
                 note = "Residency, not read volume — a small hot table and a large one scanned once can "
                      + "read alike and occupy the pool completely differently. avg_usage_count is what the "
-                     + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block.",
+                     + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block."
+                     + (truncated
+                         ? $" This page holds {rows.Count} of the {newest.RelationsInSnapshot} relations in the "
+                           + $"snapshot and leaves out {Math.Max(0, newest.SnapshotBuffers - pageBuffers)} buffers: "
+                           + "raise limit to see the rest."
+                         : " This page holds every relation in the snapshot.")
+                     + (rows.Any(r => r.NameLabel != null)
+                         ? " A relation_name of null is not an error: the pool is cluster-wide and the collector "
+                           + "names a relation only in the database it is connected to. relation_label says which "
+                           + "kind it is. "
+                           + DarlingPgBufferUsageReader.NotResolvedLabel + " is a buffer whose relation was not resolved here: usually a "
+                           + "buffer in another database, but the stored row does not say which database the collector "
+                           + "connected to, so a relation in that database that did not resolve reads the same. "
+                           + DarlingPgBufferUsageReader.SharedOrDroppedLabel + " is a buffer whose database is in "
+                           + "no pg_database row, the shared catalogs on a stock server."
+                         : string.Empty),
                 relations,
             }, McpHelpers.JsonOptions);
         }
@@ -125,6 +162,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("One database, or omit for every database. Rows are (database x extension), so a multi-database host can exceed limit. Pass this to complete one database's full slice. See the tool's reading guide.")]
             string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);
@@ -152,9 +190,20 @@ public sealed class DarlingMcpPgServerStateTools
 
             if (fetched.Count == 0)
             {
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken)
-                    ?? McpHelpers.Status(
+                /* #7010: the empty answer carries the window floor under hints. not_collected is decided first and stays
+                   bare, so the probe is only paid for when that gate did not answer. */
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, "pg_extension_availability", cancellationToken);
+                if (notCollected != null)
+                {
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, notCollected, cancellationToken);
+                }
+
+                var emptyNotice = await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, ExtensionsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                    windowStart, windowEnd, ExtensionsTable, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd,
+                    DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status(
                         "empty",
                         $"No extension inventory for {resolved.DisplayName} in the last {hours_back} "
                         + "hour(s). This collector runs DAILY, so a short window can be empty on a healthy "
@@ -164,7 +213,8 @@ public sealed class DarlingMcpPgServerStateTools
                             : $" You filtered to database_name '{scope}': check the spelling and "
                               + "that the collector enumerates it, because a name that matches nothing is "
                               + "indistinguishable here from a server with no inventory. Re-run without the "
-                              + "filter to see which databases are reported.")), cancellationToken);
+                              + "filter to see which databases are reported."),
+                        emptyNotice.AsHints()), emptyNotice), cancellationToken);
             }
 
             /* The result is capped at `limit`, so a summary count taken over the returned rows describes
@@ -196,6 +246,14 @@ public sealed class DarlingMcpPgServerStateTools
                Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
                 postgres, resolved.ServerId, windowStart, windowEnd, scope, cancellationToken);
+
+            /* #7010: the rows are the newest inventory per (database, extension) the window holds, so a window that starts before the store's
+               data reads as "nothing older existed" without this. A failed probe costs the keys, never the rows. */
+            var notice = await DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, ExtensionsTable, resolved.ServerName, windowStart, windowEnd, cancellationToken),
+                windowStart, windowEnd, ExtensionsTable,
+                "The inventory holds only what the collector recorded from effective_start onward, so a database or extension seen only before then is absent.",
+                logger: logger, cancellationToken: cancellationToken);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
@@ -285,7 +343,7 @@ public sealed class DarlingMcpPgServerStateTools
                 comment = r.Comment,
             });
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Attach(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -384,7 +442,7 @@ public sealed class DarlingMcpPgServerStateTools
                          : string.Empty)
                      + " " + reach.Message,
                 extensions,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -670,12 +728,12 @@ public sealed class DarlingMcpPgServerStateTools
     }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings: value, default, source, restart-or-reload need. LATEST IS A TIME: the newest stored snapshot, not a window or the live server; captured_at is when it was taken (collector runs hourly). Non-default settings list FIRST; pass include_defaults for the rest. pending_restart=true means the file and server disagree, with no other symptom. Bounded by limit (truncated says if more existed); non_default_count is the snapshot's, not the page's. database_overrides (present only if any exist) is what sessions actually run with. <<GUIDE>> Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Where pg_file_settings is read, true can also mean the file holds a value PostgreSQL rejected, which would stop the next start; the server log names the rejected setting. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them. A setting marked pending_restart is kept in the non-default view whatever its source, because it is the row that says the file and the server disagree.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings: value, default, source, restart-or-reload need. LATEST IS A TIME: the newest stored snapshot, not a window or the live server; captured_at is when it was taken. Differing settings list FIRST, then file-pinned defaults; include_defaults adds the rest. pending_restart=true means the file and server disagree, with no other symptom. Bounded by limit (truncated says if more existed); non_default_count is the snapshot's, not the page's. database_overrides (present only if any exist) is what sessions actually run with. <<GUIDE>> Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Settings whose value differs from the default are listed FIRST, because a server has several hundred parameters and only the ones somebody changed are an answer. Next come settings written into a configuration file at exactly their default value (initdb does this for max_connections, for example): is_default is true for them and source says where they were set, so a setting somebody pinned on purpose stays visible without counting as a difference. default_value is shown in the same base as value, so the octal settings (log_file_mode, unix_socket_permissions, data_directory_mode) compare directly. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Where pg_file_settings is read, true can also mean the file holds a value PostgreSQL rejected, which would stop the next start; the server log names the rejected setting. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them. A setting marked pending_restart is kept in the non-default view whatever its source, because it is the row that says the file and the server disagree.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Maximum settings to return. Default 100. This is what bounds the page - read truncated to know whether the population held more; non_default_count stays the whole snapshot's whatever this is set to.")] int limit = 100,
-        [Description("When true, include settings still at their default. Default false: non-default settings, plus any pending_restart row, are the answer. See the tool's reading guide.")] bool include_defaults = false,
+        [Description("When true, include settings still at their default. Default false: differing or file-pinned settings, plus any pending_restart row. See the tool's reading guide.")] bool include_defaults = false,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorForAnswerAsync(postgres, server_name, cancellationToken);

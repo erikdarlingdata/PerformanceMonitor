@@ -494,7 +494,7 @@ public class PgBaselineProvider
     /// side is what makes them daily arms. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/> is the
     /// seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
     /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
@@ -862,6 +862,8 @@ LIMIT 1";
     {
         MetricNames.Blocking => ("blocked_process_report", TimescaleSupport.BlockedProcessBaselineView),
         MetricNames.Deadlock => ("deadlocks", TimescaleSupport.DeadlockBaselineView),
+        /* #7588: the snapshot arm's view is plain on every store, so it always needs the clamp. */
+        MetricNames.BlockingSnapshot => ("dmv_blocking_snapshot", TimescaleSupport.DmvBlockingBaselineView),
         _ => null,
     };
 
@@ -975,6 +977,7 @@ LIMIT 1";
             {
                 windowStart = supplyFloor;
             }
+
 
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
@@ -1497,13 +1500,16 @@ WITH clean AS (
                source, same DOUBLE PRECISION cast (the STDDEV_SAMP-overflows-System.Decimal note above applies verbatim)
                and same scaffold, over the rows that wrote. WHERE delta_writes > 0 keeps v non-null here, so sample_count
                is the count of write-bearing file rows: the detector's write tiles count the same rows
-               (write_sample_count). */
+               (write_sample_count).
+
+               #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. The baseline reads the raw table at each recompute, so history is re-read through the filter with no migration. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms::DOUBLE PRECISION / NULLIF(delta_writes, 0) AS v
     FROM file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // Event-based (#4731) — mean = events per COVERED day for this bucket, sample_count = covered days: the days
@@ -1517,6 +1523,11 @@ WITH clean AS (
                run without complaint and key on UTC; the local-clock census in LocalClockBucketKeyTests is what
                forbids it. */
             MetricNames.Blocking => EventBaselineSql("blocked_process_report", "collection_log", "blocked_process_baseline", "SUM(event_count)"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts dmv_blocking_snapshots rows, so its history is
+               the same rows (dmv_blocking_baseline, a plain view over the raw table with the same self-wait filter, read through the same
+               purge-horizon clamp as the report arm, EventSupplyFor), covered by the snapshot collector's own runs. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "collection_log", "dmv_blocking_baseline", "SUM(event_count)"),
 
             // Event-based — same approach as blocking; the deadlocks collector's own runs cover the hours.
             MetricNames.Deadlock => EventBaselineSql("deadlocks", "collection_log", "deadlock_baseline", "SUM(event_count)"),
@@ -1620,7 +1631,7 @@ clean AS (
     WHERE NOT (ms_per_sec = 0 AND prior_ms_per_sec > 100 AND sample_interval_seconds IS NULL)
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', collection_time) AS minute_bucket,

@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Protocol;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.FrontDoor;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -73,7 +74,7 @@ internal sealed class FakeFrontDoorDirectory : IFrontDoorDirectory
 }
 
 /// <summary>One call the fake peers received.</summary>
-internal sealed record FakePeerCall(string Store, CallToolRequestParams Params, bool AgentRole, CancellationToken Token);
+internal sealed record FakePeerCall(string Store, CallToolRequestParams Params, bool AgentRole, CancellationToken Token, McpDataDetail Detail = McpDataDetail.Full);
 
 /// <summary>The MCP peer client with the answer to each call set by a test, recording every call it gets.</summary>
 internal sealed class FakeFrontDoorPeers : IFrontDoorMcpPeers
@@ -86,9 +87,9 @@ internal sealed class FakeFrontDoorPeers : IFrontDoorMcpPeers
 
     internal IReadOnlyList<FakePeerCall> Calls => _calls.ToArray();
 
-    public Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct)
+    public Task<CallToolResult> CallAsync(string store, CallToolRequestParams call, bool agentRole, CancellationToken ct, McpDataDetail detail = McpDataDetail.Full)
     {
-        var record = new FakePeerCall(store, call, agentRole, ct);
+        var record = new FakePeerCall(store, call, agentRole, ct, detail);
         _calls.Enqueue(record);
         return Handler(record);
     }

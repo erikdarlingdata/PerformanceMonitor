@@ -84,37 +84,21 @@ public sealed partial class DarlingMcpPlanForceTools
             var permit = decision.Permit!;
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
 
-            var row = await ReadServerRowAsync(owner, resolved.ServerId, ct);
-            if (row is null)
-                return Answer("failed", "server_row_missing", $"{resolved.DisplayName} has no row in the monitored-server settings.");
-
-            /* 3b: a database the server's entry excludes is one Darling does not act in. Refused before the dry run reads anything, with the Azure kill's sentence. */
-            if (IsExcludedDatabase(row.ExcludedDatabases, database))
-            {
-                await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, AzureDatabaseExcluded, agentTokenName, ct);
-                return DarlingAgentActionGate.RefusalAnswer(ExcludedDatabaseRefusal(database));
-            }
-
-            var executor = new SqlServerRemediationExecutor(resolved.ServerId, row.Server, row.UserName, row.SecretSlot, logger);
-            var statement = ModuleRecompileStatement.For(database, module);
-
-            /* 4: the executor's own checks run on a dry run and before a write: the name resolves, it is a procedure, function or trigger, the grant. */
-            var dry = await executor.RecompileModuleAsync(permit, module, dryRun: true, ct);
-            /* The journal and the answer name the object the server resolved (its schema and name), not the input text. Before it resolves, only the input is known. */
-            var resolvedModule = dry.ObjectSchema is null || dry.ObjectName is null
-                ? module
-                : "[" + dry.ObjectSchema.Replace("]", "]]", StringComparison.Ordinal) + "].[" + dry.ObjectName.Replace("]", "]]", StringComparison.Ordinal) + "]";
-            var before = new { database, module = resolvedModule, schema = dry.ObjectSchema, name = dry.ObjectName, object_type = dry.ObjectType };
-            if (dry.Outcome != RemediationOutcome.Done)
-            {
-                if (dry.Outcome == RemediationOutcome.Refused && dry.Reason is not null)
-                    await store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, dry.Reason, agentTokenName, ct);
-                return Answer(dry.Outcome == RemediationOutcome.Refused ? "refused" : "failed", dry.Reason, dry.Message,
-                    new { dry_run, statement = dry.Statement ?? statement, before });
-            }
-
-            if (dry_run)
-                return Answer("dry_run", null, dry.Message + " A recompile has no undo.", new { dry_run = true, statement = dry.Statement ?? statement, before });
+            /* 4: the prepare step: the server row, the excluded database and the executor's own checks (the name resolves, it is a procedure, function or trigger, the grant). */
+            var proposing = decision.NeedsApproval && !dry_run;
+            var prepared = await PrepareRecompileModuleAsync(owner, logger, permit, resolved.ServerId, resolved.DisplayName, database, module, dry_run || proposing,
+                (reason, token) => store.RecordAgentActionRefusalAsync(action!.RequestId, action.AgentId, tool, reason, agentTokenName, token), ct);
+            /* #7109: the action needs a person's approval: store a proposal, write nothing. */
+            if (proposing && prepared.Facts is { } proposed)
+                return await ProposeAsync(owner, null, decision, action!, tool, ServerActionNames.RecompileModule, resolved.ServerId, resolved.DisplayName,
+                    new { database = proposed.Database, module = proposed.Module }, RecompileModuleBinding(proposed),
+                    new { statement = proposed.Statement, before = proposed.Before }, ct);
+            if (prepared.Answer is { } preparedAnswer)
+                return preparedAnswer;
+            var facts = prepared.Facts!;
+            var executor = prepared.Executor!;
+            var before = facts.Before;
+            var statement = facts.Statement;
 
             /* 5: the write, journaled. action_called holds the object read on the server; action_done holds the statement and the message. */
             try
@@ -123,11 +107,11 @@ public sealed partial class DarlingMcpPlanForceTools
                 var hooks = new AgentActionHooks
                 {
                     ServerChange = changed,
-                    LoadLevels = (connection, _, token) => DarlingAgentActionGate.LoadLevelsAsync(connection, logger, token),
+                    LoadRoutes = (connection, _, token) => DarlingAgentActionGate.LoadRoutesAsync(connection, logger, token),
                     ReadBefore = (_, _, _) => Task.FromResult<string?>(JsonSerializer.Serialize(before, McpHelpers.JsonOptions)),
                     Write = async (_, _, token) =>
                     {
-                        var written = await executor.RecompileModuleAsync(permit, module, dryRun: false, token);
+                        var written = await WriteRecompileModuleAsync(executor, permit, facts, token);
                         if (written.Wrote)
                             changed.MarkServerChanged();
                         if (written.Outcome != RemediationOutcome.Done || !written.Wrote)

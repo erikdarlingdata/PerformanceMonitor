@@ -48,6 +48,9 @@
 --                         on the fleet row only: the spread of the per-server p999 across the servers above
 --
 -- Collected text is not read: no statement text, no application names, only counts and times.
+-- #7061: this script sums the EXACT count rows and does not read sample rows, so it still counts events under 1 ms and Azure Data Studio metadata
+-- queries. The alert's own baseline (AttentionWindowSql.BaselineMinutes) scales each minute by the share of that minute's sampled events that
+-- are not left out, so on a store with that noise the alert's baseline is lower than the p999 and p999_3min_avg this script prints.
 
 WITH
 bounds AS (

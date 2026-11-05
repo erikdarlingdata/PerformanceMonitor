@@ -8,14 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -185,11 +182,17 @@ public partial class QueryStatsHistoryWindow : Window
         if (sender is not Button btn) return;
         if (string.IsNullOrEmpty(_queryHash)) return;
 
+        /* #7175: the clicked row's own plan, not the newest plan for the query hash. */
+        var requestedHash = HistoryRowPlanTarget.Resolve<ViewerQueryStatsHistoryRow>(sender, HistoryDataGrid)?.QueryPlanHash;
+
         btn.IsEnabled = false;
         btn.Content = "...";
         try
         {
-            var plan = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash);
+            var read = await _dataService.GetQueryStatsPlanAsync(_serverId, _databaseName, _queryHash, requestedHash);
+            var plan = read?.PlanXml;
+            /* The file is named for the plan inside it, which on a fallback is not the clicked row's plan. */
+            var planHash = read?.PlanId;
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show(this, "No query plan was captured in the collected data for this query hash.",
@@ -200,21 +203,18 @@ public partial class QueryStatsHistoryWindow : Window
             /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
             if (WithheldPlanGuard.RefuseSave(plan)) return;
 
-            var dialog = new SaveFileDialog
+            if (read!.IsFallback)
             {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"query_plan_{_queryHash}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
+                MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = "Saved";
+            var saveName = string.IsNullOrEmpty(planHash) ? $"query_plan_{_queryHash}" : $"query_plan_{_queryHash}_{planHash}";
+            if (FileSaveHelper.SavePlanFile(plan, saveName)) btn.Content = "Saved";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -229,13 +229,16 @@ public partial class QueryStatsHistoryWindow : Window
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)
     {
         string? planXml;
+        var requestedHash = HistoryRowPlanTarget.Resolve<ViewerQueryStatsHistoryRow>(sender, HistoryDataGrid)?.QueryPlanHash;
+        StoredPlanRead? read;
         try
         {
-            planXml = await _dataService.GetQueryStatsPlanXmlAsync(_serverId, _databaseName, _queryHash);
+            read = await _dataService.GetQueryStatsPlanAsync(_serverId, _databaseName, _queryHash, requestedHash);
+            planXml = read?.PlanXml;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -246,7 +249,10 @@ public partial class QueryStatsHistoryWindow : Window
             return;
         }
 
-        var label = $"Est Plan - {_queryHash}";
+        /* #7175: name the plan that was read. On a fallback, say the clicked row's plan was not stored. */
+        var planHash = read!.PlanId;
+        var label = string.IsNullOrEmpty(planHash) ? $"Est Plan - {_queryHash}" : $"Est Plan - {_queryHash} ({planHash})";
+        if (read.IsFallback) label += " - " + StoredPlanNotice.Text;
         var viewer = new PlanViewerControl();
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
@@ -327,13 +333,14 @@ public partial class QueryStatsHistoryWindow : Window
         }
         catch (ViewerReadOnlyException)
         {
-            MessageBox.Show(this, "This is a read-only viewer seat, which cannot ask the service to fetch a live plan.",
+            MessageBox.Show(this, "This viewer is connected with a read-only store login, so it cannot ask the service to fetch a live plan. " +
+                ViewerReadOnlyException.HowToConnectAsAdmin,
                 "Read-Only", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to fetch the live plan: {ex.Message}", "Cached Plan Error",
+            MessageBox.Show(this, $"The service could not fetch the live plan for server {_serverName}: {ex.Message}", "Cached Plan Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }

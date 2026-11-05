@@ -93,6 +93,14 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
     }
 
     [Fact]
+    public void ThePickerList_IsInNameOrderWithoutCase_ThenByRawName()
+    {
+        // #7550: a plain ordinal sort put every capitalized name above every lower-case one (Alpha, Beta, Delta, alpha, beta, gamma).
+        var r = Run("nameOrder");
+        Assert.Equal(new[] { "Alpha", "alpha", "Beta", "beta", "Delta", "gamma" }, Strings(r.GetProperty("listed")));
+    }
+
+    [Fact]
     public void CheckingAndUnchecking_RedrawsWithOneReadPerCheckedCounter()
     {
         var r = Run("checkUncheck");
@@ -262,6 +270,8 @@ public sealed class WebPerfmonMultiSelectBehaviourTests
         Assert.Contains("readToolWithinKeptHistory(\"get_perfmon_trend\", { server, counter_name: counter, hours: ctx.hours }, mine.signal)", tabs);
         Assert.Contains("const MAX_COUNTERS_CHARTED = 10;", tabs);
         Assert.Contains("export async function drawPerfmonTrends(", tabs);
-        Assert.Contains("discontinuityNotes(trend.data)", tabs);
+        /* #7416: the baseline discontinuities of a rate counter draw as a structured strip (one step shown once across counters), no longer as a joined sentence. */
+        Assert.Contains("trend.data.discontinuities", tabs);
+        Assert.Contains("discontinuityStrip({ discontinuities: [...seenSteps.values()] })", tabs);
     }
 }

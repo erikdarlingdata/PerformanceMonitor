@@ -1,0 +1,39 @@
+<Window x:Class="PerformanceMonitor.Darling.Viewer.PersonGrantDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add a grant"
+        SizeToContent="Height" Width="540"
+        WindowStartupLocation="CenterOwner"
+        Icon="EDD.ico"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{DynamicResource BackgroundLightBrush}"
+        Foreground="{DynamicResource ForegroundBrush}">
+    <!-- #7107: one grant. A capability, the server action kinds it covers (only Level 3 requests and approvals take kinds), and a scope picked as the route editor picks one. -->
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="ViewerDarkTheme.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    <StackPanel Margin="20">
+        <TextBlock x:Name="HeaderText" Text="Add a grant" FontSize="18" FontWeight="Bold" Margin="0,0,0,6"/>
+        <TextBlock Text="A grant gives one person one capability on the whole fleet, on every server with a tag, or on one server. It only narrows what the route already allows."
+                   Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+        <TextBlock Text="Capability" FontWeight="Bold" Margin="0,0,0,4"/>
+        <ComboBox x:Name="CapabilityCombo" DisplayMemberPath="Label" Margin="0,0,0,10" SelectionChanged="Capability_Changed"/>
+        <StackPanel x:Name="KindsPanel" Visibility="Collapsed" Margin="0,0,0,10">
+            <TextBlock Text="Server actions it covers" FontWeight="Bold" Margin="0,0,0,4"/>
+            <StackPanel x:Name="KindsList"/>
+        </StackPanel>
+        <TextBlock Text="Applies to" FontWeight="Bold" Margin="0,0,0,4"/>
+        <ComboBox x:Name="ScopeCombo" DisplayMemberPath="Label" Margin="0,0,0,4"/>
+        <TextBlock x:Name="ScopeNote" Foreground="{DynamicResource ForegroundMutedBrush}" TextWrapping="Wrap"/>
+        <TextBlock x:Name="ErrorText" Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" Visibility="Collapsed"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
+            <Button Content="_Add" Width="80" Height="28" Margin="0,0,8,0" IsDefault="True" Click="Ok_Click"/>
+            <Button Content="_Cancel" Width="80" Height="28" IsCancel="True"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

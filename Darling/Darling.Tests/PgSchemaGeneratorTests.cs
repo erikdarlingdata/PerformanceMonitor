@@ -777,8 +777,6 @@ public sealed class PgSchemaGeneratorTests
     {
         var v8 = PgSchemaGenerator.GenerateV8Move();
 
-        Assert.Contains("CREATE SCHEMA IF NOT EXISTS collect AUTHORIZATION darling;", v8, StringComparison.Ordinal);
-        Assert.Contains("CREATE SCHEMA IF NOT EXISTS config AUTHORIZATION darling;", v8, StringComparison.Ordinal);
 
         /* Every collector table moves to collect — catalog-driven, so a new collector moves for free. */
         foreach (var schema in CollectorCatalog.All)

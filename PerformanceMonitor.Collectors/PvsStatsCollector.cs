@@ -354,29 +354,24 @@ OPTION(RECOMPILE);";
     /// the shape query_store and database_config already use.
     /// </summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= 15
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target.MeetsMinimumVersion(15, unknownIsNewest: true);
 
     /// <summary>
-    /// Never per-database. On the on-prem/MI path the DMV is instance-wide, so one query covers the whole
-    /// server; on Azure SQL DB the query is database-scoped and reads through the connection the host
-    /// already holds. Enumerating would connect to <c>master</c> for nothing — the #1631 trap
-    /// database_size_stats documents.
+    /// Per-database on Azure SQL DB only (#7165). The Azure query is database-scoped
+    /// (<c>pvss.database_id = DB_ID()</c>), and a logical-server registration names no database, so the host
+    /// connects to <c>master</c>: with one connection the collector read master's version store and no user
+    /// database's, although ADR is always on there and version-store growth is a real alert source. The host
+    /// now connects to each database and runs the query in it, the same fallback database_size_stats takes
+    /// (#5498). On the on-prem/MI path the DMV is instance-wide, so one query covers the whole server.
     /// </summary>
-    public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
+    public override bool RunsPerDatabase(CollectorTargetInfo target) => target.IsAzureSqlDb;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         /* MS documents pvs_off_row_page_skipped_oldest_aborted_xdesid as 2022+; every other column spans
            the whole 2019..2025/Azure range. Azure SQL DB and MI always have it. */
         var target = context.Target;
-        bool has2022Column =
-            target.SqlMajorVersion == 0
-            || target.SqlMajorVersion >= 16
-            || target.IsAzureSqlDb
-            || target.IsAzureManagedInstance;
+        bool has2022Column = target.MeetsMinimumVersion(16, unknownIsNewest: true);
 
         string skippedOldestAborted = has2022Column
             ? SkippedOldestAbortedColumn

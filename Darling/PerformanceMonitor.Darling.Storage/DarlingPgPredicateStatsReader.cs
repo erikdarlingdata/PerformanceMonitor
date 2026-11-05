@@ -53,11 +53,19 @@ public static class DarlingPgPredicateStatsReader
         double? FilteredPct,
         double WorstEstimateErrorRatio,
         double SampleRate,
-        DateTime CaptureTime);
+        DateTime CaptureTime,
+        string? QueryText = null);
 
-    /* DISTINCT ON includes database_name because this collector runs per database and a column name is only
+    /* #7428: the statement text is joined AFTER the cap, in a wrapper over the ranked page, so only the page's rows
+       look anything up. The text store is keyed on (server_id, queryid) with that pair as its PRIMARY KEY (#2219): an
+       index lookup per row that cannot multiply one. Query id 0 and NULL find nothing and read as null. The outer
+       ORDER BY repeats the inner keys plus the row's own key, so a tie is stable, and the outer LIMIT repeats the cap
+       (a no-op, the page is already that size) so the cap stays the last word of the statement.
+
+       DISTINCT ON includes database_name because this collector runs per database and a column name is only
        unique within one - the #2599 lesson applied at the read as well as the write. */
     public const string PgPredicateStatsSql = """
+        WITH ranked AS (
         SELECT database_name, schema_name, table_name, column_name, operator, query_id,
                sample_count, rows_evaluated, rows_filtered,
                CASE WHEN rows_evaluated > 0
@@ -77,6 +85,18 @@ public static class DarlingPgPredicateStatsReader
                      collection_time DESC
         ) AS latest
         ORDER BY rows_filtered DESC, worst_estimate_error_ratio DESC NULLS LAST
+        LIMIT $4
+        )
+        SELECT r.database_name, r.schema_name, r.table_name, r.column_name, r.operator, r.query_id,
+               r.sample_count, r.rows_evaluated, r.rows_filtered, r.filtered_pct,
+               r.worst_estimate_error_ratio, r.sample_rate, r.collection_time,
+               t.query_text
+        FROM ranked AS r
+        LEFT JOIN collect.pg_statement_text AS t
+               ON  t.server_id = $1
+               AND t.queryid   = r.query_id
+        ORDER BY r.rows_filtered DESC, r.worst_estimate_error_ratio DESC NULLS LAST,
+                 r.database_name, r.schema_name, r.table_name, r.column_name, r.operator, r.query_id
         LIMIT $4
         """;
 
@@ -113,7 +133,8 @@ public static class DarlingPgPredicateStatsReader
                 SampleRate: reader.IsDBNull(11) ? 1.0 : reader.GetDouble(11),
                 CaptureTime: reader.IsDBNull(12)
                     ? default
-                    : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc)));
+                    : DateTime.SpecifyKind(reader.GetDateTime(12), DateTimeKind.Utc),
+                QueryText: reader.IsDBNull(13) ? null : reader.GetString(13)));
         }
 
         return rows;

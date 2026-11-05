@@ -178,7 +178,7 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
         Assert.Contains("if (!request) {", util, StringComparison.Ordinal);
         Assert.Contains("request = fetchBody(\"/api/fleet\", undefined, frontDoorOn ? key : undefined).finally(() => {", util, StringComparison.Ordinal);
         Assert.Contains("if (fleetRequests.get(key) === request) fleetRequests.delete(key);", util, StringComparison.Ordinal);
-        Assert.Contains("return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });", util, StringComparison.Ordinal);
+        Assert.Contains("const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });", util, StringComparison.Ordinal);
     }
 
     /* ─────────────────────────── the rule ─────────────────────────── */
@@ -314,32 +314,6 @@ SELECT DISTINCT ON (server_id)
 FROM v_cpu_scheduler_stats
 ORDER BY server_id, collection_time DESC";
 
-    private const string OldBlockingSql = @"
-SELECT
-    COALESCE(xe.server_id, dmv.server_id) AS server_id,
-    COALESCE(xe.cnt, 0) AS xe_count,
-    COALESCE(xe.max_wait, 0) AS xe_max_wait,
-    COALESCE(dmv.cnt, 0) AS dmv_count,
-    COALESCE(dmv.max_wait, 0) AS dmv_max_wait,
-    COALESCE(xe.cnt, 0) AS xe_reports,
-    COALESCE(dmv.cnt, 0) AS dmv_reports
-FROM
-(
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_blocked_process_reports
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    GROUP BY server_id
-) AS xe
-FULL OUTER JOIN
-(
-    SELECT server_id, COUNT(*) AS cnt, MAX(wait_time_ms) AS max_wait
-    FROM v_dmv_blocking_snapshots
-    WHERE event_time >= $1
-    AND   event_time <= $2
-    GROUP BY server_id
-) AS dmv ON xe.server_id = dmv.server_id";
-
     private const string OldDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
@@ -388,20 +362,26 @@ GROUP BY server_id";
             var now = Micro(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc));
             await SeedAsync(connection, now, ct);
 
-            /* The newest-row reads: identical rows for every compared sentinel. */
-            foreach (var (label, oldSql, newSql) in new[]
+            /* The newest-row reads: identical rows for every compared sentinel. The CPU read is bounded on
+               collection_time (#7196): $1 is now and $2 the freshness floor in minutes. The dark server's
+               five-day-old CPU reading is the one row it leaves out on purpose, so the CPU comparison is over
+               the servers that still collect, and the dark server must be absent from it. */
+            object[] cpuArgs = { now, CpuReadingFreshnessSql.FloorMinutes };
+            var cpuCompared = s_compared.Where(id => id != DarkFiveDays).ToArray();
+            foreach (var (label, oldSql, newSql, args, compared) in new (string, string, string, object[], int[])[]
             {
-                ("cpu", OldCpuSql, DarlingFleetReader.FleetCpuSql),
-                ("memory", OldMemorySql, DarlingFleetReader.FleetMemorySql),
-                ("memory pressure", OldMemoryPressureSql, DarlingFleetReader.FleetMemoryPressureSql),
-                ("threads", OldThreadsSql, DarlingFleetReader.FleetThreadsSql),
+                ("cpu", OldCpuSql, DarlingFleetReader.FleetCpuSql, cpuArgs, cpuCompared),
+                ("memory", OldMemorySql, DarlingFleetReader.FleetMemorySql, Array.Empty<object>(), s_compared),
+                ("memory pressure", OldMemoryPressureSql, DarlingFleetReader.FleetMemoryPressureSql, Array.Empty<object>(), s_compared),
+                ("threads", OldThreadsSql, DarlingFleetReader.FleetThreadsSql, Array.Empty<object>(), s_compared),
             })
             {
-                var before = Scoped(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), s_compared);
-                var after = Scoped(await ReadRowsAsync(connection, newSql, Array.Empty<object>(), ct), s_compared);
+                var before = Scoped(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), compared);
+                var after = Scoped(await ReadRowsAsync(connection, newSql, args, ct), compared);
                 Assert.Equal(before, after);
-                /* And the comparison is not vacuous: both collecting servers and the dark one answered. */
-                Assert.Equal(3, after.Count(r => r.StartsWith(Id(CollectingA), StringComparison.Ordinal)
+                /* And the comparison is not vacuous: both collecting servers answered, and the dark one did
+                   everywhere but CPU, where its days-old reading is dropped. */
+                Assert.Equal(label == "cpu" ? 2 : 3, after.Count(r => r.StartsWith(Id(CollectingA), StringComparison.Ordinal)
                                                  || r.StartsWith(Id(CollectingB), StringComparison.Ordinal)
                                                  || r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal)));
                 Assert.DoesNotContain(after, r => r.StartsWith(Id(NeverCollected), StringComparison.Ordinal));
@@ -409,9 +389,16 @@ GROUP BY server_id";
                 /* The two populations the new driver leaves out on purpose: a disabled server has no card to
                    fill, and a PostgreSQL target never writes these tables (its planted row is the proof the
                    filter is real, not a reading any card was ever built from). */
-                var unscoped = await ReadRowsAsync(connection, newSql, Array.Empty<object>(), ct);
+                var unscoped = await ReadRowsAsync(connection, newSql, args, ct);
                 Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(Disabled), StringComparison.Ordinal));
                 Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(PostgresTarget), StringComparison.Ordinal));
+                if (label == "cpu")
+                {
+                    /* The read with no bound still finds the dark server's old reading; the bounded one does not. */
+                    Assert.Contains(await ReadRowsAsync(connection, oldSql, Array.Empty<object>(), ct), r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
+                    Assert.DoesNotContain(unscoped, r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
+                }
+
                 if (label == "memory")
                 {
                     /* The planted row is really there to be skipped: the oracle, which has no driver, finds it. */
@@ -420,16 +407,28 @@ GROUP BY server_id";
             }
 
             /* The CPU tiebreak survived the reshape: the newest sample of the tied batch. */
-            Assert.Contains(Id(CollectingB) + "77|7", await ReadRowsAsync(connection, DarlingFleetReader.FleetCpuSql, Array.Empty<object>(), ct));
+            Assert.Contains(Id(CollectingB) + "77|7", await ReadRowsAsync(connection, DarlingFleetReader.FleetCpuSql, cpuArgs, ct));
 
             /* The incident counts over the default hour: the late-collected and the clock-ahead rows count
                in both; nothing differs. */
             var windowStart = now.AddHours(-1);
             var oldArgs = new object[] { windowStart, now };
             var newArgs = new object[] { windowStart, now, EventWindowFloor.For(windowStart) };
-            Assert.Equal(
-                Scoped(await ReadRowsAsync(connection, OldBlockingSql, oldArgs, ct), s_all),
-                Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, newArgs, ct), s_all));
+            /* Blocking (#7028): the measure is the hour-chosen waits plus the gated snapshot peak, so the oracle is the
+               SAME statement with the floor genuinely off, $3 an instant before any row the store holds. It cannot drift
+               from the statement the way a hand-copied older shape did, and what it checks is the floor's job: it drops no
+               row the window wants. The one-hour statement is the one the default window runs, the general one the
+               longer windows. */
+            var noFloor = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            var unboundedArgs = new object[] { windowStart, now, noFloor };
+            var unboundedBlocking = Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingOneHourSql, unboundedArgs, ct), s_all);
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSqlFor(now - windowStart), newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingOneHourSql, newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, newArgs, ct), s_all));
+            Assert.Equal(unboundedBlocking, Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetBlockingSql, unboundedArgs, ct), s_all));
+            /* Not vacuous: A's two blocked-process waits, the ordinary one and the one collected 56 minutes after it
+               happened, both count (count 2, longest wait 1500) and A has no gated DMV snapshot. */
+            Assert.Contains(Id(CollectingA) + "2|1500|null", unboundedBlocking);
             Assert.Equal(
                 Scoped(await ReadRowsAsync(connection, OldDeadlockSql, oldArgs, ct), s_all),
                 Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetDeadlockSql, newArgs, ct), s_all));
@@ -542,7 +541,10 @@ GROUP BY server_id";
             Assert.Equal(7, b.OtherProcessCpuPercent);
 
             var dark = cards[DarkFiveDays];
-            Assert.Equal(11, dark.CpuPercent);             // five days old, still its newest
+            /* #7196: its CPU reading is five days old, past the freshness bound, so the card shows none. The memory
+               reading is as old and is still shown as its newest: only the CPU read is bounded by age. */
+            Assert.Null(dark.CpuPercent);
+            Assert.Equal(FleetCpuSource.NotCollected, dark.CpuSource);
             Assert.Equal(1100, dark.MemoryMb);
 
             /* #3935: dark for five days, registered nine days ago — Offline, the viewer's word for it, and not

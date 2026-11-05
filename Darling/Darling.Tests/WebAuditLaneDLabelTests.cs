@@ -27,7 +27,7 @@ public sealed class WebAuditLaneDLabelTests
         var tabs = Js("pages", "server-tabs.js");
         Assert.Contains("{ key: \"peak_waiters_at\", label: \"Peak waiters at\", format: \"time\" },", tabs, StringComparison.Ordinal);
         Assert.Contains(
-            "{ key: \"peak_granted_memory_mb\", label: \"Peak granted\", format: \"mb\" },\n  { key: \"peak_granted_at\", label: \"Peak granted at\", format: \"time\" },",
+            "{ key: \"peak_granted_memory_mb\", label: \"Peak granted\", format: \"mbfit\" },\n  { key: \"peak_granted_at\", label: \"Peak granted at\", format: \"time\" },",
             tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("label: \"Peak at\"", tabs, StringComparison.Ordinal);
     }
@@ -45,7 +45,7 @@ public sealed class WebAuditLaneDLabelTests
     public void W16_TheDeadlockTrendChartAndTheDeadlocksTableAreNamedApartAndEmptyTheSameWay()
     {
         var tabs = Js("pages", "server-tabs.js");
-        Assert.Contains("line(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
+        Assert.Contains("linePanel(\"Deadlock trend\", \"get_deadlock_trend\", { server, hours: ctx.hours }, \"trend\", \"time\", COUNT_SERIES, {\n        subtitle: ctx.label,\n        format: \"int\",\n        atTimeItem: \"deadlocks\",\n        emptyText: DEADLOCKS_EMPTY_TEXT,", tabs, StringComparison.Ordinal);
         Assert.Contains("const DEADLOCKS_EMPTY_TEXT = \"No deadlocks in this window.\";", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("an empty trend here means none happened", tabs, StringComparison.Ordinal);
     }
@@ -57,7 +57,7 @@ public sealed class WebAuditLaneDLabelTests
         Assert.Contains("{ key: \"hyperthread_ratio\", label: \"Logical CPUs per socket\"", tabs, StringComparison.Ordinal);
         Assert.DoesNotContain("label: \"HT ratio\"", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"plan_cache_mb\", label: \"Plan cache (all cache stores)\", format: \"mb\" },", tabs, StringComparison.Ordinal);
-        Assert.Contains("{ key: \"summary.total_size_mb\", label: \"Cached plans size\", format: \"mb\" },", tabs, StringComparison.Ordinal);
+        Assert.Contains("{ key: \"summary.total_size_mb\", label: \"Cached plans size\", format: \"mbfit\" },", tabs, StringComparison.Ordinal);
         Assert.Contains("{ key: \"pct_of_sweep_budget_per_run\", label: \"% of run budget\"", tabs, StringComparison.Ordinal);
         /* fmtMs prints seconds above a second ("32.9 s"), so the header carries no unit. */
         Assert.Contains("{ key: \"duration_ms\", label: \"Duration\", format: \"ms\" },\n  { key: \"signal_duration_ms\", label: \"Signal duration\", format: \"ms\" },", tabs, StringComparison.Ordinal);
@@ -68,7 +68,7 @@ public sealed class WebAuditLaneDLabelTests
         Assert.Contains("label: \"Avg SQL Server CPU %\"", Js("pages", "finops", "server-inventory.js"), StringComparison.Ordinal);
 
         var fleet = Js("pages", "fleet.js");
-        Assert.Contains("chip(c.total_cpu_percent != null ? \"Total CPU\" : \"CPU\", cpuValue, c.cpu_severity, cpuDetail)", fleet, StringComparison.Ordinal);
+        Assert.Contains("chip(c.total_cpu_percent != null ? \"Total CPU\" : \"CPU\", cpuValue, sevOf(c.cpu_severity), known(cpuDetail))", fleet, StringComparison.Ordinal);
         Assert.Contains("fmtInt(threadsInUse) + \" in use / \" + fmtInt(c.total_threads) + \" threads\"", fleet, StringComparison.Ordinal);
     }
 }

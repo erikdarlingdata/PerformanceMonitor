@@ -314,7 +314,7 @@ public sealed class BaselineDiscontinuityTests
     [Fact]
     public void Sentence_IsTheSharedRenderText()
     {
-        Assert.Equal("baseline discontinuity at 2026-09-20 03:12 (restart)", BaselineDiscontinuities.Sentence(T0, BaselineDiscontinuities.RestartReason));
+        Assert.Equal("SQL Server restarted at 2026-09-20 03:12. Rates start over there.", BaselineDiscontinuities.Sentence(T0, BaselineDiscontinuities.RestartReason));
     }
 
     /// <summary>
@@ -327,10 +327,10 @@ public sealed class BaselineDiscontinuityTests
     {
         var wall = new DateTime(2026, 11, 1, 1, 30, 0, DateTimeKind.Unspecified);
 
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -04:00 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-04:00"));
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -05:00 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-05:00"));
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason));
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 (restart)", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, null));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30 -04:00. Rates start over there.", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-04:00"));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30 -05:00. Rates start over there.", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, "-05:00"));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30. Rates start over there.", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30. Rates start over there.", BaselineDiscontinuities.Sentence(wall, BaselineDiscontinuities.RestartReason, null));
     }
 
     /// <summary>
@@ -345,11 +345,11 @@ public sealed class BaselineDiscontinuityTests
         static string Worded(DateTime atUtc, TimeZoneInfo zone) => BaselineDiscontinuities.Sentence(
             DisplayZone.ToDisplay(atUtc, zone), BaselineDiscontinuities.RestartReason, DisplayZone.AmbiguousOffsetSuffix(atUtc, zone));
 
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -04:00 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), zone));
-        Assert.Equal("baseline discontinuity at 2026-11-01 01:30 -05:00 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 6, 30), zone));
-        Assert.Equal("baseline discontinuity at 2026-11-01 00:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 4, 30), zone));
-        Assert.Equal("baseline discontinuity at 2026-11-01 02:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 7, 30), zone));
-        Assert.Equal("baseline discontinuity at 2026-11-01 05:30 (restart)", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), TimeZoneInfo.Utc));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30 -04:00. Rates start over there.", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), zone));
+        Assert.Equal("SQL Server restarted at 2026-11-01 01:30 -05:00. Rates start over there.", Worded(DisplayZoneFixtures.At(2026, 11, 1, 6, 30), zone));
+        Assert.Equal("SQL Server restarted at 2026-11-01 00:30. Rates start over there.", Worded(DisplayZoneFixtures.At(2026, 11, 1, 4, 30), zone));
+        Assert.Equal("SQL Server restarted at 2026-11-01 02:30. Rates start over there.", Worded(DisplayZoneFixtures.At(2026, 11, 1, 7, 30), zone));
+        Assert.Equal("SQL Server restarted at 2026-11-01 05:30. Rates start over there.", Worded(DisplayZoneFixtures.At(2026, 11, 1, 5, 30), TimeZoneInfo.Utc));
     }
 
     [Fact]

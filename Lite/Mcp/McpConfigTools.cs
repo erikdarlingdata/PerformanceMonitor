@@ -27,7 +27,7 @@ public sealed class McpConfigTools
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "server_config", awsRdsKind: AwsRdsKind.None)
                     ?? McpHelpers.Status(
                         "unavailable",
-                        "No server configuration data available. The config collector may not have run yet.");
+                        $"No server configuration data available for {resolved.DisplayName}. The config collector may not have run yet. Check get_collection_health for {resolved.DisplayName} to see if the collector is failing or still waiting for its first run.");
 
             return JsonSerializer.Serialize(new
             {
@@ -203,6 +203,13 @@ public sealed class McpConfigTools
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
 
+            /* #7584: the on-prem health capture always holds a tempdb row, so on a readable secondary the read is never empty and the
+               miss path above never runs. A capture of only tempdb has no database Query Store is read for, so it gets the same
+               readable-secondary answer; a server that is not one answers null here and keeps showing the rows as before. */
+            if (rows.All(r => string.Equals(r.DatabaseName, "tempdb", StringComparison.OrdinalIgnoreCase))
+                && await McpRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(dataService, resolved.ServerId, resolved.DisplayName) is { } secondaryStatus)
+                return secondaryStatus;
+
             IEnumerable<QueryStoreHealthRow> filtered = rows;
             if (!string.IsNullOrWhiteSpace(database_name))
                 filtered = filtered.Where(r => r.DatabaseName.Equals(database_name, StringComparison.OrdinalIgnoreCase));
@@ -249,12 +256,12 @@ public sealed class McpConfigTools
     }
 
     /// <summary>#5633 item 19: the empty answer of get_trace_flags. A successful trace_flags run that stored nothing says no flag is enabled as of
-    /// that run; with no such run it keeps the old hedge, which is then the true statement.</summary>
-    internal static string EmptyTraceFlagsStatus(CollectorRunFacts runFacts) =>
-        McpHelpers.Status(
-            "empty",
-            runFacts.NoTraceFlagsEnabled()
-                ?? "No trace flags found (none enabled, or the config collector has not run yet).");
+    /// that run; with no successful run it answers unavailable, because nobody has looked yet (#7459).</summary>
+    internal static string EmptyTraceFlagsStatus(CollectorRunFacts runFacts)
+    {
+        var (status, message) = runFacts.TraceFlagsEmpty();
+        return McpHelpers.Status(status, message);
+    }
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_trace_flags"), Description("Gets active trace flags on the SQL Server instance. Shows flag number, enabled status, and whether the flag is global or session-scoped. LATEST IS A TIME: captured when the collector connects, not on a schedule - captured_at is the instant these flags are as of; a flag turned on or off since is not reflected until the next connect.")]

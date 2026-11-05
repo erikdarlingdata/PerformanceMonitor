@@ -173,6 +173,15 @@ public static class DarlingRetention
     internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// #6977: the reconcile-run log's horizon, <see cref="DataRetentionBaseDays"/> like the oversized-plan backlog and the
+    /// fleet-sweep run records. <c>collect.raw_chunk_interval_reconcile_runs</c> is one row per reconcile run, written by
+    /// <c>RawChunkIntervalReconciler</c> and never read back: the planner's "days since the last move" input comes from
+    /// <c>raw_chunk_interval_rung_history</c>, not from this table. So no decision needs any of its history and the
+    /// base horizon is only an operator-facing look-back. About one row a day plus one per service start, so it was never urgent, only unbounded.
+    /// </summary>
+    internal const int RawChunkIntervalReconcileRunsRetentionDays = DataRetentionBaseDays;
+
+    /// <summary>
     /// #3953: the latest-snapshot interval table's horizon, on <c>first_execution_time</c>: the ruled 15 days, the
     /// detector's 14-day window plus a day. A named constant, not a knob, and in no collector schedule: the table's
     /// horizon is the detector's, not the store's, so a held purge (#1759) does not hold it. It is deliberately NOT a
@@ -737,7 +746,7 @@ public static class DarlingRetention
                    facts is a few dead bytes, whereas facts kept past their text is a top-queries answer that
                    reads as a list of integers — the exact failure this table was added to fix. Hence a margin
                    ADDED to the fact horizon rather than subtracted from it. */
-                var textCutoff = utcNow.AddDays(-(widestFactRetentionDays + PgStatementText.PruneMarginDays));
+                var textCutoff = ComputeStatementTextCutoff(utcNow, widestFactRetentionDays);
                 var textDeleted = await PurgeOneAsync(
                     postgres, PgStatementText.TableName,
                     PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
@@ -1328,6 +1337,25 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.raw_chunk_interval_reconcile_runs (#6977, V144): one row per reconcile run, pruned on run_at at
+               RawChunkIntervalReconcileRunsRetentionDays. NOT in CollectorCatalog.All (the chunk-interval reconciler
+               writes it, not a collector), so the loop above skips it and nothing else prunes it. A plain table with
+               an index on run_at, so the one-day slice seeks. Failure-isolated like every sibling. */
+            var reconcileRunsDeleted = await PurgeOneAsync(
+                postgres, "collect.raw_chunk_interval_reconcile_runs",
+                TimeSlicedDeleteSql("collect.raw_chunk_interval_reconcile_runs", "run_at"),
+                utcNow.AddDays(-RawChunkIntervalReconcileRunsRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
+            if (reconcileRunsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += reconcileRunsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
             /* collect.analysis_collection_caveats (#3691 part a1, V141): pruned on last_seen_utc at
                CollectionCaveatStore.PruneAfterDays, same cadence as the backlog purge just above rather than
                the catalog loop, for the same reason — the table is written by the analysis pass's own
@@ -1871,6 +1899,20 @@ public static class DarlingRetention
         $"DELETE FROM {table} WHERE ctid IN ("
       + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
       + $"LIMIT {cap})";
+
+
+    /// <summary>
+    /// The prune cutoff for <c>collect.pg_statement_text</c> (#2219, #7567). The text outlives the facts that point at it
+    /// by <see cref="PgStatementText.PruneMarginDays"/>, and since #7567 it also feeds the baseline: the own-statement
+    /// exclusion (<c>PgOwnStatement.NotOwnOnStats</c>) reads it for every <c>pg_statement_stats</c> row in the 30-day
+    /// baseline window, and <c>pg_statement_stats</c> itself is floored at that window in
+    /// <see cref="EffectivePurgeRetentionDays"/>. The widest-fact figure is the schedule's, unfloored, so with every
+    /// retention shortened to 7 days the text would go at 9 while its statistics rows stay for 30, and the service's own
+    /// rows between day 9 and day 30 would come back into the baseline. The table is not a collector (no schedule row,
+    /// so it cannot join <see cref="BaselineServingRawCollectors"/>); this is its floor.
+    /// </summary>
+    internal static DateTime ComputeStatementTextCutoff(DateTime utcNow, int widestFactRetentionDays) =>
+        utcNow.AddDays(-(Math.Max(widestFactRetentionDays, BaselineMath.BaselineWindowDays) + PgStatementText.PruneMarginDays));
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +

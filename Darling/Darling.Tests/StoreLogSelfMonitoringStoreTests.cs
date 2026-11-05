@@ -480,6 +480,6 @@ public class StoreLogSelfMonitoringStoreTests
         }
 
         Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relativePath));
+        return RepoFile.ReadRepoFile(Path.Combine(dir!, relativePath));
     }
 }

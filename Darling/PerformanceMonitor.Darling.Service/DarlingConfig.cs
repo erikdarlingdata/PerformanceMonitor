@@ -446,7 +446,7 @@ public sealed class DarlingConfig
     internal List<string> SecretReferencesAsWritten { get; set; } = new();
 
     /// <summary>#5307: the paths (never the values) of keys under <c>web.network</c> and <c>mcp.network</c>, their
-    /// <c>tls</c> blocks and <c>web.network.oidc</c> that no config class declares, e.g. <c>mcp.network.ssl</c>,
+    /// <c>tls</c> blocks, <c>web.network.oidc</c> and each <c>mcp.tokens</c> entry (#7023) that no config class declares, e.g. <c>mcp.network.ssl</c>,
     /// found by <see cref="DarlingUnknownKeys"/> in <see cref="Parse"/>. Internal and <c>[JsonIgnore]</c>, so a
     /// serialized config (the diagnostics bundle) never carries it.</summary>
     [JsonIgnore]
@@ -481,7 +481,7 @@ public sealed class DarlingConfig
         var config = JsonSerializer.Deserialize<DarlingConfig>(json, s_jsonOptions);
         if (config is null)
         {
-            throw new InvalidDataException("Configuration file parsed to null.");
+            throw new InvalidDataException("darling.json is empty or contains only 'null'. Copy darling.sample.json to darling.json and edit it.");
         }
 
         /* #6468: a file with no "servers" key, or "servers": null, is the same as an empty list (a start with no servers yet). */
@@ -494,7 +494,7 @@ public sealed class DarlingConfig
 
         /* #5240: a reference in a server's own secret slot is one the file declares for that server, so the entry read from
            the file may resolve it even when it is owned. The flags are set here and nowhere from a stored value. */
-        foreach (var server in config.Servers ?? new List<MonitoredServer>())
+        foreach (var server in config.Servers)
         {
             if (server is null)
             {
@@ -824,17 +824,20 @@ public sealed class AlertsConfig
     [JsonPropertyName("blockingEnabled")]
     public bool BlockingEnabled { get; set; } = true;
 
+    /// <summary>
+    /// #7083: blocked events in the window that page, but only when the worst wait among them is also at
+    /// least <see cref="BlockingPageRule.CountArmWorstWaitFloorMs"/> (15 seconds, fixed). Default 3.
+    /// </summary>
     [JsonPropertyName("blockingCountThreshold")]
-    public int BlockingCountThreshold { get; set; } = 1;
+    public int BlockingCountThreshold { get; set; } = BlockingPageRule.CountThresholdDefault;
 
     /// <summary>
     /// #1839: fire when the latest blocking snapshot's TOTAL blocked wait reaches this many seconds.
-    /// 0 = off, and off is the shipped default — a count threshold cannot tell one session blocked for
-    /// an hour from one blocked for a second, but enabling it for everyone would change what existing
-    /// deployments alert about.
+    /// #7083: ON by default at 60 seconds, and the same figure is the bar for one blocked event: a single
+    /// event whose own wait reaches it pages at once. 0 turns both off.
     /// </summary>
     [JsonPropertyName("blockingWaitSecondsThreshold")]
-    public int BlockingWaitSecondsThreshold { get; set; }
+    public int BlockingWaitSecondsThreshold { get; set; } = BlockingPageRule.WaitSecondsThresholdDefault;
 
     [JsonPropertyName("deadlockEnabled")]
     public bool DeadlockEnabled { get; set; } = true;
@@ -927,6 +930,19 @@ public sealed class AlertsConfig
 
     [JsonPropertyName("checkDbOverdueEnabled")]
     public bool CheckDbOverdueEnabled { get; set; }
+
+    /// <summary>The three overdue ages (#7611): a full backup older than this many hours (default 168, 7 days), a log backup older than this many minutes
+    /// (default 60) and a good CHECKDB older than this many hours (default 336, 14 days) is overdue. Store columns <c>backup_overdue_threshold_hours</c>,
+    /// <c>log_backup_overdue_threshold_minutes</c> and <c>checkdb_overdue_threshold_hours</c> (V245). A per-server or per-database threshold override
+    /// (<c>backup_overdue.threshold_hours</c>, <c>log_backup_overdue.threshold_minutes</c>, <c>checkdb_overdue.threshold_hours</c>) replaces each.</summary>
+    [JsonPropertyName("backupOverdueThresholdHours")]
+    public int BackupOverdueThresholdHours { get; set; } = 168;
+
+    [JsonPropertyName("logBackupOverdueThresholdMinutes")]
+    public int LogBackupOverdueThresholdMinutes { get; set; } = 60;
+
+    [JsonPropertyName("checkDbOverdueThresholdHours")]
+    public int CheckDbOverdueThresholdHours { get; set; } = 336;
 
     [JsonPropertyName("longRunningQueryEnabled")]
     public bool LongRunningQueryEnabled { get; set; } = true;
@@ -1062,7 +1078,7 @@ public sealed class AlertsConfig
     public int PgDeadlockCountThreshold { get; set; } = PostgresAlertEvaluator.DeadlockCountThresholdDefault;
 
     /// <summary>#3444 (V122): how many distinct ROOT BLOCKERS inside the rolling window fire the PostgreSQL
-    /// Blocking alert, seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
+    /// Blocking alert (default 3 since #7083, same 15-second worst-wait floor as the SQL Server count arm), seeded from <see cref="PostgresAlertEvaluator.BlockingCountThresholdDefault"/> for
     /// the reason its deadlock sibling above is.
     ///
     /// <para>Separate from <see cref="BlockingCountThreshold"/> because the two count different things: that
@@ -1105,13 +1121,13 @@ public sealed class AlertsConfig
     [JsonPropertyName("deadlockCriticalPerHour")]
     public double DeadlockCriticalPerHour { get; set; } = ServerHealthThresholds.DeadlockCriticalPerHourDefault;
 
-    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked-process reports per hour over the window a card
+    /// <summary>#6927 (V228): the blocking health band's WARNING tier, blocked waits per hour (#7028, the unit blocking.count_threshold uses) over the window a card
     /// counted them in. Seeded from <see cref="ServerHealthThresholds.BlockingWarnPerHour"/>, named rather than restated, so a store
     /// that never sets it bands as every earlier build did. <c>BlockingBandThresholds</c> clamps it on read.</summary>
     [JsonPropertyName("blockingWarnPerHour")]
     public double BlockingWarnPerHour { get; set; } = ServerHealthThresholds.BlockingWarnPerHour;
 
-    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, reports per hour, seeded from
+    /// <summary>#6927 (V228): the blocking health band's CRITICAL tier, waits per hour, seeded from
     /// <see cref="ServerHealthThresholds.BlockingCriticalPerHour"/>.</summary>
     [JsonPropertyName("blockingCriticalPerHour")]
     public double BlockingCriticalPerHour { get; set; } = ServerHealthThresholds.BlockingCriticalPerHour;
@@ -1125,6 +1141,34 @@ public sealed class AlertsConfig
     /// <see cref="ServerHealthThresholds.BlockingCriticalWaitSeconds"/>.</summary>
     [JsonPropertyName("blockingCriticalWaitSeconds")]
     public double BlockingCriticalWaitSeconds { get; set; } = ServerHealthThresholds.BlockingCriticalWaitSeconds;
+
+    /// <summary>#7028 (V230): the blocking band's WARNING bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means the
+    /// tier is off, as the Blocking Wait Time alert's own bar does at 0. Valid values are 0 and 1 to 86400. When both tiers are above 0, critical
+    /// is at least warn. <c>BlockingBandThresholds</c> clamps it on read.</summary>
+    [JsonPropertyName("blockingWarnSnapshotWaitSeconds")]
+    public double BlockingWarnSnapshotWaitSeconds { get; set; }
+
+    /// <summary>#7028 (V230): the blocking band's CRITICAL bar on the longest total blocked wait in one sampled snapshot, seconds. 0 means off.</summary>
+    [JsonPropertyName("blockingCriticalSnapshotWaitSeconds")]
+    public double BlockingCriticalSnapshotWaitSeconds { get; set; }
+
+    /// <summary>The scheduled Daily Health Report (#7041): one report a day through the alert pipeline, as the "Daily Health Report" metric. Ships OFF.
+    /// Store column <c>daily_report_enabled</c> (V232).</summary>
+    [JsonPropertyName("dailyReportEnabled")]
+    public bool DailyReportEnabled { get; set; }
+
+    /// <summary>The local time of day (<c>HH:mm</c>, in <see cref="DailyReportTimeZone"/>) the Daily Health Report goes out; it covers the 24 hours before.
+    /// Store column <c>daily_report_send_at</c> (V232).</summary>
+    [JsonPropertyName("dailyReportSendAt")]
+    public string DailyReportSendAt { get; set; } = Reports.DailyHealthReportSettings.DefaultSendAt;
+
+    /// <summary>The report's time zone id; NULL means the service host's local zone. Store column <c>daily_report_time_zone</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTimeZone")]
+    public string? DailyReportTimeZone { get; set; }
+
+    /// <summary>The report's title; NULL means "Daily Health Report". Store column <c>daily_report_title</c> (V232).</summary>
+    [JsonPropertyName("dailyReportTitle")]
+    public string? DailyReportTitle { get; set; }
 
     [JsonPropertyName("longRunningJobEnabled")]
     public bool LongRunningJobEnabled { get; set; } = true;
@@ -1520,6 +1564,15 @@ public sealed class McpConfig
     public bool AllowInvestigations { get; set; }
 
     /// <summary>
+    /// Default ON (#7414). Under <see cref="AllowInvestigations"/> an agent token may create, change, enable, disable and delete a mute or digest
+    /// rule with no investigation claim, for one server or all servers and a named metric, each rule expiring within 7 days of its creation, with a
+    /// reason, and journaled. Set false to refuse that path (the refusal names this setting) and write nothing. It does not touch the claim-based
+    /// Level 2 and 3 tools. Has no effect unless <see cref="AllowInvestigations"/> serves the agent. File-only and restart-only, like it.
+    /// </summary>
+    [JsonPropertyName("allowAgentMuteRules")]
+    public bool AllowAgentMuteRules { get; set; } = true;
+
+    /// <summary>
     /// Default OFF. A loopback-only MCP server needs a bearer token like an exposed one: with no
     /// <see cref="McpNetworkConfig.EncryptedToken"/> or <see cref="McpNetworkConfig.Token"/>, an enabled MCP server does not
     /// start, and the log names the settings to add. On, a loopback-only server with no token serves local clients
@@ -1569,7 +1622,8 @@ public sealed class McpConfig
     /// Null or empty keeps the legacy single token (<see cref="McpNetworkConfig.Token"/> or <see cref="McpNetworkConfig.EncryptedToken"/>)
     /// exactly as before. With entries, the token on each request picks the tool set: <c>operator</c> gets the reads and the write
     /// tools (never the claim or submit tools), <c>agent</c> gets the reads, the investigation tools and the Level 2 action tools
-    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), and an agent's identity is the entry's name. A legacy token
+    /// (never a tool in <c>DarlingMcpWritePolicy.NeverAgentTools</c>), an agent's identity is the entry's name, and <c>reader</c> (#7023)
+    /// gets the reads only, whatever <see cref="AllowWrites"/>, <see cref="AllowServerAdmin"/> and <see cref="AllowInvestigations"/> say. A legacy token
     /// set beside them keeps its role from <see cref="AllowWrites"/> and <see cref="AllowInvestigations"/>. File-only and restart-only.
     /// </summary>
     [JsonPropertyName("tokens")]
@@ -1584,7 +1638,8 @@ public sealed class McpConfig
 /// <summary>
 /// One named MCP bearer token (#6542): a <see cref="Name"/> (1 to 64 of <c>A-Za-z0-9._:-</c>), the token itself
 /// (<see cref="EncryptedToken"/> or <see cref="Token"/>, the same rules as <c>mcp.network</c>'s), and a <see cref="Role"/>,
-/// <c>operator</c> or <c>agent</c>. The name is what logs and the journal record; the value is never logged.
+/// <c>operator</c>, <c>agent</c> or <c>reader</c> (#7023), and optionally a <see cref="DataDetail"/> that narrows <c>mcp.dataDetail</c> for
+/// this token. The name is what logs and the journal record; the value is never logged.
 /// </summary>
 public sealed class McpTokenEntry
 {
@@ -1593,6 +1648,10 @@ public sealed class McpTokenEntry
 
     /// <summary>The <c>agent</c> role.</summary>
     public const string AgentRole = "agent";
+
+    /// <summary>The <c>reader</c> role (#7023): the read tools only. It is not an agent: no identity in the journal, no claim, no submit,
+    /// no Level 2 action, and no setting widens it.</summary>
+    public const string ReaderRole = "reader";
 
     [JsonPropertyName("name")]
     public string? Name { get; set; }
@@ -1607,6 +1666,11 @@ public sealed class McpTokenEntry
 
     [JsonPropertyName("role")]
     public string? Role { get; set; }
+
+    /// <summary>Optional (#7023): <c>full</c>, <c>maskLiterals</c> or <c>metadataOnly</c>. It can only narrow <c>mcp.dataDetail</c>: the level this
+    /// token is served is the stricter of the two. Absent, the token is served <c>mcp.dataDetail</c>. An unrecognized value leaves the entry unserved.</summary>
+    [JsonPropertyName("dataDetail")]
+    public string? DataDetail { get; set; }
 
     /// <summary>The token, preferring <see cref="EncryptedToken"/> over <see cref="Token"/>; null when neither is set. Throws when an
     /// encrypted token cannot be read.</summary>
@@ -3232,7 +3296,7 @@ public sealed class PeerStoreConfig
 /// </summary>
 public sealed class ReadsConfig
 {
-    /// <summary>How many long reads run at once (default 2). 0 turns the limit off.</summary>
+    /// <summary>How many long reads run at once (default 4, #7357). 0 turns the limit off.</summary>
     [JsonPropertyName("maxHeavyReads")]
     public int MaxHeavyReads { get; set; } = ReadAdmission.DefaultMaxHeavyReads;
 }

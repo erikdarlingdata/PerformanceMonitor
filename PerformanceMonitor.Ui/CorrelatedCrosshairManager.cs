@@ -101,6 +101,16 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         _lanes.Add(lane);
     }
 
+    /// <summary>
+    /// Changes the unit printed after a lane's value, for a lane whose unit depends on the data drawn (#7219: the blocking lane
+    /// counts blocked-process reports, or DMV snapshot rows when the window holds no reports).
+    /// </summary>
+    public void SetLaneUnit(ScottPlot.WPF.WpfPlot chart, string unit)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane != null) lane.Unit = unit;
+    }
+
     private void OnLaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => ForceReanchor();
     private void OnLaneUnloaded(object sender, RoutedEventArgs e) => ForceReanchor();
     private void OnLaneLoaded(object sender, RoutedEventArgs e) => ForceReanchor();
@@ -132,7 +142,8 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     /// Sets a single data series for a lane (most lanes have one series).
     /// </summary>
     public void SetLaneData(ScottPlot.WPF.WpfPlot chart, double[] times, double[] values,
-        bool isEventBased = false, double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays)
+        bool isEventBased = false, double hoverToleranceDays = EventLaneGeometry.MinHoverToleranceDays,
+        long[]? reads = null, long minReads = 0)
     {
         var lane = _lanes.Find(l => l.Chart == chart);
         if (lane == null) return;
@@ -144,7 +155,9 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
             Times = times,
             Values = values,
             IsEventBased = isEventBased,
-            HoverToleranceDays = hoverToleranceDays
+            HoverToleranceDays = hoverToleranceDays,
+            Reads = reads,
+            MinReads = minReads
         });
     }
 
@@ -295,7 +308,7 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
 
                 if (value.HasValue)
                 {
-                    var indicator = GetBaselineIndicator(lane, value.Value, 0);
+                    var indicator = ToIndicator(SingleSeriesArrow(lane, series, value.Value, xValue));
 
                     // Tooltip: value, plus an arrow when the value is outside the lane's baseline band
                     _tooltipText.Inlines.Add(new Run($"\n{lane.Label}: {value.Value:N1} {lane.Unit}") { Foreground = DefaultBrush });
@@ -352,6 +365,38 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// #7624: the ▲/▼ for a single-series lane at <paramref name="xValue"/>: none when the nearest point has fewer reads than the lane's
+    /// floor (its red dot is not drawn either), else the lane's baseline arrow for the value.
+    /// </summary>
+    private static string? SingleSeriesArrow(LaneInfo lane, DataSeries series, double value, double xValue)
+        => BelowReadFloor(series, xValue)
+            ? null
+            : BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, 0, value);
+
+    /// <summary>The ▲/▼ the tooltip shows for a single-series lane at <paramref name="xValue"/>, or null (the same decision the hover makes).</summary>
+    internal string? HoverArrowAt(ScottPlot.WPF.WpfPlot chart, double xValue)
+    {
+        var lane = _lanes.Find(l => l.Chart == chart);
+        if (lane == null || lane.Series.Count != 1) return null;
+        var series = lane.Series[0];
+        var value = FindNearestValue(series, xValue);
+        return value.HasValue ? SingleSeriesArrow(lane, series, value.Value, xValue) : null;
+    }
+
+    /// <summary>
+    /// #7624: whether the nearest point of a series with a read floor has fewer reads than the floor, so the tooltip draws no ▲/▼ the chart has
+    /// no dot for. A point with no entry in <see cref="DataSeries.Reads"/> counts as 0 reads, as <c>UpdateLane</c> counts it when it draws the dots.
+    /// </summary>
+    private static bool BelowReadFloor(DataSeries series, double targetX)
+    {
+        if (series.Reads == null || series.MinReads <= 0 || series.Times == null || series.Times.Length == 0)
+            return false;
+        var index = EventLaneGeometry.NearestIndex(series.Times, targetX);
+        var reads = index < series.Reads.Length ? series.Reads[index] : 0;
+        return reads < series.MinReads;
+    }
+
     private static double? FindNearestValue(DataSeries series, double targetX)
         => EventLaneGeometry.NearestValue(series.Times, series.Values, targetX, series.IsEventBased, series.HoverToleranceDays);
 
@@ -372,8 +417,10 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
     private record struct BaselineIndicator(string Symbol, SolidColorBrush Brush);
 
     private static BaselineIndicator? GetBaselineIndicator(LaneInfo lane, double value, int seriesIndex)
+        => ToIndicator(BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value));
+
+    private static BaselineIndicator? ToIndicator(string? symbol)
     {
-        var symbol = BaselineArrowSymbol(lane.BaselineUpper, lane.BaselineLower, lane.MinAnomalyValue, lane.IsEventBased, seriesIndex, value);
         return symbol switch
         {
             "▲" => new BaselineIndicator(symbol, RedBrush),
@@ -460,6 +507,10 @@ internal sealed class CorrelatedCrosshairManager : IDisposable
         public double[]? Times { get; set; }
         public double[]? Values { get; set; }
         public bool IsEventBased { get; set; }
+        /// <summary>#7624: the reads behind each value (the I/O lane only), parallel to <see cref="Values"/>. Null for a lane with no read floor.</summary>
+        public long[]? Reads { get; set; }
+        /// <summary>#7624: a value with fewer <see cref="Reads"/> than this gets no ▲/▼, as its red dot is not drawn either.</summary>
+        public long MinReads { get; set; }
         /// <summary>How far from a bucket an event series still reads that bucket's count (#6284).</summary>
         public double HoverToleranceDays { get; set; } = EventLaneGeometry.MinHoverToleranceDays;
     }

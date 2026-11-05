@@ -54,6 +54,15 @@ public sealed class DarlingMcpWhoDroveItTools
         CancellationToken cancellationToken = default) =>
         GetCpuByDatabaseCore(postgres, server_name, hours_back, top, as_of, cancellationToken);
 
+    /// <summary>#7010: the window-floor notice of the raw query_stats table for get_cpu_by_database; the hourly tier answers <see cref="McpWindowNotice.Unavailable"/> (no raw verdict, see the call).</summary>
+    private static Task<McpWindowNotice> CpuNoticeAsync(
+        NpgsqlDataSource postgres, string serverName, bool hourly, DateTime start, DateTime end, bool emptyAnswer, CancellationToken cancellationToken) =>
+        hourly
+            ? Task.FromResult(McpWindowNotice.Unavailable)
+            : DarlingMcpWindowNotice.ReadAsync(
+                () => DarlingMcpWindowNotice.Probe(postgres, "query_stats", serverName, start, end, cancellationToken),
+                start, end, "query_stats", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
     internal static async Task<string> GetCpuByDatabaseCore(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? as_of, CancellationToken cancellationToken)
     {
@@ -76,14 +85,32 @@ public sealed class DarlingMcpWhoDroveItTools
                 postgres, resolved.ServerId, start, windowEnd, top + 1, planRoute.Hourly, planRoute.Ceiling, cancellationToken);
             var (page, cut) = McpHelpers.BoundPage(fetched, top);
 
+            /* #7010: the window-floor notice of the raw query_stats table, the three keys every window-floor tool writes. The hourly rollup
+               tier reads a table that keeps far more than raw does, and its own edges are already in statements_window (served_start,
+               start_dropped_from, materialized_to), so that tier carries no raw-floor verdict (Unavailable writes no key). A never-collected
+               server answers bare, before the notice is read. */
             if (page.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
-                    ?? McpHelpers.Status("empty",
-                        $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
-                        + "Procedure stats are not a substitute, because they count the same work.",
-                        new { statements_window = planRoute.Disclosure });
+                var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken);
+                if (notCollected is not null) return notCollected;
+
+                var emptyNotice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: true, cancellationToken);
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
+                    $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
+                    + "Procedure stats are not a substitute, because they count the same work.",
+                    emptyNotice.IsUnavailable
+                        ? new Dictionary<string, object?> { ["statements_window"] = planRoute.Disclosure }
+                        : new Dictionary<string, object?>
+                        {
+                            ["statements_window"] = planRoute.Disclosure,
+                            ["effective_start"] = emptyNotice.EffectiveStart,
+                            ["window_truncated"] = emptyNotice.WindowTruncated,
+                            ["truncation_note"] = emptyNotice.TruncationNote,
+                        }), cancellationToken);
             }
+
+            var notice = await CpuNoticeAsync(postgres, resolved.ServerName, planRoute.Hourly, start, windowEnd, emptyAnswer: false, cancellationToken);
 
             var serverCpuUs = page[0].ServerCpuUs;
             var procedures = await DarlingWhoDroveItReader.ReadProcedureCpuAsync(
@@ -123,21 +150,25 @@ public sealed class DarlingMcpWhoDroveItTools
                 };
             }).ToList();
 
-            return JsonSerializer.Serialize(new
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 server_cpu_ms = Math.Round(serverCpuUs / 1000.0, 1),
                 cpu_source = planRoute.Hourly ? "collect.query_stats_io_hourly (hourly rollup)" : "collect.query_stats",
                 procedure_cpu_source = procRoute.Hourly ? "collect.procedure_stats_io_hourly (hourly rollup)" : "collect.procedure_stats",
                 statements_window = planRoute.Disclosure,
                 procedures_window = procRoute.Disclosure,
                 overlap_note = "cpu_ms counts every statement the plan cache sampled, including the statements inside procedures. procedure_cpu_ms is the procedures' own total for the same work: read it beside cpu_ms, never added to it.",
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 share_note = "share is a database's cpu_ms over server_cpu_ms, the CPU of every database in the window, so it does not change with top.",
                 databases_returned = databases.Count,
                 truncated = cut,
                 databases,
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -195,9 +226,9 @@ public sealed class DarlingMcpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken);
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -314,10 +345,10 @@ public sealed class DarlingMcpWhoDroveItTools
             {
                 var anySnapshots = notice.EffectiveStart is not null || notice.WindowTruncated;
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_snapshots", cancellationToken)
-                    ?? McpHelpers.Status("empty",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.Status("empty",
                         $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints());
+                        notice.AsHints()), cancellationToken);
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

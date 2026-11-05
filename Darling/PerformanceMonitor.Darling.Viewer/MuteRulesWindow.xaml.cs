@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -48,6 +49,7 @@ public partial class MuteRulesWindow : Window
         if (dataService.IsReadOnly)
         {
             ActionButtonsPanel.Visibility = Visibility.Collapsed;
+            ReadOnlyBanner.Text = "Read-only connection: mute rules can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin;
             ReadOnlyBanner.Visibility = Visibility.Visible;
         }
 
@@ -76,7 +78,7 @@ public partial class MuteRulesWindow : Window
 
     private async void AddRule_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new MuteRuleEditDialog { Owner = this };
+        var dialog = new MuteRuleEditDialog((MuteRule?)null, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -100,7 +102,7 @@ public partial class MuteRulesWindow : Window
             return;
         }
 
-        var dialog = new MuteRuleEditDialog(selected) { Owner = this };
+        var dialog = new MuteRuleEditDialog(selected, await _dataService.SupportsMuteRecurrenceAsync()) { Owner = this };
         if (dialog.ShowDialog() != true)
         {
             return;
@@ -201,10 +203,39 @@ public partial class MuteRulesWindow : Window
         }
     }
 
-    private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => EditRule_Click(sender, e);
+    /* A double-click on a column header, the scrollbar or the empty area is not a row (#7210). */
+    private void RulesGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (DataGridRowHit.IsOnRow(e.OriginalSource))
+        {
+            EditRule_Click(sender, e);
+        }
+    }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 
     private void ShowError(string what, Exception ex) =>
         MessageBox.Show($"{what}: {ex.Message}", "Mute Rules", MessageBoxButton.OK, MessageBoxImage.Warning);
+}
+
+/// <summary>The Schedule column of the Manage Mute Rules list (#7040): the rule's repeating window, with a note when it is open now.
+/// A one-off rule shows nothing.</summary>
+public sealed class MuteScheduleConverter : System.Windows.Data.IValueConverter
+{
+    internal static string Display(MuteRule rule, DateTime nowUtc)
+    {
+        var text = rule.ScheduleText;
+        if (text is null)
+        {
+            return "";
+        }
+
+        return rule.IsInWindowAt(nowUtc) ? text + " (in window now)" : text;
+    }
+
+    public object Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+        value is MuteRule rule ? Display(rule, DateTime.UtcNow) : "";
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) =>
+        throw new NotSupportedException();
 }

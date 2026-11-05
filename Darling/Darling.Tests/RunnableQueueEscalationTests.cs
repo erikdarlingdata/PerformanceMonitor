@@ -119,24 +119,30 @@ public sealed class RunnableQueueEscalationTests
     {
         h.Now = at;
         h.Adapter.RunnableQueue = Samples(at, averages);
-        var before = h.Deliverer.Outcomes.Count;
+        var before = h.Deliverer.Outcomes.Count(o => o.Hold is null);
         await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot());
-        return h.Deliverer.Outcomes.Count - before;
+        return h.Deliverer.Outcomes.Count(o => o.Hold is null) - before;
     }
+
+    /// <summary>#7086: a Warning is held (a digest row, nothing sent), so the flows below count PAGES only, and the held
+    /// row is checked where a test needs it.</summary>
+    private static AlertOutcome LastHeld(AlertEngineTests.Harness h) =>
+        h.Deliverer.Outcomes.Last(o => o.Hold is not null);
 
     [Fact]
     public async Task AWarningThatWorsensToCritical_IsDeliveredAtOnce_AndRestartsTheClock()
     {
         var (h, engine) = Engine();
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
-        Assert.Equal(AlertSeverityLevel.Warning, h.Deliverer.Outcomes[^1].Severity);
-        Assert.False(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        /* #7086: the Warning is held, not paged, and it leaves the page cooldown and the tier alone. */
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.Equal(AlertSeverityLevel.Warning, LastHeld(h).Severity);
 
-        /* A minute later, a fresh collection takes the average over the Critical bar: delivered inside the cooldown. */
+        /* A minute later, a fresh collection takes the average over the Critical bar: it pages at once. Nothing stamped the
+           cooldown, so it is an ordinary first page and needs no bypass flag. */
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));
         Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[^1].Severity);
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.False(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
 
         /* The clock restarted at the Critical: the next Critical evaluations are held by the normal cooldown. */
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(2), 9, 9, 60, 60));
@@ -148,7 +154,7 @@ public sealed class RunnableQueueEscalationTests
     {
         var (h, engine) = Engine();
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));
 
         /* The default cooldown is counted from the Critical (T0 + 1 minute), not from the Warning. */
@@ -163,7 +169,7 @@ public sealed class RunnableQueueEscalationTests
     {
         var (h, engine) = Engine();
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));
 
         /* Back to Warning inside the cooldown: nothing. */
@@ -188,19 +194,19 @@ public sealed class RunnableQueueEscalationTests
     {
         var (h, engine) = Engine();
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));
 
         /* Under the Warning bar: cleared. */
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(2), 0, 0, 0, 0, 0));
 
-        /* A new incident inside the old cooldown: its Warning is held by the cooldown, as before... */
+        /* A new incident inside the old cooldown: its Warning is held, as before... */
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3), 0, 0, 9, 9, 9));
-        /* ...but after the cooldown, Warning then Critical escalates once more. */
+        /* ...and after the cooldown a Warning is still held and the Critical that follows it pages once more. */
         var later = T0.AddMinutes(1).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes)).AddMinutes(1);
-        Assert.Equal(1, await EvaluateAsync(h, engine, later, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, later, 9, 9, 9));
         Assert.Equal(1, await EvaluateAsync(h, engine, later.AddMinutes(1), 9, 9, 9, 60));
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[^1].Severity);
     }
 
     [Fact]
@@ -209,8 +215,9 @@ public sealed class RunnableQueueEscalationTests
         var (h, engine) = Engine();
         h.Muted = true;
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
-        Assert.True(h.Deliverer.Outcomes[^1].Muted);
+        /* The muted Warning is held and the mute is recorded on its row. */
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.True(LastHeld(h).Muted);
 
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));
         Assert.True(h.Deliverer.Outcomes[^1].Muted);
@@ -232,30 +239,26 @@ public sealed class RunnableQueueEscalationTests
            every evaluation while every channel was down. While the family and key have an open streak it waits for the stamp. */
         var (h, engine) = Engine();
 
-        Assert.Equal(1, await EvaluateAsync(h, engine, T0, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, T0, 9, 9, 9));
 
         h.Deliverer.Report = _ => FailedByWebhook();
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(1), 9, 9, 9, 60));      /* failure 1: retry in 1 minute */
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(30), 9, 9, 9, 60));
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(1).AddSeconds(59), 9, 9, 9, 60));
 
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(2), 9, 9, 9, 60));      /* failure 2: retry in 2 minutes */
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3), 9, 9, 60, 60));
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(3).AddSeconds(59), 9, 60, 60, 60));
 
         h.Deliverer.Report = null;
         Assert.Equal(1, await EvaluateAsync(h, engine, T0.AddMinutes(4), 60, 60, 60, 60));   /* delivered: the streak ends */
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(4).AddSeconds(30), 60, 60, 60, 60, 60));
 
-        /* A later incident's escalation goes at once again, inside the cooldown. */
+        /* A later incident's Critical goes out once the cooldown is up, after its held Warning. */
         Assert.Equal(0, await EvaluateAsync(h, engine, T0.AddMinutes(5), 0, 0, 0, 0, 0));
         var later = T0.AddMinutes(4).Add(TimeSpan.FromMinutes(h.Settings.CooldownMinutes)).AddMinutes(1);
-        Assert.Equal(1, await EvaluateAsync(h, engine, later, 9, 9, 9));
+        Assert.Equal(0, await EvaluateAsync(h, engine, later, 9, 9, 9));
         Assert.Equal(1, await EvaluateAsync(h, engine, later.AddMinutes(1), 9, 9, 9, 60));
-        Assert.True(h.Deliverer.Outcomes[^1].Context!.EscalationBypassesCooldown);
     }
 
     [Fact]

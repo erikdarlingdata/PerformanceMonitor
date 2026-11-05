@@ -68,7 +68,7 @@ public sealed class WaitNameTrimDarlingTests
     [Fact]
     public void TheServiceRunner_BindsTheSharedIgnoreList_AndNoOtherSource()
     {
-        var source = File.ReadAllText(Path.Combine(
+        var source = RepoFile.ReadRepoFile(Path.Combine(
             RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
 
         var bindings = Regex.Matches(source, @"IgnoredWaitTypes\s*=\s*([^,;\r\n]+)")
@@ -102,10 +102,11 @@ public sealed class WaitNameTrimDarlingTests
         table.Columns.Add("wait_duration_ms", typeof(long));
         table.Columns.Add("blocking_session_id", typeof(short));
         table.Columns.Add("database_name", typeof(string));
-        table.Rows.Add((short)61, SpacedTimer, 240_000L, DBNull.Value, DBNull.Value);
-        table.Rows.Add((short)62, "RBIO_COMM_RETRY", 900L, DBNull.Value, DBNull.Value);
-        table.Rows.Add((short)63, "REMOTE_BLOCK_IO", 15L, DBNull.Value, "SalesDb");
-        table.Rows.Add((short)64, SpacedName, 1_000L, DBNull.Value, "SalesDb");
+        table.Columns.Add("program_name", typeof(string));
+        table.Rows.Add((short)61, SpacedTimer, 240_000L, DBNull.Value, DBNull.Value, DBNull.Value);
+        table.Rows.Add((short)62, "RBIO_COMM_RETRY", 900L, DBNull.Value, DBNull.Value, DBNull.Value);
+        table.Rows.Add((short)63, "REMOTE_BLOCK_IO", 15L, DBNull.Value, "SalesDb", DBNull.Value);
+        table.Rows.Add((short)64, SpacedName, 1_000L, DBNull.Value, "SalesDb", DBNull.Value);
 
         using var reader = table.CreateDataReader();
         var rows = await WaitingTasksCollector.Instance.ReadAsync(reader, ContextAt(T0, new CollectorDeltaCalculator()), CancellationToken.None);

@@ -126,10 +126,10 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         Tool.SevereErrors => (SystemHealthParser.ErrorReportedEvent, "error_reported.xml", null),
         Tool.IoIssues => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_io_subsystem.xml", null),
         Tool.SchedulerIssues => (SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor_high_sql_cpu.xml", null),
-        /* The fixtures carry the HIGH notification, which the memory gates drop; LOW is the one they keep. */
+        /* The memory-conditions fixture carries HIGH and the broker fixture STABLE, which the gates drop; LOW and SHRINK (#7466) are the ones they keep. */
         Tool.MemoryConditions => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_resource.xml", "LOW"),
         Tool.CpuTasks => (SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_query_processing_warning.xml", null),
-        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "LOW"),
+        Tool.MemoryBroker => (SystemHealthParser.MemoryBrokerEvent, "memory_broker.xml", "SHRINK"),
         Tool.MemoryNodeOom => (SystemHealthParser.MemoryNodeOomEvent, "memory_node_oom.xml", null),
         Tool.SignificantWaits => (SystemHealthParser.WaitInfoEvent, "wait_info.xml", null),
         _ => throw new ArgumentOutOfRangeException(nameof(tool))
@@ -157,7 +157,9 @@ public sealed class McpWindowNoticeSystemHealthToolTests : IDisposable
         var xml = LoadFixture(fixture);
         if (replace is not null)
         {
-            xml = xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
+            xml = tool == Tool.MemoryBroker
+                ? xml.Replace(">STABLE<", ">" + replace + "<", StringComparison.Ordinal)
+                : xml.Replace("RESOURCE_MEMPHYSICAL_HIGH", "RESOURCE_MEMPHYSICAL_" + replace, StringComparison.Ordinal);
         }
 
         return ExecuteAsync(@"
@@ -482,6 +484,8 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var (eventType, _, _) = SourceOf(tool);
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -522,6 +526,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         await _duckDb.InitializeFromTemplateAsync();
         await SeedEventAsync(tool, WindowStart.AddDays(-9));
         await SeedLogRunsAsync(WindowStart.AddDays(-9), WindowStart.AddDays(-8), everyMinutes: 60);
+        /* #7167: the server is being collected now (another collector ran a minute ago), so the empty window is this collector's
+           alone and stays empty. A server with no successful run of any collector up to the window's end answers unavailable instead. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool));
 
@@ -869,6 +876,8 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, $5)",
         await SeedEventAsync(tool, Anchor.AddDays(-20));
         await SeedLogRunsAsync(Anchor.AddDays(-9), Anchor.AddHours(-4), everyMinutes: 30);
         await SeedTruncatedRunAsync(Anchor.AddHours(-3));
+        /* #7167: another collector ran a minute ago, so the server is being collected and the empty window stays empty. */
+        await SeedOtherCollectorRunAsync(DateTime.UtcNow.AddMinutes(-1));
 
         var root = Root(await CallAsync(tool, hoursBack: 1));
 
@@ -959,6 +968,68 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, $5, 0, $6)",
         {
             Assert.Contains("NOT an all-clear", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>One successful run of a collector the system_health reads do not use (#7167: it keeps the server collected, so an empty window stays empty).</summary>
+    private async Task SeedOtherCollectorRunAsync(DateTime atUtc)
+    {
+        await ExecuteAsync(@"
+INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+VALUES ($1, $2, $3, 'wait_stats', $4, 12, 'SUCCESS', 0)",
+            _nextId, _serverId, ServerName, Naive(atUtc));
+        _nextId += 100_000;
+    }
+
+    /* #7466: the broker tool shows what the SHRINK gate filtered out. The counts come from the tool's own JSON, on its real
+       path, and events_in_window is the raw number of stored broker events (a row that fails to shred still counts), the
+       same on the data reply and the empty reply, so the two paths agree. */
+    private async Task SeedBrokerEventsAsync(params string[] notifications)
+    {
+        var (eventType, fixture, _) = SourceOf(Tool.MemoryBroker);
+        var minutes = 10;
+        foreach (var n in notifications)
+        {
+            var xml = n == "unparseable" ? "this is not xml" : LoadFixture(fixture).Replace(">STABLE<", ">" + n + "<", StringComparison.Ordinal);
+            await ExecuteAsync(@"
+INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                _nextId++, Naive(Anchor.AddMinutes(-minutes)), _serverId, ServerName, Naive(Anchor.AddMinutes(-minutes)), eventType, xml);
+            minutes += 10;
+        }
+    }
+
+    [Fact]
+    public async Task MemoryBroker_DataReply_CarriesNotificationCounts_AndTheRawEventCount_7466()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedLogRunsAsync(WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBrokerEventsAsync("STABLE", "GROW", "GROW", "SHRINK", "unparseable");
+
+        var root = Root(await CallAsync(Tool.MemoryBroker));
+
+        Assert.Equal(1, root.GetProperty("event_count").GetInt32());
+        Assert.Equal(5, root.GetProperty("events_in_window").GetInt32());
+        var counts = root.GetProperty("notification_counts");
+        Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+        Assert.Equal(1, counts.GetProperty("SHRINK").GetInt32());
+        Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+    }
+
+    [Fact]
+    public async Task MemoryBroker_EmptyReply_CarriesNotificationCounts_AndTheSameRawEventCount_7466()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        await SeedLogRunsAsync(WindowStart.AddHours(-1), Anchor, everyMinutes: 30);
+        await SeedBrokerEventsAsync("STABLE", "GROW", "GROW", "unparseable");
+
+        var root = Root(await CallAsync(Tool.MemoryBroker));
+
+        Assert.Equal("empty", root.GetProperty("status").GetString());
+        Assert.Equal(4, root.GetProperty("events_in_window").GetInt32());
+        var counts = root.GetProperty("notification_counts");
+        Assert.Equal(2, counts.GetProperty("GROW").GetInt32());
+        Assert.Equal(1, counts.GetProperty("STABLE").GetInt32());
+        Assert.False(counts.TryGetProperty("SHRINK", out _));
     }
 
     private async Task SeedLogRunsAsync(DateTime firstUtc, DateTime lastUtc, int everyMinutes)

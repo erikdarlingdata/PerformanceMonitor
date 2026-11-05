@@ -441,8 +441,9 @@ public sealed class PgLogEventMetricsParserTests
         Assert.Contains("recent_runs", healthDescription, StringComparison.Ordinal);
         Assert.Contains("log_autovacuum_min_duration", healthDescription, StringComparison.Ordinal);
         Assert.Contains("never zero", healthDescription, StringComparison.Ordinal);
-        /* No new parameter: the run history rides the tool's existing window and page. */
-        Assert.Equal(new[] { "postgres", "server_name", "hours_back", "limit", "as_of" }, health.GetParameters().Where(p => p.ParameterType != typeof(CancellationToken)).Select(p => p.Name));
+        /* No new parameter: the run history rides the tool's existing window and page. The logger is injected by the host's
+           AddSingleton<ILogger> (like the cancellation token), so it is not an argument a client sends. */
+        Assert.Equal(new[] { "postgres", "server_name", "hours_back", "limit", "as_of" }, health.GetParameters().Where(p => p.ParameterType != typeof(CancellationToken) && p.ParameterType != typeof(Microsoft.Extensions.Logging.ILogger)).Select(p => p.Name));
 
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgAutovacuumTools.cs");
         Assert.Contains("GetAutovacuumRunsAsync(", tool, StringComparison.Ordinal);

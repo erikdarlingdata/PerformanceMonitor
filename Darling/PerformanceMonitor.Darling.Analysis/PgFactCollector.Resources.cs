@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -477,9 +478,9 @@ UNION ALL
         }
     }
 
-    public const string PlanCacheStatsSql = @"
+    public const string PlanCacheStatsSql = $@"
 WITH ranked AS (
-    SELECT total_plans, single_use_plans, total_size_mb, single_use_size_mb,
+    SELECT cacheobjtype, total_plans, single_use_plans, total_size_mb, single_use_size_mb,
            DENSE_RANK() OVER (ORDER BY collection_time DESC) AS rnk
     FROM plan_cache_stats
     WHERE server_id = $1
@@ -487,10 +488,10 @@ WITH ranked AS (
     AND   collection_time <= $3
 )
 SELECT
-    COALESCE(SUM(total_plans), 0) AS total_plans,
-    COALESCE(SUM(single_use_plans), 0) AS single_use_plans,
     COALESCE(SUM(total_size_mb), 0) AS total_size_mb,
-    COALESCE(SUM(single_use_size_mb), 0) AS single_use_size_mb
+    COALESCE(SUM(total_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_plans,
+    COALESCE(SUM(single_use_plans) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_plans,
+    COALESCE(SUM(single_use_size_mb) FILTER (WHERE {PlanCacheBloatRule.CompiledPredicateSql}), 0) AS compiled_single_use_size_mb
 FROM ranked
 WHERE rnk = 1";
 
@@ -503,7 +504,8 @@ WHERE rnk = 1";
     /// planned over every retained chunk); DENSE_RANK() selects every
     /// row of the newest collection (QUALIFY is DuckDB-only and banned in the shared PG dialect). The
     /// FactScorer applies the &gt; 50/30/20% tiers AND the single_use_size_mb &gt;= 100 noise guard.
-    /// Ported byte-identically from Lite's DuckDbFactCollector.CollectPlanCacheFactsAsync.
+    /// Ported byte-identically from Lite's DuckDbFactCollector.CollectPlanCacheFactsAsync. The plan and single-use
+    /// figures are over COMPILED plans only (#7445, <see cref="PlanCacheBloatRule"/>), as the live badges are.
     /// </summary>
     private async Task CollectPlanCacheFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -521,12 +523,14 @@ WHERE rnk = 1";
 
             // SUM(integer) is bigint in Postgres — read every aggregate through ToInt64 (the Lite-parity
             // shape), then widen the MB sizes to double for the metadata.
-            var totalPlans = reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0));
-            var singleUsePlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
-            var totalSizeMb = reader.IsDBNull(2) ? 0.0 : (double)ToInt64(reader.GetValue(2));
+            var totalSizeMb = reader.IsDBNull(0) ? 0.0 : (double)ToInt64(reader.GetValue(0));
+            var totalPlans = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
+            var singleUsePlans = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var singleUseSizeMb = reader.IsDBNull(3) ? 0.0 : (double)ToInt64(reader.GetValue(3));
 
-            // No cache collected (or an empty cache) — nothing to classify.
+            /* #7445: every figure but total_size_mb is over COMPILED plans only (PlanCacheBloatRule), so this card
+               and the live badge read one population. A parse tree is not an ad-hoc plan, and thousands of
+               single-use ones must not score as bloat. No compiled plan collected means nothing to classify. */
             if (totalPlans <= 0) return;
 
             var singleUsePercent = singleUsePlans * 100.0 / totalPlans;

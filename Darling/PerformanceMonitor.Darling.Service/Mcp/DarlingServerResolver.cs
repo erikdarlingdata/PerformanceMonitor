@@ -51,8 +51,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// hands back for a name that resolves to nothing is <see cref="McpHelpers.Refusal"/>'s
 /// <c>{"status":"invalid","message":"Could not resolve server. …","hints":{"parameter":"server_name"}}</c>, so
 /// the ~190 tools that <c>return error;</c> put a status word on the wire without any of them changing. The
-/// SENTENCE is unchanged — <see cref="MissSentence"/> still begins "Could not resolve server." and still
-/// carries the local listing and the peer disclosure — and the consumers that want the words (the CLI's
+/// SENTENCE still begins "Could not resolve server." (callers match on those words), then says why — the name
+/// sent matched no monitored server, or none was sent and several are monitored (<see cref="McpHelpers.ServerMissOpening"/>,
+/// #7077) — and carries the local listing and the peer disclosure. The consumers that want the words (the CLI's
 /// stderr, the triage page's note, <c>remove_servers</c>' <c>not_found</c> outcome) read them back through
 /// <see cref="McpHelpers.ErrorMessageOf"/>. The one return here that is NOT a refusal — the registry read
 /// itself failing — stays a bare sentence on purpose: it is a store fault, not the caller's, and wearing
@@ -300,7 +301,8 @@ ORDER BY server_name";
     /// the peer disclosure is appended, naming the sibling store whose declared coverage matches. It is
     /// APPENDED rather than substituted because the local server listing is still the right answer to the
     /// commonest miss (a typo), and because the leading "Could not resolve server." is what callers key off.
-    /// With nothing declared the sentence is byte-for-byte what it was; since #3739 it travels as the
+    /// With nothing declared the sentence is the opening <see cref="McpHelpers.ServerMissOpening"/> builds (#7077) and the
+    /// server list; since #3739 it travels as the
     /// <c>message</c> of the <c>invalid</c> envelope (<see cref="McpHelpers.Refusal"/>), and a caller that
     /// keys off the words reads them through <see cref="McpHelpers.ErrorMessageOf"/>.</para>
     /// </summary>
@@ -346,7 +348,7 @@ ORDER BY server_name";
         string? serverName,
         DarlingPeerDirectory.Snapshot peers)
     {
-        var message = $"Could not resolve server. Available servers:\n{ListAvailableServers(servers)}";
+        var message = $"{McpHelpers.ServerMissOpening(serverName, servers.Count)} Available servers:\n{ListAvailableServers(servers)}";
         var disclosure = DarlingPeerDirectory.ResolutionMissDisclosure(peers, serverName);
 
         return disclosure.Length == 0 ? message : $"{message}\n\n{disclosure}";

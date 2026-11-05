@@ -92,6 +92,7 @@
             <!-- DarkGrid has no BasedOn, so it must re-declare the implicit DataGrid style's behaviors or grids using it silently lose them (sort-descending-first, header-copy, middle-click panning). -->
             <Setter Property="ui:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
+            <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -1024,7 +1025,7 @@
                                             </Style.Triggers>
                                         </Style>
                                     </Border.Style>
-                                    <TextBlock x:Name="FleetAdditionalProblemsText" Text="{Binding AdditionalProblemText}"
+                                    <TextBlock Text="{Binding AdditionalProblemText}"
                                                FontSize="11" TextDecorations="Underline"
                                                Foreground="{DynamicResource AccentBrush}"/>
                                 </Border>
@@ -1618,7 +1619,7 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" x:Name="StatusText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
-            <TextBlock Grid.Column="1" x:Name="SeatText" Text="Seat: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="1" x:Name="SeatText" Text="Access: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="2" x:Name="CollectorHealthText" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="3" x:Name="DatabaseSizeText" Text="Database: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>
             <TextBlock Grid.Column="4" x:Name="CollectionStatusText" Text="Collection: --" FontSize="12" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="16,0" VerticalAlignment="Center"/>

@@ -526,6 +526,22 @@ VALUES ($1, $2, $3, $4, $5)";
         }
     }
 
+    /// <summary>
+    /// The text a window shows for an exception from an investigation write (#7077). An <see cref="ArgumentException"/>
+    /// carrying a refusal sentence ends its <see cref="Exception.Message"/> with " (Parameter 'login')", a code name the
+    /// person cannot act on, so that suffix is removed. Any other exception's message comes back unchanged.
+    /// </summary>
+    internal static string InputErrorText(Exception ex)
+    {
+        var message = ex.Message;
+        if (ex is ArgumentException { ParamName: { Length: > 0 } name })
+        {
+            message = message.Replace($" (Parameter '{name}')", "", StringComparison.Ordinal);
+        }
+
+        return message;
+    }
+
     /// <summary>The login the actor names: not blank, and the undo path's person shape (1 to 256 characters: letters, digits, single spaces, a few punctuation marks).</summary>
     public static string? ValidateInvestigationLogin(string? login) => InvestigationPersonWrites.ValidateLogin(login);
 
@@ -615,9 +631,9 @@ public sealed class InvestigationRequestViewRow
     /// <summary>True when a person may still close it: open, claimed or reported.</summary>
     public bool IsClosable => State is "open" or "claimed" or "reported";
 
-    public string OpenedDisplay => OpenedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string ExpiresDisplay => ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string LeaseDisplay => LeaseUntilUtc is { } lease ? lease.ToLocalTime().ToString("HH:mm", CultureInfo.CurrentCulture) : "";
+    public string OpenedDisplay => ViewerTimeHelper.FormatFleetWide(OpenedAtUtc, "yyyy-MM-dd HH:mm");
+    public string ExpiresDisplay => ViewerTimeHelper.FormatFleetWide(ExpiresAtUtc, "yyyy-MM-dd HH:mm");
+    public string LeaseDisplay => LeaseUntilUtc is { } lease ? ViewerTimeHelper.FormatFleetWide(lease, "HH:mm") : "";
     public string ClaimsDisplay => ClaimCount.ToString(CultureInfo.InvariantCulture) + " of 3";
 }
 
@@ -635,13 +651,13 @@ public sealed class InvestigationRequestDetail
 /// <summary>An alert that opened or joined a request.</summary>
 public sealed record InvestigationAlertViewRow(DateTime AlertTimeUtc, string MetricName, string? DedupKey)
 {
-    public string TimeDisplay => AlertTimeUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+    public string TimeDisplay => ViewerTimeHelper.FormatFleetWide(AlertTimeUtc, "yyyy-MM-dd HH:mm:ss");
 }
 
 /// <summary>A journal row of a request.</summary>
 public sealed record InvestigationJournalViewRow(DateTime EventTimeUtc, string Event, string Actor, string? Reason)
 {
-    public string TimeDisplay => EventTimeUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+    public string TimeDisplay => ViewerTimeHelper.FormatFleetWide(EventTimeUtc, "yyyy-MM-dd HH:mm:ss");
 }
 
 /// <summary>The report an agent returned.</summary>
@@ -680,8 +696,8 @@ public sealed class InvestigationNoteViewRow
 
     public bool IsPending => State == "pending";
     public string ScopeDisplay => ServerName ?? (ServerId is { } id ? "server " + id.ToString(CultureInfo.InvariantCulture) : "Fleet");
-    public string CreatedDisplay => CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.CurrentCulture);
-    public string ExpiresDisplay => ExpiresAtUtc.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.CurrentCulture);
+    public string CreatedDisplay => ViewerTimeHelper.FormatFleetWide(CreatedAtUtc, "yyyy-MM-dd HH:mm");
+    public string ExpiresDisplay => ViewerTimeHelper.FormatFleetWide(ExpiresAtUtc, "yyyy-MM-dd");
 }
 
 /// <summary>An environment profile as the Profiles tab lists it.</summary>

@@ -423,7 +423,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 78;
+    internal const int CurrentSchemaVersion = 80;
 
     private readonly string _archivePath;
 
@@ -3095,6 +3095,24 @@ public partial class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Running migration to v78: adding collection_log.read_source");
             await AddMissingColumnsAsync(connection, AddedColumnsForVersion(78));
         }
+
+        if (fromVersion < 79)
+        {
+            /* v79 (#7497, twinning Darling's V241): blocked_process_reports.blocking_open_transaction_count, the blocking process's own trancount from
+               the report XML. INTEGER, nullable, the LAST column (the shared added-columns list). NULL on a row stored before v79 and on a report with no
+               trancount; the archive views union parquet by name, so a parquet file written before v79 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v79: adding blocked_process_reports.blocking_open_transaction_count");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(79));
+        }
+
+        if (fromVersion < 80)
+        {
+            /* v80 (#7573, twinning Darling's V243): waiting_tasks.program_name, the waiting task's session program name. VARCHAR, nullable, the LAST
+               column (the shared added-columns list). NULL on a row stored before v80 and never hidden by a reader; the archive views union parquet by
+               name, so a parquet file written before v80 reads NULL for it. */
+            _logger?.LogInformation("Running migration to v80: adding waiting_tasks.program_name");
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(80));
+        }
     }
 
     /* #5990: set when a migration step failed in a way that must be retried at the next start; the stamp then stops at this
@@ -3175,6 +3193,10 @@ public partial class DuckDbInitializer : IDisposable
         (77, "ag_replica_states", "primary_replica", "VARCHAR"),
         /* #6254: which server a collector run read its Query Store rows from (the Query Store replica or the primary). NULL on a row stored before v78. */
         (78, "collection_log", "read_source", "VARCHAR"),
+        /* #7497: the blocking process's own trancount from the blocked process report (Darling's V241 column). NULL on a row stored before v79 and on a report that has none. */
+        (79, "blocked_process_reports", "blocking_open_transaction_count", "INTEGER"),
+        /* #7573: the program name of the waiting task's session (Darling's V243 column). NULL on a row stored before v80; a reader never hides a NULL. */
+        (80, "waiting_tasks", "program_name", "VARCHAR"),
     };
 
     internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
@@ -3350,6 +3372,19 @@ public partial class DuckDbInitializer : IDisposable
     internal void BumpArchiveViewGeneration() => Interlocked.Increment(ref _archiveViewGeneration);
 
     private long _archiveViewGeneration;
+
+    /// <summary>
+    /// The oldest and newest time column value in a table's Parquet archive, one entry per table and column and
+    /// archive view generation (#7256). The span only changes when the files do, and the files change exactly when
+    /// <see cref="ArchiveViewGeneration"/> goes up, so a read whose window lies outside the span skips the archive
+    /// without opening one of its files. See <c>LocalDataService.ArchiveSpan</c>.
+    /// </summary>
+    internal ArchiveWatermarkCache ArchiveSpans { get; } = new();
+
+    /// <summary>True when the archive view of <paramref name="table"/> removes copies on a natural key. Such a view can
+    /// hide a hot row, so a read of it never swaps the view for the hot table or reasons from the archive's span.</summary>
+    internal static bool ArchiveViewDedups(string table) =>
+        table == "config_alert_log" || ArchiveViewDedupKeys.ContainsKey(table);
 
     /// <summary>
     /// A counter that goes up by one each time <see cref="CreateArchiveViewsCoreAsync"/> finishes, which
@@ -3690,7 +3725,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time {(Ar
     }
 
     /* The read_parquet source argument for one or more globs: a quoted string for one, a list for several. */
-    private static string ParquetSourceSql(List<string> globs) =>
+    internal static string ParquetSourceSql(List<string> globs) =>
         globs.Count == 1
             ? $"'{EscapeSqlPath(globs[0])}'"
             : "[" + string.Join(", ", globs.Select(g => $"'{EscapeSqlPath(g)}'")) + "]";

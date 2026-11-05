@@ -50,7 +50,7 @@ CREATE CONSTRAINT TRIGGER test_fail_done AFTER INSERT ON config.investigation_jo
             Assert.Equal(planA, (long)done["after"]!["state"]!["forced_plan"]!["plan_id"]!);
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(AgentChangeResult.Done, change.Result);
             Assert.True(change.CanTryUndo(DateTime.UtcNow));
@@ -118,7 +118,7 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             Assert.Equal(called, (long)row["called_id"]!);
             Assert.Equal(ForceKind, (string?)row["kind"]);
 
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal("person:alice", change.UndoneBy);
             Assert.False(change.CanTryUndo(DateTime.UtcNow));
             Assert.Equal("already_undone", (await UndoAsync(c, called, confirm: true)).Code);
@@ -179,7 +179,7 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             Assert.Equal(PlanUndoAnswer.Failed, undone.Status);
             Assert.Equal(planA, await c.Sql.ForcedPlanAsync(query, c.Ct));
             Assert.Empty(await RowsAsync(c, "action_undone"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Null(change.UndoneBy);
             Assert.True(change.CanTryUndo(DateTime.UtcNow));
             AssertNoSecret(c, undone.Message, await JournalTextAsync(c));
@@ -246,7 +246,7 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             Assert.Empty(await RowsAsync(c, "action_undone"));
             Assert.Equal(refusedBefore, (await RowsAsync(c, "refused")).Count);
             /* The person's attempt is on the list as a call with no result; the change it tried to undo is still offered. */
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId == called);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes, x => x.CalledId == called);
             Assert.Null(change.UndoneBy);
             Assert.True(change.CanTryUndo(DateTime.UtcNow));
 
@@ -283,7 +283,7 @@ CREATE TRIGGER test_fail_every_undone BEFORE INSERT ON config.investigation_jour
             Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Empty(await RowsAsync(c, "action_failed"));
             Assert.Empty(await RowsAsync(c, "action_done"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Unknown, change.Result);
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });

@@ -158,8 +158,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource DefaultRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="Category" Binding="{Binding Category}" MinWidth="120" Width="Auto"/>
                         <DataGridTextColumn Header="Severity" Binding="{Binding Severity}" MinWidth="80" Width="Auto" SortMemberPath="SeveritySort">
@@ -1447,7 +1446,9 @@
                      "what is it now". One line per top-5 database by current PVS size, 7 days; legend
                      labels carry each database's latest %-of-database. Collapsed until the loader has
                      points, so an ADR-less server shows no dead chart. -->
-                <ScottPlot:WpfPlot Grid.Row="2" x:Name="PvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
+                    <ScottPlot:WpfPlot x:Name="PvsTrendChart" Visibility="Collapsed"/>
+                </ui:ChartGridPanel>
                 <Grid Grid.Row="3" Margin="10,0,10,10">
                     <DataGrid x:Name="PvsStatsDataGrid"
                               AutoGenerateColumns="False"
@@ -2495,8 +2496,7 @@
                           HeadersVisibility="Column" GridLinesVisibility="Horizontal"
                           RowStyle="{StaticResource HighImpactRowStyle}"
                           Background="Transparent" BorderThickness="0"
-                          RowBackground="Transparent"
-                          AlternatingRowBackground="{DynamicResource DataGridAlternatingRowBrush}">
+                          RowBackground="Transparent">
                     <DataGrid.Columns>
                         <DataGridTextColumn Binding="{Binding ImpactScore}" Width="90">
                             <DataGridTextColumn.Header>
@@ -2632,11 +2632,11 @@
                                 <Style TargetType="TextBlock"><Setter Property="HorizontalAlignment" Value="Right"/></Style>
                             </DataGridTextColumn.ElementStyle>
                         </DataGridTextColumn>
-                        <DataGridTextColumn Binding="{Binding TotalMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
+                        <DataGridTextColumn Binding="{Binding PeakMemoryMb, StringFormat='{}{0:N1}'}" Width="135">
                             <DataGridTextColumn.Header>
                                 <StackPanel Orientation="Horizontal">
-                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
-                                    <TextBlock Text="Memory (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
+                                    <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PeakMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                    <TextBlock Text="Peak grant (MB)" FontWeight="Bold" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </DataGridTextColumn.Header>
                             <DataGridTextColumn.ElementStyle>

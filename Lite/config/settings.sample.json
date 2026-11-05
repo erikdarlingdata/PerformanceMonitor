@@ -51,8 +51,12 @@
 
   // ---- Blocking ----------------------------------------------------------------------
   "alert_blocking_enabled": true,
-  "alert_blocking_threshold": 1,                    // blocked sessions
-  "alert_blocking_wait_seconds_threshold": 0,       // 0 = any wait duration qualifies
+  "alert_blocking_threshold": 3,                    // blocked events in the last hour; pages only when the worst wait is 15 s or more
+  "alert_blocking_wait_seconds_threshold": 60,      // one blocked event this long pages at once; also the total-wait alert. 0 = off
+
+  // The marker that makes the two blocking values above count. A settings.json without it loads a 1 / 0 as the new defaults (3 / 60),
+  // because a Settings save used to write the whole block and those were the old defaults, not choices. The Settings window writes it on every save.
+  "alert_blocking_defaults_applied": true,
 
   // ---- Deadlocks ---------------------------------------------------------------------
   "alert_deadlock_enabled": true,

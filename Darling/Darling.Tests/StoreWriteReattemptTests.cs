@@ -467,7 +467,7 @@ public class StoreWriteReattemptTests
     [Fact]
     public void TheShippedStoreWriteRoutesThroughTheReattemptOnAFreshConnection()
     {
-        var source = File.ReadAllText(FindRepoFile(
+        var source = RepoFile.ReadRepoFile(FindRepoFile(
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
 
         Assert.Contains(
@@ -547,7 +547,7 @@ public class StoreWriteReattemptTests
     [Fact]
     public void TheReattemptCountReachesTheCollectionLogNote()
     {
-        var source = File.ReadAllText(FindRepoFile(
+        var source = RepoFile.ReadRepoFile(FindRepoFile(
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs")));
 
         var merge = source.IndexOf(
@@ -597,7 +597,7 @@ public class StoreWriteReattemptTests
     {
         foreach (var file in new[] { "DarlingCollectorRunner.cs", "StoreWriteReattempt.cs" })
         {
-            var source = File.ReadAllText(FindRepoFile(
+            var source = RepoFile.ReadRepoFile(FindRepoFile(
                 Path.Combine("Darling", "PerformanceMonitor.Darling.Service", file)));
 
             foreach (var invented in new[] { "\"RETRIED\"", "\"REATTEMPTED\"", "\"SUCCESS_ON_RETRY\"", "\"DEGRADED\"" })

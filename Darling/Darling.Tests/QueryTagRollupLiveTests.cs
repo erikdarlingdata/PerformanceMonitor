@@ -122,6 +122,16 @@ public sealed class QueryTagRollupLiveTests
             "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $2, $4, 60, 70, 'suspended', 'db1', $5, 'lg', 'h', $6, 'lg', 'h')",
             c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-20), server, waitMs, blockedApp, blockingApp);
 
+    private static Task BlockedReportAsync(Ctx c, int server, string blockedApp, string blockingApp, DateTime eventTime, long waitMs, int blockedSpid, int blockingSpid) =>
+        ExecAsync(c.Store,
+            "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $2, $4, $7, $8, 'suspended', 'db1', $5, 'lg', 'h', $6, 'lg', 'h')",
+            c.Ct, CollectionIdGenerator.Next(), eventTime, server, waitMs, blockedApp, blockingApp, blockingSpid, blockedSpid);
+
+    private static Task SnapshotAsync(Ctx c, int server, string blockedApp, string blockingApp, long waitMs, int blockedSpid, int blockingSpid) =>
+        ExecAsync(c.Store,
+            "INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $2, $4, $7, $8, 'suspended', 'db1', $5, 'lg', 'h', $6, 'lg', 'h')",
+            c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow.AddMinutes(-20), server, waitMs, blockedApp, blockingApp, blockingSpid, blockedSpid);
+
     private static Task DeadlockAsync(Ctx c, int server, params string[] apps) =>
         ExecAsync(c.Store,
             "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $2, $4, 'db1')",
@@ -277,6 +287,53 @@ public sealed class QueryTagRollupLiveTests
         });
     }
 
+    /// <summary>#7163: SQL Server writes a blocked-process report every threshold interval, each carrying the wait so far. One 60 s wait at a
+    /// 5 s threshold is twelve reports: the section counts it once, at its longest report, not as 390 s and twelve; a parallel query's
+    /// self-wait (the same spid on both sides) is no wait and adds nothing.</summary>
+    [Fact]
+    public async Task BlockingReportsOfOneWait_CountOnce_AtTheLongestReport_AndSelfWaitsAddNothing()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var victim = await TagAsync(c, "Reports");
+            var culprit = await TagAsync(c, "Etl");
+            await MapAsync(c, ServerOne, "caller", Caller("reportApp", "lg", "h", "db1"), victim);
+            await MapAsync(c, ServerOne, "caller", Caller("etlApp", "lg", "h", "db1"), culprit);
+            var start = DateTime.UtcNow.AddMinutes(-30);
+            for (var k = 1; k <= 12; k++)
+            {
+                await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", start.AddSeconds(5 * k), 5_000L * k, 70, 60);
+            }
+
+            /* A second, separate wait of 8 s (two reports), and a self-wait the way a parallel query writes it. */
+            var second = start.AddMinutes(10);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(5), 5_000, 71, 60);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(8), 8_000, 71, 60);
+            await BlockedReportAsync(c, ServerOne, "reportApp", "etlApp", second.AddSeconds(5), 5_000, 90, 90);
+
+            /* The always-on DMV sample: one row per sample, so an ordinary row counts and the self-wait row adds nothing. */
+            await SnapshotAsync(c, ServerOne, "reportApp", "etlApp", 3_000, 70, 60);
+            await SnapshotAsync(c, ServerOne, "reportApp", "etlApp", 9_000, 90, 90);
+
+            using var doc = await ReadAsync(c, "srv-one");
+            var blocking = Section(doc, "blocking_reports");
+            Assert.Equal(68_000, Figure(Row(blocking, "Reports").GetProperty("own"), "blocked_ms"));
+            Assert.Equal(2, Figure(Row(blocking, "Reports").GetProperty("own"), "blocked_reports"));
+            Assert.Equal(68_000, Figure(Row(blocking, "Etl").GetProperty("own"), "caused_ms"));
+            Assert.Equal(2, Figure(Row(blocking, "Etl").GetProperty("own"), "caused_reports"));
+            Assert.Equal(68_000, Figure(blocking.GetProperty("total"), "blocked_ms"));
+            Assert.Equal(2, Figure(blocking.GetProperty("total"), "blocked_reports"));
+
+            var snapshots = Section(doc, "blocking_snapshots");
+            Assert.Equal(3_000, Figure(Row(snapshots, "Reports").GetProperty("own"), "blocked_ms"));
+            Assert.Equal(1, Figure(Row(snapshots, "Reports").GetProperty("own"), "blocked_snapshots"));
+            Assert.Equal(3_000, Figure(Row(snapshots, "Etl").GetProperty("own"), "caused_ms"));
+            Assert.Equal(1, Figure(Row(snapshots, "Etl").GetProperty("own"), "caused_snapshots"));
+            Assert.Equal(3_000, Figure(snapshots.GetProperty("total"), "blocked_ms"));
+            Assert.Equal(1, Figure(snapshots.GetProperty("total"), "blocked_snapshots"));
+        });
+    }
+
     /// <summary>The interval table is read only behind the gate every other reader applies; with no coverage row the section is unavailable
     /// (raw may hold the work), never empty, and nothing is read from the table.</summary>
     [Fact]
@@ -355,6 +412,236 @@ public sealed class QueryTagRollupLiveTests
             Assert.Equal(1, Figure(Row(deadlocks, "B").GetProperty("own"), "deadlocks"));
             Assert.Equal(1, Figure(deadlocks.GetProperty("total"), "deadlocks"));
             Assert.False(deadlocks.GetProperty("rows_add_up_to_total").GetBoolean());
+        });
+    }
+
+    /// <summary>Blocked-process reports and deadlocks are read on the event's own timestamp, and carry the collection_time floor beside it
+    /// (#7204) so a fleet read leaves the older chunks closed. A report collected a minute after its event (the usual lag) and one collected
+    /// hours late (an outage catch-up, still inside the one-day allowance) both count (each as its own wait, so the blocked spid differs: #7163 counts one wait once); a row whose collection_time is days before the window,
+    /// which only a monitored clock days off the collector's could produce, is the row the floor leaves out.</summary>
+    [Fact]
+    public async Task TheBlockingReportAndDeadlockReads_CarryTheCollectionTimeFloor()
+    {
+        await WithStoreAsync(async c =>
+        {
+            var tag = await TagAsync(c, "Reports");
+            await MapAsync(c, ServerOne, "caller", Caller("floorApp", "lg", "h", "db1"), tag);
+            var eventTime = DateTime.UtcNow.AddMinutes(-20);
+            const string reportInsert =
+                "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, database_name, blocked_client_app, blocked_login_name, blocked_host_name, blocking_client_app, blocking_login_name, blocking_host_name) VALUES ($1, $2, $3, 'x', $4, 1000, 60, $5, 'suspended', 'db1', 'floorApp', 'lg', 'h', 'floorApp', 'lg', 'h')";
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddMinutes(1), ServerOne, eventTime, 70);
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddHours(5), ServerOne, eventTime, 71);
+            await ExecAsync(c.Store, reportInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddDays(-5), ServerOne, eventTime, 72);
+
+            const string deadlockInsert =
+                "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, deadlock_graph_xml, database_name) VALUES ($1, $2, $3, 'x', $4, $5, 'db1')";
+            const string graph = "<deadlock><process-list><process id=\"p0\" clientapp=\"floorApp\" loginname=\"lg\" hostname=\"h\" currentdbname=\"db1\" /></process-list></deadlock>";
+            await ExecAsync(c.Store, deadlockInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddMinutes(1), ServerOne, eventTime, graph);
+            await ExecAsync(c.Store, deadlockInsert, c.Ct, CollectionIdGenerator.Next(), eventTime.AddDays(-5), ServerOne, eventTime, graph);
+
+            using var doc = await ReadAsync(c, "srv-one");
+            var blocking = Section(doc, "blocking_reports");
+            Assert.Equal(2_000, Figure(blocking.GetProperty("total"), "blocked_ms"));
+            Assert.Equal(1, Figure(Section(doc, "deadlocks").GetProperty("total"), "deadlocks"));
+        });
+    }
+
+    /// <summary>#7374: all six sections read SQL Server sources, so the fleet form answers a PostgreSQL server's row not_collected in each of
+    /// them (the one-server form already does), instead of empty (five sections) or unavailable (query_store, the gate's "no coverage row").
+    /// The SQL Server row and fleet_total are what they were with no PostgreSQL server in the fleet.</summary>
+    [Fact]
+    public async Task AFleetRead_AnswersAPostgresServerNotCollected_InEverySection_AndLeavesTheSqlServerRowsAlone()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+            await CoverQueryStoreAsync(c, ServerOne);
+
+            using var doc = await ReadAsync(c, null);
+            var sections = doc.RootElement.GetProperty("sections").EnumerateArray().ToList();
+            Assert.Equal(6, sections.Count);
+            foreach (var section in sections)
+            {
+                var servers = section.GetProperty("servers").EnumerateArray().ToDictionary(s => s.GetProperty("server").GetString()!);
+                var pg = servers["srv-two"];
+                Assert.Equal("not_collected", pg.GetProperty("status").GetString());
+                Assert.Contains("srv-two", pg.GetProperty("message").GetString(), StringComparison.Ordinal);
+                Assert.NotEqual("not_collected", servers["srv-one"].GetProperty("status").GetString());
+            }
+
+            var plan = Section(doc, "plan_cache");
+            Assert.Equal("ok", plan.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-one").GetProperty("status").GetString());
+            Assert.Equal(2_000, Figure(plan.GetProperty("fleet_total"), "cpu_ms"));
+            Assert.False(doc.RootElement.TryGetProperty("message", out var topMessage) && (topMessage.GetString() ?? string.Empty).Contains("srv-two", StringComparison.Ordinal));
+        });
+    }
+
+    /// <summary>#7374: a PostgreSQL server has no Query Store, so it is never fed to the interval-table gate and never named under "Sections
+    /// not served". With the SQL Server uncovered, only the SQL Server is.</summary>
+    [Fact]
+    public async Task AFleetRead_NeverNamesAPostgresServerAmongTheSectionsNotServed()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            var top = doc.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("query_store", top, StringComparison.Ordinal);
+            Assert.Contains("srv-one", top, StringComparison.Ordinal);
+            Assert.DoesNotContain("srv-two", top, StringComparison.Ordinal);
+            var qs = Section(doc, "query_store");
+            Assert.DoesNotContain("srv-two", qs.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            var servers = qs.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("unavailable", servers["srv-one"].GetProperty("status").GetString());
+            Assert.Equal("not_collected", servers["srv-two"].GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>#7376: the newest server_properties row marks the server a readable secondary (the facts get_query_store_top judges), and no
+    /// query_store_replica is set, so Darling never collects its Query Store.</summary>
+    private static Task MarkReadableSecondaryAsync(Ctx c, int server) =>
+        ExecAsync(c.Store,
+            "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, ag_replica_role) " +
+            "VALUES ($1, $2, $3, 'x', 'Enterprise', '16.0.1000.6', 'RTM', 3, 'Secondary')",
+            c.Ct, CollectionIdGenerator.Next(), DateTime.UtcNow, server);
+
+    /// <summary>#7376: on a readable secondary Darling does not collect Query Store from, the query_store section reads not_collected with the
+    /// reason get_query_store_top gives (the gate's "no coverage row" says the gap will close, and it never does). The other five sections keep
+    /// their rows, the secondary is not named under "Sections not served", and the normal server beside it is what it was.</summary>
+    [Fact]
+    public async Task AFleetRead_AnswersAReadableSecondaryNotCollected_InQueryStoreOnly_AndNeverNamesItAsNotServed()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+            await QueryStoreAsync(c, ServerOne, "0xA1", 1, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerOne);
+
+            using var doc = await ReadAsync(c, null);
+            var queryStore = Section(doc, "query_store");
+            var qs = queryStore.GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("not_collected", qs["srv-two"].GetProperty("status").GetString());
+            Assert.Contains("readable secondary", qs["srv-two"].GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("coverage row", qs["srv-two"].GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("ok", qs["srv-one"].GetProperty("status").GetString());
+            var plan = Section(doc, "plan_cache").GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("ok", plan["srv-two"].GetProperty("status").GetString());
+            Assert.Equal("ok", plan["srv-one"].GetProperty("status").GetString());
+            Assert.False(doc.RootElement.TryGetProperty("message", out var top) && (top.GetString() ?? string.Empty).Contains("srv-two", StringComparison.Ordinal));
+            Assert.DoesNotContain("interval table", queryStore.GetProperty("message").GetString() ?? string.Empty, StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#7376: the one-server form of the same server: query_store is not_collected with the reason and no section is named as not served.</summary>
+    [Fact]
+    public async Task AServerRead_AnswersAReadableSecondaryNotCollected_InQueryStoreOnly()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+
+            using var doc = await ReadAsync(c, "srv-two");
+            var qs = Section(doc, "query_store");
+            Assert.Equal("not_collected", qs.GetProperty("status").GetString());
+            Assert.Contains("readable secondary", qs.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("ok", Section(doc, "plan_cache").GetProperty("status").GetString());
+            Assert.False(doc.RootElement.TryGetProperty("message", out _), "no section is not served");
+        });
+    }
+
+    /// <summary>#7376: the readable-secondary question is asked after the read, so a readable secondary that DOES hold Query Store rows in the
+    /// window keeps them (a former primary, a re-registration), in the one-server form and the fleet form.</summary>
+    [Fact]
+    public async Task AReadableSecondaryThatHoldsQueryStoreRows_KeepsThem()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await MarkReadableSecondaryAsync(c, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await QueryStoreAsync(c, ServerTwo, "0xB1", 1, 4_000_000, 7);
+            await CoverQueryStoreAsync(c, ServerTwo);
+
+            using var one = await ReadAsync(c, "srv-two");
+            Assert.Equal("ok", Section(one, "query_store").GetProperty("status").GetString());
+            using var fleet = await ReadAsync(c, null);
+            var qs = Section(fleet, "query_store").GetProperty("servers").EnumerateArray().ToDictionary(x => x.GetProperty("server").GetString()!);
+            Assert.Equal("ok", qs["srv-two"].GetProperty("status").GetString());
+        });
+    }
+
+    /// <summary>#7374: a fleet of PostgreSQL servers only has nothing to read, so the whole answer is not_collected with the engine reason.</summary>
+    [Fact]
+    public async Task AFleetOfOnlyPostgresServers_AnswersNotCollected()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres'", c.Ct);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("srv-one", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    /// <summary>#7374: the engine question is asked after the read, as the one-server form does (DarlingEngineCapability's contract). A
+    /// server whose registry row says PostgreSQL but that holds SQL Server rows in the window (a re-registration, a restored database) keeps
+    /// its data in the fleet form, in every section, and is never answered not_collected.</summary>
+    [Fact]
+    public async Task AFleetRead_KeepsTheDataOfAServerWhoseRegistryRowSaysPostgres_ButHasSqlServerRows()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres' WHERE server_id = $1", c.Ct, ServerTwo);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerTwo, "hash", "0xB1", a);
+            await PlanCacheAsync(c, ServerTwo, "0xB1", 30, 3_000_000);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.False(doc.RootElement.TryGetProperty("status", out var top) && top.GetString() == "not_collected");
+            foreach (var section in doc.RootElement.GetProperty("sections").EnumerateArray())
+            {
+                var two = section.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-two");
+                Assert.NotEqual("not_collected", two.GetProperty("status").GetString());
+            }
+
+            var plan = Section(doc, "plan_cache");
+            Assert.Equal("ok", plan.GetProperty("servers").EnumerateArray().Single(s => s.GetProperty("server").GetString() == "srv-two").GetProperty("status").GetString());
+            Assert.Equal(3_000, Figure(plan.GetProperty("fleet_total"), "cpu_ms"));
+        });
+    }
+
+    /// <summary>#7374: with every server registered as PostgreSQL, the one that holds rows keeps them and the answer is data, not the whole
+    /// answer not_collected. The other, with no rows anywhere, reads not_collected.</summary>
+    [Fact]
+    public async Task AFleetOfRegistryPostgresServers_AnswersNotCollectedOnlyForTheOnesWithNoRows()
+    {
+        await WithStoreAsync(async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE servers SET engine_kind = 'postgres'", c.Ct);
+            var a = await TagAsync(c, "A");
+            await MapAsync(c, ServerOne, "hash", "0xA1", a);
+            await PlanCacheAsync(c, ServerOne, "0xA1", 30, 2_000_000);
+
+            using var doc = await ReadAsync(c, null);
+            Assert.False(doc.RootElement.TryGetProperty("status", out var top) && top.GetString() == "not_collected");
+            var plan = Section(doc, "plan_cache");
+            var servers = plan.GetProperty("servers").EnumerateArray().ToDictionary(s => s.GetProperty("server").GetString()!);
+            Assert.Equal("ok", servers["srv-one"].GetProperty("status").GetString());
+            Assert.Equal("not_collected", servers["srv-two"].GetProperty("status").GetString());
         });
     }
 

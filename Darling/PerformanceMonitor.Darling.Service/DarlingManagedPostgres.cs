@@ -100,6 +100,13 @@ public sealed class DarlingManagedPostgres
     public const string ViewerCredentialFileName = "pg-viewer-credential.dpapi";
 
     /// <summary>
+    /// DPAPI-LocalMachine blob holding the generated password for the <c>web</c> login, the web dashboard host's own store identity:
+    /// the writes its pages make, which the read-only <c>viewer</c> login (the one the export verbs hand to a remote seat) does not hold.
+    /// Consumed only by the in-service web host, so, like the mcp credential, it is hardened non-interactive.
+    /// </summary>
+    public const string WebCredentialFileName = "pg-web-credential.dpapi";
+
+    /// <summary>
     /// DPAPI-LocalMachine blob holding the generated password for the dedicated least-privilege
     /// <c>mcp</c> login role (darling-network-endpoints, D3-role) — the store pool identity the
     /// (optionally network-exposed) MCP host connects as. Same location/posture as the admin/viewer
@@ -113,6 +120,7 @@ public sealed class DarlingManagedPostgres
     /// <c>mcp</c> added for the network endpoints, D3-role).</summary>
     public const string AdminRoleName = "admin";
     public const string ViewerRoleName = "viewer";
+    public const string WebRoleName = "web";
     public const string McpRoleName = "mcp";
 
     /// <summary>
@@ -134,6 +142,10 @@ public sealed class DarlingManagedPostgres
     /// <summary>#6600: the most connections the web dashboard's admin pool opens. The pool serves only a signed-in admin's writes and their
     /// access checks, so a handful is enough, and every pooled connection is a postgres.exe process.</summary>
     internal const int WebAdminMaxPoolSize = 4;
+
+    /// <summary>#7223: the pool bound every managed role connection string takes unless its caller names a smaller one (the web admin pool's
+    /// <see cref="WebAdminMaxPoolSize"/>). One definition, so a change here moves the owner string and all five stored-credential builders (#1559, #2819).</summary>
+    internal const int DefaultMaxPoolSize = 24;
 
     /// <summary>
     /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
@@ -904,6 +916,10 @@ public sealed class DarlingManagedPostgres
     /// <summary>Path to the <c>viewer</c> role's DPAPI credential, beside the data directory.</summary>
     public static string ViewerCredentialPathFor(string dataDirectory)
         => Path.Combine(ParentOf(dataDirectory), ViewerCredentialFileName);
+
+    /// <summary>Path to the <c>web</c> role's DPAPI credential, beside the data directory.</summary>
+    public static string WebCredentialPathFor(string dataDirectory)
+        => Path.Combine(ParentOf(dataDirectory), WebCredentialFileName);
 
     /// <summary>Path to the <c>mcp</c> role's DPAPI credential, beside the data directory (darling-network-endpoints).</summary>
     public static string McpCredentialPathFor(string dataDirectory)
@@ -2634,9 +2650,12 @@ public sealed class DarlingManagedPostgres
     /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker. A store whose conf still carries the
     /// legacy blocks gets the line in <c>darling-managed.conf</c> when that conf migrates
     /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), written at the same start as the rest of the file, so the
-    /// next start finds the file unchanged. That migration runs after the start and never reloads, so on such a
-    /// store the value is in force from the following start; every store already on the managed file has the line
-    /// written before <c>pg_ctl start</c>, so it is in force on the start that writes it.
+    /// next start finds the file unchanged. That migration runs after the start and reloads the server only once it
+    /// has verified (<c>EnsureRunningAsync</c>, #7446), so on such a store the value is in force on that start when the
+    /// migration verifies, and from the following start when it does not; every store already on the managed file has
+    /// the line written before <c>pg_ctl start</c>, so it is in force on the start that writes it. A store that migrated before this
+    /// key became managed may hold the operator's own <c>random_page_cost</c> above the include, where the include would override it:
+    /// <see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/> finds such a line and the render leaves the key out.
     ///
     /// <para><b>Why.</b> The store lives on SSD-backed volumes (EBS gp3 at 3,000 to 6,000 provisioned IOPS in the
     /// measured case). With PostgreSQL's default of 4 the planner prices a BRIN index's lossy heap pages as
@@ -2663,6 +2682,146 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
         return builder.ToString();
+    }
+
+    /* ===================== TimescaleDB telemetry (#7446) ===================== */
+
+    /// <summary>TimescaleDB's usage-report setting. <c>basic</c> (the extension's default) sends a report to
+    /// Timescale's server about once a day and checks for a newer version; <c>off</c> sends nothing.</summary>
+    internal const string TelemetryLevelSetting = "timescaledb.telemetry_level";
+
+    /// <summary>The value <see cref="BuildTelemetryLevelConfAppend"/> writes: <c>off</c>.</summary>
+    internal const string TelemetryLevelValue = "off";
+
+    /// <summary>
+    /// The telemetry block (#7446): <c>timescaledb.telemetry_level = off</c> only. Rendered into
+    /// <c>darling-managed.conf</c> by <see cref="ManagedConfFile.RenderBody"/> and not appended to
+    /// <c>postgresql.conf</c> as a numbered legacy block: it has no marker, like the planner page cost line
+    /// above, and it reaches an existing store the same way (<see cref="ManagedConfFile.ManagedOnlyKeys"/>).
+    ///
+    /// <para><b>Why.</b> The bundled TimescaleDB defaults the level to <c>basic</c> (measured on 2.30.1), so an
+    /// unmodified store phones home daily. A monitoring product on a restricted network should make no
+    /// outbound call its operator did not choose.</para>
+    ///
+    /// <para><b>Context and precedence.</b> The setting is <c>user</c>-context (measured: <c>pg_settings.context</c>
+    /// is <c>user</c>), so a reload applies it. A value set with <c>ALTER SYSTEM</c> lives in
+    /// <c>postgresql.auto.conf</c>, which is read after this file and wins, so an operator can turn the report
+    /// back on. Nothing here reads or writes that file.</para>
+    /// </summary>
+    public static string BuildTelemetryLevelConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(TelemetryLevelSetting).Append(" = ").Append(TelemetryLevelValue).Append('\n');
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// <c>pg_reload_conf()</c>, then waits up to five seconds for <c>pg_conf_load_time()</c> to move, so a read right
+    /// after sees the reloaded values (the reload signal is handled asynchronously). A failure is logged and never
+    /// fails the start.
+    /// </summary>
+    internal async Task ReloadConfAndWaitAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+            await connection.OpenAsync(cancellationToken);
+            await using var before = new NpgsqlCommand("SELECT pg_catalog.pg_conf_load_time()", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            var loadedBefore = (DateTime)(await before.ExecuteScalarAsync(cancellationToken))!;
+
+            await using var reload = new NpgsqlCommand("SELECT pg_catalog.pg_reload_conf()", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            await reload.ExecuteScalarAsync(cancellationToken);
+
+            for (var attempt = 0; attempt < 50; attempt++)
+            {
+                await Task.Delay(100, cancellationToken);
+                var loadedNow = (DateTime)(await before.ExecuteScalarAsync(cancellationToken))!;
+                if (loadedNow != loadedBefore)
+                {
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not reload the store's settings after writing {File}; they take effect at the next start", ManagedConfFile.FileName);
+        }
+    }
+
+    /// <summary>
+    /// Sets the extension's <c>policy_telemetry</c> job to run only while the level is not <c>off</c> (#7446).
+    /// Measured on 2.30.1: with the level off the job still runs, returns false, and TimescaleDB records every run
+    /// as Failed with no error text, a daily false failure at the top of the job list. The job is found by
+    /// <c>proc_name</c> (never by id), so no row is a no-op, and only a row whose <c>scheduled</c> differs is
+    /// altered, so a start that finds it settled writes nothing. An operator who sets the level back to
+    /// <c>basic</c> with <c>ALTER SYSTEM</c> gets the job back at the next start. Reads the level in force, so it
+    /// follows whichever file won. A store without the extension yet (a new store, when the start reaches this pass)
+    /// has no job and is left alone here; the worker runs the pass again right after it creates the extension.
+    /// </summary>
+    internal const string TelemetryJobReconcileSql = @"
+SELECT count(*)::int
+FROM (
+    SELECT alter_job(j.job_id, scheduled => (COALESCE(current_setting('timescaledb.telemetry_level', true), 'basic') <> 'off'))
+    FROM timescaledb_information.jobs AS j
+    WHERE j.proc_name = 'policy_telemetry'
+      AND j.scheduled IS DISTINCT FROM (COALESCE(current_setting('timescaledb.telemetry_level', true), 'basic') <> 'off')
+) AS altered";
+
+    /// <summary>
+    /// Runs <see cref="TelemetryJobReconcileSql"/> against the store database. A failure is logged and never
+    /// fails the start. Returns the number of jobs changed, or -1 when the step did not run.
+    /// </summary>
+    internal async Task<int> ReconcileTelemetryJobAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+            await connection.OpenAsync(cancellationToken);
+
+            await using (var probe = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')", connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            })
+            {
+                if (!(bool)(await probe.ExecuteScalarAsync(cancellationToken) ?? false))
+                {
+                    return 0;
+                }
+            }
+
+            await using var command = new NpgsqlCommand(TelemetryJobReconcileSql, connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            var changed = (int)(await command.ExecuteScalarAsync(cancellationToken) ?? 0);
+            if (changed > 0)
+            {
+                _logger.LogInformation(
+                    "Set the TimescaleDB telemetry job to follow {Setting} ({Changed} job changed)", TelemetryLevelSetting, changed);
+            }
+
+            return changed;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not set the TimescaleDB telemetry job to follow {Setting}; the store start continues", TelemetryLevelSetting);
+            return -1;
+        }
     }
 
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
@@ -3011,7 +3170,7 @@ public sealed class DarlingManagedPostgres
     /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
     /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = 24)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null, int maxPoolSize = DefaultMaxPoolSize)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -3059,13 +3218,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = CredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildConnectionString(config.Port, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, CredentialPathFor, UserName, null);
     }
 
     /// <summary>
@@ -3079,13 +3232,7 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildMcpConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = McpCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
-
-        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), McpApplicationName);
+        return TryBuildRoleConnectionStringFromStoredCredential(config, McpCredentialPathFor, McpRoleName, McpApplicationName);
     }
 
     /// <summary>
@@ -3099,13 +3246,19 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildViewerConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = ViewerCredentialPathFor(ResolveDataDirectory(config));
-        if (!File.Exists(credentialPath))
-        {
-            return null;
-        }
+        return TryBuildRoleConnectionStringFromStoredCredential(config, ViewerCredentialPathFor, ViewerRoleName, WebApplicationName);
+    }
 
-        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
+    /// <summary>
+    /// Derives the web dashboard host's WRITE-capable connection string from the stored <c>web</c>-role credential WITHOUT touching the server:
+    /// the login that holds the writes the dashboard's pages make (mute rules, dismissals, custom alerts, server add and edit, the command
+    /// requests), which the read-only <c>viewer</c> login does not hold. Null until <see cref="DarlingManagedRoles.EnsureProvisionedAsync"/>
+    /// has written the credential. Never derived from the viewer credential: the caller that falls back to viewer reads only.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public static string? TryBuildWebConnectionStringFromStoredCredential(PostgresConfig config)
+    {
+        return TryBuildRoleConnectionStringFromStoredCredential(config, WebCredentialPathFor, WebRoleName, WebApplicationName);
     }
 
     /// <summary>
@@ -3117,14 +3270,25 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     public static string? TryBuildWebAdminConnectionStringFromStoredCredential(PostgresConfig config)
     {
-        var credentialPath = AdminCredentialPathFor(ResolveDataDirectory(config));
+        return TryBuildRoleConnectionStringFromStoredCredential(config, AdminCredentialPathFor, AdminRoleName, WebAdminApplicationName, WebAdminMaxPoolSize);
+    }
+
+    /// <summary>
+    /// The one body behind every <c>TryBuild*ConnectionStringFromStoredCredential</c>: resolve the credential file for the role, return null
+    /// when it has not been written yet, otherwise unprotect it and build the role's connection string. The five callers differ only in the
+    /// path function, the role, the application name and the pool size.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private static string? TryBuildRoleConnectionStringFromStoredCredential(
+        PostgresConfig config, Func<string, string> credentialPathFor, string role, string? applicationName, int maxPoolSize = DefaultMaxPoolSize)
+    {
+        var credentialPath = credentialPathFor(ResolveDataDirectory(config));
         if (!File.Exists(credentialPath))
         {
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, AdminRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()),
-            WebAdminApplicationName, WebAdminMaxPoolSize);
+        return BuildRoleConnectionString(config.Port, role, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), applicationName, maxPoolSize);
     }
 
     /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested
@@ -3169,8 +3333,11 @@ public sealed class DarlingManagedPostgres
                 "folder it points to as it is).");
         }
 
+        /* #7363: a store folder that is a drive root (a data directory at D:\pg) is never locked. The lock protects the
+           folder's ACL and writes entries that every file and folder below it inherits, and on a drive root that is
+           every file and folder on the drive. */
         var viaLink = !string.Equals(storeFolder, storeLink, StringComparison.Ordinal);
-        var storeFolderLocked = TryHardenDirectory(storeFolder, viaLink);
+        var storeFolderLocked = LockStoreFolder(storeFolder, viaLink, _dataDirectory, _logger, TryHardenDirectory);
 
         /* The data directory, pg.log, server.key and the log folder are the names the service writes into and opens
            again on every start: refuse ones another user made first, before initdb or the server touches them. */
@@ -3199,6 +3366,8 @@ public sealed class DarlingManagedPostgres
            delegate included) sees only the Func<string> built from networkPlan.Value below. */
         var networkPlan = new Lazy<NetworkPlan>(BuildNetworkPlan);
 
+        DiscardInterruptedInitdb(_dataDirectory, _logger);
+
         /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
            extension for the quiesced update to move. */
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
@@ -3216,7 +3385,7 @@ public sealed class DarlingManagedPostgres
                 throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
             }
 
-            RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked);
+            RefuseInitdbOnUnlockedStoreFolder(storeFolder, storeFolderLocked, _dataDirectory);
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -3469,7 +3638,25 @@ public sealed class DarlingManagedPostgres
             {
                 LastManagedConfVerification = migrationOutcome;
             }
+
+            /* #7446: a store whose conf was still the legacy blocks (every new store, and each one upgrading from a
+               build before the managed file) was started on those blocks, and the migration above has just written
+               darling-managed.conf, which carries the telemetry level. Have the server read it now so the level is
+               off on this first start, not only on the next. Only on a Legacy start whose migration verified: a Verified
+               outcome means the file equals the one in force apart from added keys (ManagedOnlyKeys), so the reload
+               changes nothing else. A Failed or Unknown outcome leaves the files unverified, and before this change
+               such a start could not alter the running server, so it still does not. Every other confState started
+               on the migrated files already (PendingVerify, MigratedUnstamped) or on a file Step B owns (Verified),
+               so a reload would add nothing and could apply a hand edit. */
+            if (confState == ManagedConfMigrationState.Kind.Legacy
+                && migrationOutcome is { Status: ManagedConfVerificationStatus.Verified })
+            {
+                await ReloadConfAndWaitAsync(connectionString, cancellationToken);
+            }
         }
+
+        /* #7446: the extension's telemetry job follows the telemetry level in force. Never fails the start. */
+        await ReconcileTelemetryJobAsync(connectionString, cancellationToken);
 
         return connectionString;
     }
@@ -3796,8 +3983,10 @@ public sealed class DarlingManagedPostgres
     /// First-run initdb. The credential is generated and DPAPI-persisted BEFORE initdb runs:
     /// if the order were reversed, a crash after a successful initdb would leave a cluster whose
     /// password nobody knows. A failed initdb leaves the credential file behind harmlessly —
-    /// the next attempt regenerates and overwrites it (initdb itself cleans up its partial data
-    /// directory on failure).
+    /// the next attempt regenerates and overwrites it. initdb cleans up its partial data directory
+    /// when it exits non-zero by itself, but not when it is killed (the 180 s timeout, a service stop, or a
+    /// kill from outside the service, which returns a non-zero code): the marker stays on any non-zero exit
+    /// and any throw, so that case is covered by <see cref="RunInitdbWithMarkerAsync"/> and <see cref="DiscardInterruptedInitdb"/> (#7191).
     /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task InitializeClusterAsync(string binDirectory, CancellationToken cancellationToken)
@@ -3822,11 +4011,13 @@ public sealed class DarlingManagedPostgres
         try
         {
             var initDb = Path.Combine(binDirectory, "initdb.exe");
-            var (exitCode, output) = await RunToolAsync(
-                initDb,
-                $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
-                s_initDbTimeout,
-                cancellationToken);
+            var (exitCode, output) = await RunInitdbWithMarkerAsync(
+                _dataDirectory,
+                () => RunToolAsync(
+                    initDb,
+                    $"-D \"{_dataDirectory}\" -U {UserName} -A scram-sha-256 --pwfile=\"{passwordFile}\" -E UTF8 --locale=C --data-checksums",
+                    s_initDbTimeout,
+                    cancellationToken));
 
             if (exitCode != 0)
             {
@@ -3855,6 +4046,167 @@ public sealed class DarlingManagedPostgres
         }
 
         _logger.LogInformation("Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)");
+    }
+
+    /// <summary>
+    /// The file beside the data directory that exists while a first-run initdb is in flight, or after one was
+    /// stopped. It holds the full path of the data directory it was written for (#7191), because the file name is
+    /// fixed and sits in the parent folder, which other data directories can share.
+    /// </summary>
+    internal const string InitdbIncompleteMarkerFileName = "pg-initdb-incomplete.marker";
+
+    internal static string InitdbIncompleteMarkerPath(string dataDirectory)
+        => Path.Combine(ParentOf(dataDirectory), InitdbIncompleteMarkerFileName);
+
+    /// <summary>The suffix <see cref="DiscardInterruptedInitdb"/> adds to the name of a half-made data directory it moves aside.</summary>
+    internal const string InterruptedInitdbDirectorySuffix = ".interrupted-";
+
+    /// <summary>Appended to the moved folder's name for the copy of <c>pg-credential.dpapi</c> kept beside it (#7191).</summary>
+    internal const string InterruptedInitdbCredentialSuffix = ".pg-credential.dpapi";
+
+    /// <summary>Files a half-made initdb folder never holds but a store that has run (<c>postmaster.opts</c>) or a restored base backup (<c>backup_label</c>) does (#7191).</summary>
+    private static readonly string[] InterruptedInitdbStoreEvidenceFiles = ["postmaster.opts", "backup_label"];
+
+    private static string FullDataDirectoryPath(string dataDirectory)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory));
+
+    /// <summary>
+    /// Runs the first-run initdb between writing and removing <see cref="InitdbIncompleteMarkerFileName"/>
+    /// (#7191). initdb writes <c>PG_VERSION</c> long before the cluster is usable, and a killed initdb (the
+    /// 180 s timeout, a service stop, a power cut) cannot run its own cleanup, so without the marker the next
+    /// start would see <c>PG_VERSION</c>, take the existing-cluster branch and fail on a half-made cluster for
+    /// good. The marker is removed only on exit code 0. It stays on any non-zero exit and when
+    /// <paramref name="runInitdb"/> throws (<see cref="RunToolAsync"/> throws after killing the tree on both the
+    /// timeout and a stop), and when the process dies with the service: an initdb killed from outside the service
+    /// (Task Manager, a crash, an out-of-memory kill) returns a non-zero code instead of throwing, and removing
+    /// the marker on that return would leave its half-made folder blocking every later start. The marker is
+    /// written only when the data directory is absent or empty, so a folder that held anything never gets one
+    /// (a mistyped <c>postgres.dataDirectory</c> that names a folder with files in it: initdb exits 1 "exists but
+    /// is not empty" and touches nothing). The marker records the data directory's full path, so
+    /// <see cref="DiscardInterruptedInitdb"/>, which reads it on a later start, acts only on the directory this
+    /// initdb was started for.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> RunInitdbWithMarkerAsync(
+        string dataDirectory, Func<Task<(int ExitCode, string Output)>> runInitdb)
+    {
+        if (Directory.Exists(dataDirectory) && Directory.EnumerateFileSystemEntries(dataDirectory).Any())
+        {
+            return await runInitdb();
+        }
+
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        File.WriteAllText(marker, FullDataDirectoryPath(dataDirectory) + Environment.NewLine);
+        var result = await runInitdb();
+
+        /* Only a clean exit removes the marker. A throw skips this line, and a non-zero exit (an initdb killed from
+           outside the service) keeps it so the next start sets the half-made folder aside. */
+        if (result.ExitCode == 0)
+        {
+            File.Delete(marker);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A first-run initdb that never finished left <see cref="InitdbIncompleteMarkerFileName"/> beside the data
+    /// directory, naming it, and a half-made cluster that is not a store (#7191). Moves that folder aside to
+    /// <c>&lt;dataDirectory&gt;.interrupted-yyyyMMddHHmmss</c> (an empty one is just removed) and removes the
+    /// marker, so the start initializes again. A folder that holds <c>postmaster.opts</c> or <c>backup_label</c> is a
+    /// real store (a restored backup, say), not a half-made initdb: it is left exactly as it is, the stale marker is
+    /// deleted and the start goes on against it. Before any other non-empty folder is moved, a copy of the shared
+    /// <c>pg-credential.dpapi</c> is made beside it, because the next initdb overwrites that file. It never deletes a non-empty folder: the marker survives every
+    /// non-zero initdb exit, so it can sit on disk until an operator has pointed <c>postgres.dataDirectory</c>
+    /// at a sibling store or restored a backup into the same folder, and either would be lost to a delete.
+    /// Acts only when the marker names exactly this directory (full paths, case-insensitive on Windows only). A
+    /// marker that names another directory, or holds no readable path, is left in place with one warning and
+    /// nothing is touched. When the move throws, the exception propagates and the marker stays, so the start
+    /// fails with the reason and nothing is lost. Does nothing when there is no marker.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static void DiscardInterruptedInitdb(string dataDirectory, ILogger logger)
+    {
+        var marker = InitdbIncompleteMarkerPath(dataDirectory);
+        if (!File.Exists(marker))
+        {
+            return;
+        }
+
+        var full = FullDataDirectoryPath(dataDirectory);
+        string? named = null;
+        try
+        {
+            var text = File.ReadLines(marker).FirstOrDefault()?.Trim();
+            if (!string.IsNullOrEmpty(text) && Path.IsPathFullyQualified(text))
+            {
+                named = FullDataDirectoryPath(text);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            named = null;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (named is null || !string.Equals(named, full, comparison))
+        {
+            logger.LogWarning(
+                "The first-run initdb marker {Marker} {Names}, not {DataDirectory}, so it was left in place and nothing was touched. Delete the marker file once you have checked it is stale",
+                marker,
+                named is null ? "does not name a readable data directory" : "names " + named,
+                dataDirectory);
+            return;
+        }
+
+        if (Directory.Exists(full))
+        {
+            if (Directory.EnumerateFileSystemEntries(full).Any())
+            {
+                /* The marker alone does not prove the folder is half-made: an operator can restore a store backup
+                   into it after the failed run. initdb's bootstrap and single-user steps never write
+                   postmaster.opts (the postmaster does, on its first start), and a pg_basebackup copy leaves that
+                   file out but carries backup_label. Either file means a real store, so it is kept as it is. */
+                var keepFile = InterruptedInitdbStoreEvidenceFiles.FirstOrDefault(name => File.Exists(Path.Combine(full, name)));
+                if (keepFile is not null)
+                {
+                    logger.LogWarning(
+                        "The first-run initdb marker {Marker} named {DataDirectory}, but that folder holds {EvidenceFile}, which a half-made initdb folder never has, so it is a real store. The marker was stale: it was deleted and the folder was left as it is",
+                        marker, dataDirectory, keepFile);
+                    File.Delete(marker);
+                    return;
+                }
+
+                var aside = full + InterruptedInitdbDirectorySuffix + DateTime.Now.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture);
+
+                /* InitializeClusterAsync writes a new superuser credential over pg-credential.dpapi in the shared
+                   parent before initdb runs, so the moved folder would lose the password that opens it. Copy the
+                   file beside the moved folder first: a failed copy throws here with the marker kept and nothing
+                   moved. */
+                string? credentialCopy = null;
+                var credential = CredentialPathFor(full);
+                if (File.Exists(credential))
+                {
+                    credentialCopy = aside + InterruptedInitdbCredentialSuffix;
+                    /* Written through the hardened create (#7363): File.Copy gives the copy the access of the folder it
+                       lands in, which under a drive root the service does not lock is the drive's, and this is the superuser
+                       credential. The create refuses an existing file, like the copy it replaces (overwrite: false). */
+                    var credentialBytes = File.ReadAllBytes(credential);
+                    using var copy = DarlingFileSecurity.CreateHardenedFile(credentialCopy, allowInteractiveRead: false);
+                    copy.Write(credentialBytes);
+                }
+
+                logger.LogWarning(
+                    "A previous first-run initdb for {DataDirectory} did not finish (it was stopped or timed out). Moving the half-made data directory to {MovedTo} and initializing again. The moved folder can be deleted once you have checked it. If it is actually a store you restored, it holds no postmaster.opts or backup_label; its superuser credential was copied to {CredentialCopy}, so to use it again, stop the service, put the folder back and copy that file over {Credential}",
+                    dataDirectory, aside, credentialCopy ?? "(none: there was no credential file)", credential);
+                Directory.Move(full, aside);
+            }
+            else
+            {
+                Directory.Delete(full);
+            }
+        }
+
+        File.Delete(marker);
     }
 
     /// <summary>
@@ -4324,7 +4676,7 @@ public sealed class DarlingManagedPostgres
     /// force), so a fresh render never disagrees with what those readers would have told the old blocks.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
+    internal ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         var ramBytes = GetTotalPhysicalMemoryBytes();
@@ -4332,6 +4684,33 @@ public sealed class DarlingManagedPostgres
         var diskAuthoritative = TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes);
         var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
         var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+
+        /* #7370: the operator lines above the include that a key managed only by this file would override. */
+        IReadOnlyDictionary<string, ManagedConfFile.OperatorPinnedLine>? operatorPinned = null;
+        try
+        {
+            if (File.Exists(confPath))
+            {
+                operatorPinned = ManagedConfFile.FindOperatorLinesAboveInclude(File.ReadAllText(confPath));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not read {Path} for operator lines above the include ({Message}).", confPath, ex.Message);
+        }
+
+        /* #7370: once per start, for each key the managed file leaves out because postgresql.conf assigns it above the
+           include. The start path's WriteManagedConfFile and the post-start Legacy Step A both gather their inputs
+           here, and a start takes only one of the two, so the line is logged here and not in either caller. */
+        if (operatorPinned is not null)
+        {
+            foreach (var (key, pinned) in operatorPinned)
+            {
+                _logger.LogInformation(
+                    "{Key} = {Value} on line {Line} of postgresql.conf, above the include of {ManagedFile}, stays in force: the managed file leaves the key out rather than override it. Remove or comment out that line to let the managed value apply.",
+                    key, pinned.Value, pinned.Line, ManagedConfFile.FileName);
+            }
+        }
 
         return new ManagedConfFile.RenderInputs(
             ManagedConfFile.CurrentFormulaVersion,
@@ -4345,7 +4724,8 @@ public sealed class DarlingManagedPostgres
             totalBytes,
             diskAuthoritative,
             _config.Port,
-            effectivePreload);
+            effectivePreload,
+            OperatorPinned: operatorPinned);
     }
 
     /// <summary>
@@ -5379,6 +5759,11 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal static string? StoreFolderProblem(string storeFolder, bool lockedDown)
     {
+        if (IsDriveRoot(storeFolder))
+        {
+            return "it is a drive root, whose permissions are the whole drive's and are never changed by the service";
+        }
+
         if (IsLink(storeFolder))
         {
             return "it is a link (a junction or symbolic link) to another folder";
@@ -5447,7 +5832,7 @@ public sealed class DarlingManagedPostgres
             }
 
             var full = Path.GetFullPath(next.FullName);
-            if (string.Equals(Path.GetPathRoot(full), full, StringComparison.OrdinalIgnoreCase))
+            if (IsDriveRoot(full))
             {
                 return $"{link} is a junction or symbolic link to a drive root, {full}";
             }
@@ -5535,11 +5920,21 @@ public sealed class DarlingManagedPostgres
     /// <summary>The fresh-cluster gate on <see cref="StoreFolderProblem"/>: a startup error that names the folder and
     /// the fix. The worker logs it critical and exits, like every other failure of the managed start.</summary>
     [SupportedOSPlatform("windows")]
-    private void RefuseInitdbOnUnlockedStoreFolder(string storeFolder, bool lockedDown)
+    internal static void RefuseInitdbOnUnlockedStoreFolder(string storeFolder, bool lockedDown, string dataDirectory)
     {
         if (StoreFolderProblem(storeFolder, lockedDown) is not { } reason)
         {
             return;
+        }
+
+        if (IsDriveRoot(storeFolder))
+        {
+            /* takeown and icacls on a drive root would change the whole drive, so the usual fix below is the wrong one. */
+            throw new InvalidOperationException(
+                $"Refusing to initialize a new store at {dataDirectory}: its store folder, {storeFolder}, is a drive root. " +
+                "The service locks the folder that holds the data directory and its credential files, and on a drive root " +
+                "that would change the permissions of every file and folder on the drive, so it never does. " +
+                DriveRootMoveText(storeFolder, dataDirectory));
         }
 
         if (IsLink(storeFolder))
@@ -5552,16 +5947,62 @@ public sealed class DarlingManagedPostgres
                 "service again. install-darling.ps1 creates this folder itself.");
         }
 
-        throw new InvalidOperationException(
-            $"Refusing to initialize a new store under {storeFolder}: {reason}" +
-            $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
-            "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
-            "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
-            "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
-            $"the same way, or, to keep the folder, from an ELEVATED prompt:   takeown /f \"{storeFolder}\" /a   then   " +
-            $"icacls \"{storeFolder}\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. Either way " +
-            "the service then checks the data directory, pg.log, server.key and the logs folder before it uses them.");
+        throw new InvalidOperationException(UnlockedStoreFolderRefusal(storeFolder, reason));
+    }
+
+    /// <summary>The refusal text for a new store under a folder that is not locked down (#7267): why, the two ways out, and for
+    /// keeping the folder the link advice and the four commands.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string UnlockedStoreFolderRefusal(string storeFolder, string reason) =>
+        $"Refusing to initialize a new store under {storeFolder}: {reason}" +
+        $"{DarlingFileSecurity.DescribeOwnerAndExposure(storeFolder)}. A data directory created there would inherit " +
+        "that access, and it holds query text, plans and every monitored server's encrypted password. If you did not " +
+        "create the folder, find out who did and delete it, then run install-darling.ps1, which creates the folder " +
+        "with that owner and ACL before the first start. If you did create it, delete it and run install-darling.ps1 " +
+        "the same way, or, to keep the folder, fix the folder and everything under it at once from an ELEVATED " +
+        $"prompt (#7267):{StoreRepairInstructions(storeFolder)}{Environment.NewLine}and start the " +
+        "service again. Either way the service then checks the data directory, pg.log, server.key and the logs folder " +
+        "before it uses them.";
+
+    /// <summary>
+    /// The sentence about links followed by <see cref="StoreRepairCommands"/>, one line each after a line break (#7267).
+    /// <c>icacls</c> follows a junction or symbolic link into whatever it points at even with <c>/L</c>, which governs only
+    /// a link named on the command line (measured: with a junction at <c>data\pg_tblspc\16384</c>, a reset with
+    /// <c>/T /C /L</c> reset the files inside the junction's target). So a link anywhere under the store folder sends the
+    /// owner change and the reset to its target, and every printed copy of the four commands says to take the links out
+    /// first and make them again after. Every refusal that prints the commands uses this, not the bare commands.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string StoreRepairInstructions(string storeFolder)
+    {
+        var folder = Path.TrimEndingDirectorySeparator(storeFolder);
+        return $"{Environment.NewLine}icacls follows a junction or symbolic link into whatever it points at and changes that too, " +
+               $"so list the links under the folder with dir /s /a:l \"{folder}\", remove each one (rmdir \"<link>\" removes " +
+               "the link and keeps its target), run these four commands, then make the links again:" +
+               StoreRepairCommands(storeFolder);
+    }
+
+    /// <summary>
+    /// The one command sequence that makes a whole store folder acceptable to <see cref="StoreContentsProblem"/> at
+    /// once (#7267), one command per line after a line break. A store folder made by hand has its maker as owner and
+    /// explicit or inherited access on items far below the folder (the data directory, its files, pg.log, the keys).
+    /// The service tightens an item it owns or can restore, but it cannot rewrite one that Administrators own and
+    /// that grants it nothing, so the earlier advice (one <c>/setowner</c>, then <c>/inheritance:r</c> on the single
+    /// item a start named) made each start name the next item. The sequence: Administrators own the folder and
+    /// everything in it, the folder itself is cleared of its own and inherited access, the folder is protected and
+    /// granted to SYSTEM, Administrators and the service account, and everything below it is reset to inherit that.
+    /// Principals are SIDs where the service account is not involved, so no account name has to translate.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string StoreRepairCommands(string storeFolder)
+    {
+        var folder = Path.TrimEndingDirectorySeparator(storeFolder);
+        var grants = $"\"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\" \"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"";
+        var newLine = Environment.NewLine + "    ";
+        return $"{newLine}icacls \"{folder}\" /setowner \"*S-1-5-32-544\" /T /C /L" +
+               $"{newLine}icacls \"{folder}\" /reset /C /L" +
+               $"{newLine}icacls \"{folder}\" /inheritance:r /grant {grants}" +
+               $"{newLine}icacls \"{folder}\\*\" /reset /T /C /L";
     }
 
     /// <summary>
@@ -5705,7 +6146,7 @@ public sealed class DarlingManagedPostgres
     /// four "anyone on this box" groups, or, for a directory, writable by an account beyond the trusted ones. Null
     /// when it is not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? StoreItemExposure(string path, bool isDirectory)
+    internal static string? StoreItemExposure(string path, bool isDirectory)
     {
         if (DarlingFileSecurity.IsReadableByOrdinaryUsers(path))
         {
@@ -5723,7 +6164,7 @@ public sealed class DarlingManagedPostgres
     /// <summary>The protected ACL on one store item, through a handle opened without following links, the way
     /// <c>--harden-files</c> applies it. Null on success, otherwise why not.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? TightenStoreItem(string path, bool isDirectory, string anchor)
+    internal static string? TightenStoreItem(string path, bool isDirectory, string anchor)
     {
         try
         {
@@ -5746,20 +6187,25 @@ public sealed class DarlingManagedPostgres
             return;
         }
 
-        throw new InvalidOperationException(
-            $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
-            "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
-            "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
-            "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
-            "this service (the previous Log On account of an earlier install, say), from an ELEVATED prompt run   " +
-            $"icacls \"{storeFolder}\" /setowner \"*S-1-5-32-544\" /T /C /L   and start the service again. If it is " +
-            "readable or changeable by other accounts and the service could not restrict it, from an ELEVATED prompt run   " +
-            "icacls \"<the item named above>\" /inheritance:r /grant \"SYSTEM:(OI)(CI)F\" \"Administrators:(OI)(CI)F\" " +
-            $"\"{DarlingFileSecurity.ServiceAccountDisplayName}:(OI)(CI)F\"   and start the service again. If it is a " +
-            "link, or another user may have made it first, do not keep it: stop the service, delete the " +
-            $"item named above (deleting {_dataDirectory} destroys the collected history), and run install-darling.ps1 " +
-            "again, which creates the store folder with the right owner and ACL before the first start.");
+        throw new InvalidOperationException(UntrustedStoreContentsRefusal(storeFolder, problem, _dataDirectory));
     }
+
+    /// <summary>The refusal text for a store item the service cannot tell is its own (#7267): the item, why it matters, and the
+    /// link advice with the four commands that fix the whole store folder at once.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string UntrustedStoreContentsRefusal(string storeFolder, string problem, string dataDirectory) =>
+        $"Refusing to initialize or start the managed store under {storeFolder}: {problem}. The data directory holds query " +
+        "text, plans and every monitored server's encrypted password, PostgreSQL does not check who owns its data " +
+        "directory on Windows, and the service runs what it finds in these files, so it will not use ones it cannot " +
+        "tell are its own. If the item named above is owned by an account that is not SYSTEM, Administrators or " +
+        "this service (the previous Log On account of an earlier install, or the account that made the folder by " +
+        "hand, say), or it is readable or changeable by other accounts and the service could not restrict it, " +
+        "fix the whole store folder at once from an ELEVATED prompt, so the next start does not name another item " +
+        $"under it:{StoreRepairInstructions(storeFolder)}{Environment.NewLine}and " +
+        "start the service again. If it is a " +
+        "link, or another user may have made it first, do not keep it: stop the service, delete the " +
+        $"item named above (deleting {dataDirectory} destroys the collected history), and run install-darling.ps1 " +
+        "again, which creates the store folder with the right owner and ACL before the first start.";
 
     /// <summary>
     /// Writes a secret to a file that carries the hardened ACL from its first byte, UTF-8 without a BOM like
@@ -5817,6 +6263,63 @@ public sealed class DarlingManagedPostgres
         }
 
         return parent;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="folder"/> is the root of a volume: <c>D:\</c>, a UNC share root (<c>\\server\share</c>, which
+    /// <see cref="Path.GetPathRoot(string)"/> returns without the trailing separator the full path has) or a volume
+    /// path (<c>\\?\Volume{...}\</c>, which is what a folder that mounts a volume resolves to). A folder that mounts a
+    /// volume, such as <c>C:\mnt\data</c>, has the root of the drive it sits on as its <c>GetPathRoot</c>, so it is judged
+    /// by its link: <see cref="ResolveStoreFolder"/> refuses a link whose target is a volume root. Pure string work: it
+    /// reads nothing from the disk.
+    /// </summary>
+    internal static bool IsDriveRoot(string folder)
+    {
+        var full = Path.GetFullPath(folder);
+        var root = Path.GetPathRoot(full);
+        return !string.IsNullOrEmpty(root)
+            && string.Equals(root.TrimEnd('\\', '/'), full.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>What to do about a store whose folder is a drive root, in the words <c>upgrade-darling.ps1</c> uses: move the
+    /// data directory and the files beside it into a folder of its own and point <c>postgres.dataDirectory</c> at it.</summary>
+    internal static string DriveRootMoveText(string storeFolder, string dataDirectory) =>
+        "To use this layout, stop the service, move the data directory and the files beside it (pg.log, server.key, " +
+        "server.crt, the logs folder and the pg-*.dpapi credential files) into a folder of its own such as " +
+        $"{Path.Join(storeFolder, "Darling")} (the data directory becomes " +
+        $"{Path.Join(storeFolder, "Darling", Path.GetFileName(Path.TrimEndingDirectorySeparator(dataDirectory)))}), " +
+        "set postgres.dataDirectory in darling.json to the moved data directory, and start the service again.";
+
+    /// <summary>
+    /// Locks the store folder, except a drive root (#7363). The lock protects the folder's ACL, drops what it inherited and
+    /// writes entries that every file and folder below it inherits, so on a drive root it would rewrite the access of the
+    /// whole drive, again on every start. A drive root is left as it is and is not called locked. For a store that already
+    /// exists the start goes on and logs an error that says so, because the data directory, pg.log, server.key and each
+    /// credential file beside it are still checked and restricted one by one at every start, and the new cluster of a
+    /// major upgrade is restricted as soon as initdb has made it (<c>DarlingStoreUpgrade.InitializeNewClusterAsync</c>).
+    /// A new store under a drive root is refused before initdb by <see cref="RefuseInitdbOnUnlockedStoreFolder"/>.
+    /// </summary>
+    /// <param name="harden">Locks one folder (<see cref="TryHardenDirectory"/> in production); never called for a drive root.</param>
+    /// <returns>Whether the folder was locked.</returns>
+    internal static bool LockStoreFolder(string storeFolder, bool viaLink, string dataDirectory, ILogger logger, Func<string, bool, bool> harden)
+    {
+        if (!IsDriveRoot(storeFolder))
+        {
+            return harden(storeFolder, viaLink);
+        }
+
+        if (File.Exists(Path.Combine(dataDirectory, "PG_VERSION")))
+        {
+            logger.LogError(
+                "The store folder {StoreFolder} is a drive root, so the service did not lock it: that would change the " +
+                "permissions of every file and folder on the drive. The store keeps running. The data directory {DataDirectory}, " +
+                "pg.log, server.key and the credential files beside it are checked and restricted at every start, and the new " +
+                "cluster of a major upgrade is restricted as soon as initdb has made it, but the drive root itself keeps the " +
+                "access it has. {Move}",
+                storeFolder, dataDirectory, DriveRootMoveText(storeFolder, dataDirectory));
+        }
+
+        return false;
     }
 
     /* ================= Opt-in network exposure (darling-network-endpoints) ================= */

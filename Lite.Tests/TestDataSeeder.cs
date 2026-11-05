@@ -704,7 +704,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         // New collectors — full coverage
         await SeedCpuUtilizationAsync(95, 10); // 95% SQL + 10% other = pegged
         await SeedIoLatencyAsync(totalReads: 2_000_000, stallReadMs: 100_000_000, // 50ms avg read
-                                  totalWrites: 500_000, stallWriteMs: 15_000_000); // 30ms avg write
+                                  totalWrites: 500_000, stallWriteMs: 15_000_000, // 30ms avg write on the log
+                                  dataFileWrites: 400_000, dataFileStallWriteMs: 100_000_000); // 250ms on the user data file, which the fact must leave out
         await SeedTempDbAsync(reservedMb: 9_000, unallocatedMb: 1_000); // 90% full
         await SeedMemoryGrantsAsync(maxWaiters: 8, maxGrantees: 5, timeoutErrors: 10, forcedGrants: 5);
         await SeedQueryStatsAsync(totalSpills: 5_000, highDopQueryCount: 20);
@@ -1447,7 +1448,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
     /// Average latency = stallMs / ioCount.
     /// </summary>
     internal async Task SeedIoLatencyAsync(long totalReads, long stallReadMs,
-        long totalWrites, long stallWriteMs)
+        long totalWrites, long stallWriteMs,
+        long dataFileWrites = 0, long dataFileStallWriteMs = 0)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -1457,11 +1459,24 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)";
         var deltaStallRead = stallReadMs / 16;
         var deltaWrites = totalWrites / 16;
         var deltaStallWrite = stallWriteMs / 16;
+        var deltaDataWrites = dataFileWrites / 16;
+        var deltaDataStallWrite = dataFileStallWriteMs / 16;
+
+        /* #6959: write latency is scored on log and tempdb data files only, so the scored writes sit on a log file and the
+           reads on a user data file, the way a real database splits them. dataFileWrites / dataFileStallWriteMs put
+           extra writes on the user data file, which the scored figure must leave out. */
+        var files = new[]
+        {
+            (Name: "UserDB.mdf", Type: "ROWS", Reads: deltaReads, StallRead: deltaStallRead, Writes: deltaDataWrites, StallWrite: deltaDataStallWrite),
+            (Name: "UserDB_log.ldf", Type: "LOG", Reads: 0L, StallRead: 0L, Writes: deltaWrites, StallWrite: deltaStallWrite),
+        };
 
         for (var i = 0; i < 16; i++)
         {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            foreach (var f in files)
+            {
+                using var cmd = connection.CreateCommand();
+                cmd.CommandText = @"
 INSERT INTO file_io_stats
     (collection_id, collection_time, server_id, server_name,
      database_name, file_name, file_type, size_mb,
@@ -1471,24 +1486,25 @@ INSERT INTO file_io_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, 0,
         $8, $9, 0, 0, $10, $11, $12, $13, $14, $15)";
 
-            var t = TestPeriodStart.AddMinutes(i * 15);
-            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
-            cmd.Parameters.Add(new DuckDBParameter { Value = t });
-            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-            cmd.Parameters.Add(new DuckDBParameter { Value = "UserDB" });
-            cmd.Parameters.Add(new DuckDBParameter { Value = "UserDB.mdf" });
-            cmd.Parameters.Add(new DuckDBParameter { Value = "ROWS" });
-            cmd.Parameters.Add(new DuckDBParameter { Value = (long)(deltaReads * (i + 1)) }); // cumulative
-            cmd.Parameters.Add(new DuckDBParameter { Value = (long)(deltaWrites * (i + 1)) });
-            cmd.Parameters.Add(new DuckDBParameter { Value = (long)(deltaStallRead * (i + 1)) });
-            cmd.Parameters.Add(new DuckDBParameter { Value = (long)(deltaStallWrite * (i + 1)) });
-            cmd.Parameters.Add(new DuckDBParameter { Value = deltaReads });
-            cmd.Parameters.Add(new DuckDBParameter { Value = deltaWrites });
-            cmd.Parameters.Add(new DuckDBParameter { Value = deltaStallRead });
-            cmd.Parameters.Add(new DuckDBParameter { Value = deltaStallWrite });
+                var t = TestPeriodStart.AddMinutes(i * 15);
+                cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+                cmd.Parameters.Add(new DuckDBParameter { Value = t });
+                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+                cmd.Parameters.Add(new DuckDBParameter { Value = "UserDB" });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.Name });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.Type });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (long)(f.Reads * (i + 1)) }); // cumulative
+                cmd.Parameters.Add(new DuckDBParameter { Value = (long)(f.Writes * (i + 1)) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (long)(f.StallRead * (i + 1)) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = (long)(f.StallWrite * (i + 1)) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.Reads });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.Writes });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.StallRead });
+                cmd.Parameters.Add(new DuckDBParameter { Value = f.StallWrite });
 
-            await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync();
+            }
         }
     }
 
@@ -1747,7 +1763,8 @@ VALUES ($1, $2, $3, $4, $5, $6)";
     /// plan/size totals, so CollectPlanCacheFactsAsync SUMs it into a PLAN_CACHE_BLOAT fact. Stamped at
     /// TestPeriodEnd (the latest-snapshot the collector reads).
     /// </summary>
-    internal async Task SeedPlanCacheStatsAsync(int totalPlans, int singleUsePlans, int totalSizeMb, int singleUseSizeMb)
+    internal async Task SeedPlanCacheStatsAsync(int totalPlans, int singleUsePlans, int totalSizeMb, int singleUseSizeMb,
+        string cacheObjType = "Compiled Plan", string objType = "Adhoc")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -1764,8 +1781,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd });
         cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Compiled Plan" });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Adhoc" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = cacheObjType });
+        cmd.Parameters.Add(new DuckDBParameter { Value = objType });
         cmd.Parameters.Add(new DuckDBParameter { Value = totalPlans });
         cmd.Parameters.Add(new DuckDBParameter { Value = singleUsePlans });
         cmd.Parameters.Add(new DuckDBParameter { Value = totalSizeMb });
@@ -2619,6 +2636,50 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
             cmd.Parameters.Add(new DuckDBParameter { Value = reads });
             cmd.Parameters.Add(new DuckDBParameter { Value = writes });
             cmd.Parameters.Add(new DuckDBParameter { Value = memoryKb });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
+    /// Seeds query_stats for the peak-grant check (#7166): STEADY is one 1 GB grant seen in 96 collection rows,
+    /// ONEOFF is one 50 GB grant seen once. max_grant_kb is a lifetime high-water mark, so each row repeats it.
+    /// TWOPLANS is one hash with an older plan that took 8 GB and a newer plan at 2 GB: the figure is the newest row's reading.
+    /// </summary>
+    internal async Task SeedQueryStatsGrantHistoryAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var rows = new List<(string hash, int minutesAgo, long grantKb)>();
+        for (var i = 0; i < 96; i++) rows.Add(("STEADY", 30 + i, 1_048_576L));
+        rows.Add(("ONEOFF", 30, 52_428_800L));
+        rows.Add(("TWOPLANS", 90, 8_388_608L));
+        rows.Add(("TWOPLANS", 30, 2_097_152L));
+
+        foreach (var (hash, minutesAgo, grantKb) in rows)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, query_hash, query_text,
+     delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, max_grant_kb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 10, 1000000, 2000000, 1000, 10, $8)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd.AddMinutes(-minutesAgo) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = "UserDB" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT /* {hash} */ * FROM dbo.SomeTable" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = grantKb });
 
             await cmd.ExecuteNonQueryAsync();
         }

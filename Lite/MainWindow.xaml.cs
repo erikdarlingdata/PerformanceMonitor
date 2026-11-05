@@ -106,7 +106,7 @@ public partial class MainWindow : Window
     /// per-server snapshot — the same reason Darling keeps it in its self-alert evaluator rather than the
     /// engine. The decisions themselves are the shared PerformanceMonitor.Common.AgAlertPolicy, so both apps
     /// fire on identical rules under identical metric names.</summary>
-    private readonly Services.AgAlertEvaluator _agAlertEvaluator = new();
+    private readonly Services.AgAlertEvaluator _agAlertEvaluator;
 
     /// <summary>#5642: when the current connection to each server began collecting, the alert snapshot's
     /// <c>WatchingSinceUtc</c>. Keyed by the connection's id, the key <see cref="_previousConnectionStates"/> uses.</summary>
@@ -159,6 +159,8 @@ public partial class MainWindow : Window
            (Plan E E3c): the shared send core fans out to it. The history store is shared
            by both so the webhook service can seed its cooldown across restart (#1145). */
         _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
+        /* #7068: the AG Sync Fell Behind seed reads the same history, so a standing lag is not announced again after a restart. */
+        _agAlertEvaluator = new Services.AgAlertEvaluator(history: _alertHistoryStore);
         _webhookAlertService = new WebhookAlertService(
             _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
         /* #5820: the investigation store is built before the email service, which opens requests in it through the shared
@@ -179,7 +181,9 @@ public partial class MainWindow : Window
                 investigationStore.OpenOrJoinAsync, _alertSettings, new AppLoggerAdapter<InvestigationDispatchCore>(), opened: null, keys: _pseudonymKeys,
                 /* #6596: an alert whose story is recurring at this hour opens no request; the skip is journaled. */
                 recurringSkipped: duckInvestigationStore.RecordRecurringSkipAsync),
-            (requestId, token) => investigationStore.ReadRequestAsync(requestId, token),
+            /* #7217: the alert path can run on the dispatcher, and this read takes the store read lock, which waits without limit
+               while an archival holds the write lock. Task.Run keeps that wait off the UI thread. */
+            (requestId, token) => Task.Run(() => investigationStore.ReadRequestAsync(requestId, token), token),
             () => _mcpDataDetail);
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
@@ -392,7 +396,9 @@ public partial class MainWindow : Window
             var analysisNotificationService = _analysisNotificationService = new AnalysisNotificationService(
                 _emailAlertService, _alertSettings, f => f.ServerId.ToString(), new AppLoggerAdapter<AnalysisNotificationService>(),
                 isStoryMuted: async (serverId, storyPathHash) =>
-                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
+                    (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash),
+                /* #7084 part 4: a finding that would page attaches to an engine alert still open on its server. */
+                findOpenEngineAlert: _alertHistoryStore.FindOpenEngineAlertAsync);
 
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
@@ -458,6 +464,8 @@ public partial class MainWindow : Window
                 logger: new AppLoggerAdapter<AlertEngine>(),
                 /* #5715 part B: a Warning delivered before a restart still lets the Critical through at once. */
                 escalationSeedReader: PerformanceMonitor.Alerting.EscalationSeed.ReaderFor(_alertHistoryStore),
+                /* #7068: a standing Volume Free Space or PVS condition is not announced again after a restart. */
+                openFireReader: PerformanceMonitor.Alerting.EscalationSeed.OpenFireReaderFor(_alertHistoryStore),
                 /* #3013: the process counter every swallowed condition read is tallied on, which
                    get_collection_health's alert_read_health block reads back. Lite's alert reads hit the
                    local DuckDB store rather than a Postgres one, so the deadline mechanism #3013 measured
@@ -552,9 +560,11 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
+            AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
             MessageBox.Show(
-                $"Failed to initialize the application:\n\n{ex.Message}",
+                $"Failed to initialize the application:\n\n{ex.Message}\n\nSee the log for details: {AppLogger.GetCurrentLogFile()}. If the database is locked, close any other copy of Lite and start it again.",
                 "Initialization Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -853,7 +863,9 @@ public partial class MainWindow : Window
         var servers = _serverManager.GetAllServers();
         foreach (var server in servers)
         {
-            server.IsOnline = _serverManager.GetConnectionStatus(server.Id).IsOnline;
+            var connectionStatus = _serverManager.GetConnectionStatus(server.Id);
+            server.IsOnline = connectionStatus.IsOnline;
+            server.UnreachableReason = connectionStatus.UnreachableReason;
             server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
                 && server.IsOnline == true
@@ -869,6 +881,7 @@ public partial class MainWindow : Window
         var previousServerId = (ServerListView.SelectedItem as FleetServerRow)?.Server.ServerId;
         _fleet.SetAll(servers.Select(ToFleetServer).ToList());
         ApplyFleetTagsAndRebind(previousServerId);
+        RefreshRenamedServerTabs(servers);
 
         // Update UI based on server count
         if (servers.Count == 0 && _openServerTabs.Count == 0)
@@ -1065,6 +1078,7 @@ public partial class MainWindow : Window
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
+                        summary.UnreachableReason = connStatus.UnreachableReason;
                         if (_collectorService != null && connStatus.IsOnline == true)
                             summary.HasCollectorErrors = _collectorService.GetHealthSummary(server).ErroringCollectors > 0;
                         summaries.Add(summary);
@@ -1238,7 +1252,7 @@ public partial class MainWindow : Window
 
         OverviewItemsControl.ItemsSource = ServerOverviewSort.Order(
             filtered, App.OverviewSortMode,
-            s => s.CpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
+            s => s.ShownCpuPercentForAlert, s => s.DisplayName, s => s.ServerId);
 
         /* #5352: a search that matched nothing says so (same sentence as the viewer) rather than leaving a blank grid. */
         var noMatch = _overviewSummaries.Count > 0 && filtered.Count == 0;
@@ -1352,6 +1366,13 @@ public partial class MainWindow : Window
             try
             {
                 await ConnectToServerAsync(server, (view, fromUtc, toUtc));
+                /* #7554: keyboard focus into the server tab, so the Alert History grid getting focus back does not select
+                   Alert History again (the Viewer's opener does the same). */
+                if (_openServerTabs.TryGetValue(server.Id, out var openedTab) && ReferenceEquals(ServerTabControl.SelectedItem, openedTab)
+                    && openedTab.Content is UIElement openedContent)
+                {
+                    openedContent.MoveFocus(new TraversalRequest(FocusNavigationDirection.First));
+                }
             }
             catch (Exception ex)
             {
@@ -1455,6 +1476,10 @@ public partial class MainWindow : Window
                    registration there would wait out the reset's drain timeout. */
                 using var collectionScope = await CollectionResetGate.BeginCollectionAsync();
 
+                /* #7215: this server's turn, so these runs and a scheduled sweep or tab-open run on the same server never share its
+                   telemetry slot. */
+                using var serverTurn = await _collectorService.AcquireServerRunAsync(server);
+
                 var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)
                 {
@@ -1527,13 +1552,38 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// After a server list reload, gives every open tab whose label is out of date (#7212) the new header text and the tab's
+    /// own server name line. The tab keeps its server record: the Edit Server dialog changes that record in place, and the
+    /// tab's store key was fixed from the server name, database and read-only intent when it opened. A server the list no
+    /// longer holds keeps its tab as it is.
+    /// </summary>
+    private void RefreshRenamedServerTabs(IReadOnlyList<ServerConnection> servers)
+    {
+        var shown = new Dictionary<string, string>();
+        foreach (var (serverId, tab) in _openServerTabs)
+        {
+            if (tab.Header is StackPanel header && header.Children.Count > 0 && header.Children[0] is TextBlock nameText)
+            {
+                shown[serverId] = nameText.Text;
+            }
+        }
+
+        foreach (var server in PerformanceMonitorLite.Helpers.ServerTabLabels.NeedingNewLabel(shown, servers))
+        {
+            var tab = _openServerTabs[server.Id];
+            ((TextBlock)((StackPanel)tab.Header).Children[0]).Text = PerformanceMonitorLite.Helpers.ServerTabLabels.HeaderLabel(server);
+            (tab.Content as ServerTab)?.ShowServerName(server);
+        }
+    }
+
     private StackPanel CreateTabHeader(ServerConnection server)
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
         /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
         panel.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
 
-        var tabLabel = server.ReadOnlyIntent ? $"{server.DisplayName} (RO)" : server.DisplayName;
+        var tabLabel = PerformanceMonitorLite.Helpers.ServerTabLabels.HeaderLabel(server);
         panel.Children.Add(new TextBlock
         {
             Text = tabLabel,
@@ -2491,6 +2541,7 @@ public partial class MainWindow : Window
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
                 server.IsOnline = status?.IsOnline;
+                server.UnreachableReason = status?.UnreachableReason;
                 server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
                 if (status?.IsOnline == null) continue;
 

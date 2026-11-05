@@ -348,18 +348,51 @@ public sealed class AlertEngineTests
         public List<(string Key, string Metric, int Watermark)> SavedEdge { get; } = new();
         public List<(string Key, DateTime Watermark)> SavedFailedJob { get; } = new();
 
-        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName) =>
-            Task.FromResult(EdgeWatermarks.TryGetValue((serverKey, metricName), out var w) ? (int?)w : null);
+        /* #7295: how many of the next edge-watermark loads throw, as a store that cannot be read does. Every load counts. */
+        public int FailEdgeLoads { get; set; }
+
+        public int EdgeLoadAttempts { get; private set; }
+
+        public Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName)
+        {
+            EdgeLoadAttempts++;
+            if (FailEdgeLoads > 0)
+            {
+                FailEdgeLoads--;
+                throw new InvalidOperationException("edge watermark store read failed");
+            }
+
+            return Task.FromResult(EdgeWatermarks.TryGetValue((serverKey, metricName), out var w) ? (int?)w : null);
+        }
+
+        /* #7085: a metric name whose edge-watermark save throws, to pin that a failed save does not cost the page. */
+        public string? ThrowOnSaveEdgeMetric { get; set; }
 
         public Task SaveEdgeTriggerWatermarkAsync(string serverKey, string metricName, int watermark)
         {
+            if (metricName == ThrowOnSaveEdgeMetric)
+            {
+                throw new InvalidOperationException("edge watermark store write failed");
+            }
+
             EdgeWatermarks[(serverKey, metricName)] = watermark;
             SavedEdge.Add((serverKey, metricName, watermark));
             return Task.CompletedTask;
         }
 
-        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey) =>
-            Task.FromResult(FailedJobWatermarks.TryGetValue(serverKey, out var w) ? (DateTime?)w : null);
+        /* #7295: how many of the next failed-job watermark loads throw, as a store that cannot be read does. */
+        public int FailFailedJobLoads { get; set; }
+
+        public Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
+        {
+            if (FailFailedJobLoads > 0)
+            {
+                FailFailedJobLoads--;
+                throw new InvalidOperationException("failed-job watermark store read failed");
+            }
+
+            return Task.FromResult(FailedJobWatermarks.TryGetValue(serverKey, out var w) ? (DateTime?)w : null);
+        }
 
         public Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark)
         {
@@ -385,8 +418,19 @@ public sealed class AlertEngineTests
         public Dictionary<(string Key, string Metric), AlertPersistenceRecord> Persistence { get; } = new();
         public List<(string Key, string Metric, AlertPersistenceRecord Record)> SavedPersistence { get; } = new();
 
-        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName) =>
-            Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+        /* #7295: how many of the next persistence-record loads throw, as a store that cannot be read does. Every load counts. */
+        public int FailPersistenceLoads { get; set; }
+
+        public Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
+        {
+            if (FailPersistenceLoads > 0)
+            {
+                FailPersistenceLoads--;
+                throw new InvalidOperationException("persistence store read failed");
+            }
+
+            return Task.FromResult(Persistence.TryGetValue((serverKey, metricName), out var r) ? (AlertPersistenceRecord?)r : null);
+        }
 
         public Task SaveAlertPersistenceAsync(string serverKey, string metricName, AlertPersistenceRecord record)
         {
@@ -481,8 +525,12 @@ public sealed class AlertEngineTests
            pin above builds an engine that counts nothing and no test can leak into another's totals or
            into the process-wide AlertReadFailureCounter.Shared. */
         public AlertReadFailureCounter? ReadFailures { get; set; }
+        /// <summary>#7295 round 3: the engine's logger; null (the default) logs nothing, as before.</summary>
+        public Microsoft.Extensions.Logging.ILogger? Logger { get; set; }
         /// <summary>#5715 part B: the alert-history reader that seeds the escalation tier; null (the default) leaves the engine memory-only.</summary>
         public Func<EscalationSeedQuery, CancellationToken, Task<AlertSeverityLevel?>>? EscalationSeedReader { get; set; }
+        /// <summary>#7068: the alert-history reader that tells a standing Volume Free Space or PVS incident it is already open; null (the default) is the engine before #7068.</summary>
+        public Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>>? OpenFireReader { get; set; }
         /// <summary>#5910: the threshold overrides; null (the default) is the engine before #5910, so every pin above is unchanged.</summary>
         public IAlertThresholdOverrides? Overrides { get; set; }
 
@@ -512,11 +560,12 @@ public sealed class AlertEngineTests
                 }
                 : null,
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
-            logger: null,
+            logger: Logger,
             utcNow: () => Now,
             readFailures: ReadFailures,
             escalationSeedReader: EscalationSeedReader,
-            overrides: Overrides);
+            overrides: Overrides,
+            openFireReader: OpenFireReader);
 
         /* #3282: every snapshot gets a DISTINCT, increasing CPU sample instant unless the test says
            otherwise, because that is the realistic case — the sweep sees a new ring-buffer sample each
@@ -531,12 +580,20 @@ public sealed class AlertEngineTests
             double? sqlCpu = null, double? totalCpu = null,
             bool isOnline = true, bool isAzureSqlDb = false, bool suppressed = false,
             DateTime? cpuSampleTime = null, bool noCpuSampleTime = false,
-            IReadOnlyList<string>? separatelyMonitored = null) =>
-            new(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed,
-                noCpuSampleTime
-                    ? null
-                    : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick)),
+            IReadOnlyList<string>? separatelyMonitored = null, bool localStampOnly = false)
+        {
+            var sampleAt = noCpuSampleTime
+                ? (DateTime?)null
+                : cpuSampleTime ?? SampleBase.AddMinutes(System.Threading.Interlocked.Increment(ref s_sampleTick));
+            var snapshot = new AlertServerSnapshot(Key, Name, isOnline, sqlCpu, totalCpu, isAzureSqlDb, suppressed, sampleAt,
                 SeparatelyMonitoredDatabases: separatelyMonitored);
+
+            /* #7085: the UTC twin every V134+ store hands the engine. The clear hold is measured on it, so a snapshot without it
+               (localStampOnly: a pre-V134 row, whose only stamp is the target's local clock) is held on the sweep's clock instead.
+               Only a reading under the default 80 bar carries it here: the hold reads it on clear samples alone, and on a breaching
+               sample it would add the card's sample-age line to every pin that asserts the card byte for byte. */
+            return sampleAt is { } utc && !localStampOnly && (totalCpu ?? sqlCpu) < 80 ? snapshot with { CpuSampleUtcOnly = utc } : snapshot;
+        }
 
         /// <summary>The instant distinct sample times are counted from — arbitrary, only the ordering matters.</summary>
         public static readonly DateTime SampleBase = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -549,7 +606,7 @@ public sealed class AlertEngineTests
         DatabaseName = database,
         BlockedSpid = blockedSpid,
         BlockingSpid = blockedSpid + 100,
-        WaitTimeMs = 12000,
+        WaitTimeMs = 20000, /* #7083: over the count arm's 15 s worst-wait floor */
         LockMode = "X",
         BlockedSqlText = "UPDATE Users SET x = 1",
         BlockingSqlText = "BEGIN TRAN UPDATE Users",
@@ -700,7 +757,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
@@ -726,13 +783,11 @@ public sealed class AlertEngineTests
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
-        /* After the cooldown elapses the STANDING breach re-fires. #3282 changed what counts as an
-           incident, deliberately not how often a standing one repeats: the gate's rising edge is a
-           separate question from the reminder cadence, and silencing the reminder would be a second
-           behaviour change nobody asked for. */
+        /* After the cooldown elapses the STANDING breach does not page again (#7085). An incident that has paged is held
+           open and only an escalation pages inside it, so the cooldown reminder this test used to expect is gone. */
         h.Now = h.Now.AddMinutes(5);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 85, samples: 1, from: at);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -767,7 +822,7 @@ public sealed class AlertEngineTests
         var engine = h.Build();
 
         var stuck = Harness.SampleBase.AddMinutes(1);
-        for (var i = 0; i < AlertEngine.CpuBreachSamples * 3; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples * 3; i++)
         {
             await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, cpuSampleTime: stuck));
         }
@@ -775,7 +830,7 @@ public sealed class AlertEngineTests
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* Two genuinely new samples on top of that one observation reach the bar. */
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: stuck);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: stuck);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -813,20 +868,27 @@ public sealed class AlertEngineTests
 
         var fallenBack = new DateTime(2026, 11, 1, 1, 0, 0);          /* 01:00 EST: one real minute later, 59 local minutes EARLIER */
         Assert.True(fallenBack < local, "the fixture must run the stamp backwards, or it tests nothing #3744 changed");
-        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 — the bar */
+        await ObserveCpuAsync(engine, fallenBack, breaching: true);       /* 3 */
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: true); /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: true); /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
 
         /* The same rule on the falling edge: an incident open across the fall-back clears in the repeated
-           hour rather than waiting for the local clock to climb past 01:59 again. */
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(1), breaching: false);
+           hour rather than waiting for the local clock to climb past 01:59 again. Fifteen minutes under the bar (#7085). */
+        for (var i = 3; i <= 17; i++)
+        {
+            await ObserveCpuAsync(engine, fallenBack.AddMinutes(i), breaching: false);
+        }
+
         Assert.Empty(h.Resolutions);
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Single(h.Resolutions);
 
         /* And a repeat of the LAST counted instant is still the same sample: the streak holds and nothing is
            written — equality lost none of #3282. */
         var writes = h.StateStore.SavedPersistence.Count;
-        await ObserveCpuAsync(engine, fallenBack.AddMinutes(2), breaching: false);
+        await ObserveCpuAsync(engine, fallenBack.AddMinutes(18), breaching: false);
         Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
     }
 
@@ -869,9 +931,12 @@ public sealed class AlertEngineTests
         Assert.Equal(writes, h.StateStore.SavedPersistence.Count);
 
         /* Within the UTC frame the samples advance and the bar is reached where it should be. */
-        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);                              /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);                              /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal(utc.AddMinutes(1), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
+        Assert.Equal(utc.AddMinutes(3), Assert.Single(h.StateStore.Persistence).Value.LastObservedSampleUtc);
     }
 
     [Fact]
@@ -897,7 +962,10 @@ public sealed class AlertEngineTests
         await ObserveCpuAsync(upgraded, utc, breaching: true);                                            /* held */
         Assert.Empty(h.Deliverer.Outcomes);
 
-        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 — the bar */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(1), breaching: true);                              /* 3 */
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(2), breaching: true);                              /* 4 */
+        Assert.Empty(h.Deliverer.Outcomes);
+        await ObserveCpuAsync(upgraded, utc.AddMinutes(3), breaching: true);                              /* 5 — the bar */
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -940,26 +1008,26 @@ public sealed class AlertEngineTests
 
         /* SqlProcess mode compares the SQL value even when total is higher. */
         h.Settings.CpuAlertMode = CpuAlertMode.SqlProcess;
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 50, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 50, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
 
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 85, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 85, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal("85% (SQL CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
         /* TotalServer mode falls back to the SQL value when no total is available. A fresh harness, so the
            incident the sub-case above opened cannot mask this one's rising edge. */
         h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
-        at = await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(h.Build(), sqlCpu: 90, totalCpu: null, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal("90% (Total CPU)", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
 
         /* No CPU sample at all → no alert (:66 HasValue gate), on a fresh harness so nothing is open. */
         h = new Harness { Settings = { CpuEnabled = true, CpuAlertMode = CpuAlertMode.TotalServer } };
-        await DriveCpuAsync(h.Build(), sqlCpu: null, totalCpu: null, samples: AlertEngine.CpuBreachSamples, from: at);
+        await DriveCpuAsync(h.Build(), sqlCpu: null, totalCpu: null, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task Cpu_ResolvesOnlyAfterTwoConsecutiveClearSamples_WithLiteToastStrings_UnlessSuppressed()
+    public async Task Cpu_ResolvesOnlyAfterFifteenMinutesUnderTheBar_WithLiteToastStrings_UnlessSuppressed()
     {
         /* Lite AlertEngine.cs:101-113 — the "CPU Resolved" strings are unchanged; what changed is that
            ONE sample under the bar no longer announces a recovery. */
@@ -967,10 +1035,10 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples - 1, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1) - 1, from: at);
         Assert.Empty(h.Resolutions);
 
         at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
@@ -983,8 +1051,8 @@ public sealed class AlertEngineTests
            nothing (:107). */
         h.Resolutions.Clear();
         h.Deliverer.Outcomes.Clear();
-        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: at, suppressed: true);
-        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at, suppressed: true);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: at, suppressed: true);
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at, suppressed: true);
         Assert.Empty(h.Resolutions);
         Assert.Empty(h.Deliverer.Outcomes);
     }
@@ -999,7 +1067,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 23, samples: 1, from: at);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 99, samples: 1, from: at);
 
@@ -1018,14 +1086,14 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         at = await DriveCpuAsync(engine, sqlCpu: null, totalCpu: null, samples: 5, from: at);
         Assert.Empty(h.Resolutions);
 
-        /* And the frozen streak is the BREACH streak: one real clear sample still is not enough. */
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
+        /* And the frozen streak is the BREACH streak: real clear samples short of the fifteen-minute hold are not enough. */
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes), from: at);
         Assert.Empty(h.Resolutions);
 
         await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: 1, from: at);
@@ -1043,7 +1111,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 95, noCpuSampleTime: true));
         }
@@ -1061,12 +1129,12 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
-        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples - 1, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
         Assert.Empty(h.Deliverer.Outcomes);
 
         var persisted = Assert.Single(h.StateStore.Persistence);
         Assert.Equal(AlertEngine.CpuPersistenceMetric, persisted.Key.Metric);
-        Assert.Equal(AlertEngine.CpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
+        Assert.Equal(AlertEngine.SqlCpuBreachSamples - 1, persisted.Value.State.ConsecutiveBreaches);
         Assert.False(persisted.Value.State.Firing);
 
         /* A brand-new engine over the same state store IS the restart. */
@@ -1085,7 +1153,7 @@ public sealed class AlertEngineTests
         var h = new Harness();
         h.Settings.CpuEnabled = true;
 
-        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
         Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
 
@@ -1094,8 +1162,64 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
 
         /* And it resolves normally rather than being orphaned. */
-        at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples, from: at);
+        at = await DriveCpuAsync(restarted, sqlCpu: 20, totalCpu: 30, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
         Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AFailedPersistenceReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepResumesTheSavedStreak()
+    {
+        /* #7295: a store that cannot be read used to look like a store with no row. The CPU record was left at Initial and marked seeded,
+           so the streak the last life had built (one sample short of the page) restarted from zero and the page that was due came
+           late. The failed read now leaves the check unseeded and skipped, and the next sweep resumes the saved streak: the one sample
+           after it completes the streak and pages. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuAsync(h.Build(), sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        var savedBefore = h.StateStore.SavedPersistence.Count;
+
+        h.StateStore.FailPersistenceLoads = 1;
+        var restarted = h.Build();
+        at = await DriveCpuAsync(restarted, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(savedBefore, h.StateStore.SavedPersistence.Count);
+
+        await DriveCpuAsync(restarted, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Equal("High CPU", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task Cpu_APersistenceReadThatKeepsFailing_SeedsEmptyOnTheThirdSweep_AndTheNextStreakPages()
+    {
+        /* #7295 round 3: a persistence table that stays unreadable must not hold the CPU check back for as long as the failure lasts.
+           The first two failed sweeps skip the check (their samples count for nothing and nothing is saved). The third failed read
+           seeds an empty record and the check runs from it, so that sweep's sample is the first of a new streak and the streak that
+           follows pages. */
+        var h = new Harness();
+        var log = new CapturingTestLogger();
+        h.Logger = log;
+        h.Settings.CpuEnabled = true;
+        h.StateStore.FailPersistenceLoads = 1000;
+        var engine = h.Build();
+
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: SeedLoadCap.MaxFailedLoads - 1, from: Harness.SampleBase);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedPersistence);
+
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples - 1, from: at);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.NotEmpty(h.StateStore.SavedPersistence);
+
+        /* The store works again. The step is done: nothing is loaded again and the streak goes on. */
+        h.StateStore.FailPersistenceLoads = 0;
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: 1, from: at);
+        Assert.Equal("High CPU", Assert.Single(h.Deliverer.Outcomes).MetricName);
+
+        var warning = CapWarnings(log).First(l => l.Contains("CPU persistence record", StringComparison.Ordinal));
+        Assert.Contains(nameof(FakeStateStore), warning, StringComparison.Ordinal);
+        Assert.Contains(Key, warning, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1113,7 +1237,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase, suppressed: true);
+        var at = await DriveCpuAsync(engine, sqlCpu: 95, totalCpu: 99, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase, suppressed: true);
         Assert.Empty(h.Deliverer.Outcomes);
 
         /* One UNsuppressed sample: the incident is already open from the suppressed streak, so this is the
@@ -1147,7 +1271,7 @@ public sealed class AlertEngineTests
             resolutionCallback: (r, _) => { h.Resolutions.Add(r); return Task.CompletedTask; },
             utcNow: () => h.Now, readFailures: counter);
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.True(store.SaveAttempts > 0, "the engine must have tried to persist, or this pin proves nothing");
         Assert.Single(h.Deliverer.Outcomes);
@@ -1155,24 +1279,263 @@ public sealed class AlertEngineTests
         Assert.Equal(0, counter.ReadFor(Key).InstanceReadFailures);
 
         /* And it resolves normally too — a broken save must not strand an open incident. */
-        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: AlertEngine.CpuClearSamples,
-            from: Harness.SampleBase.AddMinutes(AlertEngine.CpuBreachSamples));
+        await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 30, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1),
+            from: Harness.SampleBase.AddMinutes(AlertEngine.SqlCpuBreachSamples));
+        Assert.Single(h.Resolutions);
+    }
+
+    /* #7085: samples one minute apart with the engine clock moving WITH them, so the five-minute alert cooldown really
+       elapses during a long run. On a frozen clock the old reminder path could never show. */
+    private static async Task<DateTime> DriveCpuTimedAsync(
+        Harness h, AlertEngine engine, double totalCpu, int samples, DateTime from, bool suppressed = false)
+    {
+        var at = from;
+        for (var i = 0; i < samples; i++)
+        {
+            at = at.AddMinutes(1);
+            h.Now = at;
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: totalCpu, suppressed: suppressed, cpuSampleTime: at));
+        }
+
+        return at;
+    }
+
+    /* #7085 review: the alert history as the restart seed reads it. Each row is a delivered High CPU page (a fire whose every channel
+       failed, or one raised under suppression, is never in it), with the tier its context carries. */
+    private static Func<OpenFireQuery, CancellationToken, Task<AlertHistoryStanding>> HistoryOfPages(params (DateTime At, AlertSeverityLevel Tier)[] pages) =>
+        (_, _) => Task.FromResult(new AlertHistoryStanding(
+            pages.OrderByDescending(p => p.At)
+                .Select(p => new AlertHistoryFire(p.At, 90, AlertContextSerializer.Serialize(new AlertContext { SeverityOverride = p.Tier })))
+                .ToList(),
+            Array.Empty<AlertHistoryClear>()));
+
+    [Fact]
+    public async Task Cpu_ADipUnderTheBarForThreeMinutes_HoldsTheIncident_OnePageAndNoResolved()
+    {
+        /* #7085 verify 1: 90% for 5 minutes, 70% for 3, 90% for 5 again. Before: the 3-minute dip took two clear samples to
+           resolve and the second run paged again once the cooldown had passed. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        at = await DriveCpuTimedAsync(h, engine, 70, 3, at);
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_SixteenMinutesUnderTheBar_ResolvesOnce_AndTheNextIncidentPagesAgain()
+    {
+        /* #7085 verify 2: the same shape with 16 minutes under the bar in between: two pages, one Resolved between. Fifteen
+           minutes of samples under the bar is not yet fifteen minutes of CPU under the bar (the first clear sample starts the run). */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 70, 15, at);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+
+        at = await DriveCpuTimedAsync(h, engine, 70, 1, at);
+        var resolution = Assert.Single(h.Resolutions);
+        Assert.Equal("CPU Resolved", resolution.Title);
+
+        at = await DriveCpuTimedAsync(h, engine, 70, 1, at);
+        Assert.Single(h.Resolutions);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AFourSampleSpike_DoesNotPage()
+    {
+        /* #7085 verify 3: three samples used to open an incident; four still do not. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 99, AlertEngine.SqlCpuBreachSamples - 1, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 30, 20, at);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_SustainedWarningThatRisesToCritical_PagesTwice_AndADropBackToWarningAddsNothing()
+    {
+        /* #7085 verify 4: open at Warning, rise to Critical (page two), fall back to Warning and rise again: nothing more. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        at = await DriveCpuTimedAsync(h, engine, 90, 12, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveCpuTimedAsync(h, engine, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 12, at);
+        at = await DriveCpuTimedAsync(h, engine, 97, 12, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.Resolutions);
+    }
+
+    [Fact]
+    public async Task Cpu_AStandingIncidentPastTheCooldown_IsNotRemindedOf()
+    {
+        /* #7085: a held incident pages once. Before, every 5-minute cooldown that elapsed on a still-breaching sample
+           delivered another page for the same incident. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        await DriveCpuTimedAsync(h, engine, 90, 40, Harness.SampleBase);
+
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task Cpu_AnIncidentOpenBeforeARestart_IsNotPagedAgainAfterTheCooldown()
+    {
+        /* #7085 and the restart seed: the persisted Firing bit restores an open incident, and the alert history says its page was
+           delivered. The first fire it judges only learns the tier, so neither the restart nor the cooldown after it re-pages. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.OpenFireReader = HistoryOfPages((at, AlertSeverityLevel.Warning));
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        at = await DriveCpuTimedAsync(h, restarted, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AnIncidentOpenedUnderSuppression_PagesOnceAfterARestart()
+    {
+        /* #7085 review: the gate advances under suppression, so the persisted Firing bit says "open" for an incident nobody was paged
+           for. The history holds no delivered High CPU row, so the first unsuppressed breach after the restart is the opening page,
+           and the incident stays at that one page. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.OpenFireReader = HistoryOfPages();
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.True(Assert.Single(h.StateStore.Persistence).Value.State.Firing);
+
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AnOlderUnresolvedCriticalRow_DoesNotStandForAnIncidentOpenedUnderSuppression()
+    {
+        /* #7085: Monday's incident paged Critical and its clear completed under suppression, which writes no CPU Resolved row, so its
+           fire row still looks open. Friday's incident opens under suppression, the service restarts and suppression ends while it
+           still breaches. The seed counts only the rows of the incident that is open now: the old Critical is not its page, so the
+           first unsuppressed breaching sample pages once. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.OpenFireReader = HistoryOfPages((Harness.SampleBase.AddDays(-4), AlertSeverityLevel.Critical));
+
+        var at = await DriveCpuTimedAsync(h, h.Build(), 90, 5, Harness.SampleBase, suppressed: true);
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 90, 20, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AWarningPagedLongBeforeARestart_StillPagesTheCriticalThatFollows()
+    {
+        /* #7085 review: the Warning page is 90 minutes old, older than the one-cooldown window the tier seed reads, so only the open
+           incident's own delivered rows can say it was paged. The first sample after the restart is already Critical: an escalation. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+
+        var engine = h.Build();
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+        var pagedAt = at;
+        at = await DriveCpuTimedAsync(h, engine, 90, 90, at);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.OpenFireReader = HistoryOfPages((pagedAt, AlertSeverityLevel.Warning));
+        h.EscalationSeedReader = (_, _) => Task.FromResult<AlertSeverityLevel?>(null);
+        var restarted = h.Build();
+        at = await DriveCpuTimedAsync(h, restarted, 97, 1, at);
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var escalation = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Critical, escalation.Severity);
+        Assert.True(escalation.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AClearHoldOnLocalClockStamps_IsMeasuredOnTheSweepsUtcClock_NotOnTheStampsDifference()
+    {
+        /* #7085 review: a row from before V134 carries only the target's LOCAL clock. Across a spring-forward gap its stamps jump an
+           hour, which used to complete the fifteen-minute hold after two real minutes. With no UTC instant the hold runs on the sweep's
+           clock, so the stamps' jump changes nothing: fifteen real minutes under the bar, then the Resolved. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        var utc = at;
+        var local = at;
+        for (var i = 1; i <= 15; i++)
+        {
+            utc = utc.AddMinutes(1);
+            h.Now = utc;
+            local = i == 3 ? local.AddMinutes(61) : local.AddMinutes(1);
+            await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 30, cpuSampleTime: local, localStampOnly: true));
+        }
+
+        Assert.Empty(h.Resolutions);
+
+        utc = utc.AddMinutes(1);
+        h.Now = utc;
+        await engine.EvaluateServerAsync(Harness.Snapshot(sqlCpu: 70, totalCpu: 30, cpuSampleTime: local.AddMinutes(1), localStampOnly: true));
         Assert.Single(h.Resolutions);
     }
 
     [Fact]
     public void CpuGateDefaults_AreDerivedFromTheSampleCadence()
     {
-        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Three
-           breaching samples at the ~60-second SCHEDULER_MONITOR cadence is about three minutes, which is
-           above every excursion measured on the fleet for #3282 (42-147 seconds, median 87 s, worst two
-           consecutive one-minute samples over the bar). Clearing is deliberately FASTER than firing: a
-           late resolve is a stale open incident, an early one is the resolve/fire pair this issue exists
-           to remove. */
+        /* The numbers are a real decision, so they are pinned rather than left to drift silently. Five
+           breaching samples at the ~60-second SCHEDULER_MONITOR cadence is about five minutes (#7085: three
+           still paged on isolated spikes of one to six minutes), and an open incident clears only after
+           fifteen minutes of sample time under the bar (the 22-pages-in-three-mornings flap closed on two). */
+        Assert.Equal(5, AlertEngine.SqlCpuBreachSamples);
+        Assert.Equal(TimeSpan.FromMinutes(15), AlertEngine.SqlCpuClearHold);
+        /* The PostgreSQL target gate keeps its own numbers (#7085 changed only the SQL Server arm). */
         Assert.Equal(3, AlertEngine.CpuBreachSamples);
         Assert.Equal(2, AlertEngine.CpuClearSamples);
-        Assert.True(AlertEngine.CpuClearSamples < AlertEngine.CpuBreachSamples);
-        Assert.True(AlertEngine.CpuClearSamples > 1);
 
         /* The persisted subject is the metric an operator already knows, not a second spelling of it. */
         Assert.Equal("High CPU", AlertEngine.CpuPersistenceMetric);
@@ -1190,7 +1553,7 @@ public sealed class AlertEngineTests
         h.Muted = true;
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 90, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
 
         /* Unmuting inside the cooldown does not re-fire — the muted fire stamped it (:76). */
@@ -1237,7 +1600,224 @@ public sealed class AlertEngineTests
         Assert.Contains((Key, AlertEngine.BlockingWatermarkMetric, 0), h.StateStore.SavedEdge);
         var resolution = Assert.Single(h.Resolutions);
         Assert.Equal("Blocking Cleared", resolution.Title);                   /* :190 */
-        Assert.Equal("SRV-A: No active blocking", resolution.Message);        /* :191 */
+        /* #7083: the text names the window and what clears the alert. */
+        Assert.Equal(BlockingPageRule.ClearedMessage("SRV-A", 1, 0), resolution.Message);
+        Assert.Contains("last 60 minutes", resolution.Message);
+    }
+
+    private static BlockedProcessAlertRow TimedBlockingRow(int blockedSpid, long waitMs)
+    {
+        var row = BlockingRow(blockedSpid);
+        row.WaitTimeMs = waitMs;
+        /* One wait start (11:54:00), reports written as the wait ran on: the reports of one wait differ in EventTime and WaitTimeMs. */
+        row.EventTime = new DateTime(2026, 7, 1, 11, 54, 0).AddMilliseconds(waitMs);
+        return row;
+    }
+
+    private static Harness NewDefaultsHarness()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.BlockingCountThreshold = BlockingPageRule.CountThresholdDefault;
+        h.Settings.BlockingWaitSecondsThreshold = BlockingPageRule.WaitSecondsThresholdDefault;
+        return h;
+    }
+
+    [Fact]
+    public async Task Blocking_OneShortEvent_DoesNotPage_WithTheNewDefaults()
+    {
+        /* #7083: one blocked event of 2 seconds paged under count = 1. Defaults now: count 3, wait bar 60 s. */
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 2000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_OneVictimWhoseReportsReach90Seconds_PagesAtOnce_And25SecondsDoesNot()
+    {
+        var h = NewDefaultsHarness();
+        /* Three reports of the SAME blocked process collapse to one event at its largest wait. */
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 30000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 60000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 90000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Equal("1", fired.CurrentValue);
+
+        var quiet = NewDefaultsHarness();
+        quiet.Adapter.Blocking.Add(TimedBlockingRow(55, 10000));
+        quiet.Adapter.Blocking.Add(TimedBlockingRow(55, 25000));
+        await quiet.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(quiet.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_ThreeEventsWorstWait20Seconds_Page_ButSixEventsWorst5SecondsDoNot()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 20000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(56, 3000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(57, 3000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("3", Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected").CurrentValue);
+
+        /* Six events of 5 s each: 30 s of total wait, worst 5 s. No page; #7083 part 2 records it as a held (digest) row. */
+        var quiet = NewDefaultsHarness();
+        for (var spid = 60; spid < 66; spid++)
+        {
+            quiet.Adapter.Blocking.Add(TimedBlockingRow(spid, 5000));
+        }
+        await quiet.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.All(quiet.Deliverer.Outcomes.Where(o => o.MetricName == "Blocking Detected"), o => Assert.NotNull(o.Hold));
+    }
+
+    /// <summary>#7083 part 2: 14 events, none over 9 s, one of them stacked behind another (a chain of 2).</summary>
+    private static void AddFourteenShortEvents(Harness h)
+    {
+        for (var spid = 60; spid < 73; spid++)
+        {
+            h.Adapter.Blocking.Add(TimedBlockingRow(spid, 9000));
+        }
+
+        /* Session 160 is the blocker of session 60 (60 + 100) and is itself blocked: a chain of two. */
+        h.Adapter.Blocking.Add(TimedBlockingRow(160, 9000));
+    }
+
+    [Fact]
+    public async Task Blocking_FourteenEventsWorstWait9Seconds_WriteOneHeldRow_SendNothing_AndAnUnchangedWindowWritesNoSecondRow()
+    {
+        var h = NewDefaultsHarness();
+        AddFourteenShortEvents(h);
+        var engine = h.Build();
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var held = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.NotNull(held.Hold);
+        Assert.Equal("14 blocking events, worst wait 9 s, longest chain 2", held.Hold!.Reason);
+        Assert.False(held.Muted);
+        Assert.Equal("14", held.CurrentValue);
+        Assert.Empty(h.Resolutions);
+
+        /* Inside the cooldown (5 minutes): the same pattern writes nothing more. */
+        h.Now = h.Now.AddMinutes(2);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        /* One cooldown later the rolling hour still holds the same 14 events and none is newer: no second row (#7083 review). */
+        h.Now = h.Now.AddMinutes(4);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        /* A newer wait arrives in the window, still short: past the cooldown it earns the next held row. */
+        var later = TimedBlockingRow(200, 9000);
+        later.EventTime = later.EventTime!.Value.AddMinutes(8);
+        h.Adapter.Blocking.Add(later);
+        h.Now = h.Now.AddMinutes(1);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        var rows = h.Deliverer.Outcomes.Where(o => o.MetricName == "Blocking Detected").ToList();
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, o => Assert.NotNull(o.Hold));
+        Assert.Equal("15", rows[1].CurrentValue);
+    }
+
+    [Fact]
+    public async Task Blocking_OneBurstOfShortWaits_AnHourOfSweeps_WritesExactlyOneHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(60, 2000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(61, 2000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(62, 2000));
+        var engine = h.Build();
+
+        /* The adapter hands back the same three events at every sweep, as the rolling hour does until they age out. */
+        for (var i = 0; i < 121; i++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            h.Now = h.Now.AddSeconds(30);
+        }
+
+        var held = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.NotNull(held.Hold);
+        Assert.Equal("3 blocking events, worst wait 2 s, longest chain 1", held.Hold!.Reason);
+    }
+
+    [Fact]
+    public async Task Blocking_ThreeEventsWorstWait20Seconds_PageAndWriteNoHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 20000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(56, 3000));
+        h.Adapter.Blocking.Add(TimedBlockingRow(57, 3000));
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Null(fired.Hold);
+    }
+
+    [Fact]
+    public async Task Blocking_AHeldRowThenA90SecondEvent_PagesAtOnce()
+    {
+        var h = NewDefaultsHarness();
+        AddFourteenShortEvents(h);
+        var engine = h.Build();
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.NotNull(Assert.Single(h.Deliverer.Outcomes).Hold);
+
+        /* A minute later one event has waited 90 s: the held row stamped no page cooldown and no tier. */
+        h.Now = h.Now.AddMinutes(1);
+        h.Adapter.Blocking.Add(TimedBlockingRow(99, 90000));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var page = h.Deliverer.Outcomes.Last(o => o.MetricName == "Blocking Detected");
+        Assert.Null(page.Hold);
+        Assert.Equal("15", page.CurrentValue);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Detected"));
+
+        /* The incident is open now, so a later sweep over the same window holds nothing back. */
+        h.Now = h.Now.AddMinutes(10);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count(o => o.MetricName == "Blocking Detected"));
+    }
+
+    [Fact]
+    public async Task Blocking_CountBarOff_WritesNoHeldRow()
+    {
+        var h = NewDefaultsHarness();
+        h.Settings.BlockingCountThreshold = 0;
+        AddFourteenShortEvents(h);
+
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_FewerEventsThanTheCountBar_OrAMutedServer_WriteNoHeldRow()
+    {
+        var few = NewDefaultsHarness();
+        few.Adapter.Blocking.Add(TimedBlockingRow(55, 9000));
+        few.Adapter.Blocking.Add(TimedBlockingRow(56, 9000));
+        await few.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(few.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+
+        var muted = NewDefaultsHarness();
+        muted.Muted = true;
+        AddFourteenShortEvents(muted);
+        await muted.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(muted.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+    }
+
+    [Fact]
+    public async Task Blocking_WaitBarOff_TurnsTheSingleEventRouteOff()
+    {
+        var h = NewDefaultsHarness();
+        h.Settings.BlockingWaitSecondsThreshold = 0;
+        h.Adapter.Blocking.Add(TimedBlockingRow(55, 90000));
+        await h.Build().EvaluateServerAsync(Harness.Snapshot());
+        Assert.DoesNotContain(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
     }
 
     [Fact]
@@ -2167,6 +2747,170 @@ public sealed class AlertEngineTests
     }
 
     [Fact]
+    public async Task Deadlock_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        /* #7295: the saved watermark (1) covers the report in the window. A store that cannot be read used to look like a store with
+           no row: the key was marked seeded at 0 and the report was paged again. The failed read now leaves the key unseeded and
+           the deadlock check is skipped for that sweep, so nothing is paged and nothing is saved. */
+        var h = new Harness();
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)] = 1;
+        h.StateStore.FailEdgeLoads = 1;
+        var engine = h.Build();
+
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        /* The store works again. The next sweep reads the saved watermark and the report it covers stays quiet, once the cooldown is out too. */
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        /* The positive control: the check can page once it is seeded. Under the #7086 rule a rise inside an open episode does not page,
+           so the report leaves the hour (the episode ends and the watermark resets) and a new deadlock is a new episode. */
+        h.Adapter.Deadlocks.Clear();
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("Deadlocks Detected", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task Blocking_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)] = 1;
+        h.StateStore.FailEdgeLoads = 1;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.StateStore.SavedEdge);
+
+        h.Adapter.Blocking.Add(BlockingRow(77));
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("2", Assert.Single(h.Deliverer.Outcomes).CurrentValue);
+    }
+
+    [Fact]
+    public async Task AFailedWatermarkRead_IsReadAgainOnEverySweep_AndTheTwoSkippedChecksFetchNothing()
+    {
+        /* #7295: a store that stays unreadable is asked again on every sweep, and blocking and deadlocks read nothing and page
+           nothing meanwhile. The two loads of one seed count as one attempt, because the first one throws. */
+        var h = new Harness();
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.FailEdgeLoads = 100;
+        var engine = h.Build();
+
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(2, h.StateStore.EdgeLoadAttempts);
+        Assert.Equal(0, h.Adapter.BlockingFetches + h.Adapter.DeadlockFetches);
+
+        /* The positive control: the same two checks page once the store can be read, with no saved watermark to hold them. */
+        h.StateStore.FailEdgeLoads = 0;
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+    }
+
+    [Fact]
+    public async Task AWatermarkReadThatKeepsFailing_SeedsEmptyOnTheThirdSweep_AndTheEventsPage_AndALaterWorkingStoreChangesNothing()
+    {
+        /* #7295 round 3: a state table that stays unreadable while the collected data is readable must not hold blocking and deadlocks
+           back for as long as the failure lasts. The first two failed sweeps skip both checks. The third failed read seeds both
+           watermarks empty (what every sweep did before #7295: at worst one duplicate page), and the checks run. */
+        var h = new Harness();
+        var log = new CapturingTestLogger();
+        h.Logger = log;
+        h.Settings.BlockingEnabled = true;
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.FailEdgeLoads = 100;
+        var engine = h.Build();
+        h.Adapter.Blocking.Add(BlockingRow(55));
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+
+        for (var sweep = 1; sweep < SeedLoadCap.MaxFailedLoads; sweep++)
+        {
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            Assert.Empty(h.Deliverer.Outcomes);
+            Assert.Equal(sweep, h.StateStore.EdgeLoadAttempts);
+            Assert.Empty(CapWarnings(log));
+        }
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(SeedLoadCap.MaxFailedLoads, h.StateStore.EdgeLoadAttempts);
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Blocking Detected");
+        Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Deadlocks Detected");
+
+        /* One warning, naming the step, the store and the server, and saying a duplicate page is possible. */
+        var warning = Assert.Single(CapWarnings(log));
+        Assert.Contains("blocking and deadlock count watermarks", warning, StringComparison.Ordinal);
+        Assert.Contains(nameof(FakeStateStore), warning, StringComparison.Ordinal);
+        Assert.Contains(Key, warning, StringComparison.Ordinal);
+        Assert.Contains("sent once more", warning, StringComparison.Ordinal);
+
+        /* The store works again, with a saved watermark that would have held the report. The step is done for the life of the process,
+           the same as after a seed that worked: nothing is loaded again and nothing pages again. */
+        var paged = h.Deliverer.Outcomes.Count;
+        h.StateStore.FailEdgeLoads = 0;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.BlockingWatermarkMetric)] = 0;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)] = 0;
+        h.Now = h.Now.AddMinutes(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(SeedLoadCap.MaxFailedLoads, h.StateStore.EdgeLoadAttempts);
+        Assert.Equal(paged, h.Deliverer.Outcomes.Count);
+        Assert.Single(CapWarnings(log));
+    }
+
+    /// <summary>The warning that says a seed step was given up on after its failed reads (#7295 round 3), apart from the alert lines logged at the same level.</summary>
+    private static List<string> CapWarnings(CapturingTestLogger log) =>
+        log.Lines.Where(l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("sweeps in a row", StringComparison.Ordinal)).ToList();
+
+    [Fact]
+    public async Task AWatermarkReadThatFailsLessOftenThanTheCap_NeverSeedsEmpty()
+    {
+        /* #7295 round 3: the cap counts failed sweeps in a row for a step. Two failures and a working store seed the saved watermark,
+           and the report it covers stays quiet. The positive control for the cap above: it does not fire early. */
+        var h = new Harness();
+        var log = new CapturingTestLogger();
+        h.Logger = log;
+        h.Settings.DeadlockEnabled = true;
+        h.StateStore.EdgeWatermarks[(Key, AlertEngine.DeadlockWatermarkMetric)] = 1;
+        h.StateStore.FailEdgeLoads = SeedLoadCap.MaxFailedLoads - 1;
+        var engine = h.Build();
+        h.Adapter.Deadlocks.Add(DeadlockRow());
+
+        for (var sweep = 0; sweep < SeedLoadCap.MaxFailedLoads + 2; sweep++)
+        {
+            h.Now = h.Now.AddMinutes(6);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+        }
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(CapWarnings(log));
+    }
+
+    [Fact]
     public async Task Deadlock_TotalOccurrences_AccumulateAcrossThrottledDeliveries()
     {
         /* #2216 end to end. Delivery one carries one deadlock; two more happen before the next eligible
@@ -2186,9 +2930,14 @@ public sealed class AlertEngineTests
         Assert.Equal(1L, firstIncident.TotalOccurrences);
         Assert.Equal(h.Now, firstIncident.IncidentStartedUtc);
 
-        /* Same fingerprint (identical graphs), so this is the same incident continuing. */
-        h.Adapter.Deadlocks.Add(DeadlockRow());
-        h.Adapter.Deadlocks.Add(DeadlockRow());
+        /* Same fingerprint (identical graphs), so this is the same incident continuing. #7086: a count rise inside an
+           open episode no longer pages, so the second delivery is the rise to the Critical rate (20 an hour), the
+           one rise that still does. */
+        for (var i = 0; i < 20; i++)
+        {
+            h.Adapter.Deadlocks.Add(DeadlockRow());
+        }
+
         var openedAt = h.Now;
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
@@ -2196,15 +2945,15 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
         var second = h.Deliverer.Outcomes[1];
         var secondIncident = Assert.Single(second.Context!.Incidents!);
-        Assert.Equal(3, secondIncident.OccurrenceCount);
-        Assert.Equal(3L, secondIncident.TotalOccurrences);
+        Assert.Equal(21, secondIncident.OccurrenceCount);
+        Assert.Equal(21L, secondIncident.TotalOccurrences);
 
         /* The start time did NOT move — that is how the consumer tells a continuation from a new incident
            that happens to read 3. */
         Assert.Equal(openedAt, secondIncident.IncidentStartedUtc);
 
         var persisted = h.StateStore.Occurrences[(Key, AlertEngine.DeadlockWatermarkMetric)];
-        Assert.Equal(3L, persisted[secondIncident.DedupKey].TotalOccurrences);
+        Assert.Equal(21L, persisted[secondIncident.DedupKey].TotalOccurrences);
     }
 
     [Fact]
@@ -2439,7 +3188,7 @@ public sealed class AlertEngineTests
         h.Settings.CpuEnabled = true;
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: totalCpu, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3151,7 +3900,7 @@ public sealed class AlertEngineTests
         h.Adapter.LongRunning.Add(BackupSession());
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         Assert.Single(h.Deliverer.Outcomes);
         Assert.True(h.Adapter.LastLrqExclusions!.IsEmpty);
@@ -3193,7 +3942,7 @@ public sealed class AlertEngineTests
         h.Adapter.LongRunning.Add(BackupSession());
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3231,7 +3980,7 @@ public sealed class AlertEngineTests
         });
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("  Total CPU: 95%\n  Threshold: 80%", fired.DetailText);
@@ -3250,7 +3999,7 @@ public sealed class AlertEngineTests
         h.Adapter.ThrowOnLongRunningRead = true;
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -3277,7 +4026,7 @@ public sealed class AlertEngineTests
         }
         var engine = h.Build();
 
-        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 95, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
 
         var detail = Assert.Single(h.Deliverer.Outcomes).DetailText!;
         Assert.Equal(AlertContextBuilders.ActiveMaintenanceMaxLines,
@@ -4489,6 +5238,65 @@ public sealed class AlertEngineTests
     /* ---------------- failed jobs ---------------- */
 
     [Fact]
+    public async Task FailedJobs_AFailedWatermarkReadOnTheFirstSweep_SkipsTheCheck_AndTheNextSweepSeedsFromTheSavedWatermark()
+    {
+        /* #7295: the saved watermark covers the failure in the window. A store that cannot be read used to look like a store with no row:
+           the watermark stayed empty and a failure a page had already carried was paged again. The failed read now leaves the check
+           unseeded and skipped (it fetches nothing and saves nothing), and the next sweep reads the saved watermark. */
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.StateStore.FailedJobWatermarks[Key] = failure;
+        h.StateStore.FailFailedJobLoads = 1;
+        var engine = h.Build(withFailedJobsFetcher: true);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(0, h.FailedJobFetches);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, h.FailedJobFetches);
+
+        /* The positive control: a failure newer than the saved watermark pages. */
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = failure.AddMinutes(30) });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal("Failed Agent Job", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
+    public async Task FailedJobs_AWatermarkReadThatKeepsFailing_SeedsEmptyOnTheThirdSweep_AndTheFailurePages()
+    {
+        /* #7295 round 3: the failed-job watermark table stays unreadable. Two sweeps skip the check (nothing is fetched), the third
+           failed read seeds an empty watermark and the failure pages. At worst that is a failure a page already carried before the
+           restart, paged once more. */
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.StateStore.FailedJobWatermarks[Key] = failure;
+        h.StateStore.FailFailedJobLoads = 1000;
+        var engine = h.Build(withFailedJobsFetcher: true);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+
+        for (var sweep = 1; sweep < SeedLoadCap.MaxFailedLoads; sweep++)
+        {
+            h.Now = h.Now.AddMinutes(6);
+            await engine.EvaluateServerAsync(Harness.Snapshot());
+            Assert.Empty(h.Deliverer.Outcomes);
+            Assert.Equal(0, h.FailedJobFetches);
+        }
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(1, h.FailedJobFetches);
+        Assert.Equal("Failed Agent Job", Assert.Single(h.Deliverer.Outcomes).MetricName);
+    }
+
+    [Fact]
     public async Task FailedJobs_WatermarkDedups_AndPersistsTheServerLocalRunTime()
     {
         /* Lite AlertEngine.cs:663-709 — only a strictly newer failure re-fires; the persisted
@@ -4837,7 +5645,7 @@ public sealed class AlertEngineTests
         var engine = h.Build();
 
         /* #3282: CpuBreachSamples distinct samples per server, since High CPU no longer fires on one. */
-        for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+        for (var i = 1; i <= AlertEngine.SqlCpuBreachSamples; i++)
         {
             var at = Harness.SampleBase.AddMinutes(i);
             await engine.EvaluateServerAsync(new AlertServerSnapshot("101", "SRV-A", true, 70, 90, false, false, at));
@@ -4941,6 +5749,30 @@ public sealed class AlertEngineTests
         FailureDelta = delta, TotalFailures = total, ObservedAtUtc = observedAt
     };
 
+    /// <summary>#7086: a plan's FIRST failure is held, not paged, and these tests guard what happens to a PAGE (the observation
+    /// guard, the cooldown, the retry after a failed send, the recovery). So each starts after one earlier failure of the same plan
+    /// at <paramref name="firstObservation"/>, inside the 24 hours, which makes its own observation the second one. The held row
+    /// is checked and cleared from the deliverer, and the rows and clock the test set are put back.</summary>
+    private static async Task HoldTheFirstForcePlanFailureAsync(Harness h, AlertEngine engine, DateTime firstObservation)
+    {
+        var rows = h.Adapter.ForcePlanFailures.ToList();
+        var now = h.Now;
+        var report = h.Deliverer.Report;
+        h.Deliverer.Report = null;
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.Add(ForcePlanRow(firstObservation));
+        h.Now = firstObservation.AddSeconds(30);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        var held = Assert.Single(h.Deliverer.Outcomes);
+        Assert.NotNull(held.Hold);
+        h.Deliverer.Outcomes.Clear();
+        h.Deliverer.Report = report;
+        h.Adapter.ForcePlanFailures.Clear();
+        h.Adapter.ForcePlanFailures.AddRange(rows);
+        h.Now = now;
+    }
+
     [Fact]
     public async Task ForcePlanFailure_SameObservationAcrossSixCooldowns_FiresOnce_ThenResolvesOnTheNextCollection()
     {
@@ -4955,6 +5787,8 @@ public sealed class AlertEngineTests
         h.Now = Collection0418.AddSeconds(53);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
+        var fetchesBefore = h.Adapter.ForcePlanFetches;
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -4969,7 +5803,7 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
         /* And the read still happened on every pass — the guard is on the FIRE, never on the fetch, so the
            recovery arm keeps seeing fresh evidence. */
-        Assert.Equal(6, h.Adapter.ForcePlanFetches);
+        Assert.Equal(6, h.Adapter.ForcePlanFetches - fetchesBefore);
 
         /* 04:50: APC released the forcing and the counter reset. The adapter's '>' filter drops the row, and
            the recovery is announced exactly as before #3579. */
@@ -5032,6 +5866,7 @@ public sealed class AlertEngineTests
         h.Now = Collection0402.AddSeconds(30);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0402));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402.AddMinutes(-16));
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -5090,6 +5925,7 @@ public sealed class AlertEngineTests
         h.Now = Collection0418.AddSeconds(53);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
 
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Deliverer.Outcomes);
@@ -5099,7 +5935,7 @@ public sealed class AlertEngineTests
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Single(h.Resolutions, r => r.MetricName == ForcePlanTokens.MetricName);
 
-        /* Hours later, forced again and failing again. */
+        /* Hours later (inside the 24 hours of the first failure), forced again and failing again. */
         var laterCollection = Collection0450.AddHours(3);
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(laterCollection, delta: 1, total: 1));
         h.Now = laterCollection.AddSeconds(30);
@@ -5685,7 +6521,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => webhookOnly ? FailedByWebhook() : FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
@@ -5706,15 +6542,10 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => DeliveredByWebhook();
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
 
-        /* A delivered fire waits the whole cooldown, as it always did. */
+        /* A delivered incident is held open and not reminded of (#7085), cooldown or no cooldown. */
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(61)));
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(238)));
-        h.Deliverer.Report = _ => FailedByEmail();
-        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
-
-        /* ...and the next failure starts over at a minute, not at the four the old streak would have reached. */
-        Assert.Equal(4, await SweepAfterAsync(TimeSpan.FromSeconds(59)));
-        Assert.Equal(5, await SweepAfterAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(600)));
     }
 
     [Fact]
@@ -5727,7 +6558,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
@@ -5757,22 +6588,25 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmailButDeliveredByWebhook();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         h.Now = h.Now.AddSeconds(61);
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
+        /* Past the cooldown too: the delivered incident is held open and sends no reminder (#7085). */
         h.Now = h.Now.AddMinutes(4);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
     public async Task Cpu_AMutedFire_StillWaitsTheFullCooldown()
     {
-        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. */
+        /* A muted fire attempts no channel, so there is no failure to retry: it behaves as it always did. #7085: and a mute that lasts
+           the whole incident does not make the incident "paged". The muted fire comes again once the cooldown runs out, so its history
+           row comes at most once per cooldown. */
         var h = new Harness();
         h.Settings.CpuEnabled = true;
         h.Settings.CooldownMinutes = 5;
@@ -5780,16 +6614,119 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => MutedNothingAttempted();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
 
         h.Now = h.Now.AddSeconds(61);
         at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Single(h.Deliverer.Outcomes);
 
+        /* Past the cooldown: the next muted fire, and nothing else. */
         h.Now = h.Now.AddMinutes(4);
         await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: 1, from: at);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteThatSpansTheWholeIncident_SendsNothing_AndWritesAtMostOneMutedRowPerCooldown()
+    {
+        /* #7085: 45 minutes over the bar under a mute, cooldown 5. Every fire is muted, and they come at most once per cooldown
+           (minutes 5, 10 ... 45), the way a mute behaved before #7085. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+
+        await DriveCpuTimedAsync(h, h.Build(), 90, 45, Harness.SampleBase);
+
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+        Assert.Equal(9, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task Cpu_AMuteLiftedMidIncident_PagesOnceWithinACooldown_ThenHoldsTheIncident()
+    {
+        /* #7085: the incident opened while muted (one muted row), the mute ends, and CPU stays over the bar. Before, the muted fire
+           counted as the incident's page for its whole life, so nothing paged until the 15 minute clear or an escalation. Now the muted
+           fire counts for one cooldown: the page goes out once the cooldown after it has run out, and then the incident is held. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+
+        h.Muted = false;
+        h.Deliverer.Report = null;
+        at = await DriveCpuTimedAsync(h, engine, 90, 5, at);
+        var page = Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+
+        at = await DriveCpuTimedAsync(h, engine, 90, 40, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+    }
+
+    [Fact]
+    public async Task Cpu_ACriticalThatArrivesWhileMuted_IsMuted_AndTheLiftedPageCarriesTheCurrentTier()
+    {
+        /* #7085: Warning opens the incident under a mute, then Critical arrives: both are muted rows. After the lift the one page
+           carries the tier CPU is at then. It is not an escalation: nothing was delivered before it. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        at = await DriveCpuTimedAsync(h, engine, 97, 1, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.All(h.Deliverer.Outcomes, o => Assert.True(o.Muted));
+        Assert.Equal(AlertSeverityLevel.Critical, h.Deliverer.Outcomes[1].Severity);
+
+        h.Muted = false;
+        h.Deliverer.Report = null;
+        at = await DriveCpuTimedAsync(h, engine, 97, 10, at);
+
+        var page = Assert.Single(h.Deliverer.Outcomes, o => !o.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, page.Severity);
+        Assert.False(page.Context!.EscalationBypassesCooldown);
+    }
+
+    [Fact]
+    public async Task Cpu_AWarningPaged_ThenACriticalWhileMuted_PagesTheCriticalAfterTheLift_AsAnEscalation()
+    {
+        /* #7085: the Warning went out, then a mute began and Critical arrived (one muted row, held for the cooldown). A muted Critical
+           was never delivered, so once the mute is lifted and the cooldown has run out the Critical pages once, flagged as the
+           escalation it is. */
+        var h = new Harness();
+        h.Settings.CpuEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build();
+
+        var at = await DriveCpuTimedAsync(h, engine, 90, 5, Harness.SampleBase);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Muted = true;
+        h.Deliverer.Report = o => o.Muted ? MutedNothingAttempted() : null;
+        at = await DriveCpuTimedAsync(h, engine, 97, 3, at);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.True(h.Deliverer.Outcomes[1].Muted);
+
+        h.Muted = false;
+        at = await DriveCpuTimedAsync(h, engine, 97, 10, at);
+
+        Assert.Equal(3, h.Deliverer.Outcomes.Count);
+        var page = h.Deliverer.Outcomes[2];
+        Assert.False(page.Muted);
+        Assert.Equal(AlertSeverityLevel.Critical, page.Severity);
+        Assert.True(page.Context!.EscalationBypassesCooldown);
     }
 
     [Fact]
@@ -6569,6 +7506,7 @@ public sealed class AlertEngineTests
         h.Adapter.ForcePlanFailures.Add(ForcePlanRow(Collection0418));
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
+        await HoldTheFirstForcePlanFailureAsync(h, engine, Collection0402);
 
         async Task<int> SweepAfterAsync(TimeSpan wait)
         {
@@ -6646,7 +7584,7 @@ public sealed class AlertEngineTests
         h.Deliverer.Report = _ => FailedByEmail();
         var engine = h.Build();
 
-        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: Harness.SampleBase);
+        var at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: Harness.SampleBase);
         Assert.Single(h.Deliverer.Outcomes);
 
         /* Failure one waits a minute; failure two, now the second in a row, would wait two. */
@@ -6655,12 +7593,12 @@ public sealed class AlertEngineTests
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
 
         /* The condition clears... */
-        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: AlertEngine.CpuClearSamples, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 20, totalCpu: 40, samples: ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1), from: at);
         Assert.Single(h.Resolutions);
 
         /* ...and comes back eleven minutes after the second failure: more than twice the five-minute cooldown. */
         h.Now = h.Now.AddMinutes(11);
-        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.CpuBreachSamples, from: at);
+        at = await DriveCpuAsync(engine, sqlCpu: 70, totalCpu: 80, samples: AlertEngine.SqlCpuBreachSamples, from: at);
         Assert.Equal(3, h.Deliverer.Outcomes.Count);
 
         /* That failure is number one again, so its retry is a minute away, not the four a streak of three waits. */

@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -89,7 +90,10 @@ public partial class AgentAlertsTab : UserControl
             var read = await _dataService.ReadAgentAlertsAsync(server, DateTime.UtcNow);
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
 
-            Show(read);
+            var clock = await _dataService.GetServerClockOrMachineAsync(server.ServerId, System.Threading.CancellationToken.None);
+            if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
+
+            Show(read, clock);
             LastRefreshedIndicator.Text = "Last refreshed " + ViewerTimeHelper.FormatFleetWide(DateTime.UtcNow, "HH:mm:ss");
         }
         catch (Exception ex)
@@ -100,7 +104,7 @@ public partial class AgentAlertsTab : UserControl
         }
     }
 
-    private void Show(ViewerAgentAlertsRead? read)
+    private void Show(ViewerAgentAlertsRead? read, ServerClock? clock = null)
     {
         if (read is null)
         {
@@ -111,10 +115,11 @@ public partial class AgentAlertsTab : UserControl
             return;
         }
 
-        StatusLine.Text = ViewerAgentAlertsText.StatusLine(read);
+        StatusLine.Text = ViewerAgentAlertsText.StatusLine(read, clock ?? ViewerTimeHelper.ActiveServerClock);
         var gaps = ViewerAgentAlertsText.GapRows(read);
         var alerts = ViewerAgentAlertsText.AlertRows(read);
         GapsDataGrid.ItemsSource = gaps;
+        GapWhichColumn.Visibility = gaps.Any(g => g.Which.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         AlertsDataGrid.ItemsSource = alerts;
         GapsEmptyMessage.Text = ViewerAgentAlertsText.GapsEmptyText(read);
         AlertsEmptyMessage.Text = ViewerAgentAlertsText.AlertsEmptyText(read);

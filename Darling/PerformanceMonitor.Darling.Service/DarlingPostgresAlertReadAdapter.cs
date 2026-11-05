@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -228,15 +229,17 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             SELECT
                 MAX(wait_type) AS wait_type,
                 MAX(wait_event) AS wait_event,
-                (SUM(delta_wait_time_us) / 1000)::bigint AS accumulated_wait_ms,
-                SUM(delta_waits)::bigint AS accumulated_waits,
-                MAX(collection_time) AS newest_collection_time
+                (SUM(delta_wait_time_us) FILTER (WHERE collection_time >= $2) / 1000)::bigint AS accumulated_wait_ms,
+                SUM(delta_waits) FILTER (WHERE collection_time >= $2)::bigint AS accumulated_waits,
+                MAX(collection_time) FILTER (WHERE collection_time >= $2) AS newest_collection_time,
+                (COALESCE(SUM(delta_wait_time_us) FILTER (WHERE collection_time < $2), 0) / 1000)::bigint AS prior_window_wait_ms
             FROM pg_wait_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time >= $3
             AND   lower(wait_type) = 'ipc'
             AND   lower(wait_event) IN ('btreepage', 'bufferio')
             GROUP BY lower(wait_type), lower(wait_event)
+            HAVING COUNT(*) FILTER (WHERE collection_time >= $2) > 0
         )
         SELECT
             a.wait_type,
@@ -244,7 +247,8 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
             a.accumulated_wait_ms,
             a.accumulated_waits,
             a.newest_collection_time,
-            c.captures_in_window
+            c.captures_in_window,
+            a.prior_window_wait_ms
         FROM captures AS c
         LEFT JOIN accumulated AS a ON true
         """;
@@ -261,8 +265,11 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
            threshold normalizes against, so read and evaluation must agree on it or the "average backends
            stuck" arithmetic silently means something else. The SAME bind bounds the witness count, so
            "observed" and "accumulated over" describe one window by construction. */
-        command.Parameters.AddWithValue(
-            NaiveUtcNow().AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes));
+        var windowStart = NaiveUtcNow().AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+        command.Parameters.AddWithValue(windowStart);
+        /* #7082: the window before this one, read in the same statement so a Warning can be held until the
+           episode has lasted two back-to-back windows. */
+        command.Parameters.AddWithValue(windowStart.AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -281,11 +288,160 @@ public sealed class DarlingPostgresAlertReadAdapter : IPostgresAlertReadAdapter
                 reader.IsDBNull(1) ? "(unknown)" : reader.GetString(1),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4)));
+                reader.IsDBNull(4) ? DateTime.MinValue : reader.GetDateTime(4),
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6)));
         }
 
         return new PostgresPoisonWaitWindow(rows, capturesInWindow);
     }
+
+    /// <summary>The top three wait events of the window by summed wait time, idle classes left out (#7082).</summary>
+    internal const string PoisonTopEventsSql = """
+        SELECT MAX(wait_type), MAX(wait_event), (SUM(delta_wait_time_us) / 1000)::bigint AS wait_ms
+        FROM pg_wait_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   delta_wait_time_us > 0
+        AND   lower(coalesce(wait_type, '')) NOT IN ('activity', 'client')
+        GROUP BY lower(wait_type), lower(wait_event)
+        ORDER BY wait_ms DESC
+        LIMIT 3
+        """;
+
+    /// <summary>
+    /// The top three statements by sampled waits on one event over the window (#7082). Same differencing as
+    /// <c>DarlingPgWaitSamplingReader.PgWaitSamplingSql</c>: the cumulative sample count at the newest capture
+    /// less the one at the oldest, and the whole count when the profile was reset inside the window. Query id 0
+    /// is work that belongs to no statement and a NULL id is a target that does not report one: neither names a
+    /// statement.
+    /// </summary>
+    internal const string PoisonStatementsSampledSql = """
+        SELECT x.query_id, x.samples, t.query_text
+        FROM (
+            SELECT n.query_id,
+                   CASE WHEN n.sample_count < o.sample_count
+                        THEN n.sample_count
+                        ELSE n.sample_count - coalesce(o.sample_count, 0)
+                   END AS samples
+            FROM (
+                SELECT DISTINCT ON (query_id) query_id, sample_count
+                FROM pg_wait_sampling
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   lower(event_type) = lower($3)
+                AND   lower(event) = lower($4)
+                AND   query_id IS NOT NULL
+                AND   query_id <> 0
+                ORDER BY query_id, collection_time DESC
+            ) AS n
+            LEFT JOIN (
+                SELECT DISTINCT ON (query_id) query_id, sample_count
+                FROM pg_wait_sampling
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   lower(event_type) = lower($3)
+                AND   lower(event) = lower($4)
+                AND   query_id IS NOT NULL
+                AND   query_id <> 0
+                ORDER BY query_id, collection_time ASC
+            ) AS o ON o.query_id = n.query_id
+        ) AS x
+        LEFT JOIN pg_statement_text AS t ON t.server_id = $1 AND t.queryid = x.query_id
+        WHERE x.samples > 0
+        ORDER BY x.samples DESC, x.query_id
+        LIMIT 3
+        """;
+
+    /// <summary>
+    /// The same question from the session captures, for a target with no <c>pg_wait_sampling</c> rows (Aurora
+    /// reports its waits as cumulative counters, so the statement side comes from backends caught waiting):
+    /// how many captures had a backend running each statement on this event (#7082).
+    /// </summary>
+    internal const string PoisonStatementsSessionSql = """
+        SELECT s.query_id, COUNT(*)::bigint AS captures, MAX(t.query_text)
+        FROM pg_session_states AS s
+        LEFT JOIN pg_statement_text AS t ON t.server_id = s.server_id AND t.queryid = s.query_id
+        WHERE s.server_id = $1
+        AND   s.collection_time >= $2
+        AND   lower(s.wait_event_type) = lower($3)
+        AND   lower(s.wait_event) = lower($4)
+        AND   s.query_id IS NOT NULL
+        AND   s.query_id <> 0
+        AND   NOT coalesce(s.state_is_redacted, false)
+        GROUP BY s.query_id
+        ORDER BY captures DESC, s.query_id
+        LIMIT 3
+        """;
+
+    /// <summary>
+    /// What the Poison Wait detail text names (#7082): the window's top three wait events by average waiting
+    /// backends, and the top three statements seen waiting on the finding's event (<c>pg_wait_sampling</c>
+    /// first, <c>pg_session_states</c> when that holds nothing for the event). Statement text is returned at
+    /// the <paramref name="dataDetail"/> level the other alert texts are served at: as stored for
+    /// <see cref="McpDataDetail.Full"/>, with literals replaced for <see cref="McpDataDetail.MaskLiterals"/>,
+    /// and withheld (id and count only) for <see cref="McpDataDetail.MetadataOnly"/>.
+    /// </summary>
+    public async Task<PostgresPoisonWaitDetail> GetPoisonWaitDetailAsync(
+        int serverId, string waitType, string waitEvent, McpDataDetail dataDetail,
+        CancellationToken cancellationToken = default)
+    {
+        var windowStart = NaiveUtcNow().AddMinutes(-PostgresAlertEvaluator.PoisonWaitWindowMinutes);
+        var windowMs = PostgresAlertEvaluator.PoisonWaitWindowMinutes * 60_000.0;
+
+        var topEvents = new List<PostgresPoisonWaitTopEvent>();
+        await using (var command = _postgres.CreateCommand(PoisonTopEventsSql))
+        {
+            command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(windowStart);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                topEvents.Add(new PostgresPoisonWaitTopEvent(
+                    reader.IsDBNull(0) ? "(unknown)" : reader.GetString(0),
+                    reader.IsDBNull(1) ? "(unknown)" : reader.GetString(1),
+                    (reader.IsDBNull(2) ? 0 : reader.GetInt64(2)) / windowMs));
+            }
+        }
+
+        var statements = await ReadPoisonStatementsAsync(
+            PoisonStatementsSampledSql, "pg_wait_sampling", serverId, windowStart, waitType, waitEvent, dataDetail, cancellationToken);
+        if (statements.Count == 0)
+        {
+            statements = await ReadPoisonStatementsAsync(
+                PoisonStatementsSessionSql, "pg_session_states", serverId, windowStart, waitType, waitEvent, dataDetail, cancellationToken);
+        }
+
+        return new PostgresPoisonWaitDetail(topEvents, statements);
+    }
+
+    private async Task<List<PostgresPoisonWaitStatement>> ReadPoisonStatementsAsync(
+        string sql, string source, int serverId, DateTime windowStart, string waitType, string waitEvent,
+        McpDataDetail dataDetail, CancellationToken cancellationToken)
+    {
+        var statements = new List<PostgresPoisonWaitStatement>();
+        await using var command = _postgres.CreateCommand(sql);
+        command.CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(windowStart);
+        command.Parameters.AddWithValue(waitType);
+        command.Parameters.AddWithValue(waitEvent);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var raw = reader.IsDBNull(2) ? null : reader.GetString(2);
+            statements.Add(new PostgresPoisonWaitStatement(
+                reader.GetInt64(0), PoisonStatementTextAt(raw, dataDetail), reader.GetInt64(1), source));
+        }
+
+        return statements;
+    }
+
+    /// <summary>A statement at the <c>mcp.dataDetail</c> level (#7082): as stored, literals replaced, or withheld.</summary>
+    internal static string? PoisonStatementTextAt(string? statement, McpDataDetail mode) =>
+        string.IsNullOrWhiteSpace(statement) || mode == McpDataDetail.MetadataOnly
+            ? null
+            : mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(statement) : statement;
 
     public async Task<List<PostgresWraparoundAlertInfo>> GetWraparoundRiskAsync(
         int serverId, CancellationToken cancellationToken = default)

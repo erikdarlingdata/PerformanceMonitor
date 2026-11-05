@@ -223,27 +223,34 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private void PopulateServerFilter(List<AlertHistoryRow> alerts)
+    /// <summary>
+    /// Brings the Server filter combo up to date after a read (#7211): "All Servers" first, then every server already on offer plus
+    /// those in the read. The list only grows (<see cref="JobHistoryFilterChoices.MergeServers"/>, as on the Job History tab, #5703), so
+    /// a read narrowed to one server, or to a window where the picked server has no alerts, never removes a choice and the operator can
+    /// always pick another server or go back to All. The picked server is kept, and a pick that cannot be found falls back to
+    /// "All Servers" on purpose instead of leaving the combo blank while the grid reads every server.
+    /// </summary>
+    internal void PopulateServerFilter(List<AlertHistoryRow> alerts)
     {
-        var servers = alerts
-            .Select(a => (a.ServerId, a.ServerName))
-            .Where(s => !string.IsNullOrEmpty(s.ServerName))
-            .Distinct()
-            .OrderBy(s => s.ServerName)
+        var offered = ServerFilterComboBox.Items
+            .OfType<ComboBoxItem>()
+            .Skip(1)
+            .Where(i => int.TryParse(i.Tag?.ToString(), out _))
+            .Select(i => new JobHistoryFilterChoices.ServerChoice(int.Parse(i.Tag!.ToString()!), i.Content?.ToString() ?? string.Empty))
             .ToList();
 
         var currentSelection = ServerFilterComboBox.SelectedIndex > 0
             ? (ServerFilterComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString()
             : null;
 
-        var existingIds = ServerFilterComboBox.Items
-            .OfType<ComboBoxItem>()
-            .Skip(1)
-            .Select(i => i.Tag?.ToString())
-            .ToList();
+        var servers = JobHistoryFilterChoices.MergeServers(
+            offered,
+            [],
+            alerts.Select(a => new JobHistoryFilterChoices.ServerChoice(a.ServerId, a.ServerName ?? string.Empty)));
 
         var newIds = servers.Select(s => s.ServerId.ToString()).ToList();
-        if (newIds.SequenceEqual(existingIds)) return;
+        var existingIds = offered.Select(o => o.ServerId.ToString()).ToList();
+        if (newIds.SequenceEqual(existingIds) && ServerFilterComboBox.SelectedIndex >= 0) return;
 
         ServerFilterComboBox.SelectionChanged -= ServerFilterComboBox_SelectionChanged;
 
@@ -259,18 +266,20 @@ public partial class AlertsHistoryTab : UserControl
             });
         }
 
+        var picked = 0;
         if (currentSelection != null)
         {
             for (int i = 1; i < ServerFilterComboBox.Items.Count; i++)
             {
                 if ((ServerFilterComboBox.Items[i] as ComboBoxItem)?.Tag?.ToString() == currentSelection)
                 {
-                    ServerFilterComboBox.SelectedIndex = i;
+                    picked = i;
                     break;
                 }
             }
         }
 
+        ServerFilterComboBox.SelectedIndex = picked;
         ServerFilterComboBox.SelectionChanged += ServerFilterComboBox_SelectionChanged;
     }
 
@@ -278,7 +287,7 @@ public partial class AlertsHistoryTab : UserControl
     private (DateTime sinceUtc, DateTime? untilUtc) GetSelectedWindow()
         => LiteTimeRange.BoundsOf(RangePicker, 24, DateTime.UtcNow);
 
-    private int? GetSelectedServerId()
+    internal int? GetSelectedServerId()
     {
         if (ServerFilterComboBox.SelectedIndex > 0 &&
             ServerFilterComboBox.SelectedItem is ComboBoxItem item &&
@@ -350,29 +359,8 @@ public partial class AlertsHistoryTab : UserControl
         UpdateStaleDataIndicator();
     }
 
-    private void UpdateStaleDataIndicator()
-    {
-        if (_lastRefreshed.HasValue)
-        {
-            var elapsed = DateTime.UtcNow - _lastRefreshed.Value;
-            LastRefreshedIndicator.Text = elapsed.TotalSeconds < 5
-                ? "Refreshed just now"
-                : elapsed.TotalMinutes < 1
-                    ? $"Refreshed {(int)elapsed.TotalSeconds}s ago"
-                    : $"Refreshed {(int)elapsed.TotalMinutes}m ago";
-        }
-
-        // Show archival warning if ArchiveService is currently running
-        if (ArchiveService.IsArchiving)
-        {
-            ArchivalWarning.Text = "⚠ Archival in progress";
-            ArchivalWarning.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            ArchivalWarning.Visibility = Visibility.Collapsed;
-        }
-    }
+    private void UpdateStaleDataIndicator() =>
+        StaleDataIndicator.Update(LastRefreshedIndicator, ArchivalWarning, _lastRefreshed);
 
     #endregion
 
@@ -398,8 +386,7 @@ public partial class AlertsHistoryTab : UserControl
     private void AlertsDataGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         var selected = AlertsDataGrid.SelectedItems.OfType<AlertHistoryRow>().ToList();
-        var liveCount = selected.Count(a => !a.IsArchived);
-        DismissSelectedButton.IsEnabled = liveCount > 0 && !_dismissInFlight;
+        DismissSelectedButton.IsEnabled = selected.Count > 0 && !_dismissInFlight;
     }
 
     /* #5650: a dismiss can wait up to 30 s for the local database (LocalDataService.OpenUserWriteConnectionAsync) while
@@ -423,7 +410,14 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private async void DismissSelected_Click(object sender, RoutedEventArgs e)
+    private async void DismissSelected_Click(object sender, RoutedEventArgs e) => await DismissSelectedAsync();
+
+    /// <summary>The confirmation prompt Dismiss All asks. A property so a test answers it without a modal box.</summary>
+    internal Func<string, string, MessageBoxButton, MessageBoxImage, MessageBoxResult> ConfirmPrompt { get; set; } = MessageBox.Show;
+
+    /// <summary>Dismiss Selected, archived rows included (#7160): the keyed write puts an archived key in the dismissed_archive_alerts
+    /// sidecar, and the view then hides it, the way the window write has always hidden archived rows for Dismiss All.</summary>
+    internal async System.Threading.Tasks.Task DismissSelectedAsync()
     {
         if (_dataService == null || _dismissInFlight) return;
 
@@ -433,44 +427,20 @@ public partial class AlertsHistoryTab : UserControl
 
         if (selected.Count == 0) return;
 
-        var liveAlerts = selected.Where(a => !a.IsArchived).ToList();
-        var archivedCount = selected.Count - liveAlerts.Count;
-
-        if (liveAlerts.Count == 0)
-        {
-            MessageBox.Show(
-                "The selected alert(s) have been archived and cannot be dismissed.",
-                "Cannot Dismiss",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
-
-        if (archivedCount > 0)
-        {
-            var confirmResult = MessageBox.Show(
-                $"{archivedCount} of {selected.Count} selected alert(s) have been archived and cannot be dismissed.\n\n" +
-                $"Dismiss the remaining {liveAlerts.Count} alert(s)?",
-                "Partial Dismiss",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-            if (confirmResult != MessageBoxResult.Yes) return;
-        }
-
         SetDismissInFlight(true);
         try
         {
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(liveAlerts));
-            if (affected < liveAlerts.Count && App.LogAlertDismissals)
+            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAlertsAsync(selected));
+            if (affected < selected.Count && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {liveAlerts.Count} live alert(s) were updated");
+                AppLogger.Warn("AlertsHistory", $"Dismiss selected: only {affected} of {selected.Count} alert(s) were updated");
             }
             await LoadAlertsAsync();
 
             /* Clear the matching server tab badge(s) for the servers whose alerts were dismissed,
                matching Dismiss All's behavior (issue #1092). Selected rows can span servers when
                the filter is "all", so acknowledge each distinct server rather than the filter. */
-            foreach (var dismissedServerId in liveAlerts.Select(a => a.ServerId).Distinct())
+            foreach (var dismissedServerId in selected.Select(a => a.ServerId).Distinct())
                 AlertsDismissed?.Invoke(dismissedServerId);
         }
         catch (TimeoutException ex)
@@ -496,32 +466,29 @@ public partial class AlertsHistoryTab : UserControl
         }
     }
 
-    private async void DismissAll_Click(object sender, RoutedEventArgs e)
+    /// <summary>Whether Dismiss All must dismiss the rows on screen by key (a column filter is set or the last read hit the
+    /// cap) rather than the whole window (#7160).</summary>
+    internal bool DismissAllUsesShownRows()
+        => AlertDismissScope.UseShownRows(_filterManager?.AnyFilterActive == true, _lastReadRowCount, RowCap);
+
+    private async void DismissAll_Click(object sender, RoutedEventArgs e) => await DismissAllAsync();
+
+    internal async System.Threading.Tasks.Task DismissAllAsync()
     {
         if (_dataService == null || _dismissInFlight) return;
 
         var allAlerts = (AlertsDataGrid.ItemsSource as IEnumerable<AlertHistoryRow>)?.ToList();
         if (allAlerts == null || allAlerts.Count == 0) return;
 
-        var liveCount = allAlerts.Count(a => !a.IsArchived);
-        var archivedCount = allAlerts.Count - liveCount;
+        /* #7160: the window write ignores column filters and the row cap, so with either in play it would dismiss alerts
+           the grid never showed. Then dismiss the rows on screen by key, the way Dismiss Selected does. */
+        var dismissShownRows = DismissAllUsesShownRows();
 
-        if (liveCount == 0)
-        {
-            MessageBox.Show(
-                "All visible alerts have been archived and cannot be dismissed.",
-                "Cannot Dismiss",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
+        /* Archived rows are dismissed too (#7160): both paths hide them (the window write and the keyed write each put them in the
+           dismissed_archive_alerts sidecar), so the count asked about is the count dismissed. */
+        var message = $"Dismiss {allAlerts.Count} alert(s)?\n\nDismissed alerts are hidden from this view but remain in the database.";
 
-        var message = $"Dismiss {liveCount} alert(s)?";
-        if (archivedCount > 0)
-            message += $"\n\n{archivedCount} archived alert(s) will remain visible.";
-        message += "\n\nDismissed alerts are hidden from this view but remain in the database.";
-
-        var result = MessageBox.Show(
+        var result = ConfirmPrompt(
             message,
             "Dismiss All Alerts",
             MessageBoxButton.YesNo,
@@ -535,15 +502,26 @@ public partial class AlertsHistoryTab : UserControl
             /* The same window the grid read (#5562): a range that ended in the past dismisses only the rows up to its end. */
             var (sinceUtc, untilUtc) = GetSelectedWindow();
             int? serverId = GetSelectedServerId();
-            var affected = await System.Threading.Tasks.Task.Run(() => _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
-            if (affected < liveCount && App.LogAlertDismissals)
+            var shownRows = dismissShownRows ? allAlerts : null;
+            var affected = await System.Threading.Tasks.Task.Run(() => shownRows != null
+                ? _dataService.DismissAlertsAsync(shownRows, "DismissAllShown")
+                : _dataService.DismissAllVisibleAlertsWindowAsync(sinceUtc, untilUtc, serverId));
+            if (affected < allAlerts.Count && App.LogAlertDismissals)
             {
-                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {liveCount} live alert(s) were updated");
+                AppLogger.Warn("AlertsHistory", $"Dismiss all: only {affected} of {allAlerts.Count} alert(s) were updated");
             }
             await LoadAlertsAsync();
 
             /* Clear the matching server tab badge(s) so the indicator matches the cleared list (issue #1092). */
-            AlertsDismissed?.Invoke(serverId);
+            if (shownRows != null)
+            {
+                foreach (var dismissedServerId in shownRows.Select(a => a.ServerId).Distinct())
+                    AlertsDismissed?.Invoke(dismissedServerId);
+            }
+            else
+            {
+                AlertsDismissed?.Invoke(serverId);
+            }
         }
         catch (TimeoutException ex)
         {
@@ -589,19 +567,53 @@ public partial class AlertsHistoryTab : UserControl
     {
         if (sender is not DataGrid) return;
 
-        // Walk up the visual tree from the click target to find the DataGridRow
-        var source = e.OriginalSource as DependencyObject;
-        while (source != null && source is not DataGridRow && source is not DataGridColumnHeader)
-            source = System.Windows.Media.VisualTreeHelper.GetParent(source);
-
-        // Ignore clicks on column headers or outside rows
-        if (source is not DataGridRow row) return;
+        // Ignore clicks on column headers, the scrollbar or outside rows (#7210)
+        if (DataGridRowHit.RowOf(e.OriginalSource) is not { } row) return;
         if (row.DataContext is not AlertHistoryRow item) return;
 
+        ShowDetail(item);
+    }
+
+    /// <summary>
+    /// Opens the Alert Details window. #7084 part 4: an engine alert's detail lists the findings that attached to it instead of
+    /// paging, read when it opens. A failed read leaves the list off: the rest of the detail is the row's own and is complete
+    /// without it.
+    /// </summary>
+    private async void ShowDetail(AlertHistoryRow item)
+    {
+        IReadOnlyList<string>? attached = null;
+        if (_dataService is { } dataService && OpenEngineAlerts.IsAttachable(item.MetricName))
+        {
+            try
+            {
+                /* The read takes the DuckDB read lock before its first await and DuckDB.NET's async methods complete
+                   synchronously, so awaited straight from this handler it would wait on archival or compaction and then
+                   run the query on the dispatcher. Task.Run keeps both off the UI thread (#7180). */
+                attached = await System.Threading.Tasks.Task.Run(() => dataService.GetAttachedFindingsAsync(item));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("AlertDetail", $"Could not read the findings attached to {item.MetricName}: {ex.Message}");
+            }
+        }
+
         var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
+        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore, attached);
         if (owner != null) detailWindow.Owner = owner;
-        detailWindow.ShowDialog();
+        ShowDetailDialog(detailWindow, Dispatcher);
+    }
+
+    /// <summary>
+    /// #7554: shows the Alert Details window, and when its link was clicked runs the link's action only after the dialog has closed
+    /// and focus has gone back to the grid, at input priority so the tab it selects is not taken back by that focus change.
+    /// </summary>
+    internal static void ShowDetailDialog(Windows.AlertDetailWindow window, Dispatcher dispatcher)
+    {
+        window.ShowDialog();
+        if (window.DeferredOpen is { } open)
+        {
+            dispatcher.BeginInvoke(DispatcherPriority.Input, open);
+        }
     }
 
     private void ViewAlertDetails_Click(object sender, RoutedEventArgs e)
@@ -610,10 +622,7 @@ public partial class AlertsHistoryTab : UserControl
         var dataGrid = FindParentDataGrid(menuItem);
         if (dataGrid?.SelectedItem is not AlertHistoryRow item) return;
 
-        var owner = Window.GetWindow(this);
-        var detailWindow = new Windows.AlertDetailWindow(item, FullChainOpener?.Invoke(item), DetailWindowSizeStore);
-        if (owner != null) detailWindow.Owner = owner;
-        detailWindow.ShowDialog();
+        ShowDetail(item);
     }
 
     private async void MuteThisAlert_Click(object sender, RoutedEventArgs e)

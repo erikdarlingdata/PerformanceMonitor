@@ -28,8 +28,9 @@ dotnet run -p:StorageProject=/tmp/pm-vX.Y.Z/Darling/PerformanceMonitor.Darling.S
   -- ../../Darling.Tests/Fixtures/migration-ladder-vX.Y.Z.sql
 ```
 
-then point `MigrationUpgradeLadderLiveTests.FixtureRelativePath` at the new file and retire the old
-one (keeping more than one previous release is fine too — each is one more `[Fact]`).
+then keep the file beside the older ones. `MigrationUpgradeLadderLiveTests` runs every
+`migration-ladder-v*.sql` file in that folder as one test case, so no edit to the test is needed.
+Do not retire the old files: an older file replays more rungs, and it finds more defects.
 
 ## 2. Cut time: previous release image, same volume (the literal operator path)
 

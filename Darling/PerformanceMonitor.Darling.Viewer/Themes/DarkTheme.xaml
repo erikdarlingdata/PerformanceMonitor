@@ -808,6 +808,7 @@
     <Style TargetType="DataGrid">
         <Setter Property="helpers:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
         <Setter Property="helpers:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
+        <Setter Property="helpers:DataGridFillColumn.Enabled" Value="True"/>
         <Setter Property="helpers:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
         <Setter Property="Background" Value="{StaticResource BackgroundDarkBrush}"/>
         <Setter Property="Foreground" Value="{StaticResource ForegroundBrush}"/>

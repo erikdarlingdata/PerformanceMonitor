@@ -12,10 +12,24 @@ name: Darling upgrade shapes
 #       the folder's own write entry, and prints the move steps
 # U1, U2 and U3 run both install-darling.ps1 and upgrade-darling.ps1 as separate legs; U4 runs install-darling.ps1.
 #
-# Triggers: the nightly (as a reusable workflow) and a manual dispatch. It no longer runs on pull requests (#6656):
-# the pull request workflow (pr.yml) is the one per-PR CI system, so these legs are a nightly and on-demand check.
+# #6982: the scripts under test run in Windows PowerShell 5.1 (what the MSI and an operator's elevated prompt start), and
+# three legs run them in PowerShell 7, where an operator on the zip path may choose to run them: U1-install-pwsh,
+# U1-upgrade-pwsh and U2-upgrade-pwsh, on windows-2025 only. U1-upgrade-pwsh and U2-upgrade-pwsh run `upgrade-darling.ps1
+# -Check` first. The released base installs always run in 5.1, as a release's own install did.
+#
+# Triggers: the nightly (as a reusable workflow) and a manual dispatch run every leg. A pull request that changes the scripts
+# or this check runs ONLY the three PowerShell 7 legs (#6982); #6656 took the full set off pull requests, because the pull
+# request workflow (pr.yml) is the one per-PR CI system and fourteen legs per PR cost too much. The pull_request trigger
+# is path-filtered, so a pull request that touches none of those paths gets no check from this workflow at all, and the
+# branch rule waits on `CI result` (a status pr.yml sets), not on this workflow, so a skipped run blocks nothing (the
+# darling-msi.yml workflow is the same shape).
 # Never add `pull_request_target`: the legs run the checked-out scripts, which must not get a write token or secrets.
 on:
+  pull_request:
+    paths:
+      - 'Darling/tools/*.ps1'
+      - '.github/scripts/darling-upgrade-shapes.ps1'
+      - '.github/workflows/darling-upgrade-shapes.yml'
   workflow_call:
   workflow_dispatch:
 
@@ -43,7 +57,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ windows-2022, windows-2025 ]
-        leg: [ U1-install, U1-upgrade, U2-install, U2-upgrade, U3-install, U3-upgrade, U4-install ]
+        # A pull request runs the first list (the PowerShell 7 legs), every other trigger the second (all ten legs).
+        leg: ${{ fromJSON(github.event_name == 'pull_request' && '["U1-install-pwsh","U1-upgrade-pwsh","U2-upgrade-pwsh"]' || '["U1-install","U1-upgrade","U2-install","U2-upgrade","U3-install","U3-upgrade","U4-install","U1-install-pwsh","U1-upgrade-pwsh","U2-upgrade-pwsh"]') }}
+        # The PowerShell 7 legs run on windows-2025 only.
+        exclude:
+          - { os: windows-2022, leg: U1-install-pwsh }
+          - { os: windows-2022, leg: U1-upgrade-pwsh }
+          - { os: windows-2022, leg: U2-upgrade-pwsh }
     env:
       GH_TOKEN: ${{ github.token }}
     steps:

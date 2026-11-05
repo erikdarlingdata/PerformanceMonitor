@@ -336,7 +336,7 @@ public sealed class InvestigationPracticeLiveTests
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>("{}"),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };
@@ -570,7 +570,7 @@ public sealed class InvestigationPracticeGrantLiveTests
 {
     /* #1776 own-store: each test mints its own scratch database through ScratchPostgres; the fixed admin/viewer/mcp roles
        are why the class sits in the pg-cluster-roles collection. */
-    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "mcp"];
+    private static readonly string[] s_cleanupRoles = ["admin", "viewer", "web", "mcp"];
     private const int ServerId = 7_591_802;
     private const string ServerName = "LcPracticeGrantSrv";
 
@@ -689,7 +689,8 @@ public sealed class InvestigationPracticeGrantLiveTests
                 .Replace("ON DATABASE darling", $"ON DATABASE \"{scratch.DatabaseName}\"", StringComparison.Ordinal)
                 .Replace("CHANGE_ME_ADMIN_PASSWORD", AdminPassword, StringComparison.Ordinal)
                 .Replace("CHANGE_ME_VIEWER_PASSWORD", ViewerPassword, StringComparison.Ordinal)
-                .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal);
+                .Replace("CHANGE_ME_MCP_PASSWORD", McpPassword, StringComparison.Ordinal)
+                .Replace("CHANGE_ME_WEB_PASSWORD", "ScriptWeb6991", StringComparison.Ordinal);
             await ExecAsync(owner, script, ct);
             return (AdminPassword, ViewerPassword);
         });

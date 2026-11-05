@@ -67,7 +67,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                     CollectionIdGenerator.Next(), r.T, ServerId, ServerName, r.Commit, r.Rollback, r.Read, r.Hit, r.TempFiles, r.TempBytes, r.Deadlocks);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgDatabaseTrendAsync(ServerId, start, end, ct);
 
@@ -105,7 +105,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 await SeedStatementAsync(connection, ct, T0.AddMinutes(i), 88, deltaCalls: 5, deltaMs: 5.0, interval: 60);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgQueryDurationTrendAsync(ServerId, start, end, ct);
 
@@ -145,7 +145,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                     CollectionIdGenerator.Next(), T0.AddMinutes(i), ServerId, ServerName, 10L * i, 100L * i);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgWaitTrend(postgres, ServerName, null, Hours, AsOfText, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgWaitTrendAsync(ServerId, start, end, ct);
 
@@ -160,9 +160,41 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 var v = read.Points[i];
                 Assert.Equal(Stamp(v.CollectionTimeUtc), Stamp(w.GetProperty("collection_time")));
                 Assert.Equal(w.GetProperty("sample_count").GetInt64(), v.SampleCount);
-                Assert.Equal(w.GetProperty("backend_count").GetInt32(), v.BackendCount);
+                var webBackends = w.GetProperty("backend_count");
+                Assert.Equal(webBackends.ValueKind == JsonValueKind.Null ? (int?)null : webBackends.GetInt32(), v.BackendCount);
                 Near(w.GetProperty("estimated_wait_ms_per_second"), v.EstimatedWaitMsPerSecond, 3);
             }
+        });
+    }
+
+    /// <summary>#7428: the extension's backend_count is a running total since the profile started, so the read gives a figure only for an
+    /// interval that gained samples. A flat interval is null rather than the stored total, and the next interval that gains samples reads it.</summary>
+    [Fact]
+    public async Task WaitTrend_BackendCount_IsNullOnAnIntervalWithNoNewSamples()
+    {
+        await RunAsync(async (connection, postgres, viewer, ct) =>
+        {
+            var seeds = new (DateTime T, long Samples, long Backends)[]
+            {
+                (T0, 100, 2),
+                (T0.AddMinutes(1), 100, 5),
+                (T0.AddMinutes(2), 160, 7),
+            };
+            foreach (var s in seeds)
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms) VALUES ($1, $2, $3, $4, 'Lock', 'relation', 1, $5, 1000, $6, 60000)",
+                    CollectionIdGenerator.Next(), s.T, ServerId, ServerName, s.Samples, s.Backends);
+            }
+
+            var (start, end) = Window();
+            var points = await DarlingPgTrendReader.GetWaitTrendAsync(postgres, ServerId, "relation", start, end, ct);
+
+            Assert.Equal(2, points.Count);
+            Assert.Equal(0L, points[0].SampleCount);
+            Assert.Null(points[0].BackendCount);
+            Assert.Equal(60L, points[1].SampleCount);
+            Assert.Equal(7, points[1].BackendCount);
         });
     }
 
@@ -179,7 +211,7 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
                 await SeedIoAsync(connection, ct, T0.AddMinutes(i), "checkpointer", reads: 50 + i, hits: 0);
             }
 
-            var web = Root(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, null, null, Hours, AsOfText, null, TrendBudget.Chart, ct));
+            var web = Root(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, null, null, Hours, AsOfText, null, TrendBudget.Chart, cancellationToken: ct));
             var (start, end) = Window();
             var read = await viewer.GetPgIoTrendAsync(ServerId, start, end, ct);
 

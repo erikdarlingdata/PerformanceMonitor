@@ -3,6 +3,7 @@
    reconstruction); this file only draws what it returns. Every collected value reaches the page as text. */
 
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { withheldDisplayText } from "../mute-context.js";
 import { el, readTool, loadingStrip, errorStrip, emptyStrip, noticeStrip, fmtMs, localTime } from "../util.js";
 
 const NONE_TEXT = "No blocking chain could be rebuilt for this session near this report.";
@@ -43,7 +44,7 @@ function drawNode(n) {
   if (n.sql_text) {
     const details = el("details", { class: "block-chain-sql" });
     details.appendChild(el("summary", { text: n.sql_text_truncated ? "SQL (cut)" : "SQL" }));
-    details.appendChild(el("pre", { text: n.sql_text }));
+    details.appendChild(el("pre", { text: withheldDisplayText(n.sql_text) }));
     item.appendChild(details);
   }
   const children = Array.isArray(n.children) ? n.children : [];
@@ -128,7 +129,7 @@ export function blockChainCell(server, row) {
     while (host.firstChild) host.removeChild(host.firstChild);
     const button = el("button", {
       type: "button",
-      class: "grid-tool",
+      class: "btn grid-tool",
       text: entry.open ? "Hide block chain" : "Block chain",
       "aria-expanded": entry.open ? "true" : "false",
       title: "Show the lead blocker and the sessions it blocks, for this report",

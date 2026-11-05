@@ -276,7 +276,7 @@ internal static class DarlingConfigHistoryReader
         FROM v_database_scoped_config
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_database_scoped_config WHERE server_id = $1)
-        ORDER BY database_name, configuration_name
+        ORDER BY lower(database_name), database_name, lower(configuration_name), configuration_name
         """;
 
     public static async Task<LatestSnapshot<DatabaseScopedConfigReadRow>> GetLatestDatabaseScopedConfigAsync(
@@ -318,7 +318,7 @@ internal static class DarlingConfigHistoryReader
         FROM v_query_store_health
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
-        ORDER BY database_name
+        ORDER BY lower(database_name), database_name
         """;
 
     public static async Task<LatestSnapshot<QueryStoreHealthReadRow>> GetLatestQueryStoreHealthAsync(

@@ -375,6 +375,92 @@ public sealed class TestMapProducerGuardTests : IDisposable
         }
     }
 
+    /// <summary>#7025: a test that reads `Svc.cs` reads its `Svc.Part.cs` partial files too (`RepoFile.ReadRepoFile` joins
+    /// them), so the partials carry the same text pattern; a test that names a partial alone does not gain the main file.</summary>
+    [Fact]
+    public void ATestThatReadsAMainFile_ReadsItsPartialFiles_ButANamedPartialStaysAlone()
+    {
+        Write("tracked.txt", string.Join("\n", new[]
+        {
+            "Darling/Darling.Tests/MainReaderTests.cs", "Darling/Darling.Tests/PartReaderTests.cs",
+            "Darling/PerformanceMonitor.Darling.Service/Svc.cs", "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs",
+        }));
+        Write("Darling/Darling.Tests/MainReaderTests.cs", """
+            public sealed class MainReaderTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.cs"); }
+            }
+            """);
+        Write("Darling/Darling.Tests/PartReaderTests.cs", """
+            public sealed class PartReaderTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Svc.Part.cs"); }
+            }
+            """);
+        Write("shards/a/shard-darling-0.json", ShardJson("darling", 0,
+            ("Ns.MainReaderTests", Array.Empty<string>(), 0.1, 1, 0),
+            ("Ns.PartReaderTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("shards/b/shard-lite-0.json", ShardJson("lite", 0, ("Ns.BetaTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("Lite.Tests/BetaTests.cs", "public sealed class BetaTests { public void Runs() { } }\n");
+
+        var (code, output, map) = Build();
+        Assert.True(code == 0, output);
+        using (map)
+        {
+            var patterns = map!.RootElement.GetProperty("text_patterns");
+            List<string?> Of(string cls) => patterns.GetProperty(cls).EnumerateArray().Select(e => e.GetString()).ToList();
+
+            Assert.Equal(
+                new List<string?>
+                {
+                    /* The map sorts a class's patterns, ordinal: `Svc.Part.cs` sorts before `Svc.cs`. */
+                    "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs",
+                    "Darling/PerformanceMonitor.Darling.Service/Svc.cs",
+                },
+                Of("MainReaderTests"));
+            Assert.Equal(new List<string?> { "Darling/PerformanceMonitor.Darling.Service/Svc.Part.cs" }, Of("PartReaderTests"));
+        }
+    }
+
+    /// <summary>#7027: a test that reads `pages/server-tabs.js` reads the files in `pages/server-tabs/` too (`RepoFile.ReadRepoFile`
+    /// joins them), so a change to a tab file selects what a change to the main file selects. Any `<name>/x.js` with a tracked `<name>.js` beside it
+    /// counts, by name, with no module list to keep in step: the folder of another module (`other/`) is joined the same way.</summary>
+    [Fact]
+    public void ATestThatReadsAPageModule_ReadsTheFilesInTheFolderBesideIt()
+    {
+        const string Pages = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/";
+        Write("tracked.txt", string.Join("\n", new[]
+        {
+            "Darling/Darling.Tests/TabsReaderTests.cs",
+            Pages + "server-tabs.js", Pages + "server-tabs/shared.js", Pages + "server-tabs/sql-waits.js",
+            Pages + "other.js", Pages + "other/inner.js",
+        }));
+        Write("Darling/Darling.Tests/TabsReaderTests.cs", """
+            public sealed class TabsReaderTests
+            {
+                public void Reads() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"); }
+                public void ReadsOther() { var s = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "other.js"); }
+            }
+            """);
+        Write("shards/a/shard-darling-0.json", ShardJson("darling", 0, ("Ns.TabsReaderTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("shards/b/shard-lite-0.json", ShardJson("lite", 0, ("Ns.BetaTests", Array.Empty<string>(), 0.1, 1, 0)));
+        Write("Lite.Tests/BetaTests.cs", "public sealed class BetaTests { public void Runs() { } }\n");
+
+        var (code, output, map) = Build();
+        Assert.True(code == 0, output);
+        using (map)
+        {
+            var patterns = map!.RootElement.GetProperty("text_patterns").GetProperty("TabsReaderTests")
+                .EnumerateArray().Select(e => e.GetString()).ToList();
+
+            Assert.Contains(Pages + "server-tabs.js", patterns);
+            Assert.Contains(Pages + "server-tabs/shared.js", patterns);
+            Assert.Contains(Pages + "server-tabs/sql-waits.js", patterns);
+            Assert.Contains(Pages + "other.js", patterns);
+            Assert.Contains(Pages + "other/inner.js", patterns);
+        }
+    }
+
     [Fact]
     public void TheSummary_NamesTheHoles_AndTheSize()
     {

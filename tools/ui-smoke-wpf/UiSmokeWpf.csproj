@@ -13,7 +13,8 @@
     <IsTestProject>true</IsTestProject>
     <RootNamespace>UiSmokeWpf</RootNamespace>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CS4014;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;xUnit1051</NoWarn>
+    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through Lite) have no .NET 10 build. -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

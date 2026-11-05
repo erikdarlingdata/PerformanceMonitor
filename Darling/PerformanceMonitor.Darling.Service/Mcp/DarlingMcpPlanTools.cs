@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpPlanTools
 {
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes query_hash's latest plan. No plan: not_collected if the engine can't collect query_stats, else unavailable. " +
+        "Analyzes query_hash's latest plan. No plan: not_collected on Lite or if engine lacks query_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
@@ -89,7 +89,7 @@ public sealed class DarlingMcpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
-        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected on Lite or if engine lacks procedure_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
         "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
         "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
@@ -379,7 +379,7 @@ public sealed class DarlingMcpPlanTools
     /// #4348: said when the statement filter withheld a plan whole, so the analysis is skipped instead of reading the
     /// placeholder as XML and reporting a parse error. Worded once for the four analysis tools.
     /// </summary>
-    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter (#4348), so it was not analysed.";
+    internal const string WithheldPlanMessage = "This plan was withheld by the statement filter, which hides text it treats as sensitive, so it was not analysed.";
 
     /// <summary>
     /// #4348: the one way every plan-analysis tool here turns plan XML into its result. The statement filter runs on

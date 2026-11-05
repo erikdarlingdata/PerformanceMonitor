@@ -362,7 +362,7 @@ public sealed class WebDataStartNoteTests
     }
 
     /// <summary>
-    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>table()</c> descriptors, no
+    /// #4966: the query heatmap and the Query Store regressions panels are grids (<c>tablePanel()</c> descriptors, no
     /// <c>noteKey</c>) and neither read is in <see cref="WebDataStartNote.TableByRead"/>, so the page draws the tool's own
     /// <c>truncation_note</c> above each, through <c>windowFloorStrip</c>, when the answer says <c>window_truncated: true</c>.
     /// It is the MCP sentence as sent: it names no instant (the regressions tail says "effective_start" and "baseline_end"
@@ -389,8 +389,8 @@ public sealed class WebDataStartNoteTests
         }
         else
         {
-            var open = tabs.IndexOf("table(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
-            Assert.True(open >= 0, read + " is no longer a table() panel on a server tab");
+            var open = tabs.IndexOf("tablePanel(\n        \"" + title + "\",\n        \"" + read + "\",", StringComparison.Ordinal);
+            Assert.True(open >= 0, read + " is no longer a tablePanel() panel on a server tab");
             call = tabs[open..tabs.IndexOf("\n      ),", open, StringComparison.Ordinal)];
         }
         Assert.DoesNotContain("truncation_note", call, StringComparison.Ordinal);
@@ -547,7 +547,7 @@ public sealed class WebDataStartNoteTests
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorTableTruncated", out var r)) return;
 
         var notice = Assert.Single(Strings(r, "notices"));
-        Assert.StartsWith("partial window: this panel's data starts at 2026-01-02 00:00 UTC", notice, StringComparison.Ordinal);
+        Assert.StartsWith("Partial window: this panel's data starts at 2026-01-02 00:00 UTC", notice, StringComparison.Ordinal);
         Assert.Single(Strings(r, "fetches"));
         Assert.Empty(Strings(r, "errors"));
     }
@@ -574,7 +574,7 @@ public sealed class WebDataStartNoteTests
     {
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorOwnNoteOnce", out var r)) return;
 
-        Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
+        Assert.StartsWith("Partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -594,7 +594,7 @@ public sealed class WebDataStartNoteTests
 
         Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
         var notice = Assert.Single(Strings(r, "notices"));
-        Assert.Equal(InTheBrowsersZone(answer["truncation_note"]!.GetValue<string>(), r.GetProperty("local")), notice);
+        Assert.Equal(ThePagesSentence(answer, r.GetProperty("local")), notice);
         Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
         Assert.Equal("No waiting tasks were captured in this window.", Assert.Single(Strings(r, "empties")));
 
@@ -609,7 +609,7 @@ public sealed class WebDataStartNoteTests
     {
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorWaitStats", out var r)) return;
 
-        Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
+        Assert.StartsWith("Partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -617,7 +617,7 @@ public sealed class WebDataStartNoteTests
     {
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorStatDraws", out var r)) return;
 
-        Assert.StartsWith("partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
+        Assert.StartsWith("Partial window:", Assert.Single(Strings(r, "notices")), StringComparison.Ordinal);
         Assert.Empty(Strings(r, "errors"));
     }
 
@@ -634,7 +634,8 @@ public sealed class WebDataStartNoteTests
     /// answers the three note fields, and the panels that draw them are exactly the ones named. Every panel of these
     /// fanouts shows the window's figures (the stat tiles are window totals, the grids window aggregates or trend
     /// points), so none opts out and the stat tile draws beside its grid. The sibling reads on the same tab answer
-    /// nothing and draw none.</summary>
+    /// nothing and draw none. The four trend reads (#7394) are charts, and a chart draws no data-start note (windowFloorStrip): its time axis
+    /// already shows where the data begins, so they expect none.</summary>
     [Theory]
     [InlineData("activity", "get_pg_blocking", "Blocking Sampling|Blocking Chains|Lock Cycles")]
     [InlineData("activity", "get_pg_top_queries", "Statement Evictions|Top Query Shapes")]
@@ -642,10 +643,10 @@ public sealed class WebDataStartNoteTests
     [InlineData("vacuum", "get_pg_session_states", "Sessions Holding a Transaction Open|By Session")]
     [InlineData("io", "get_pg_io_stats", "I/O Summary|By Backend, Object and Context")]
     [InlineData("replication", "get_pg_replication_stats", "Connected Replicas")]
-    [InlineData("activity", "get_pg_database_trend", "Database Trend")]
-    [InlineData("activity", "get_pg_query_duration_trend", "Query Duration Trend")]
-    [InlineData("waits", "get_pg_wait_trend", "Wait Trend")]
-    [InlineData("io", "get_pg_io_trend", "I/O Trend")]
+    [InlineData("activity", "get_pg_database_trend", "")]
+    [InlineData("activity", "get_pg_query_duration_trend", "")]
+    [InlineData("waits", "get_pg_wait_trend", "")]
+    [InlineData("io", "get_pg_io_trend", "")]
     [InlineData("activity", "get_pg_plans", "Captured Plans")]
     [InlineData("overview", "get_pg_autovacuum_health", "Autovacuum Backlog")]
     [InlineData("vacuum", "get_pg_autovacuum_health", "Autovacuum Backlog|Tables Behind")]
@@ -667,7 +668,7 @@ public sealed class WebDataStartNoteTests
         foreach (var heading in expected)
         {
             var notice = Assert.Single(notices, n => n.StartsWith(heading, StringComparison.Ordinal));
-            Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+            Assert.Contains("Partial window:", notice, StringComparison.Ordinal);
         }
 
         Assert.Empty(Strings(r, "errors"));
@@ -710,9 +711,9 @@ public sealed class WebDataStartNoteTests
         }
     }
 
-    /// <summary>The same decision in the source text, so it holds without Node: none of the eleven PostgreSQL window reads
+    /// <summary>The same decision in the source text, so it holds without Node: none of the seven PostgreSQL window reads that draw grids or tiles
     /// opts a panel out of the note, because each one shows the window's own figures. The check reads only the spec block of
-    /// each listed read (its <c>fanout(</c> or <c>table(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
+    /// each listed read (its <c>fanout(</c> or <c>tablePanel(</c> call), so another PostgreSQL panel can opt out on its own.</summary>
     [Fact]
     public void NoPostgresWindowPanel_OptsOutOfTheNote()
     {
@@ -722,7 +723,7 @@ public sealed class WebDataStartNoteTests
         foreach (var read in new[]
         {
             "get_pg_top_queries", "get_pg_blocking", "get_pg_database_stats", "get_pg_session_states", "get_pg_io_stats",
-            "get_pg_replication_stats", "get_pg_database_trend", "get_pg_query_duration_trend", "get_pg_wait_trend", "get_pg_io_trend", "get_pg_plans",
+            "get_pg_replication_stats", "get_pg_plans",
         })
         {
             var at = postgres.IndexOf("\"" + read + "\"", StringComparison.Ordinal);
@@ -730,7 +731,7 @@ public sealed class WebDataStartNoteTests
             Assert.Equal(at, postgres.LastIndexOf("\"" + read + "\"", StringComparison.Ordinal));
 
             /* The block: from the line naming the read to the first later line indented six spaces or fewer, the close of the
-               call (a fanout( opens at six, its panels sit deeper; a table( opens at six and names its read at eight). */
+               call (a fanout( opens at six, its panels sit deeper; a tablePanel( opens at six and names its read at eight). */
             var lines = postgres[at..].Split('\n');
             var block = new List<string> { lines[0] };
             foreach (var line in lines.Skip(1))
@@ -770,7 +771,7 @@ public sealed class WebDataStartNoteTests
 
         var notice = Assert.Single(Strings(r, "notices"));
         Assert.StartsWith(heading, notice, StringComparison.Ordinal);
-        Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        Assert.Contains("Partial window:", notice, StringComparison.Ordinal);
         Assert.Empty(Strings(r, "errors"));
     }
 
@@ -782,7 +783,7 @@ public sealed class WebDataStartNoteTests
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmpty", out var r)) return;
         var notice = Assert.Single(Strings(r, "notices"));
         Assert.StartsWith("Plan Corrections", notice, StringComparison.Ordinal);
-        Assert.Contains("partial window:", notice, StringComparison.Ordinal);
+        Assert.Contains("Partial window:", notice, StringComparison.Ordinal);
         Assert.DoesNotContain(Strings(r, "notices"), n => n.StartsWith("Automatic Tuning", StringComparison.Ordinal));
 
         if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorPlanCorrectionsEmptyUntruncated", out var q)) return;
@@ -854,7 +855,7 @@ public sealed class WebDataStartNoteTests
 
         /* #4966: the empty envelope carries the note too, drawn above its message, and a read's answer is composed in the
            browser's zone for the envelope as it is for rows. */
-        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip(emptyHeadline(desc, res))]);", panels, StringComparison.Ordinal);
+        Assert.Contains("mount(body, [kept, windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);", panels, StringComparison.Ordinal);
         Assert.Contains("res.kind !== \"data\" && res.kind !== \"empty\"", util, StringComparison.Ordinal);
 
         Assert.Contains("windowFloorStrip(res.data, spec)", tabs, StringComparison.Ordinal);
@@ -904,11 +905,22 @@ public sealed class WebDataStartNoteTests
 
     private const string NewYork = "America/New_York";
 
-    /// <summary>The server's sentence with each UTC instant it names swapped for what the page's own <c>localTime</c>
-    /// makes of that instant (the harness reports it per instant): what the page must draw when it composes the note in
-    /// the browser's zone, with the wording the server's sentence has.</summary>
-    private static string InTheBrowsersZone(string sentence, JsonElement local) =>
-        Regex.Replace(sentence, @"\d{4}-\d{2}-\d{2} \d{2}:\d{2}( UTC)?", m => local.GetProperty(m.Value[..16]).GetString()!);
+    /// <summary>The page opens a sentence with a capital: the service writes "partial window:" in lowercase for an MCP client, and the
+    /// notice strip draws "Partial window:" (#7416).</summary>
+    private static string StartOfSentence(string sentence) =>
+        sentence.StartsWith("partial window:", StringComparison.Ordinal) ? "Partial window:" + sentence["partial window:".Length..] : sentence;
+
+    /// <summary>What the page draws when it composes the note again from the answer's instants, in the browser's zone (#7416:
+    /// the page's wording, not the service's. The grid note names the window you asked for, the panel note names where the data starts).</summary>
+    private static string ThePagesSentence(JsonObject answer, JsonElement local)
+    {
+        string At(string key) => local.GetProperty(answer[key]!.GetValue<string>()).GetString()!;
+        return answer["oldest_shown_utc"] is not null
+            ? "Partial window: this grid shows only the newest rows, back to " + At("oldest_shown_utc") + ", because it stops at its row limit. "
+              + "The window you asked for runs from " + At("window_start_utc") + " to " + At("window_end_utc") + "."
+            : "Partial window: this panel's data starts at " + At("data_start_utc") + ", after the window's start at " + At("window_start_utc") + ". "
+              + "It runs to " + At("window_end_utc") + ".";
+    }
 
     /// <summary>What a coverage note's answer carries: the sentence the server builds, and the three instants as fields.</summary>
     private static JsonObject CoverageAnswer() => new()
@@ -936,7 +948,7 @@ public sealed class WebDataStartNoteTests
 
         Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
         var notice = Assert.Single(Strings(r, "notices"));
-        Assert.Equal(InTheBrowsersZone(answer["truncation_note"]!.GetValue<string>(), r.GetProperty("local")), notice);
+        Assert.Equal(ThePagesSentence(answer, r.GetProperty("local")), notice);
         Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
         Assert.Empty(Strings(r, "errors"));
     }
@@ -951,7 +963,7 @@ public sealed class WebDataStartNoteTests
         var sentence = JsonNode.Parse(answered)!["truncation_note"]!.GetValue<string>();
         Assert.NotEqual(0, r.GetProperty("tzOffset").GetInt32());
         var notice = Assert.Single(Strings(r, "notices"));
-        Assert.Equal(InTheBrowsersZone(sentence, r.GetProperty("local")), notice);
+        Assert.Equal(ThePagesSentence(JsonNode.Parse(answered)!.AsObject(), r.GetProperty("local")), notice);
         Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
     }
 
@@ -983,7 +995,7 @@ public sealed class WebDataStartNoteTests
 
         var sentence = answer["truncation_note"]!.GetValue<string>();
         var notice = Assert.Single(Strings(r, "notices"));
-        Assert.Equal(InTheBrowsersZone(sentence, r.GetProperty("local")), notice);
+        Assert.Equal(ThePagesSentence(JsonNode.Parse(answered)!.AsObject(), r.GetProperty("local")), notice);
         Assert.DoesNotContain("UTC", notice, StringComparison.Ordinal);
     }
 
@@ -1004,7 +1016,7 @@ public sealed class WebDataStartNoteTests
         foreach (var answer in new[] { none, partial, unreadable })
         {
             if (!WebRangeKeptHistoryBehaviourTests.TryRun("floorLocal:" + NewYork, out var r, answer.ToJsonString())) return;
-            Assert.Equal(answer["truncation_note"]!.GetValue<string>(), Assert.Single(Strings(r, "notices")));
+            Assert.Equal(StartOfSentence(answer["truncation_note"]!.GetValue<string>()), Assert.Single(Strings(r, "notices")));
         }
     }
 

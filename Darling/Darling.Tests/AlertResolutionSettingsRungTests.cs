@@ -100,7 +100,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 rung's live test (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -152,7 +152,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V187 round trips (they mint their own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);
@@ -249,7 +249,7 @@ public sealed class AlertResolutionSettingsRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the #6715 seed round trip (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);
@@ -342,7 +342,7 @@ public sealed class AlertResolutionSettingsRungTests
     private static async Task WithSeededScratchStoreAsync(Func<StoreConfigProvider, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
         {
             await migrate.OpenAsync(ct);

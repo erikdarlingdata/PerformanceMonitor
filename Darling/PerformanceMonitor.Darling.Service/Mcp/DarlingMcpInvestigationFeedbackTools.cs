@@ -51,7 +51,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         {
             if (!Guid.TryParse(request_id, out var source))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             var actor = DarlingMcpInvestigationAdminTools.Actor();
@@ -212,7 +212,7 @@ public sealed class DarlingMcpInvestigationFeedbackTools
         {
             if (!Guid.TryParse(request_id, out var request))
             {
-                return McpHelpers.Refusal("request_id", "The request id is not a request id. Nothing was changed.");
+                return McpHelpers.Refusal("request_id", DarlingWebEndpoints.RequestIdNotGuidText + " Nothing was changed.");
             }
 
             /* The caller is the token (named, or the legacy token), shaped to the author rule as a sign-in name is on the web. */

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -27,42 +28,73 @@ public partial class LocalDataService
     /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
     private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
 
-    private readonly Dictionary<int, (int Count, DateTime AtUtc)> _permissionDeniedCountByServer = new();
+    private readonly Dictionary<int, (List<string> Collectors, DateTime AtUtc)> _permissionDeniedCollectorsByServer = new();
 
     /// <summary>
-    /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
-    /// Collection Health tab header.
+    /// #1591, #7241: the Collection Health tab header's count: how many collectors were refused on their latest attempt after their
+    /// last success. A collector counts when <see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/> says so, the rule
+    /// <c>get_collection_health</c> exposes as <c>denied_since_last_success</c>. So one refused, then successful since, reads 0.
+    /// One refused on every run in the window and never successful reads 1, and so does one that succeeded earlier and has been
+    /// refused on every run since (a revoked grant), from its first refused run. A collector that logged any ERROR in the window
+    /// is not counted, as the rule has it.
     ///
-    /// <para>Deliberately its own narrow COUNT rather than reusing <c>GetCollectionHealthAsync</c>: that one is
-    /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
-    /// invisible until someone thought to look. This runs on every refresh alongside the alert-count badge, so a
-    /// denied collector is discoverable from any tab. Counts collectors, not rows, so one collector failing every
-    /// cycle for a week reads as "1" rather than a meaningless four-figure number.</para>
+    /// <para>Deliberately its own narrow read rather than <c>GetCollectionHealthAsync</c>: that one is per-collector, only runs
+    /// when its tab is selected and aggregates far more than this needs. This runs on every refresh alongside the alert-count badge,
+    /// so a denied collector is discoverable from any tab. One GROUP BY per collector over the 7-day window, with its own short memo.
+    /// Counts collectors, not rows, so one collector failing every cycle for a week reads as "1".</para>
+    ///
+    /// <para><paramref name="isEngineGated"/> names the collectors this server's engine does not run. Those are never counted, as
+    /// Darling's badge does: a collector that does not run here cannot be fixed with a grant. The memo holds the refused collector
+    /// names, so the gate is applied to each answer, and an engine read after the first call is honored.</para>
     /// </summary>
-    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
+    public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, Func<string, bool>? isEngineGated = null)
     {
-        if (_permissionDeniedCountByServer.TryGetValue(serverId, out var cached) &&
-            DateTime.UtcNow - cached.AtUtc < PermissionDeniedCountMemoLifetime)
+        if (!_permissionDeniedCollectorsByServer.TryGetValue(serverId, out var cached) ||
+            DateTime.UtcNow - cached.AtUtc >= PermissionDeniedCountMemoLifetime)
         {
-            return cached.Count;
+            var collectors = await ReadDeniedSinceLastSuccessCollectorsAsync(serverId);
+            cached = (collectors, DateTime.UtcNow);
+            _permissionDeniedCollectorsByServer[serverId] = cached;
         }
 
+        return isEngineGated is null ? cached.Collectors.Count : cached.Collectors.Count(name => !isEngineGated(name));
+    }
+
+    private async Task<List<string>> ReadDeniedSinceLastSuccessCollectorsAsync(int serverId)
+    {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
-SELECT COUNT(DISTINCT collector_name)
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    COUNT(*) FILTER (WHERE status = 'PERMISSIONS') AS permission_denied_count,
+    COUNT(*) FILTER (WHERE status = 'ERROR') AS error_count,
+    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+    MAX(CASE WHEN status = 'PERMISSIONS' THEN collection_time END) AS last_denied_time
 FROM v_collection_log
 WHERE server_id = $1
 AND   collection_time >= $2
-AND   status = 'PERMISSIONS'";
+AND   collector_name <> '{CollectionCycleSkip.CollectorName}'
+GROUP BY collector_name
+HAVING COUNT(*) FILTER (WHERE status = 'PERMISSIONS') > 0";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
-        var scalar = await command.ExecuteScalarAsync();
-        var count = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
-        _permissionDeniedCountByServer[serverId] = (count, DateTime.UtcNow);
-        return count;
+        var denied = new List<string>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var lastSuccess = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var lastDenied = reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4);
+            if (CollectorHealthClassifier.DeniedSinceLastSuccess(
+                    Convert.ToInt64(reader.GetValue(1)), Convert.ToInt64(reader.GetValue(2)), lastSuccess, lastDenied))
+            {
+                denied.Add(reader.GetString(0));
+            }
+        }
+
+        return denied;
     }
 
     /// <summary>
@@ -515,6 +547,7 @@ ORDER BY h.collector_name";
 
         var items = await TimedReadAsync("GetCollectionHealthAsync", timer => ReadCollectionHealthAsync(serverId, timer, cancellationToken));
         await ApplyReadSourceAsync(items, serverId, cancellationToken);
+        await ApplyObservedQuietGapsAsync(items, serverId, cancellationToken);
 
         if (allowMemo)
         {
@@ -567,6 +600,114 @@ LIMIT 1";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             System.Diagnostics.Trace.TraceWarning($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, for the rows the activity quiet bar decides
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>), as <c>(runs, sum of the gaps of an hour or less,
+    /// each longer gap)</c> per collector. The streak starts at the newest run that was not a zero-row SUCCESS (the abandonment
+    /// exclusion is the health read's own) and the first gap starts at that run. $1 server id, $2 window start, then one
+    /// collector name each. The gaps carry no interval, so the rows can be memoized and read at the cadence in force.
+    /// </summary>
+    internal static string ObservedQuietGapsSql(int collectorCount)
+    {
+        var names = string.Join(", ", Enumerable.Range(3, collectorCount).Select(i => "$" + i));
+        var floor = ObservedQuietGaps.GapFloorMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $@"
+WITH w AS
+(
+    SELECT collector_name,
+           collection_time,
+           (status = 'SUCCESS' AND COALESCE(rows_collected, 0) = 0
+            AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}) AS is_zero_row_success
+    FROM v_collection_log
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collector_name IN ({names})
+),
+b AS
+(
+    SELECT collector_name,
+           MAX(collection_time) FILTER (WHERE NOT is_zero_row_success) AS break_time
+    FROM w
+    GROUP BY collector_name
+),
+s AS
+(
+    SELECT w.collector_name,
+           w.collection_time,
+           b.break_time
+    FROM w
+    JOIN b ON b.collector_name = w.collector_name
+    WHERE w.collection_time > b.break_time
+),
+g AS
+(
+    SELECT collector_name,
+           date_diff('microsecond', COALESCE(LAG(collection_time) OVER (PARTITION BY collector_name ORDER BY collection_time), break_time), collection_time)::DOUBLE / 60000000.0 AS gap_minutes
+    FROM s
+)
+SELECT collector_name,
+       COUNT(*) AS runs,
+       COALESCE(SUM(gap_minutes) FILTER (WHERE gap_minutes <= {floor}), 0) AS short_minutes,
+       string_agg(CAST(gap_minutes AS VARCHAR), ',') FILTER (WHERE gap_minutes > {floor}) AS long_gaps
+FROM g
+GROUP BY collector_name";
+    }
+
+    /// <summary>
+    /// #7242: stamps <see cref="CollectorHealthRow.ObservedQuietGaps"/> on the rows the activity quiet bar decides, before the rows are
+    /// memoized. No row needs it, no statement. A failed read leaves the rows unstamped, which falls back to runs times the interval.
+    /// A cancellation is not swallowed.
+    /// </summary>
+    private async Task ApplyObservedQuietGapsAsync(List<CollectorHealthRow> rows, int serverId, CancellationToken cancellationToken)
+    {
+        var nowUtc = DateTime.UtcNow;
+        var needing = rows
+            .Where(r => CollectorHealthClassifier.NeedsObservedQuietRuns(r.CollectorName, r.LastProductiveTime, nowUtc))
+            .ToList();
+        if (needing.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var connection = await OpenConnectionAsync(timer: null, cancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = ObservedQuietGapsSql(needing.Count);
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = nowUtc.AddDays(-7) });
+            foreach (var row in needing)
+            {
+                command.Parameters.Add(new DuckDBParameter { Value = row.CollectorName });
+            }
+
+            var gapsByCollector = new Dictionary<string, ObservedQuietGaps>(StringComparer.Ordinal);
+            using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var longGaps = reader.IsDBNull(3)
+                        ? new List<double>()
+                        : reader.GetString(3).Split(',').Select(g => double.Parse(g, System.Globalization.CultureInfo.InvariantCulture)).ToList();
+                    gapsByCollector[reader.GetString(0)] = new ObservedQuietGaps(
+                        ToInt64(reader.GetValue(1)), Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture), longGaps);
+                }
+            }
+
+            foreach (var row in needing)
+            {
+                if (gapsByCollector.TryGetValue(row.CollectorName, out var gaps))
+                {
+                    row.ObservedQuietGaps = gaps;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#7242 collection health could not read the quiet streak's gaps for server {serverId}; the quiet bar uses runs times the interval: {ex.GetType().Name}");
         }
     }
 
@@ -1143,6 +1284,12 @@ public class CollectionLogRow
     /// <see cref="ErrorMessage"/> (blank for none) when it has none. Shared wording with the health views' Note column.</summary>
     public string MessageFormatted => CollectorHealthClassifier.FormatRunMessage(ErrorMessage, ReadSource);
 
+    /// <summary>#7416: the Error cell. The stored message is an error only on a row that did not succeed, so a run's notes stay out of it.</summary>
+    public string ErrorFormatted => CollectorHealthClassifier.FormatRunError(Status, ErrorMessage);
+
+    /// <summary>#7416: the Note cell. The notes a successful run left, with the run's read source after them when it has one.</summary>
+    public string NoteFormatted => CollectorHealthClassifier.FormatRunNoteCell(Status, ErrorMessage, ReadSource);
+
     /// <summary>
     /// The clock of the server this run belongs to (#4766), stamped by the tab or window that lists it; null (a row
     /// built without one, such as the fleet-wide log the MCP tool serializes on its own) falls back to the active
@@ -1304,12 +1451,20 @@ public class CollectorHealthRow
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, set for the rows the activity quiet bar decides
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The observed quiet time is read off it
+    /// at the cadence this row is banded against, each gap counted at most three intervals (an hour at least).
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885). Event collectors and on-load collectors are excluded inside the shared predicate, so a
     /// fortnight of zeros from a deadlock capture at rest stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>The sentence a produced-then-stopped collector carries, or null when it is not one
     /// (#3885) — composed from the shared formatter, like <see cref="RegressedFinding"/>.</summary>

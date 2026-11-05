@@ -210,22 +210,26 @@
                                     </ComboBox>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking sessions &#x2265;" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking events &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="Pages when this many blocking events land in the last hour and the longest wait among them is 15 seconds or more (the 15 is fixed). Each blocked session counts as one event, at its longest wait."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Long blocking wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="One blocked session that waits this long pages at once, whatever the count above. It is also the bar for the total blocked wait across the latest blocking snapshot (the Blocking Wait Time alert). 0 turns both off."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <TextBlock x:Name="AlertPgBlockingThresholdLabel" TextWrapping="Wrap" Text="PostgreSQL blocking roots &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertPgBlockingThresholdLabel}" x:Name="AlertPgBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock TextWrapping="Wrap" Text="(sampled root blockers; the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertPgBlockingThresholdLabel}" x:Name="AlertPgBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="(sampled root blockers in the last hour, with the same 15-second worst-wait floor and the long blocking wait above; the checkbox above covers both engines)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
@@ -279,11 +283,11 @@
                                              ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture (or under 720 minutes with a successful run) has no baseline and uses the floors."/>
                                     <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
                                     <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -388,7 +392,7 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -411,14 +415,28 @@
                                     <CheckBox x:Name="AlertAgentAlertGapsCheckBox" Content="SQL Server Agent alert setup has a gap (off by default)"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
-                                <!-- #6873: the three database protection alerts. Off by default. -->
+                                <!-- #6873: the three database protection alerts. Off by default. #7611: each age is a setting (the same value
+                                     the web and update_alert_settings write); a server or database can override it in Threshold Overrides. -->
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue (older than 7 days)"
+                                    <CheckBox x:Name="AlertBackupOverdueCheckBox" Content="Full backup overdue when older than"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <CheckBox x:Name="AlertLogBackupOverdueCheckBox" Content="Log backup overdue (older than 60 minutes)" Margin="12,0,0,0"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBackupOverdueCheckBox}" x:Name="AlertBackupOverdueHoursBox" Width="55" Text="168" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="hours (1 to 1440)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertLogBackupOverdueCheckBox" Content="Log backup overdue when older than"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <CheckBox x:Name="AlertCheckDbOverdueCheckBox" Content="CHECKDB overdue (older than 14 days)" Margin="12,0,0,0"
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLogBackupOverdueCheckBox}" x:Name="AlertLogBackupOverdueMinutesBox" Width="55" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="minutes (1 to 86400)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <CheckBox x:Name="AlertCheckDbOverdueCheckBox" Content="CHECKDB overdue when older than"
                                               VerticalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertCheckDbOverdueCheckBox}" x:Name="AlertCheckDbOverdueHoursBox" Width="55" Text="336" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="hours (1 to 8760)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <!-- #6875: off by default. Alerts when an identity column is at or past the warning bar (70 percent used) or the
                                      critical bar (90 percent) of its type's capacity. The bars are set with update_alert_settings or a threshold override. -->
@@ -449,10 +467,10 @@
                                     <TextBlock x:Name="BandBlockingWarnPerHourLabel" Text="Blocking warn at" VerticalAlignment="Center"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnPerHourLabel}" x:Name="BandBlockingWarnPerHourBox" Width="45" Text="5.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="reports per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBlock Text="waits per hour; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Blocking critical at, reports per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                    <TextBlock Text="per hour (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                    <TextBox AutomationProperties.Name="Blocking critical at, waits per hour" x:Name="BandBlockingCriticalPerHourBox" Width="45" Text="20.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="waits per hour, the unit the Blocking Count alert uses (1.0 or above)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
@@ -463,6 +481,16 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.Name="Longest block critical at, seconds" x:Name="BandBlockingCriticalWaitSecondsBox" Width="55" Text="60.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (1.0 or above; critical not below warn)" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,4,0,0">
+                                    <TextBlock x:Name="BandBlockingWarnSnapshotWaitSecondsLabel" Text="Total wait in one snapshot warns at" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=BandBlockingWarnSnapshotWaitSecondsLabel}" x:Name="BandBlockingWarnSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="seconds; critical at" VerticalAlignment="Center" Margin="2,0,0,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.Name="Total wait in one snapshot critical at, seconds" x:Name="BandBlockingCriticalSnapshotWaitSecondsBox" Width="55" Text="0.0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBlock TextWrapping="Wrap" Text="seconds (0 turns a tier off, otherwise 1.0 or above; set to the Blocking Wait Time alert's bar to colour on the same measure)" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
                                 <TextBlock Text="Normalised over whatever window a surface asks for, so one pair means the same condition on a 1-hour and a 24-hour read."
@@ -941,6 +969,13 @@
                                 <TextBlock Text="The requests an agent route hands to your own agent, with their reports and journal; the notes a brief may carry; and the environment profile per fleet, server or tag."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            Margin="20,0,0,0" TextWrapping="Wrap"/>
+                                <!-- #7107: the people the agents' requests and approvals will know, their identities and grants. -->
+                                <Button x:Name="ManagePeopleButton" Content="Manage _People..."
+                                        Click="ManagePeopleButton_Click" HorizontalAlignment="Left"
+                                        Padding="12,4" Margin="20,8,0,4"/>
+                                <TextBlock Text="The people who work with the agents, the web sign-in and Slack identities that map to each, and what each may do. An approve grant decides who can approve the actions an agent proposes."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
                         <TextBlock Style="{StaticResource ScopeLineStyle}" Text="This viewer only. The defaults below apply to what you do in this viewer."/>
@@ -1014,7 +1049,7 @@
                                     <TextBlock x:Name="AnalysisUncorroboratedRouteLabel" TextWrapping="Wrap" Text="Route a lone uncorroborated finding to" VerticalAlignment="Center" Margin="0,0,8,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=AnalysisUncorroboratedRouteLabel}" x:Name="AnalysisUncorroboratedRouteBox" Width="380" VerticalAlignment="Center"
-                                              ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Analysis Singles Digest — never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
+                                              ToolTip="A finding with ONE fact in its chain and no matched co-fire check. Digest: recorded (Alert History status Digest), shown on the web and MCP surfaces the moment it fires, and named once a day in the Daily Digest — never a page. Page: the pre-#3712 behaviour, every finding at or above the severity floor pages. Use the service's darling.json value: clears the store column so analysis.uncorroboratedRoute in the service's file decides (its shipped default is Digest). Digest or Page set here wins over the file and reaches the running service within one collection sweep; a corroborated finding pages whichever you choose. Escalation is the corroboration event: a digest-routed single that later gains a fact pages then, as a new firing.">
                                         <ComboBoxItem Content="Digest — recorded and shown, never paged (recommended)" Tag="digest"/>
                                         <ComboBoxItem Content="Page — every notify-worthy finding pages (pre-#3712)" Tag="page"/>
                                         <ComboBoxItem Content="Use the service's darling.json value (store column cleared)" Tag=""/>
@@ -1042,6 +1077,37 @@
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                     <TextBox AutomationProperties.LabeledBy="{Binding ElementName=FleetSweepIntervalLabel}" x:Name="FleetSweepIntervalBox" Width="45" TextAlignment="Center" VerticalAlignment="Center"/>
                                     <TextBlock Text="minutes (15 - 1440)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+
+                                <!-- #7041 (V232): the Daily Health Report. Like the fleet sweep it is outside the master alerts toggle; the
+                                     service sends it to the routes for the "reports" family or the "Daily Health Report" metric. -->
+                                <TextBlock Text="Daily Health Report" FontWeight="SemiBold" FontSize="12"
+                                           Foreground="{DynamicResource ForegroundBrush}" Margin="20,14,0,4"/>
+                                <TextBlock Text="One report a day on the last 24 hours across the fleet, sent through your notification channels at the time below. Off by default. To send it to chosen recipients only, add a notification route for the reports family or the Daily Health Report metric."
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Margin="20,0,0,4" TextWrapping="Wrap"/>
+                                <CheckBox x:Name="DailyReportEnabledCheckBox" Content="Send a daily health report"
+                                          Margin="20,4,0,0" Foreground="{DynamicResource ForegroundBrush}"/>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportSendAtLabel" Text="Send at" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportSendAtLabel}" x:Name="DailyReportSendAtBox" Width="60" TextAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(HH:mm, 24-hour)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTimeZoneLabel" Text="Time zone" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTimeZoneLabel}" x:Name="DailyReportTimeZoneBox" Width="220" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(an IANA id such as America/New_York; blank uses the service host's zone)" VerticalAlignment="Center" Margin="4,0,0,0"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </WrapPanel>
+                                <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
+                                    <TextBlock x:Name="DailyReportTitleLabel" Text="Title" VerticalAlignment="Center" Margin="0,0,8,0"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=DailyReportTitleLabel}" x:Name="DailyReportTitleBox" Width="260" MaxLength="100" VerticalAlignment="Center"/>
+                                    <TextBlock Text="(optional; blank uses Daily Health Report)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
                             </StackPanel>
@@ -1175,7 +1241,7 @@
                                     </ComboBox>
                                     <TextBlock TextWrapping="Wrap" Text="auto-detected from locale"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <TextBlock x:Name="TimeDisplayModeLabel" Text="Show timestamps in:" VerticalAlignment="Center"

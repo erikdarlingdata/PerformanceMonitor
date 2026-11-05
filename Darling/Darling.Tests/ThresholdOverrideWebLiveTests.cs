@@ -246,7 +246,7 @@ public sealed class ThresholdOverrideWebLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_ChangesThroughTheArm_AndCanEditIsTrue()
     {
-        await WithRoutesAsync("viewer", async (owner, send, ct) =>
+        await WithRoutesAsync("web", async (owner, send, ct) =>
         {
             var list = await send("GET", null, null);
             Assert.Equal(200, list.Status);
@@ -261,7 +261,7 @@ public sealed class ThresholdOverrideWebLiveTests
     [Fact]
     public async Task AsTheViewerRole_TheListWorks_ButAChangeAnswers403NamingTheAdminLogin_AndChangesNothing()
     {
-        await WithRoutesAsync("viewer", async (owner, send, ct) =>
+        await WithRoutesAsync("web", async (owner, send, ct) =>
         {
             var list = await send("GET", null, null);
             Assert.Equal(200, list.Status);

@@ -86,8 +86,10 @@ public sealed record AlertDelivery
     /// the finding is persisted, visible on the web and MCP surfaces the instant it fired, and named in the
     /// digest under the same dedup key a page would have carried. The row's context JSON carries the
     /// <see cref="AlertContext.Routing"/> record with the reason (a lone fact, no matched co-fire check), so
-    /// "why didn't this page" is answered by the row. Written only by the analysis-finding senders; an engine
-    /// alert never carries it.</summary>
+    /// "why didn't this page" is answered by the row. Written by the analysis-finding senders, and (#7086) by
+    /// an engine alert the evaluator held back from paging (<see cref="AlertHold"/> on
+    /// <c>AlertOutcome.Hold</c>): the deliverer records the fire as a digest row, sends nothing, and the
+    /// standing-fire reads leave the row out so a restart never seeds a tier or an open fire from it.</summary>
     public const string ChannelDigest = "digest";
 
     public const string ChannelEmail = "email";
@@ -174,7 +176,7 @@ public sealed record AlertDelivery
     /// is not shipped, writes to its own JSON store, and has its own display. Converting those 26 sites
     /// would be churn in dead code and would fix nothing an operator can see. Deliberately
     /// <c>internal</c>, so no live producer can reach it, and
-    /// <c>Darling.Tests.AlertDeliveryChannelTests.TheLegacyHatch_HasExactlyOneProductionCaller</c> pins
+    /// <c>Darling.Tests.AlertDeliveryChannelTests.TheLegacyHatch_HasNoProductionCaller</c> pins
     /// that it stays that way — an <c>internal</c> member is visible to Lite as well as to the deprecated
     /// SKU, so the boundary is asserted rather than assumed.</para>
     /// </summary>

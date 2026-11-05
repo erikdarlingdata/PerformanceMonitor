@@ -2492,6 +2492,120 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_success
         "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.HashHourlyCreateSql;
 
     /// <summary>
+    /// V239 (#7146, part 3 of #5506): <c>collect.query_store_compose_fleet</c>, the fleet rollup of the Query Store compose stamp (the
+    /// stamp's partials combined across servers, databases and modules, one row per exact stamp time and <c>query_hash</c>), its
+    /// <c>(collection_time)</c> index, and <c>fleet_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text and the
+    /// reasoning are on <see cref="QueryStoreComposeStamp.FleetCreateSql"/>. The service's hourly tick fills the table in the stamp's
+    /// transaction and rebuilds every hour whose <c>fleet_built_seq</c> differs from <c>late_seq</c>, which is every hour built before
+    /// this rung (NULL), so the backfill is the ordinary tick, newest first. <b>The rung scans nothing</b>: one new empty plain table, one
+    /// index on it, and a nullable column with no default on the small ledger. The column needs an ACCESS EXCLUSIVE lock on that ledger,
+    /// which the wide table's late-row triggers take row locks on, so the lock timeout is <see cref="MigrationCommandTimeoutSeconds"/>
+    /// less 20 s, as V173's and V221's. Additive: an older build never reads the table, and a build that rebuilds a stamp hour without
+    /// writing it leaves the pair stale for the table, which this build then rebuilds. <b>No Lite twin:</b> Lite has no compose stamp.
+    /// </summary>
+    private static readonly string V239Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + QueryStoreComposeStamp.FleetCreateSql;
+
+    /// <summary>
+    /// V240 (#7169): the execution-weighted sums <c>collect.query_store_top_daily</c> needs so the long-window read of
+    /// <c>get_query_store_top</c> averages Query Store intervals by how often each ran. Six nullable <c>numeric</c> columns, one per
+    /// averaged column V161 summarizes: <c>avg_duration_us_wsum</c>, <c>avg_cpu_time_us_wsum</c>, <c>avg_logical_io_reads_wsum</c>,
+    /// <c>avg_logical_io_writes_wsum</c>, <c>avg_physical_io_reads_wsum</c> and <c>avg_rowcount_wsum</c>, each
+    /// <c>sum(avg_x * execution_count)</c> over the day's wide-table rows. A reader divides <c>SUM(_wsum)</c> by
+    /// <c>SUM(execution_count_sum)</c> and ranks on <c>SUM(avg_duration_us_wsum)</c>, which is the table read's weighted answer. V161's
+    /// <c>_sum</c> and <c>_n</c> (the unweighted mean of interval averages, a 1-execution interval counting as much as a
+    /// 10,000-execution one) stay and are still written, but no reader uses them.
+    ///
+    /// <para><b>The rung does not empty the summary.</b> A day built before it has NULL weighted sums. The reader treats such a day as
+    /// not built (<see cref="QueryStoreTopDaily.DayIsWeightedSql"/>) and reads it from the wide table, exact but slower, and the
+    /// service's tick rebuilds it, newest day first, <see cref="QueryStoreTopDaily.MaxBuildsPerTick"/> a tick. The same test
+    /// covers a rollback and roll-forward, and an older instance that still writes to the same store, with no manual step. Only
+    /// the lock timeout is here: the <c>ALTER</c> needs an ACCESS EXCLUSIVE lock the builder's transaction also holds, so it is
+    /// <see cref="MigrationCommandTimeoutSeconds"/> less 20 s, as V239's. The columns are nullable with no default, catalog-only.
+    /// An older build ignores them.</para>
+    /// </summary>
+    private static readonly string V240Sql =
+        "SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + "s';\n" + @"
+ALTER TABLE collect.query_store_top_daily
+    ADD COLUMN IF NOT EXISTS avg_duration_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_cpu_time_us_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_logical_io_writes_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_physical_io_reads_wsum numeric,
+    ADD COLUMN IF NOT EXISTS avg_rowcount_wsum numeric;";
+
+    /// <summary>
+    /// V241 (#7497): <c>collect.blocked_process_reports.blocking_open_transaction_count</c>, the blocking process's own <c>trancount</c> from the
+    /// report XML (the head blocker's open transaction count). One nullable <c>integer</c>, no DEFAULT, no backfill (V199's shape): a row stored
+    /// before this rung never read the attribute, and a report with no <c>trancount</c> has nothing to read, so NULL is the honest value. A
+    /// nullable, default-less <c>ADD COLUMN</c> is catalog-only and TimescaleDB accepts it on a compressed hypertable. <b>Appended LAST</b>, after
+    /// <c>blocking_query_plan_xml</c>, because the writer is a positional binary COPY with an explicit column list: a fresh store (the generated V1
+    /// table carries the column from the collector's payload, and this ALTER no-ops there) and an upgraded one share one physical column order. The
+    /// trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_blocked_process_reports</c>' pinned <c>SELECT *</c> (V199's, unqualified). An older
+    /// build writes its own column list, so the new column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V241Sql = @"
+ALTER TABLE collect.blocked_process_reports ADD COLUMN IF NOT EXISTS blocking_open_transaction_count integer;
+CREATE OR REPLACE VIEW v_blocked_process_reports AS SELECT * FROM blocked_process_reports;";
+
+    /// <summary>
+    /// V242 (#7567): <c>collect.pg_statement_text.own_entries</c>, which <c>(user_id, database_id)</c> entries of a statement's
+    /// <c>queryid</c> are the monitoring service's own (their stored <c>pg_stat_statements</c> text ends with
+    /// <c>PgOwnStatement.Marker</c>). One nullable <c>jsonb</c>, no DEFAULT, no backfill: a JSON array of <c>[user_id, database_id]</c>
+    /// pairs, replaced on every hourly text upsert, so an entry that stops being the service's drops out at the next fetch. NULL
+    /// means no entry of the queryid is known to be the service's, so the statement is shown. The text row's own prune and
+    /// delete carry the column with them. An older build ignores it.
+    /// </summary>
+    private const string V242Sql = PgStatementText.AddOwnEntriesColumnSql;
+
+    /// <summary>
+    /// V243 (#7573): <c>collect.waiting_tasks.program_name</c>, the program name of the waiting task's session, read from
+    /// <c>sys.dm_exec_sessions</c> on session_id so a reader can leave the monitor's own waits out. One nullable <c>text</c>, no DEFAULT, no
+    /// backfill (V241's shape): a row stored before this rung never read it, so NULL is the honest value, and a reader never hides a NULL.
+    /// Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after <c>database_name</c>, because the writer is a positional binary
+    /// COPY with an explicit column list: a fresh store (the generated V1 table carries the column from the collector's payload, and this ALTER
+    /// no-ops there) and an upgraded one share one physical column order. There is no <c>v_waiting_tasks</c> view on this store, so no view is
+    /// re-expanded. An older build writes its own column list, so the column stays NULL for the rows it writes.
+    /// </summary>
+    private const string V243Sql = @"
+ALTER TABLE collect.waiting_tasks ADD COLUMN IF NOT EXISTS program_name text;";
+
+    /// <summary>
+    /// V244 (#7590): <c>collect.servers.connect_down_since</c> and <c>collect.servers.last_connect_error</c>, the service's own answer to
+    /// "can I reach this server right now". A failed connect stamps the first failure's time (kept while the failures continue, so it
+    /// survives a service restart) and the exception message the service log prints; a good connect clears both. Every surface that bands a
+    /// server reads them, so a server whose connection has failed reads Offline at once instead of waiting out the 30 minute collection age.
+    /// <c>next_connect_attempt</c> is when the service will try the connect again (the backoff it already decided), so Collection Health can name the
+    /// next retry. All three nullable, no DEFAULT, no backfill: NULL says the last connect succeeded or none has failed since this rung, which makes no claim.
+    /// No view refresh: <c>collect.servers</c> is a registry, not a hypertable.
+    /// </summary>
+    private const string V244Sql = @"
+ALTER TABLE collect.servers
+    ADD COLUMN IF NOT EXISTS connect_down_since timestamp,
+    ADD COLUMN IF NOT EXISTS last_connect_error text,
+    ADD COLUMN IF NOT EXISTS next_connect_attempt timestamp;";
+
+    /// <summary>
+    /// V245 (#7611): the three Database Protection overdue thresholds on <c>config.config_alert_settings</c>, each <c>integer NOT NULL DEFAULT</c>
+    /// its built-in value so an existing store keeps its behavior: <c>backup_overdue_threshold_hours</c> 168 (7 days), <c>log_backup_overdue_threshold_minutes</c> 60
+    /// and <c>checkdb_overdue_threshold_hours</c> 336 (14 days). Catalog-only adds, idempotent, no backfill (the DEFAULT fills the singleton row). The column
+    /// checkdb_overdue_threshold_hours is the probe's sentinel and is added LAST. An older build never reads the columns and keeps judging against its constants.
+    /// </summary>
+    private const string V245Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS backup_overdue_threshold_hours integer NOT NULL DEFAULT 168,
+    ADD COLUMN IF NOT EXISTS log_backup_overdue_threshold_minutes integer NOT NULL DEFAULT 60,
+    ADD COLUMN IF NOT EXISTS checkdb_overdue_threshold_hours integer NOT NULL DEFAULT 336;";
+
+    /// <summary>
+    /// V246 (#7609): <c>(query_hash, bucket DESC)</c> on <c>query_store_stats_corrected_hourly</c>'s materialization, for the Query Store source of
+    /// <c>get_query_fleet_summary</c>, which filters on the hash alone across the fleet. See <see cref="TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql"/>.
+    /// A plain non-concurrent build (the rung runs in one transaction). It is a no-op on a store without TimescaleDB or without the view, and a fresh store
+    /// gets the same index when the view is created. An older build never reads the index and is unaffected.
+    /// </summary>
+    private static readonly string V246Sql = TimescaleSupport.CreateQueryStoreCorrectedHourlyHashIndexSql;
+
+    /// <summary>
     /// V223 (#6873) - <c>collect.database_protection</c>: per database, the last good CHECKDB and the last full and log backup, read by
     /// <c>DatabaseProtectionCollector</c> every 60 minutes (Darling only). One row per database per pass: the raw times (UTC), the
     /// recovery model, the database state and replica role, a per-row platform label (native, platform_managed, native_only) and a state
@@ -2978,7 +3092,50 @@ $rung$;";
         new Migration(227, "threshold-override-tag-scope", V227Sql),
         new Migration(228, "blocking-band-tiers", V228Sql),
         new Migration(229, "notification-route-severities", V229Sql),
+        new Migration(230, "blocking-band-snapshot-wait-tiers", V230Sql),
+        new Migration(231, "mute-rule-recurrence", V231Sql),
+        new Migration(232, "daily-health-report", V232Sql),
+        new Migration(233, "notification-route-report-notice", V233Sql),
+        new Migration(234, "alert-log-alert-key", V234Sql),
+        new Migration(235, "blocking-pages-on-wait-time-defaults", V235Sql),
+        new Migration(236, "mute-rule-action", V236Sql),
+        new Migration(237, "people-identities-grants", V237Sql),
+        new Migration(238, "action-approval-proposals", V238Sql),
+        new Migration(239, "compose-fleet-rollup", V239Sql),
+        new Migration(240, "query-store-top-daily-weighted", V240Sql),
+        new Migration(241, "blocked-process-report-open-tran-count", V241Sql),
+        new Migration(242, "pg-statement-text-own-entries", V242Sql),
+        new Migration(243, "waiting-tasks-program-name", V243Sql),
+        new Migration(244, "server-connect-down-state", V244Sql),
+        new Migration(245, "database-protection-thresholds", V245Sql),
+        new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
     };
+
+    /// <summary>
+    /// V235 (#7083): the blocking alert pages on blocked wait time. The shipped bars move: <c>blocking_count_threshold</c> 1 to 3,
+    /// <c>blocking_wait_seconds_threshold</c> 0 (off) to 60 seconds, and <c>pg_blocking_count_threshold</c> 1 to 3. Four statements. The three
+    /// column defaults change, so a store with no row yet (or a new one) starts on the new bars, and the one row a store has is moved only where
+    /// a column still holds the OLD shipped default.
+    ///
+    /// <para><b>Why moving the row is right, and who it moves that it should not.</b> Nothing recorded a chosen 1 or 0 as distinct from the
+    /// default, and a Settings save sends the whole row back, so a stored 1 or 0 is usually the old default and not a choice. A store cannot tell
+    /// that apart from an operator who set 1 on purpose, so that operator is moved too and sets the value back once (Settings window, the web
+    /// settings page or <c>update_alert_settings</c>). Any other stored value is a choice and is kept. A column is moved on its own: a store
+    /// at 5 for the count and 0 for the wait keeps the 5 and gets the 60. The UPDATE fires V17's statement trigger, which bumps
+    /// <c>config_version</c>, so a running service reloads the bars at once. <c>config_alert_settings</c> is the one-row singleton, so the
+    /// UPDATE touches at most one row and the SET DEFAULT is catalog-only. Written as literals because a migration's text is frozen at the
+    /// version it ships in. An older build reads the same integer columns and is unaffected, apart from paging on the older rule.</para>
+    /// </summary>
+    private const string V235Sql = @"
+ALTER TABLE config.config_alert_settings
+    ALTER COLUMN blocking_count_threshold SET DEFAULT 3,
+    ALTER COLUMN blocking_wait_seconds_threshold SET DEFAULT 60,
+    ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 3;
+UPDATE config.config_alert_settings SET
+    blocking_count_threshold = CASE WHEN blocking_count_threshold = 1 THEN 3 ELSE blocking_count_threshold END,
+    blocking_wait_seconds_threshold = CASE WHEN blocking_wait_seconds_threshold = 0 THEN 60 ELSE blocking_wait_seconds_threshold END,
+    pg_blocking_count_threshold = CASE WHEN pg_blocking_count_threshold = 1 THEN 3 ELSE pg_blocking_count_threshold END
+WHERE blocking_count_threshold = 1 OR blocking_wait_seconds_threshold = 0 OR pg_blocking_count_threshold = 1;";
 
     /// <summary>
     /// V227 (#6926): a threshold override can be held for a server tag. <c>config.config_threshold_overrides</c> gains the nullable
@@ -3093,6 +3250,319 @@ BEGIN
     END IF;
 END
 $$;";
+
+    /// <summary>
+    /// V230 (#7028): the two snapshot wait tiers of the blocking health band on the alert settings row, beside the four V228 ones. They are the
+    /// warn and critical bars, in seconds, for the longest total blocked wait in one sampled snapshot, the same measure the Blocking Wait Time
+    /// alert reads. Both default to 0, which means that tier is off, as the alert's own bar does at 0, so a store that never sets them bands
+    /// exactly as before. No CHECK, for the reason V228 gives: the writers hold the 0 or 1 to 86400 range and the order of the pair, and a
+    /// hand-edited row is clamped on read. Idempotent: every column is added with IF NOT EXISTS. Table-level grants already cover new columns
+    /// on this table, so no GRANT is added.
+    /// </summary>
+    private const string V230Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_warn_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS blocking_critical_snapshot_wait_seconds double precision NOT NULL DEFAULT 0;";
+
+    /// <summary>
+    /// V236 (#7083): what a mute rule does, on <c>config.config_mute_rules</c>. <c>action</c> is <c>mute</c> (the default, and the value every
+    /// stored rule takes, so each keeps exactly its effect) or <c>digest</c>, which holds a matching alert back from paging and records it as a
+    /// digest row for the daily digest. The ADD COLUMN with a constant default is catalog-only, and a CHECK holds the two words. Needs no GRANT
+    /// (the roles' table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older
+    /// build ignores the column and would MUTE a digest rule's matches, so a rolled-back build silences what the operator meant to see in the digest.
+    /// </summary>
+    private const string V236Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'mute';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_action'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_action
+            CHECK (action IN ('mute', 'digest'));
+    END IF;
+END
+$$;";
+
+    /// <summary>
+    /// V231 (#7040): the repeat schedule of a mute rule, on <c>config.config_mute_rules</c>. <c>recur_days</c> is a smallint bit mask
+    /// (bit n = day of week n, Sunday = bit 0; NULL = every day), <c>recur_start_time</c> and <c>recur_end_time</c> are the daily window in
+    /// the rule's zone (an end earlier than the start is a window that crosses midnight), and <c>recur_time_zone</c> is the IANA id the
+    /// times are read in. All four are nullable with no default and no backfill: NULL times mean a rule with no schedule, which is every
+    /// stored rule, so each keeps exactly its effect. A CHECK holds the two times to both-null or both-set. Needs no GRANT (the roles'
+    /// table-level grants cover a new column) and no trigger (the V117 reload beacon fires on any change to the table). An older build
+    /// ignores the four columns and would mute a repeating rule at every hour, so a rolled-back build mutes more than the schedule allows.
+    /// </summary>
+    private const string V231Sql = @"
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_days smallint;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_start_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_end_time time;
+ALTER TABLE config.config_mute_rules ADD COLUMN IF NOT EXISTS recur_time_zone text;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_mute_rules_recur_times'
+                   AND conrelid = 'config.config_mute_rules'::regclass) THEN
+        ALTER TABLE config.config_mute_rules
+            ADD CONSTRAINT ck_config_mute_rules_recur_times
+            CHECK ((recur_start_time IS NULL) = (recur_end_time IS NULL));
+    END IF;
+END
+$$;";
+
+    /// <summary>
+    /// V232 (#7041): the scheduled Daily Health Report's four settings on the alert settings row. <c>daily_report_enabled</c> ships FALSE (the
+    /// report is off until an operator turns it on), <c>daily_report_send_at</c> is a local time of day defaulting to 07:00, and
+    /// <c>daily_report_time_zone</c> (an IANA id; NULL is the service host's zone) and <c>daily_report_title</c> (NULL is "Daily Health Report")
+    /// carry no default. Idempotent: every column is added with IF NOT EXISTS. Table-level grants already cover new columns on this table, so
+    /// no GRANT is added. Catalog-only, no backfill and no view refresh. An older build ignores the columns.
+    /// </summary>
+    private const string V232Sql = @"
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_enabled boolean NOT NULL DEFAULT FALSE;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_send_at time NOT NULL DEFAULT '07:00';
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_time_zone text;
+ALTER TABLE config.config_alert_settings
+    ADD COLUMN IF NOT EXISTS daily_report_title text;";
+
+    /// <summary>
+    /// V233 (#6979): <c>config.config_notification_routes.report_notice</c>, whether a route posts a chat notice when an agent files its report
+    /// on an investigation request: <c>off</c> (the default, which is what every route did before), <c>needs_person_or_change</c> (a report
+    /// with the needs_person verdict, or one whose request made at least one agent change) or <c>all</c>. NOT NULL with the default, so every
+    /// stored route reads <c>off</c> and keeps its effect, and a CHECK holds the three words. Idempotent: the column and the constraint are each
+    /// added only when absent. No backfill and no view refresh: a registry table. Table-level grants already cover a new column on this table.
+    /// An older build ignores the column.
+    /// </summary>
+    private const string V233Sql = @"
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS report_notice text NOT NULL DEFAULT 'off';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_config_notification_routes_report_notice'
+                   AND conrelid = 'config.config_notification_routes'::regclass) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD CONSTRAINT ck_config_notification_routes_report_notice
+            CHECK (report_notice IN ('off', 'needs_person_or_change', 'all'));
+    END IF;
+END
+$$;";
+
+    /// <summary>
+    /// V234 (#7076): <c>config.config_alert_log.alert_key</c>, the exact key of a store-wide alert whose rows are written under
+    /// <c>server_id</c> 0 (Store Job Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck and the Policy Job
+    /// bands, with their resolution rows). Many keys share one metric name there, so only free text told them apart and a restart could
+    /// not find an alert's own open row. Nullable with no default, so it is catalog-only, and every row written before this rung reads
+    /// NULL: those alerts announce once after the upgrade and stay quiet after. No backfill, no view refresh, no GRANT (the alert log
+    /// keeps its table-wide SELECT). Idempotent. An older build ignores the column. <b>No Lite twin</b>: Lite never writes these alerts.
+    /// </summary>
+    private const string V234Sql = @"
+ALTER TABLE config.config_alert_log
+    ADD COLUMN IF NOT EXISTS alert_key text;";
+
+    /// <summary>
+    /// V237 (#7107, child (a) of #6980): the people an administrator names, the identities that map a sign-in to one of them, and the
+    /// grants that will narrow what each may ask for, approve, undo or decide. Three new empty tables, so the rung moves no data:
+    /// <c>config.person</c> (a display name and an enabled flag), <c>config.person_identity</c> (a kind and an external id, unique for each
+    /// kind: <c>web</c> is a signed-in web seat's owner key, the 43-character base64url hash of the issuer and <c>sub</c>, never the display
+    /// name; <c>slack</c> is <c>team id:user id</c>) and <c>config.person_grant</c> (a person, a scope copied from a route's, one server, one tag
+    /// or neither for the fleet, and a capability, with a list of server action kinds for <c>request_level_3</c> and <c>approve</c>).
+    /// <para><b>No gate reads a grant yet</b>, so no current path changes. A grant's server and tag carry a foreign key with
+    /// <c>ON DELETE CASCADE</c>: a server id is a hash of its host, database and read-only flag, so a grant left behind by a removed server
+    /// would apply again when the same server is added back. The cascade drops the grant whichever login removes the server or tag (it runs
+    /// as the table's owner), and removing one is never blocked. Three partial unique indexes keep one grant per person, capability and
+    /// scope (the store is PostgreSQL 15 or later, since earlier rungs already build <c>NULLS NOT DISTINCT</c> indexes, and the product minimum is 16).</para>
+    /// <para><b>Owner-only.</b> Only the store owner writes them (<c>PersonDirectory</c>, which journals every change in the same
+    /// transaction). Managed provisioning section 10e3 and <c>provision-roles.sql</c> step 3j3 take every privilege back from the four
+    /// roles, as for <c>config.config_server_actions</c>, and give SELECT back. The rung itself takes the writes back too, as V198 does, so a
+    /// store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default privileges' INSERT, UPDATE and
+    /// DELETE: every write privilege on the three tables, and every privilege on their identity sequences (a table's <c>REVOKE</c> does not
+    /// reach them, and their names are PostgreSQL's own for an identity column of a table made here), from <c>PUBLIC</c> and each of the four roles that exists. SELECT stays as the default privileges gave it. The journal
+    /// trigger's owner-only list is not in any rung (provisioning writes it), so the eight people events reach it when provisioning next
+    /// runs. Every statement is idempotent. <b>No Lite twin</b>: Lite has
+    /// no people.</para>
+    /// </summary>
+    private const string V237Sql = @"
+CREATE TABLE IF NOT EXISTS config.person
+(
+    person_id bigint GENERATED ALWAYS AS IDENTITY,
+    display_name text NOT NULL,
+    enabled boolean NOT NULL DEFAULT TRUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_by text NOT NULL,
+    CONSTRAINT pk_person PRIMARY KEY (person_id),
+    CONSTRAINT ck_person_display_name CHECK (btrim(display_name) <> '' AND char_length(display_name) <= 128)
+);
+
+CREATE TABLE IF NOT EXISTS config.person_identity
+(
+    identity_id bigint GENERATED ALWAYS AS IDENTITY,
+    person_id bigint NOT NULL,
+    kind text NOT NULL,
+    external_id text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    CONSTRAINT pk_person_identity PRIMARY KEY (identity_id),
+    CONSTRAINT fk_person_identity_person FOREIGN KEY (person_id) REFERENCES config.person (person_id),
+    CONSTRAINT uq_person_identity_kind_external UNIQUE (kind, external_id),
+    CONSTRAINT ck_person_identity_kind CHECK (kind IN ('slack', 'web')),
+    CONSTRAINT ck_person_identity_external_id CHECK (
+        (kind = 'web' AND external_id ~ '^[A-Za-z0-9_-]{43}$')
+        OR (kind = 'slack' AND external_id ~ '^[A-Z0-9]{1,32}:[A-Z0-9]{1,32}$'))
+);
+
+CREATE INDEX IF NOT EXISTS ix_person_identity_person ON config.person_identity (person_id);
+
+CREATE TABLE IF NOT EXISTS config.person_grant
+(
+    grant_id bigint GENERATED ALWAYS AS IDENTITY,
+    person_id bigint NOT NULL,
+    scope_server_id integer,
+    scope_tag_id integer,
+    capability text NOT NULL,
+    kinds text[] NOT NULL DEFAULT '{}',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by text NOT NULL,
+    CONSTRAINT pk_person_grant PRIMARY KEY (grant_id),
+    CONSTRAINT fk_person_grant_person FOREIGN KEY (person_id) REFERENCES config.person (person_id),
+    CONSTRAINT fk_person_grant_server FOREIGN KEY (scope_server_id) REFERENCES config.config_monitored_servers (server_id) ON DELETE CASCADE,
+    CONSTRAINT fk_person_grant_tag FOREIGN KEY (scope_tag_id) REFERENCES config.server_tags (id) ON DELETE CASCADE,
+    CONSTRAINT ck_person_grant_scope CHECK (scope_server_id IS NULL OR scope_tag_id IS NULL),
+    CONSTRAINT ck_person_grant_capability CHECK (capability IN ('ask', 'request_level_2', 'request_level_3', 'approve', 'undo', 'decide_note', 'feedback')),
+    CONSTRAINT ck_person_grant_kinds CHECK (
+        CASE WHEN capability IN ('request_level_3', 'approve')
+             THEN cardinality(kinds) >= 1
+                  AND kinds <@ ARRAY['force_plan', 'evict_plan', 'kill_session', 'recompile_module', 'create_plan_guide', 'drop_plan_guide']::text[]
+             ELSE cardinality(kinds) = 0
+        END)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_server
+    ON config.person_grant (person_id, capability, scope_server_id) WHERE scope_server_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_tag
+    ON config.person_grant (person_id, capability, scope_tag_id) WHERE scope_tag_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_grant_fleet
+    ON config.person_grant (person_id, capability) WHERE scope_server_id IS NULL AND scope_tag_id IS NULL;
+
+REVOKE ALL ON config.person, config.person_identity, config.person_grant FROM PUBLIC;
+REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM PUBLIC;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM admin;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM viewer;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM web;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM web;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.person, config.person_identity, config.person_grant FROM mcp;
+        REVOKE ALL ON SEQUENCE config.person_person_id_seq, config.person_identity_identity_id_seq, config.person_grant_grant_id_seq FROM mcp;
+    END IF;
+END
+$do$;";
+
+    /// <summary>
+    /// V238 (#7109, child (d1) of #6980): the approval core's store. Two route columns and one new table.
+    /// <para><c>action_approval</c> (<c>off</c> or <c>required</c>, default <c>required</c>) says whether a Level 3 action on the route needs a
+    /// person's approval, and <c>approval_single_person</c> (default false) whether the person who asked may approve it. The column defaults to
+    /// <c>required</c>, so a route a person later raises to Level 3 gets approval, and the backfill sets <c>off</c> only on the rows at
+    /// <c>agent_level = 3</c> today, so no route that acts now starts to wait. The backfill runs only in the statement that adds the column: a
+    /// re-run of the rung (a rewind) must not turn approval off on a Level 3 route a person has since set to <c>required</c>. The agent-action
+    /// gate reports approval from both columns, the agent's write refuses with <c>approval_required</c> when they say so, and the press
+    /// checks who may approve from them.</para>
+    /// <para><c>config.agent_action_proposals</c> holds one proposed Level 3 action: the request, its claim number and agent, the tool, the
+    /// server, the parsed target (canonical JSON, with its SHA-256 in <c>target_key</c>), the binding, the agent's reason, the times, the state,
+    /// the first of a person's two presses (who, when and the facts it showed, so the confirming press can be checked against it on any
+    /// surface and across a service restart), who decided it and the outcome. It holds no <c>agent_action</c> and no claim id, as the journal holds none. One live proposal (pending or
+    /// approved) for each request, tool and target (<c>uq_agent_action_proposals_live</c>), so a retry gets the same id. The request's foreign
+    /// key cascades, as every other request table's does.</para>
+    /// <para><b>Owner-only.</b> Only the store owner writes it (the proposal store, which journals each state change in the same transaction).
+    /// Managed provisioning section 10e4 and <c>provision-roles.sql</c> step 3j4 take every privilege back and give SELECT to <c>admin</c>,
+    /// <c>viewer</c> and <c>web</c>, not <c>mcp</c> (no tool reads a proposal, and its binding holds statement text). The rung takes the writes
+    /// back too, as V237 does, so a store whose provisioning has not run again since the upgrade does not leave <c>admin</c> the default
+    /// privileges' writes. The table has no sequence. Every statement is idempotent. <b>No Lite twin</b>: Lite has no agent actions.</para>
+    /// </summary>
+    private const string V238Sql = @"
+DO $do$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
+                   WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'action_approval' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_notification_routes
+            ADD COLUMN action_approval text NOT NULL DEFAULT 'required'
+                CONSTRAINT ck_config_notification_routes_action_approval CHECK (action_approval IN ('off', 'required'));
+        UPDATE config.config_notification_routes SET action_approval = 'off' WHERE agent_level = 3;
+    END IF;
+END
+$do$;
+
+ALTER TABLE config.config_notification_routes
+    ADD COLUMN IF NOT EXISTS approval_single_person boolean NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS config.agent_action_proposals
+(
+    proposal_id uuid NOT NULL,
+    request_id uuid NOT NULL,
+    claim_no smallint NOT NULL,
+    agent text NOT NULL,
+    tool text NOT NULL,
+    server_id integer NOT NULL,
+    target jsonb NOT NULL,
+    target_key text NOT NULL,
+    binding jsonb NOT NULL,
+    reason text,
+    proposed_at timestamptz NOT NULL,
+    expires_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'pending',
+    first_press_by text,
+    first_press_at timestamptz,
+    first_press_facts jsonb,
+    decided_by text,
+    decided_at timestamptz,
+    finished_at timestamptz,
+    outcome jsonb,
+    CONSTRAINT pk_agent_action_proposals PRIMARY KEY (proposal_id),
+    CONSTRAINT fk_agent_action_proposals_request FOREIGN KEY (request_id)
+        REFERENCES config.investigation_requests (request_id) ON DELETE CASCADE,
+    CONSTRAINT ck_agent_action_proposals_tool CHECK (tool IN
+        ('force_query_store_plan', 'unforce_query_store_plan', 'evict_cached_plan', 'kill_session', 'recompile_module', 'create_plan_guide',
+         'drop_plan_guide')),
+    CONSTRAINT ck_agent_action_proposals_state CHECK (state IN
+        ('pending', 'approved', 'run', 'failed', 'unknown', 'refused', 'expired', 'superseded', 'voided')),
+    CONSTRAINT ck_agent_action_proposals_target_key CHECK (target_key ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_agent_action_proposals_expiry CHECK (expires_at > proposed_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_action_proposals_live
+    ON config.agent_action_proposals (request_id, tool, target_key) WHERE state IN ('pending', 'approved');
+
+REVOKE ALL ON config.agent_action_proposals FROM PUBLIC;
+
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'admin') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM admin;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'viewer') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM viewer;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'web') THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.agent_action_proposals FROM web;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles AS r WHERE r.rolname = 'mcp') THEN
+        REVOKE ALL ON config.agent_action_proposals FROM mcp;
+    END IF;
+END
+$do$;";
 
     /// <summary>
     /// V189 (#5867): <c>collect.query_store_compose_stamp_failures</c>, the failure record of the Query Store compose builder: one row
@@ -9526,7 +9996,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// V104 are cancelled at 300.05 s. A rung that instrumented its own progress, the natural way to write
     /// a long data move, would not be cancelled at all.</para>
     /// </summary>
-    private const int MigrationCommandTimeoutSeconds = 300;
+    internal const int MigrationCommandTimeoutSeconds = 300;
 
     /// <summary>
     /// Lock-wait budget (seconds) for acquiring <see cref="MigrationLockKey"/>. A different quantity from

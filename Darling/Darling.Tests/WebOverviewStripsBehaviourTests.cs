@@ -97,11 +97,29 @@ public sealed class WebOverviewStripsBehaviourTests
         var at12 = Samples(r.GetProperty("at12").GetProperty("blocking"));
         Assert.Equal((12.0, 3.0), at12[0]);
         Assert.Null(at12[1].V);
+        // #7219: the strip counts blocked-process report rows, so its readout names reports (not "Blocking 3 events").
+        Assert.Contains("Blocked-process reports 3 per min", r.GetProperty("at12Text").GetProperty("blocking").GetString(), StringComparison.Ordinal);
 
         Assert.Equal((30.0, 3.0), Samples(r.GetProperty("at30").GetProperty("io"))[0]);
         // A pointer move drives the same lookup, over one crosshair line.
         AssertReadout("07:30", "SQL 40 %  |  Total 45 %", r.GetProperty("pointerText").GetProperty("cpu").GetString());
         Assert.Equal(1, r.GetProperty("hoverLines").GetInt32());
+    }
+
+    /// <summary>
+    /// #7219: when the trend read answers from DMV snapshot rows (<c>source</c> = "DMV snapshot", no blocked-process reports in the window),
+    /// the strip names its series and its readout for snapshot rows, and the reports arm keeps "Blocked-process reports".
+    /// </summary>
+    [Fact]
+    public void TheBlockingStrip_NamesTheSourceTheReadCounted()
+    {
+        var r = Run("snapshot");
+
+        Assert.Equal(new[] { "Blocking snapshot rows", "Deadlocks" }, r.GetProperty("series").EnumerateArray().Select(e => e.GetString()).ToArray());
+        var readout = r.GetProperty("at12Text").GetProperty("blocking").GetString();
+        Assert.Contains("Blocking snapshot rows 3 per min", readout, StringComparison.Ordinal);
+        Assert.DoesNotContain("reports", readout, StringComparison.Ordinal);
+        Assert.Equal(new[] { "Blocked-process reports", "Deadlocks" }, r.GetProperty("reportsSeries").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
     /// <summary>
@@ -284,5 +302,48 @@ public sealed class WebOverviewStripsBehaviourTests
         Assert.Equal("0", waits[1]);
         var memory = r.GetProperty("memory").EnumerateArray().Select(e => e.GetString()!).ToArray();
         Assert.Equal("0", memory[1]);
+    }
+
+    /// <summary>
+    /// #7572: the I/O latency strip, on a quiet file. Fifteen minute buckets with reads at minutes 0, 15 and 45 (minute 30 holds none). The line
+    /// stops at minute 15 instead of running to minute 45, and the lone reading at 45 is a dot. It is one read at 81 ms, under the 250 reads
+    /// Analysis needs before it calls read latency high, so it carries no red dot; with 300 reads behind it, it does.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_BreaksAtABucketWithNoReads_AndDotsOnlyABucketWithEnoughReads()
+    {
+        var r = Run("iogaps");
+
+        Assert.Equal(new[] { 400, 300, 1 }, r.GetProperty("points").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        var one = r.GetProperty("oneRead");
+        Assert.Equal(new[] { 2 }, one.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(1, one.GetProperty("dots").GetInt32());
+        Assert.Equal(0, one.GetProperty("markers").GetInt32());
+        Assert.Equal(0, one.GetProperty("anomalyDots").GetInt32());
+        var many = r.GetProperty("manyReads");
+        Assert.Equal(1, many.GetProperty("markers").GetInt32());
+        Assert.Equal(1, many.GetProperty("anomalyDots").GetInt32());
+    }
+
+    /// <summary>
+    /// #7572: a bucket is the chart's width (1 minute for a day), not the collector's cadence. A file I/O collector scheduled every 5 minutes leaves a
+    /// row every fifth bucket, and the strip stays one line instead of six dots. The read floor is stated per 15 minutes of bucket (250, the bar the
+    /// PostgreSQL I/O baseline puts on a bucket) and scaled to the span a row counted: 17 reads in a 1 minute bucket, 500 in a 30 minute one, 84 in a row of a 5 minute collector.
+    /// </summary>
+    [Fact]
+    public void TheIoStrip_KeepsItsLineForACollectorSlowerThanTheBucket_AndScalesTheReadFloorToTheSpanARowCounted()
+    {
+        var r = Run("iogaps");
+
+        var slow = r.GetProperty("slowCollector");
+        Assert.Equal(new[] { 6 }, slow.GetProperty("lines").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        Assert.Equal(0, slow.GetProperty("dots").GetInt32());
+        // A row of a 5 minute collector holds 5 minutes of reads: the floor scales by that step (84), not by the 1 minute bucket (17).
+        Assert.Equal(0, r.GetProperty("floorSlowCollector").GetProperty("short").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorSlowCollector").GetProperty("enough").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorOneMinute").GetProperty("enough").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorOneMinute").GetProperty("short").GetInt32());
+        Assert.Equal(0, r.GetProperty("floorThirtyMinute").GetProperty("short").GetInt32());
+        Assert.Equal(1, r.GetProperty("floorThirtyMinute").GetProperty("enough").GetInt32());
     }
 }

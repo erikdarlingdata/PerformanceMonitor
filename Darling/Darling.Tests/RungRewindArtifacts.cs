@@ -601,6 +601,104 @@ ALTER TABLE config.config_threshold_overrides DROP COLUMN IF EXISTS scope_tag_id
             @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS severities;
 ALTER TABLE IF EXISTS config.external_alert_state DROP COLUMN IF EXISTS fired_severities;
 ALTER TABLE IF EXISTS config.investigation_request_alerts DROP COLUMN IF EXISTS severity;"),
+        // V230 (#7028): the two snapshot wait tiers of the blocking band on the alert settings row. The warn tier column is the probe's newest
+        // sentinel. The rewind drops both, so a re-run of V230 adds them again. Safe on a store that never had them.
+        new(230, "hasBlockingSnapshotBands",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS blocking_warn_snapshot_wait_seconds,
+    DROP COLUMN IF EXISTS blocking_critical_snapshot_wait_seconds;"),
+        // V231 (#7040): the recurring schedule on the mute rules. The start time column is the probe's newest sentinel. The rewind drops all
+        // four columns, so a re-run of V231 adds them again. Safe on a store that never had them.
+        new(231, "hasMuteRecurrence",
+            @"ALTER TABLE config.config_mute_rules
+    DROP COLUMN IF EXISTS recur_days,
+    DROP COLUMN IF EXISTS recur_start_time,
+    DROP COLUMN IF EXISTS recur_end_time,
+    DROP COLUMN IF EXISTS recur_time_zone;"),
+        // V232 (#7041): the Daily Health Report columns on the alert settings row. The enabled column is the probe's newest sentinel. The rewind
+        // drops all four, so a re-run of V232 adds them again. Safe on a store that never had them.
+        new(232, "hasDailyReportSettings",
+            @"ALTER TABLE config.config_alert_settings
+    DROP COLUMN IF EXISTS daily_report_enabled,
+    DROP COLUMN IF EXISTS daily_report_send_at,
+    DROP COLUMN IF EXISTS daily_report_time_zone,
+    DROP COLUMN IF EXISTS daily_report_title;"),
+        // V233 (#6979): the report notice setting on the notification routes. The column is the probe's newest sentinel. The rewind drops the
+        // column (its CHECK goes with it), so a re-run of V233 does everything again. Safe on a store that never had it.
+        new(233, "hasReportNotice",
+            @"ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS report_notice;"),
+        // V234 (#7076): the exact alert key on the alert log. The column is the probe's newest sentinel. The rewind drops it, so a re-run of
+        // V234 adds it again. Safe on a store that never had it.
+        new(234, "hasAlertLogKey",
+            @"ALTER TABLE IF EXISTS config.config_alert_log DROP COLUMN IF EXISTS alert_key;"),
+        // V235 (#7083): the blocking bars' column defaults are 3, 60 and 3, the probe's newest sentinel (the count bar's default). The rewind sets the
+        // defaults back to V1's 1, V40's 0 and V122's 1, so a re-run of V235 sets them again. The row's values are left as they are. Guarded, so it is
+        // safe on a store whose V122 column is already gone.
+        new(235, "hasBlockingBarsOnWaitTime",
+            @"
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_alert_settings') AND attname = 'pg_blocking_count_threshold' AND NOT attisdropped) THEN
+        ALTER TABLE config.config_alert_settings
+            ALTER COLUMN blocking_count_threshold SET DEFAULT 1,
+            ALTER COLUMN blocking_wait_seconds_threshold SET DEFAULT 0,
+            ALTER COLUMN pg_blocking_count_threshold SET DEFAULT 1;
+    END IF;
+END $$;"),
+        // V236 (#7083): the action on the mute rules. The column is the probe's newest sentinel. The rewind drops it (its CHECK goes with it), so a
+        // re-run of V236 adds it again. Safe on a store that never had it.
+        new(236, "hasMuteRuleAction",
+            @"ALTER TABLE IF EXISTS config.config_mute_rules DROP COLUMN IF EXISTS action;"),
+        // V237 (#7107): the people, identity and grant tables. The grant table is the probe's newest sentinel. The rewind drops all three
+        // (the two child tables first), so a re-run of V237 creates them again. Safe on a store that never had them.
+        new(237, "hasPeopleGrants",
+            @"DROP TABLE IF EXISTS config.person_grant;
+DROP TABLE IF EXISTS config.person_identity;
+DROP TABLE IF EXISTS config.person;"),
+        // V238 (#7109): the action proposals table and the two route approval columns. The table is the probe's newest sentinel. The rewind
+        // drops all three, so a re-run of V238 adds them again (and runs the backfill again, on a store whose column is gone). Safe on a store
+        // that never had them.
+        new(238, "hasActionProposals",
+            @"DROP TABLE IF EXISTS config.agent_action_proposals;
+ALTER TABLE config.config_notification_routes DROP COLUMN IF EXISTS action_approval, DROP COLUMN IF EXISTS approval_single_person;"),
+        // V239 (#7146): the fleet rollup of the Query Store compose stamp. The table is the probe's newest sentinel. The rewind drops it and
+        // the ledger column, so a re-run of V239 creates them again. Safe on a store that never had them.
+        new(239, "hasComposeFleet",
+            @"DROP TABLE IF EXISTS collect.query_store_compose_fleet;
+ALTER TABLE IF EXISTS collect.query_store_compose_stamp_built DROP COLUMN IF EXISTS fleet_built_seq;"),
+        // V240 (#7169): the execution-weighted sums on the Query Store daily summary. The last column is the probe's newest sentinel. The
+        // rewind drops all six, so a re-run of V240 adds them again. Safe on a store that never had them.
+        new(240, "hasQueryStoreTopDailyWsum",
+            @"ALTER TABLE IF EXISTS collect.query_store_top_daily
+    DROP COLUMN IF EXISTS avg_duration_us_wsum, DROP COLUMN IF EXISTS avg_cpu_time_us_wsum, DROP COLUMN IF EXISTS avg_logical_io_reads_wsum,
+    DROP COLUMN IF EXISTS avg_logical_io_writes_wsum, DROP COLUMN IF EXISTS avg_physical_io_reads_wsum, DROP COLUMN IF EXISTS avg_rowcount_wsum;"),
+        // V241 (#7497): the blocking process's open transaction count on the blocked process reports. The last column is the probe's newest
+        // sentinel. The rung re-expands the SELECT * view over it, so the rewind (V199's shape) drops the view, drops the column and creates
+        // the view again over the older shape, then a re-run of V241 adds the column and re-expands the view. Safe on a store that never had it.
+        new(241, "hasBlockingOpenTranCount",
+            @"DROP VIEW IF EXISTS collect.v_blocked_process_reports;
+ALTER TABLE IF EXISTS collect.blocked_process_reports DROP COLUMN IF EXISTS blocking_open_transaction_count;
+CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collect.blocked_process_reports;"),
+
+        // V242 (#7567): the service-own entry list on the statement text lookup. The last column is the probe's newest sentinel, so the
+        // rewind drops it and a re-run of V242 adds it again. Safe on a store that never had it.
+        new(242, "hasStatementTextOwnEntries",
+            @"ALTER TABLE IF EXISTS collect.pg_statement_text DROP COLUMN IF EXISTS own_entries;"),
+        // V243 (#7573): the session's program name on the waiting tasks. A plain nullable column with no view over it, so the rewind is the drop
+        // alone, and the re-run of V243 adds it back. Safe on a store that never had it.
+        new(243, "hasWaitingTasksProgramName",
+            @"ALTER TABLE IF EXISTS collect.waiting_tasks DROP COLUMN IF EXISTS program_name;"),
+        // V244 (#7590): the connect-failure state on the server registry. The last column is the probe's newest sentinel. The rewind drops the three
+        // columns so a re-run of V244 adds them again. Safe on a store that never had them.
+        new(244, "hasServerConnectDownState",
+            @"ALTER TABLE IF EXISTS collect.servers DROP COLUMN IF EXISTS connect_down_since, DROP COLUMN IF EXISTS last_connect_error, DROP COLUMN IF EXISTS next_connect_attempt;"),
+        // V245 (#7611): the three Database Protection thresholds on the alert settings. Plain NOT NULL DEFAULT columns, so the rewind drops all three
+        // (the probe's sentinel is the CHECKDB one) and the re-run of V245 adds them back with their defaults. Safe on a store that never had them.
+        new(245, "hasProtectionThresholds",
+            @"ALTER TABLE IF EXISTS config.config_alert_settings DROP COLUMN IF EXISTS backup_overdue_threshold_hours, DROP COLUMN IF EXISTS log_backup_overdue_threshold_minutes, DROP COLUMN IF EXISTS checkdb_overdue_threshold_hours;"),
+        // V246 (#7609): the (query_hash, bucket DESC) index on the corrected hourly Query Store rollup's materialization. The rewind drops it by name,
+        // found by catalog (it lives in the materialization's schema), and a no-op without it; the re-run of V246 builds it again.
+        new(246, "hasQueryStoreHashIndex",
+            @"DO $$ DECLARE v regclass; BEGIN SELECT c.oid::regclass INTO v FROM pg_class c WHERE c.relkind = 'i' AND c.relname = 'ix_qs_corrected_hourly_hash_bucket'; IF v IS NOT NULL THEN EXECUTE format('DROP INDEX %s', v); END IF; END $$;"),
     ];
 
     /// <summary>

@@ -39,6 +39,14 @@ public sealed class AlertEngineCpuBatchTests
 
     private static AlertCpuSample Cool(DateTime at) => new(at, 10, 20);
 
+    /// <summary>A run of <paramref name="count"/> over-the-line samples a minute apart from <paramref name="first"/>.</summary>
+    private static AlertCpuSample[] Hots(DateTime first, int count) =>
+        Enumerable.Range(0, count).Select(i => Hot(first.AddMinutes(i))).ToArray();
+
+    /// <summary>A run of <paramref name="count"/> clear samples a minute apart from <paramref name="first"/>.</summary>
+    private static AlertCpuSample[] Cools(DateTime first, int count) =>
+        Enumerable.Range(0, count).Select(i => Cool(first.AddMinutes(i))).ToArray();
+
     /// <summary>A snapshot whose latest-sample fields are the NEWEST of <paramref name="samples"/> (as the worker
     /// builds it) and whose recent list is <paramref name="samples"/>.</summary>
     private static AlertServerSnapshot Batch(DateTime? watchingSince, params AlertCpuSample[] samples)
@@ -62,13 +70,13 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
-    public async Task ThreeOverTheLineSamplesInOneBatch_FireOnce_OnTheThird()
+    public async Task FiveOverTheLineSamplesInOneBatch_FireOnce_OnTheFifth()
     {
         var h = NewHarness();
         var engine = h.Build();
         var t = Noon.AddMinutes(-10);
 
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("High CPU", fired.MetricName);
@@ -76,23 +84,45 @@ public sealed class AlertEngineCpuBatchTests
 
         /* The same list again (the next 30 s sweep) finds nothing new: still one alert. */
         h.Now = Noon.AddSeconds(30);
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
         Assert.Single(h.Deliverer.Outcomes);
     }
 
     [Fact]
-    public async Task TwoSamplesThenOneMore_FiresOnTheThird_WhateverTheBatching()
+    public async Task AFailedIncidentOpenedWatermarkSave_StillSendsTheOpeningPage()
+    {
+        /* #7085: the opened-at instant is saved at the rising edge, between the persisted gate edge and the queued fire. A store
+           write that throws there must be logged and skipped: the opening page still goes out, and the incident is held (no
+           second page on the next sweep). Only the restart seed loses the instant, and it reads unbounded as for a legacy incident. */
+        var h = NewHarness();
+        h.StateStore.ThrowOnSaveEdgeMetric = AlertEngine.CpuIncidentOpenedMetric;
+        var engine = h.Build();
+        var t = Noon.AddMinutes(-10);
+
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("High CPU", fired.MetricName);
+        Assert.DoesNotContain(h.StateStore.SavedEdge, e => e.Metric == AlertEngine.CpuIncidentOpenedMetric);
+
+        h.Now = Noon.AddSeconds(30);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task FourSamplesThenOneMore_FiresOnTheFifth_WhateverTheBatching()
     {
         var h = NewHarness();
         var engine = h.Build();
         var t = Noon.AddMinutes(-10);
 
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1))));
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples - 1)));
         Assert.Empty(h.Deliverer.Outcomes);
 
-        /* The list is the last 15 minutes, so the next sweep still holds the first two: only the third is new. */
+        /* The list is the last 15 minutes, so the next sweep still holds the first four: only the fifth is new. */
         h.Now = Noon.AddMinutes(1);
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hots(t, AlertEngine.SqlCpuBreachSamples)));
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -147,7 +177,7 @@ public sealed class AlertEngineCpuBatchTests
         var h = NewHarness();
         var engine = h.Build();
 
-        for (var i = 1; i <= AlertEngine.CpuBreachSamples; i++)
+        for (var i = 1; i <= AlertEngine.SqlCpuBreachSamples; i++)
         {
             Assert.Empty(h.Deliverer.Outcomes);
             var at = Noon.AddMinutes(-10 + i);
@@ -168,7 +198,7 @@ public sealed class AlertEngineCpuBatchTests
 
         /* Before the restart the incident fired at the third sample (t+2) and the gate persisted that. */
         h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)] = new AlertPersistenceRecord(
-            new PersistenceState(AlertEngine.CpuBreachSamples, 0, true), t.AddMinutes(2));
+            new PersistenceState(AlertEngine.SqlCpuBreachSamples, 0, true), t.AddMinutes(2));
 
         /* The restarted engine reads the whole list again (it is the store's last 15 minutes) plus one new sample. */
         var engine = h.Build();
@@ -272,11 +302,11 @@ public sealed class AlertEngineCpuBatchTests
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
 
-        /* Samples collected after the reconnect count one by one: three hot ones fire. */
+        /* Samples collected after the reconnect count one by one: five hot ones fire. */
         h.Now = Noon;
-        var live = Noon.AddMinutes(-3);
+        var live = Noon.AddMinutes(-4);
         await engine.EvaluateServerAsync(Batch(
-            Noon.AddMinutes(-4), Cool(Noon.AddMinutes(-5)), Hot(live), Hot(live.AddMinutes(1)), Hot(live.AddMinutes(2))));
+            Noon.AddMinutes(-4), Hots(live, AlertEngine.SqlCpuBreachSamples).Prepend(Cool(Noon.AddMinutes(-5))).ToArray()));
         Assert.Single(h.Deliverer.Outcomes);
     }
 
@@ -313,63 +343,76 @@ public sealed class AlertEngineCpuBatchTests
         var engine = h.Build();
         var t = Noon.AddMinutes(-10);
 
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2))));
+        var hots = Hots(t, AlertEngine.SqlCpuBreachSamples);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), hots));
         Assert.Single(h.Deliverer.Outcomes);
 
-        h.Now = Noon.AddMinutes(1);
-        await engine.EvaluateServerAsync(Batch(
-            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3)), Cool(t.AddMinutes(4))));
+        /* #7085: an open incident clears on fifteen minutes of samples under the bar, so the clear samples come in two sweeps
+           (the batch lookback is itself fifteen minutes): the first holds the incident open, the second completes the span. */
+        var firstCool = t.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        h.Now = firstCool.AddMinutes(10);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Cools(firstCool, 10)));
+        Assert.Empty(h.Resolutions);
+
+        h.Now = firstCool.AddMinutes(15);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), Cools(firstCool.AddMinutes(10), 6)));
 
         var resolved = Assert.Single(h.Resolutions);
         Assert.Equal("High CPU", resolved.MetricName);
         Assert.Single(h.Deliverer.Outcomes);
     }
 
-    /// <summary>One batch of Hot x3, Cool x2, Hot x3: the gate opens, closes and opens again (CpuBreachSamples
-    /// 3, CpuClearSamples 2), eight samples a minute apart inside the 15-minute lookback.</summary>
-    private static AlertCpuSample[] FireResolveFire(DateTime first) => new[]
-    {
-        Hot(first), Hot(first.AddMinutes(1)), Hot(first.AddMinutes(2)),
-        Cool(first.AddMinutes(3)), Cool(first.AddMinutes(4)),
-        Hot(first.AddMinutes(5)), Hot(first.AddMinutes(6)), Hot(first.AddMinutes(7))
-    };
-
     [Fact]
-    public async Task AFireResolveFireBatch_SendsOneFire_AndNoResolve()
+    public async Task AClearHoldCompletedInThisSweep_ThenAFreshRunOverTheBar_ResolvesFirstAndPagesTheNewIncident()
     {
+        /* #7085 review: the clear run began in an earlier sweep, so this batch is [the 16th clear sample, five breaching samples]. The
+           hold completed, so the old incident closes (Resolved, tier closed) and the new run opens a new incident that pages as an
+           opening page. It used to cancel the resolve with the fire: no Resolved, no page, and the old Critical tier inherited. */
         var h = NewHarness();
         var engine = h.Build();
+        var t = Noon.AddMinutes(-40);
 
-        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-30), FireResolveFire(Noon.AddMinutes(-10))));
+        h.Now = t.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-60), Hots(t, AlertEngine.SqlCpuBreachSamples)));
+        var first = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(AlertSeverityLevel.Critical, first.Severity);
 
-        /* The cooldown would swallow the second fire, leaving "CPU Resolved" as the last word while the gate is
-           firing. The resolve that a fire immediately follows is cancelled with it, so the operator's one
-           message is the fire. */
-        Assert.Single(h.Deliverer.Outcomes);
+        var firstCool = t.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        h.Now = firstCool.AddMinutes(14);
+        await engine.EvaluateServerAsync(Batch(Noon.AddMinutes(-60), Cools(firstCool, 15)));
         Assert.Empty(h.Resolutions);
+
+        var sixteenth = firstCool.AddMinutes(15);
+        h.Now = sixteenth.AddMinutes(AlertEngine.SqlCpuBreachSamples);
+        await engine.EvaluateServerAsync(Batch(
+            Noon.AddMinutes(-60),
+            Cools(sixteenth, 1).Concat(Enumerable.Range(1, AlertEngine.SqlCpuBreachSamples).Select(i => HotAt(sixteenth.AddMinutes(i), 90))).ToArray()));
+
+        Assert.Equal("CPU Resolved", Assert.Single(h.Resolutions).Title);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        var second = h.Deliverer.Outcomes[1];
+        Assert.Equal(AlertSeverityLevel.Warning, second.Severity);
+        Assert.False(second.Context!.EscalationBypassesCooldown);
     }
 
     [Fact]
-    public async Task AFireResolveFireBatch_DeliversTheNewestBreachingReading_NotTheEarlierFires()
+    public async Task ABatchOfFiveHotSamples_DeliversTheNewestBreachingReading_AndItsInstant()
     {
         var h = NewHarness();
         var engine = h.Build();
         var first = Noon.AddMinutes(-10);
 
-        /* DISTINCT values: the first run peaks at 91%, the second at 97%. The page must name the 97% reading
-           and its instant (the gate fired on the newer streak), not the 91% fire that happened to come first. */
+        /* DISTINCT values: the page must name the newest breaching reading (97%) and its instant, not the first. */
         await engine.EvaluateServerAsync(Batch(
             Noon.AddMinutes(-30),
-            HotAt(first, 91), HotAt(first.AddMinutes(1), 91), HotAt(first.AddMinutes(2), 91),
-            Cool(first.AddMinutes(3)), Cool(first.AddMinutes(4)),
-            HotAt(first.AddMinutes(5), 95), HotAt(first.AddMinutes(6), 96), HotAt(first.AddMinutes(7), 97)));
+            HotAt(first, 91), HotAt(first.AddMinutes(1), 92), HotAt(first.AddMinutes(2), 95), HotAt(first.AddMinutes(3), 96), HotAt(first.AddMinutes(4), 97)));
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.Resolutions);
         Assert.Equal("97% (Total CPU)", fired.CurrentValue);
         var sample = fired.Context!.NewestSample!;
-        Assert.Equal(first.AddMinutes(7), sample.InstantUtc);
-        Assert.Equal(TimeSpan.FromMinutes(3), sample.Age);
+        Assert.Equal(first.AddMinutes(4), sample.InstantUtc);
+        Assert.Equal(TimeSpan.FromMinutes(6), sample.Age);
     }
 
     [Fact]
@@ -380,7 +423,7 @@ public sealed class AlertEngineCpuBatchTests
 
         /* The incident was already open (the persisted firing bit), and the batch clears then breaches again. */
         h.StateStore.Persistence[(Key, AlertEngine.CpuPersistenceMetric)] = new AlertPersistenceRecord(
-            new PersistenceState(AlertEngine.CpuBreachSamples, 0, true), t.AddMinutes(-1));
+            new PersistenceState(AlertEngine.SqlCpuBreachSamples, 0, true), t.AddMinutes(-1));
         var engine = h.Build();
         await engine.EvaluateServerAsync(Batch(
             Noon.AddMinutes(-30),
@@ -391,20 +434,6 @@ public sealed class AlertEngineCpuBatchTests
     }
 
     [Fact]
-    public async Task AFireThenResolveBatch_StillSendsBoth_ARealSpikeWhileWeWereWatching()
-    {
-        var h = NewHarness();
-        var engine = h.Build();
-        var t = Noon.AddMinutes(-10);
-
-        await engine.EvaluateServerAsync(Batch(
-            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3)), Cool(t.AddMinutes(4))));
-
-        Assert.Single(h.Deliverer.Outcomes);
-        Assert.Single(h.Resolutions);
-    }
-
-    [Fact]
     public async Task TheFiredCpuAlert_CarriesTheSampleAge_SetAtFireTime_AndTheLinePrintsOnce()
     {
         var h = NewHarness();
@@ -412,7 +441,7 @@ public sealed class AlertEngineCpuBatchTests
         var newest = Noon.AddMinutes(-8);
 
         await engine.EvaluateServerAsync(Batch(
-            Noon.AddMinutes(-30), Hot(newest.AddMinutes(-2)), Hot(newest.AddMinutes(-1)), Hot(newest)));
+            Noon.AddMinutes(-30), Hots(newest.AddMinutes(1 - AlertEngine.SqlCpuBreachSamples), AlertEngine.SqlCpuBreachSamples)));
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         var sample = fired.Context!.NewestSample!;
@@ -435,21 +464,21 @@ public sealed class AlertEngineCpuBatchTests
         var engine = h.Build();
         var t = Noon.AddMinutes(-10);
 
-        /* Three breaching readings (the last at 95%) and then one clear one, the newest sample in the list. The
-           alert fires with the third reading's percentage, so the age must be that reading's, not the clear
-           sample's: "CPU at 95%" and "11:52:00, 8m old" describe the same measurement. */
+        /* Five breaching readings (the last at 95%) and then one clear one, the newest sample in the list. The
+           alert fires with the fifth reading's percentage, so the age must be that reading's, not the clear
+           sample's: "CPU at 95%" and "11:54:00, 6m old" describe the same measurement. */
         await engine.EvaluateServerAsync(Batch(
-            Noon.AddMinutes(-30), Hot(t), Hot(t.AddMinutes(1)), Hot(t.AddMinutes(2)), Cool(t.AddMinutes(3))));
+            Noon.AddMinutes(-30), Hots(t, 5).Append(Cool(t.AddMinutes(5))).ToArray()));
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("95% (Total CPU)", fired.CurrentValue);
         var sample = fired.Context!.NewestSample!;
-        Assert.Equal(t.AddMinutes(2), sample.InstantUtc);
-        Assert.Equal(TimeSpan.FromMinutes(8), sample.Age);
+        Assert.Equal(t.AddMinutes(4), sample.InstantUtc);
+        Assert.Equal(TimeSpan.FromMinutes(6), sample.Age);
 
         /* The newest sample is NOT what the alert fired on, so the line must not call it "Newest". */
         Assert.Equal("CPU reading", sample.Source);
-        Assert.Equal("CPU reading: 11:52:00 UTC, 8m 0s old", AlertDetailText.SampleAgeLine(sample));
+        Assert.Equal("CPU reading: 11:54:00 UTC, 6m 0s old", AlertDetailText.SampleAgeLine(sample));
         Assert.DoesNotContain("Newest", fired.DetailText!, StringComparison.Ordinal);
     }
 
@@ -483,7 +512,7 @@ public sealed class AlertEngineCpuBatchTests
         var engine = h.Build();
 
         /* The one-row path with no sample instant at all (a host that supplies none): no age, no line. */
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             await engine.EvaluateServerAsync(AlertEngineTests.Harness.Snapshot(sqlCpu: 70, totalCpu: 95, noCpuSampleTime: true));
         }

@@ -136,12 +136,35 @@ public sealed record PostgresXminHorizonAlertInfo(
 /// <param name="NewestCollectionTime">The newest contributing store row's own collection_time — the
 /// collector's clock, not the alert sweep's, so the host can refuse to re-fire on a row it has already
 /// reported (the #2704 unrefreshed-source-row guard).</param>
+/// <param name="PriorWindowAccumulatedWaitMs">The same accumulation over the window BEFORE this one (the
+/// ten minutes ending where this window starts), #7082. A Warning pages only when this one also averages at
+/// least the Warning bar, so an episode has to hold for two back-to-back windows (20 minutes) on the
+/// collector's own clock. It rides on the read, so it needs no memory in the host and a service restart cannot
+/// reset it. 0 when nothing was stored in that window, which never confirms a Warning.</param>
 public sealed record PostgresPoisonWaitAlertInfo(
     string WaitType,
     string WaitEvent,
     long AccumulatedWaitMs,
     long AccumulatedWaits,
-    DateTime NewestCollectionTime);
+    DateTime NewestCollectionTime,
+    long PriorWindowAccumulatedWaitMs = 0);
+
+/// <summary>One wait event in the Poison Wait detail text: its average waiting backends over the window (#7082).</summary>
+public sealed record PostgresPoisonWaitTopEvent(string WaitType, string WaitEvent, double AvgWaiters);
+
+/// <summary>
+/// One statement seen waiting on the alerting event in the window (#7082). <paramref name="QueryText"/> is
+/// ALREADY at the <c>mcp.dataDetail</c> level: the statement as stored, with literals replaced, or null when the
+/// level withholds statements or the store has no text for the id.
+/// </summary>
+/// <param name="Source">Where the count came from: <c>pg_wait_sampling</c> (samples) or
+/// <c>pg_session_states</c> (captures).</param>
+public sealed record PostgresPoisonWaitStatement(long QueryId, string? QueryText, long Count, string Source);
+
+/// <summary>What the Poison Wait detail text is built from: the top events and the statements for the finding's event.</summary>
+public sealed record PostgresPoisonWaitDetail(
+    IReadOnlyList<PostgresPoisonWaitTopEvent> TopEvents,
+    IReadOnlyList<PostgresPoisonWaitStatement> Statements);
 
 /// <summary>
 /// What the poison-wait read hands the PostgreSQL host: the per-event accumulations over the window, AND

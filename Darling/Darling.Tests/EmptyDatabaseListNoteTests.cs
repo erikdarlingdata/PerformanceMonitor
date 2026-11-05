@@ -67,7 +67,7 @@ public sealed class EmptyDatabaseListNoteTests
     [Fact]
     public void TheRunner_TakesTheNoteFromTheSharedRule_AndCarriesNoTextOfItsOwn()
     {
-        var runner = ReadLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
         Assert.Contains("EmptyDatabaseListNote.For(", runner, StringComparison.Ordinal);
         Assert.DoesNotContain("no database read", runner, StringComparison.Ordinal);
@@ -80,7 +80,7 @@ public sealed class EmptyDatabaseListNoteTests
     [Fact]
     public void TheNote_IsMergedIntoTheAssignmentThatFollowsThePerDatabaseLoop()
     {
-        var runner = ReadLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
         var loopEnd = runner.IndexOf("await PrunePgPerDatabaseStateAsync(server.ServerId, definition.Name, databases, cancellationToken);", StringComparison.Ordinal);
         Assert.True(loopEnd > 0, "the per-database loop is followed by the per-database state prune");

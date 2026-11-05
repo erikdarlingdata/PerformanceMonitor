@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
@@ -210,7 +211,7 @@ internal static class DarlingDataReader
     /// before the rung. <c>SampleIntervalSeconds</c> is the seconds the delta covers under the three-state rule
     /// (0 = no delta knowable, null on a gauge), the denominator of the row's per-second figure.</summary>
     public sealed record PerfmonRow(
-        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null);
+        string CounterName, string InstanceName, long Value, long? DeltaValue, int? CntrType = null, int? SampleIntervalSeconds = null, string? ObjectName = null);
 
     /// <summary>One (database, query_hash) group's summed query-stats deltas over the window. Time
     /// metrics are in microseconds (converted to ms by the tool, matching Lite).</summary>
@@ -299,7 +300,9 @@ internal static class DarlingDataReader
         DateTime? RegisteredAt = null,
         int? SqlEngineEdition = null,
         IReadOnlyList<string>? SameMachineAs = null,
-        decimal MonthlyCostUsd = 0m);
+        decimal MonthlyCostUsd = 0m,
+        DateTime? ConnectDownSince = null,
+        string? LastConnectError = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -1037,11 +1040,12 @@ internal static class DarlingDataReader
             delta_cntr_value,
             collection_time,
             cntr_type,
-            sample_interval_seconds
+            sample_interval_seconds,
+            object_name
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name, instance_name
         """;
 
     public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
@@ -1062,7 +1066,8 @@ internal static class DarlingDataReader
                 /* NULL stays NULL: a gauge row stores no delta (V132); 0 here would be a fabricated zero. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
             capturedAt ??= reader.GetDateTime(4);
         }
 
@@ -2574,9 +2579,10 @@ internal static class DarlingDataReader
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
     /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
-    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// metrics weighted by each interval's execution count (#7169, <see cref="QueryStoreWeightedAverage"/>), rank by
+    /// total duration (<c>SUM(avg_duration_us * execution_count)</c>) descending,
     /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
-    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// double precision before the weighted sum/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
     /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
     /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
     /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
@@ -2600,8 +2606,8 @@ internal static class DarlingDataReader
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
                cycle as its last_execution_time advances, so the SAME interval (same first_execution_time)
                is stored repeatedly with a growing execution_count. SUM(execution_count) over the raw rows
-               reports 10 + 25 + 40 for an interval that reached 40, and AVG(avg_*) becomes an avg-of-avgs
-               weighted by how many times each interval happened to be re-collected. This surface feeds
+               reports 10 + 25 + 40 for an interval that reached 40, and the execution-weighted
+               averages would count a re-collected interval again at its own execution count. This surface feeds
                BOTH the MCP tool and the REST route, so un-deduped numbers reach an agent's reasoning as
                readily as the web dashboard. Twins the viewer's QueryStoreTopSql.
 
@@ -2692,7 +2698,7 @@ internal static class DarlingDataReader
     /// before <c>LIMIT $8</c>, the round's candidate limit) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
     /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
     /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
-    private const string QueryStoreTopRankedHead = """
+    private const string QueryStoreTopRankedHead = $$"""
         ranked AS (
             SELECT
                 database_name,
@@ -2710,12 +2716,12 @@ internal static class DarlingDataReader
                    standalone/non-AG server, where every row shares one value. */
                 replica_role,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
-                AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
-                AVG(CAST(avg_cpu_time_us AS double precision)) / 1000.0 AS avg_cpu_time_ms,
-                AVG(CAST(avg_logical_io_reads AS double precision)) AS avg_logical_reads,
-                AVG(CAST(avg_logical_io_writes AS double precision)) AS avg_logical_writes,
-                AVG(CAST(avg_physical_io_reads AS double precision)) AS avg_physical_reads,
-                AVG(CAST(avg_rowcount AS double precision)) AS avg_rowcount,
+                {{QueryStoreWeightedAverage.DurationUs}} / 1000.0 AS avg_duration_ms,
+                {{QueryStoreWeightedAverage.CpuTimeUs}} / 1000.0 AS avg_cpu_time_ms,
+                {{QueryStoreWeightedAverage.LogicalReads}} AS avg_logical_reads,
+                {{QueryStoreWeightedAverage.LogicalWrites}} AS avg_logical_writes,
+                {{QueryStoreWeightedAverage.PhysicalReads}} AS avg_physical_reads,
+                {{QueryStoreWeightedAverage.Rowcount}} AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
@@ -2723,7 +2729,7 @@ internal static class DarlingDataReader
             AND   ($7::text IS NULL OR module_name = $7)
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY {{QueryStoreWeightedAverage.RankByDuration}} DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $8
         ),
 
@@ -2835,13 +2841,13 @@ internal static class DarlingDataReader
     /// <see cref="QueryStoreIntervalWide.FirstExecUpperSlack"/>, so an edge reads about a day of the server's rows, not
     /// every row newer than it), so a partial first or last day, and any day without a built row, is exact.
     /// <para><b>Every arm is projected as recombinable parts</b>: the execution count, and for each averaged column its
-    /// value as <c>numeric</c> and a 0/1 for "not NULL" (the summary stores the same two things as
-    /// <c>&lt;col&gt;_sum</c> and <c>&lt;col&gt;_n</c>). <c>ranked</c> then groups the unioned rows by the table read's own
-    /// keys and computes <c>SUM(sum) / NULLIF(SUM(n), 0)</c>, which is the table read's unweighted mean of interval
-    /// averages. In the clean case it equals the table read bit for bit: <c>AVG(double precision)</c> of the
-    /// bigint-valued columns is <c>Sx / N</c> with <c>Sx</c> a sum of integers, exact in a double while it stays below
-    /// 2^53; here <c>Sx</c> is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
-    /// <c>N</c>, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
+    /// execution-weighted sum <c>avg * execution_count</c> as <c>numeric</c> (the summary stores the same thing as
+    /// <c>&lt;col&gt;_wsum</c>, V240, #7169). <c>ranked</c> then groups the unioned rows by the table read's own
+    /// keys and computes <c>SUM(wsum) / NULLIF(SUM(ec), 0)</c>, which is the table read's execution-weighted mean of interval
+    /// averages, and ranks on <c>SUM(duration_wsum)</c>, the plan's total duration. In the clean case it equals the table read bit for
+    /// bit: the weighted sum of the bigint-valued columns is a sum of integer products, exact in a double while it stays below
+    /// 2^53; here it is an exact <c>numeric</c> sum that is converted to a double once and divided by the same
+    /// execution total, so both are one correctly rounded division of the same two numbers. $7 filters the unioned rows before
     /// the GROUP BY, where the table read puts it (<c>module_name</c> is part of the summary's key). The text lateral,
     /// the WAITFOR exclusion and the ordering are <see cref="QueryStoreTopTail"/>, shared with the table read.</para>
     /// <para><b>Approximate only through the summary's documented staleness</b>: a row written into a day after that day
@@ -2855,12 +2861,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric) AS duration_sum, CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint) AS duration_n,
-                CAST(avg_cpu_time_us AS numeric) AS cpu_sum, CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint) AS cpu_n,
-                CAST(avg_logical_io_reads AS numeric) AS reads_sum, CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint) AS reads_n,
-                CAST(avg_logical_io_writes AS numeric) AS writes_sum, CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint) AS writes_n,
-                CAST(avg_physical_io_reads AS numeric) AS physical_sum, CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint) AS physical_n,
-                CAST(avg_rowcount AS numeric) AS rowcount_sum, CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint) AS rowcount_n,
+                CAST(avg_duration_us AS numeric) * execution_count AS duration_wsum,
+                CAST(avg_cpu_time_us AS numeric) * execution_count AS cpu_wsum,
+                CAST(avg_logical_io_reads AS numeric) * execution_count AS reads_wsum,
+                CAST(avg_logical_io_writes AS numeric) * execution_count AS writes_wsum,
+                CAST(avg_physical_io_reads AS numeric) * execution_count AS physical_wsum,
+                CAST(avg_rowcount AS numeric) * execution_count AS rowcount_wsum,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2874,12 +2880,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 CAST(execution_count AS numeric) AS ec,
-                CAST(avg_duration_us AS numeric), CAST(CAST(avg_duration_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_cpu_time_us AS numeric), CAST(CAST(avg_cpu_time_us IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_reads AS numeric), CAST(CAST(avg_logical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_logical_io_writes AS numeric), CAST(CAST(avg_logical_io_writes IS NOT NULL AS integer) AS bigint),
-                CAST(avg_physical_io_reads AS numeric), CAST(CAST(avg_physical_io_reads IS NOT NULL AS integer) AS bigint),
-                CAST(avg_rowcount AS numeric), CAST(CAST(avg_rowcount IS NOT NULL AS integer) AS bigint),
+                CAST(avg_duration_us AS numeric) * execution_count,
+                CAST(avg_cpu_time_us AS numeric) * execution_count,
+                CAST(avg_logical_io_reads AS numeric) * execution_count,
+                CAST(avg_logical_io_writes AS numeric) * execution_count,
+                CAST(avg_physical_io_reads AS numeric) * execution_count,
+                CAST(avg_rowcount AS numeric) * execution_count,
                 last_execution_time, query_plan_hash
             FROM query_store_interval_wide
             WHERE server_id = $1
@@ -2893,12 +2899,12 @@ internal static class DarlingDataReader
             SELECT
                 database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role, module_name,
                 execution_count_sum,
-                avg_duration_us_sum, avg_duration_us_n,
-                avg_cpu_time_us_sum, avg_cpu_time_us_n,
-                avg_logical_io_reads_sum, avg_logical_io_reads_n,
-                avg_logical_io_writes_sum, avg_logical_io_writes_n,
-                avg_physical_io_reads_sum, avg_physical_io_reads_n,
-                avg_rowcount_sum, avg_rowcount_n,
+                avg_duration_us_wsum,
+                avg_cpu_time_us_wsum,
+                avg_logical_io_reads_wsum,
+                avg_logical_io_writes_wsum,
+                avg_physical_io_reads_wsum,
+                avg_rowcount_wsum,
                 last_execution_time_max, query_plan_hash_max
             FROM query_store_top_daily
             WHERE server_id = $1
@@ -2917,32 +2923,41 @@ internal static class DarlingDataReader
                 MAX(module_name) AS module_name,
                 replica_role,
                 CAST(SUM(ec) AS bigint) AS total_executions,
-                CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0) / 1000.0 AS avg_duration_ms,
-                CAST(SUM(cpu_sum) AS double precision) / NULLIF(SUM(cpu_n), 0) / 1000.0 AS avg_cpu_time_ms,
-                CAST(SUM(reads_sum) AS double precision) / NULLIF(SUM(reads_n), 0) AS avg_logical_reads,
-                CAST(SUM(writes_sum) AS double precision) / NULLIF(SUM(writes_n), 0) AS avg_logical_writes,
-                CAST(SUM(physical_sum) AS double precision) / NULLIF(SUM(physical_n), 0) AS avg_physical_reads,
-                CAST(SUM(rowcount_sum) AS double precision) / NULLIF(SUM(rowcount_n), 0) AS avg_rowcount,
+                CAST(SUM(duration_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_duration_ms,
+                CAST(SUM(cpu_wsum) AS double precision) / NULLIF(SUM(ec), 0) / 1000.0 AS avg_cpu_time_ms,
+                CAST(SUM(reads_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_reads,
+                CAST(SUM(writes_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_logical_writes,
+                CAST(SUM(physical_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_physical_reads,
+                CAST(SUM(rowcount_wsum) AS double precision) / NULLIF(SUM(ec), 0) AS avg_rowcount,
                 MAX(last_execution_time) AS last_execution_time,
                 MAX(query_plan_hash) AS query_plan_hash
             FROM parts
             WHERE ($7::text IS NULL OR module_name = $7)
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
-            ORDER BY SUM(ec) * (CAST(SUM(duration_sum) AS double precision) / NULLIF(SUM(duration_n), 0)) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
+            ORDER BY CAST(SUM(duration_wsum) AS double precision) DESC, database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             LIMIT $10
         ),
 
         """ + QueryStoreTopTail;
 
-    /// <summary>The days of <c>[$2, $3)</c> that have a built summary row for server $1. $2 and $3 are dates.</summary>
+    /// <summary>
+    /// The days of <c>[$2, $3)</c> that have a built summary row for server $1 AND were built by a V240-or-newer builder
+    /// (#7169, <see cref="QueryStoreTopDaily.DayIsWeightedSql"/>). A day built before V240 has NULL weighted sums, which would
+    /// sum to a wrong average beside a non-NULL execution count, so it counts as not built and is read from the wide table until
+    /// the service rebuilds it. $2 and $3 are dates. The weighted test reads one probe row for each day, not every row of the day
+    /// (#7379), so a long window over days built before V240 does not read the wide summary.
+    /// </summary>
     private const string QueryStoreTopBuiltDaysSql = """
-        SELECT day
-        FROM query_store_top_daily_built
-        WHERE server_id = $1
-        AND   day >= $2::date
-        AND   day < $3::date
-        ORDER BY day
+        SELECT b.day
+        FROM query_store_top_daily_built AS b
+        WHERE b.server_id = $1
+        AND   b.day >= $2::date
+        AND   b.day < $3::date
+        AND   
+        """ + QueryStoreTopDaily.DayIsWeightedSql + """
+
+        ORDER BY b.day
         """;
 
     /// <summary>
@@ -3335,7 +3350,9 @@ internal static class DarlingDataReader
             s.created_date,
             s.sql_engine_edition,
             {SameMachineAsColumnSql},
-            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd
+            COALESCE(c.monthly_cost_usd, 0) AS monthly_cost_usd,
+            s.connect_down_since,
+            s.last_connect_error
         FROM servers s
         JOIN config.config_monitored_servers c ON c.server_id = s.server_id
         LEFT JOIN LATERAL
@@ -3371,7 +3388,9 @@ internal static class DarlingDataReader
                 reader.IsDBNull(7) ? null : reader.GetDateTime(7),
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
                 reader.IsDBNull(9) ? null : reader.GetFieldValue<string[]>(9),
-                reader.GetDecimal(10)));
+                reader.GetDecimal(10),
+                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
         return rows;
@@ -3767,7 +3786,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#6254 collection health could not read the Query Store read source for server {serverId}; it is shown without one", ex);
+            ReadScope.Warn($"Collection health could not read the Query Store read source for server {serverId}, so it is shown without one. The cause is logged with this entry.", ex);
             return new Dictionary<string, string>(StringComparer.Ordinal);
         }
 
@@ -3785,7 +3804,7 @@ LIMIT 1";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddInt(command, serverId);
         AddTimestamp(command, windowStartUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new CollectorHealth
@@ -3841,6 +3860,11 @@ LIMIT 1";
         }
 
         ApplyScheduledFrequencies(rows, serverId, scheduleOverrides);
+
+        /* #7242: the activity quiet bar is observed time, which the ranked subquery's run count cannot give: the gaps between the
+           streak's runs, read for just the rows the bar decides, after the health reader has closed (one connection at a time). */
+        await DarlingFleetReader.ApplyObservedQuietRunsAsync(
+            postgres, rows.Select(r => (serverId, r)).ToList(), windowStartUtc, DateTime.UtcNow, cancellationToken);
         return rows;
     }
 
@@ -3898,7 +3922,7 @@ FROM config.config_collector_schedules";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ReadScope.Warn($"#4999 collection health could not read the collector schedule overrides for server {serverId}; its collectors are judged by their shipped cadences", ex);
+            ReadScope.Warn($"Collection health could not read the collector schedule overrides for server {serverId}, so its collectors are judged by their shipped cadences. The cause is logged with this entry.", ex);
             return Array.Empty<ScheduleOverride>();
         }
 
@@ -4747,8 +4771,10 @@ FROM config.config_collector_schedules";
 
     /// <summary>
     /// Blocked-session count per database per collection, for one server over an explicit window.
-    /// <para>blocking_session_id > 0 is the blocked-ness test, so this counts sessions WAITING ON another
-    /// session rather than every waiting task. The optional database filter is kept from the viewer's read
+    /// <para>A session is blocked when a waiting task of it has <c>blocking_session_id > 0</c> AND
+    /// <c>blocking_session_id &lt;> session_id</c>: a parallel query's exchange threads wait on their OWN session
+    /// (<c>intra_query_parallelism</c>), which is not blocking (#7577). The count is DISTINCT sessions, not tasks, so a
+    /// session with several blocked threads is one blocked session. The optional database filter is kept from the viewer's read
     /// rather than dropped for a simpler signature: on a busy instance one database usually owns the
     /// blocking, and a series that cannot be narrowed to it answers a different question from the one the
     /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 the databases as one <c>text[]</c> (#5244): SQL NULL
@@ -4759,10 +4785,11 @@ FROM config.config_collector_schedules";
         SELECT
             collection_time,
             database_name,
-            COUNT(*) AS blocked_count
+            COUNT(DISTINCT session_id) AS blocked_count
         FROM waiting_tasks
         WHERE server_id = $1
         AND   blocking_session_id > 0
+        AND   blocking_session_id <> session_id
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   database_name IS NOT NULL
@@ -4866,34 +4893,6 @@ FROM config.config_collector_schedules";
     /// <param name="Source">Which arm answered (#5244): "blocked-process-report" or "DMV snapshot", the tags <c>get_blocking</c> rows carry.</param>
     public sealed record BlockingDurationStatsRow(
         DateTime Time, long EventCount, long TotalDurationMs, long MaxDurationMs, double AvgDurationMs, string? Source = null);
-
-    /// <summary>
-    /// Whether ANY of the three capture paths behind the blocking-severity read has ever produced a row.
-    /// <para>Each can be off independently: the XE blocked-process report needs its session running, the
-    /// DMV snapshot needs its collector enabled, and deadlock capture is separate from both. Probing one
-    /// would report "never captured" for a server capturing fine through another; probing neither would
-    /// let a silent capture gap read as a clean bill of health.</para>
-    /// <para>Deadlocks are in here because the verdict gates on the blocking series AND the deadlock
-    /// series both being empty. Probing only the two blocking sources would call a server 'genuinely
-    /// clear' on the strength of blocking capture alone, while deadlock capture had never run -- the
-    /// reassuring-wrong answer this probe exists to prevent, missed for the deadlock half.</para>
-    /// </summary>
-    public const string HasAnyBlockingCaptureSql = """
-        SELECT 1
-        WHERE EXISTS (SELECT 1 FROM v_blocked_process_reports WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1)
-        OR    EXISTS (SELECT 1 FROM v_deadlocks WHERE server_id = $1)
-        """;
-
-    /// <summary>Runs <see cref="HasAnyBlockingCaptureSql"/>.</summary>
-    public static async Task<bool> HasAnyBlockingCaptureAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(HasAnyBlockingCaptureSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddInt(command, serverId);
-        return await command.ExecuteScalarAsync(cancellationToken) is not null;
-    }
 
     /// <summary>Runs <see cref="BlockingDurationStatsSql"/> over every database.</summary>
     public static Task<List<BlockingDurationStatsRow>> GetBlockingDurationStatsAsync(
@@ -5151,6 +5150,20 @@ internal sealed class CollectorHealth
     public long TrailingZeroRowSuccessRuns { get; set; }
 
     /// <summary>
+    /// #7242: the newest run that was NOT a zero-row SUCCESS (<c>last_zero_row_streak_break_time</c>), the instant the quiet streak
+    /// began after. Set by the fleet read only, where it is the lower bound of the exact run count taken for an activity collector
+    /// whose last productive run is older than the quiet bar (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>).
+    /// </summary>
+    internal DateTime? LastZeroRowStreakBreakTime { get; set; }
+
+    /// <summary>
+    /// #7242: the gaps between the runs of the trailing zero-row streak, set for the rows the activity quiet bar turns on
+    /// (<see cref="CollectorHealthClassifier.NeedsObservedQuietRuns"/>) and null for every other. The observed quiet time the bar is
+    /// measured in is read off it at the cadence this row is banded against, so a schedule edit changes it without another read.
+    /// </summary>
+    internal ObservedQuietGaps? ObservedQuietGaps { get; set; }
+
+    /// <summary>
     /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
     /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
     /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
@@ -5158,7 +5171,8 @@ internal sealed class CollectorHealth
     /// stays HEALTHY.
     /// </summary>
     public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
-        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime, FrequencyMinutes,
+        ObservedQuietGaps?.Minutes(FrequencyMinutes));
 
     /// <summary>
     /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).

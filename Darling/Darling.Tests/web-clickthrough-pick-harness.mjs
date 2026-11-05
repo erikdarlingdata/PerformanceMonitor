@@ -83,6 +83,7 @@ globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (ns, tag) => new FakeNode(tag),
   createTextNode: (text) => new FakeNode("#text", text),
+  querySelectorAll: () => [], /* keepScroll lists the page's grids; this fake page draws none */
 };
 
 /* list_servers answers in the registry's order (not the sidebar's); everything else answers an empty object. */

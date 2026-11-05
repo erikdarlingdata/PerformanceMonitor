@@ -64,12 +64,17 @@ internal static class DarlingHealthReader
     /// <summary>Latest SQL-process CPU for one server (newest ring-buffer sample). $1 server_id.
     /// Same shape and same reasoning as <c>DarlingWorker.LatestCpuSql</c>: ordered on the hypertable's
     /// <c>collection_time</c> partition column so ordered ChunkAppend stops at the newest chunk, with
-    /// <c>sample_time</c> as the within-batch tiebreak, and no time predicate because <c>sample_time</c> is
-    /// the monitored server's local wall clock.</summary>
-    public const string ServerSummaryCpuSql = @"
+    /// <c>sample_time</c> as the within-batch tiebreak, and no predicate on <c>sample_time</c>, because it is
+    /// the monitored server's local wall clock. $2 now (naive UTC), $3 the freshness floor in minutes: the read
+    /// is cut off on <c>collection_time</c> at now minus the larger of the floor and twice this server's
+    /// <c>cpu_utilization</c> interval (<see cref="CpuReadingFreshnessSql"/>), so a collector that stopped days ago
+    /// answers with no CPU figure, as the fleet card does (#7196). The answer still carries the reading's own
+    /// <c>collection_time</c> when there is one.</summary>
+    public static readonly string ServerSummaryCpuSql = $@"
 SELECT sqlserver_cpu_utilization, collection_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
+AND   collection_time >= {CpuReadingFreshnessSql.Cutoff("$1", "$2", "$3")}
 ORDER BY collection_time DESC, sample_time DESC
 LIMIT 1";
 
@@ -161,6 +166,8 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(now, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(CpuReadingFreshnessSql.FloorMinutes);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -307,11 +314,11 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         /// from a day the purge has not reached.</summary>
         public int SignalSourcesPresent { get; init; }
 
-        /// <summary>The blocked-process report rows behind <see cref="BlockingEvents"/> (#5644), from the aggregate's
-        /// trailing <c>blocking_reports</c> column. <see cref="BlockingEvents"/> counts WAITS and is what every
-        /// payload shows; the band's count tiers were measured in reports, so the band reads this. <c>null</c> on a
-        /// hand-built row, which bands its <see cref="BlockingEvents"/>.</summary>
-        public long? BlockingReports { get; init; }
+        /// <summary>#7028: the day's blocking band snapshot arm, in milliseconds: the largest total blocked wait of one
+        /// DMV snapshot after the Blocking Wait Time alert's persistence gate, from the aggregate's trailing
+        /// <c>peak_snapshot_wait_ms</c> column. <see cref="BlockingEvents"/> counts WAITS and is what the band's count
+        /// arm reads. <c>null</c> on a hand-built row, which carries no snapshot arm.</summary>
+        public long? PeakSnapshotWaitMs { get; init; }
 
         public DailyHealthSignals ToSignals() => new()
         {
@@ -326,10 +333,10 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
             CollectionRuns = CollectionRuns,
             HighCpuEvents = HighCpuEvents,
             BlockingEvents = BlockingEvents,
-            BlockingReports = BlockingReports,
             /* #3539 A2: the day bands blocking through the card's BlockingSeverity, whose wait arm reads the
                longest block — so the peak travels in the signals rather than only into the reasons line. */
             PeakBlockWaitMs = MaxBlockDurationMs,
+            PeakSnapshotWaitMs = PeakSnapshotWaitMs,
             MemoryPressureEvents = MemoryPressureEvents,
             MemoryCriticalEvents = MemoryCriticalEvents,
             AlertCount = AlertCount,
@@ -751,7 +758,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND {Collectio
         CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
         /* #3541 A9: the signal-presence count, after collection_runs. */
         SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
-        /* #5644: the report count the band reads, after signal_sources_present. */
-        BlockingReports = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
+        /* #7028: the snapshot arm the band reads, after signal_sources_present. */
+        PeakSnapshotWaitMs = reader.IsDBNull(14) ? 0L : Convert.ToInt64(reader.GetValue(14)),
     };
 }

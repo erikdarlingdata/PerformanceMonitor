@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Analysis;
 
@@ -65,12 +66,20 @@ public class PileupSnapshotReader
         var rows = new List<SameStatementPileupDetector.SnapshotRow>();
         try
         {
+            /* #7256: this read runs on every collection with a window of minutes. It reads the hot table alone when the Parquet
+               archive of query_snapshots holds nothing that new, instead of opening every archive file. */
+            rows.AddRange(await new LocalDataService(_duckDb).ReadWindowSkippingEmptyArchiveAsync(
+                "query_snapshots", "collection_time", windowFloorUtc, ReadAsync, cancellationToken));
+
+            async Task<List<SameStatementPileupDetector.SnapshotRow>> ReadAsync(string relation)
+            {
+            var window = new List<SameStatementPileupDetector.SnapshotRow>();
             using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 SELECT collection_time,
        session_id,
        query_hash,
@@ -88,8 +97,10 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY collection_time DESC
 LIMIT 5000";
+            cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowFloorUtc });
 
@@ -97,7 +108,7 @@ LIMIT 5000";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var rawText = reader.IsDBNull(3) ? null : reader.GetString(3);
-                rows.Add(new SameStatementPileupDetector.SnapshotRow(
+                window.Add(new SameStatementPileupDetector.SnapshotRow(
                     CollectionTime: reader.GetDateTime(0),
                     SessionId: reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
                     QueryHash: reader.IsDBNull(2) ? null : reader.GetString(2),
@@ -113,6 +124,8 @@ LIMIT 5000";
                     LogicalReads: reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
                     PhysicalReads: reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
                     PreviewText: McpHelpers.StatementPreview(rawText, StatementTextCharacters)));
+            }
+            return window;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

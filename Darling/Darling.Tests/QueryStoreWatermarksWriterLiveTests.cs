@@ -55,7 +55,7 @@ public sealed class QueryStoreWatermarksWriterLiveTests
 
         public static async Task<Rig> OpenAsync(int serverId, string serverName, CancellationToken ct)
         {
-            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+            var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
             var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await PgMigrations.MigrateAsync(connection, ct);

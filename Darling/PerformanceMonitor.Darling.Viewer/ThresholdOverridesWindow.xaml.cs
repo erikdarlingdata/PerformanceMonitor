@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 public partial class ThresholdOverridesWindow : Window
 {
     internal const string ReadOnlyMessage =
-        "Read-only connection (postgres.connectAs = \"viewer\"): overrides can be viewed but not changed here. Set connectAs to \"admin\" and restart the viewer to change them.";
+        "Read-only connection: overrides can be viewed but not changed here. " + ViewerReadOnlyException.HowToConnectAsAdmin;
 
     private readonly ViewerDataService _dataService;
     private readonly ThresholdOverridesViewModel _model;

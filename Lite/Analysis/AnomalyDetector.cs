@@ -777,57 +777,66 @@ LIMIT 6";
     {
         try
         {
-            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
-            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
+            long currentBlocking;
+            bool blockingFromDmv;
+            long currentDeadlocks;
+            /* #7588: the store read is its own block, closed before the baselines are fetched. The baseline follows the arm the window
+               counted, and the provider takes the same store read lock, so it cannot be fetched while this one is held. */
+            using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
+            using (var connection = _duckDb.CreateConnection())
+            {
+                await connection.OpenAsync(context.CancellationToken);
 
-            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-            using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync(context.CancellationToken);
-
-            using var cmd = connection.CreateCommand();
-            /* On an Azure SQL Database master target, events of databases monitored as their own targets
-               are skipped (their findings come from those targets). Only the current-window counts are
-               filtered; the baseline stays server-wide, which can only make a master spike less likely,
-               an accepted trade because master is not those databases' alerting home.
-               The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
-            var scopeList = context.SeparatelyMonitoredDatabases;
-            var scoped = scopeList is { Count: > 0 };
-            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-            /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking.
-               current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
-               snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
-               overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
-            cmd.CommandText = (@"
+                using var cmd = connection.CreateCommand();
+                /* On an Azure SQL Database master target, events of databases monitored as their own targets
+                   are skipped (their findings come from those targets). Only the current-window counts are
+                   filtered; the baseline stays server-wide, which can only make a master spike less likely,
+                   an accepted trade because master is not those databases' alerting home.
+                   The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
+                var scopeList = context.SeparatelyMonitoredDatabases;
+                var scoped = scopeList is { Count: > 0 };
+                var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+                /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking.
+                   current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
+                   snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
+                   overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
+                cmd.CommandText = (@"
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"{SCOPE})) AS current_blocking,
-    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks")
-                .Replace("{SCOPE}", rowScope);
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks,
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev) AS bpr_count) AS b")
+                    .Replace("{SCOPE}", rowScope);
 
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-            SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
-            long currentBlocking;
-            long currentDeadlocks;
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
-            {
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-                currentBlocking = Convert.ToInt64(reader.GetValue(0));
-                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+                {
+                    if (!await reader.ReadAsync(context.CancellationToken)) return;
+                    currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                    currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                    blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                }
+
+                if (scoped)
+                {
+                    currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                        connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                        inclusiveEnd: false, scopeList!, context.CancellationToken);
+                }
             }
 
-            if (scoped)
-            {
-                currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
-                    connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                    inclusiveEnd: false, scopeList!, context.CancellationToken);
-            }
+            /* #7588: the baseline follows the arm the window counted. Report rows are judged against report history and snapshot rows
+               against snapshot history, so the ratio never divides one unit by the other. */
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, blockingFromDmv ? MetricNames.BlockingSnapshot : MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -854,7 +863,7 @@ SELECT
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -931,9 +940,12 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
        COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
-       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
-       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
+       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat,
+       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat,
+       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count,
+       /* #7417: the I/O OPERATIONS behind each side over this same window (the sample counts above count file rows, not I/Os), for IoVolumeFloor. */
+       CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
+       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
@@ -949,12 +961,15 @@ ORDER BY local_hour";
 
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
+            long windowReads = 0, windowWrites = 0;
             using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
                     writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+                    windowReads += reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7));
+                    windowWrites += reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8));
                 }
             }
 
@@ -963,7 +978,8 @@ ORDER BY local_hour";
             if (wholeRead.Samples == 0 && wholeWrite.Samples == 0) return;
 
             // Read latency anomaly — the reported value and sigma are the worst tile's PEAK, the pair decides.
-            if (wholeRead.Samples > 0)
+            // #7417: the I/Os behind the latency, from the rows the tiles came from (IoVolumeFloor).
+            if (wholeRead.Samples > 0 && IoVolumeFloor.ReadsClearFloor(windowReads))
             {
                 var readTv = AnomalyGate.EvaluateTiles(
                     readTiles, map,
@@ -1009,7 +1025,8 @@ ORDER BY local_hour";
                         ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = readDecision.FallbackExceedance,
                         ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = readBucketUsed.SampleCount
+                        ["baseline_samples"] = readBucketUsed.SampleCount,
+                        ["window_io_ops"] = windowReads
                     };
                     AddBaselineContext(metadata, readBucketUsed);
                     if (readTv is not null)
@@ -1029,7 +1046,7 @@ ORDER BY local_hour";
             }
 
             // Write latency anomaly — #6696: scored against the WRITE-latency baseline (IoWriteLatency), not the read series.
-            if (wholeWrite.Samples > 0)
+            if (wholeWrite.Samples > 0 && IoVolumeFloor.WritesClearFloor(windowWrites))
             {
                 var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
                 var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
@@ -1079,7 +1096,8 @@ ORDER BY local_hour";
                         ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = writeDecision.FallbackExceedance,
                         ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = writeBucketUsed.SampleCount
+                        ["baseline_samples"] = writeBucketUsed.SampleCount,
+                        ["window_io_ops"] = windowWrites
                     };
                     AddBaselineContext(metadata, writeBucketUsed);
                     if (writeTv is not null)

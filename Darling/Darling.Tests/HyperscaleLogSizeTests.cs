@@ -61,7 +61,7 @@ public sealed class HyperscaleLogSizeTests
 
         Assert.DoesNotContain("Hyperscale", text, StringComparison.Ordinal);
         Assert.DoesNotContain("is_log_service", text, StringComparison.Ordinal);
-        Assert.Contains("CONVERT(decimal(19,2), df.size * 8.0 / 1024.0)", text, StringComparison.Ordinal);
+        Assert.Contains("CONVERT(decimal(19,2), PerformanceMonitorLite.size * 8.0 / 1024.0)", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -235,9 +235,9 @@ public sealed class HyperscaleLogSizeTests
     [Fact]
     public void WebDatabaseSizesTable_RendersTheReadsNote()
     {
-        var js = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js"));
+        var js = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
-        /* The table() helper's ninth argument is the noteKey: the read's own note rides above the rows. */
+        /* The tablePanel() helper's ninth argument is the noteKey: the read's own note rides above the rows. */
         var block = js.Substring(js.IndexOf("\"Database Sizes\",", StringComparison.Ordinal));
         block = block.Substring(0, block.IndexOf("),", StringComparison.Ordinal));
         Assert.Contains("\"get_database_sizes\"", block, StringComparison.Ordinal);

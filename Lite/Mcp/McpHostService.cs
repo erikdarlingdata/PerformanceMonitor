@@ -74,6 +74,8 @@ public sealed class McpHostService : BackgroundService
            cadence it shipped with. Null leaves this instance on the app-wide answer every LocalDataService reads
            (LocalDataService.DefaultCollectorFrequencyMinutes), which is none when nothing set one, so every row
            then keeps its shipped cadence. */
+        /* #7167: an empty read for a server with no SUCCESS row is offline only when it was added before the log's retention horizon. */
+        ServerResolver.WireOfflineLookups(dataService, serverManager);
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);
@@ -473,7 +475,7 @@ public sealed class McpHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            AppLogger.Error("MCP", $"MCP server failed: {ex.Message}");
+            AppLogger.Error("MCP", $"The MCP server on port {_port} stopped with an error: {ex.Message}. If another program uses that port, change the MCP port in Settings and restart Lite.");
         }
     }
 

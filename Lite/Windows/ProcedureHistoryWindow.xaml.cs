@@ -8,13 +8,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
@@ -255,22 +252,11 @@ public partial class ProcedureHistoryWindow : Window
                 return;
             }
 
-            /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
-            if (WithheldPlanGuard.RefuseSave(plan)) return;
-
-            var dialog = new SaveFileDialog
-            {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
-
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
+            FileSaveHelper.SavePlanFile(plan, $"proc_plan_{_objectName}");
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not download the plan: {DuckDbMemoryLimitSetting.Describe(ex)}. If this repeats, check the Lite log.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {

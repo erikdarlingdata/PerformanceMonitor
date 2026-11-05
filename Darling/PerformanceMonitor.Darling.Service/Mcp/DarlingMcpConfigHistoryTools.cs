@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -77,7 +78,8 @@ public sealed class DarlingMcpConfigHistoryTools
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice);
+                /* #7167: an offline server's empty window answers unavailable, as the get_pg_* reads do. */
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice), cancellationToken);
             }
 
             var notice = await ReadNoticeAsync(postgres, "server_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -114,7 +116,7 @@ public sealed class DarlingMcpConfigHistoryTools
         }
     }
 
-    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
+    [McpServerTool(Name = "get_database_config_changes"), Description("Gets database configuration change history by diffing sys.databases snapshots. Shows which database settings changed (recovery model, RCSI, compatibility level, etc.) with old and new values; setting_name is the underlying column name. log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting, so its flips are listed apart in status_changes and never in changes. NOTE: this edition captures config on server connect (not on a fixed schedule), so changes are detected between connect snapshots and need at least two; the setting category/description narrative is not collected and is omitted.")]
     public static Task<string> GetDatabaseConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -152,8 +154,12 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, databases, cancellationToken);
-            var changes = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
-            if (changes.Count == 0)
+            var allChanges = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
+            /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
+               status_changes so the history is kept without calling it a configuration change. */
+            var changes = allChanges.Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();
+            var statusChanges = allChanges.Where(c => !ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();
+            if (allChanges.Count == 0)
             {
                 /* Decide not_collected first: it carries no notice, so probing before it would throw the probe away. */
                 var notCollected = McpHelpers.WithDatabase(
@@ -165,9 +171,9 @@ public sealed class DarlingMcpConfigHistoryTools
                 }
 
                 var emptyNotice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: true, logger, cancellationToken);
-                return McpHelpers.WithDatabase(
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, McpHelpers.WithDatabase(
                     NoChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, DatabaseScopeText(databases)),
-                    databases.Describe())!;
+                    databases.Describe())!, cancellationToken);
             }
 
             var notice = await ReadNoticeAsync(postgres, "database_config", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -190,7 +196,16 @@ public sealed class DarlingMcpConfigHistoryTools
                 truncation_note = notice.TruncationNote,
                 database_name = databases.Describe(),
                 change_count = changes.Count,
-                changes = result
+                changes = result,
+                status_change_count = statusChanges.Count,
+                status_changes = statusChanges.Select(c => new
+                {
+                    change_time = c.ChangeTime.ToString("o"),
+                    database_name = c.DatabaseName,
+                    setting_name = c.SettingName,
+                    old_value = c.OldValue,
+                    new_value = c.NewValue
+                })
             }, McpHelpers.JsonOptions);
 
             /* A failed probe costs the notice, never the changes (see DarlingMcpWindowNotice.ReadAsync). */
@@ -238,7 +253,7 @@ public sealed class DarlingMcpConfigHistoryTools
                 /* #5633 item 19: a successful run that stored zero rows IS the collector saying no flag is on; only a collector that has not
                    run (or stored rows) really has "fewer than two snapshots". */
                 var runFacts = await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "trace_flags", null, windowEndNaive, cancellationToken);
-                return NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, windowEnd, NoTraceFlagChanges(resolved.DisplayName, hours_back, DistinctCaptures(snapshots.Select(s => s.CaptureTime)), emptyNotice, runFacts), cancellationToken);
             }
 
             var notice = await ReadNoticeAsync(postgres, "trace_flags", resolved.ServerName, windowStart, windowEndNaive, emptyAnswer: false, logger, cancellationToken);
@@ -373,6 +388,14 @@ public sealed class DarlingMcpConfigHistoryTools
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No Query Store health data available. The query_store_health collector runs hourly (SQL Server 2016+); a server with no rows either predates Query Store or has not completed a cycle yet.");
+
+            /* #7584: the on-prem health capture always holds a tempdb row (its database list is database_id > 4 OR = 2), so on a
+               readable secondary the snapshot is never empty and the miss path above never runs. A snapshot of only tempdb has no
+               database Query Store is read for, so it gets the same readable-secondary answer; a server that is not a readable
+               secondary answers null here and keeps showing the rows as before. */
+            if (snapshot.Rows.All(r => string.Equals(r.DatabaseName, "tempdb", StringComparison.OrdinalIgnoreCase))
+                && await DarlingRuntimePrecondition.QueryStoreReadableSecondaryStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, cancellationToken) is { } secondaryStatus)
+                return secondaryStatus;
 
             IEnumerable<DarlingConfigHistoryReader.QueryStoreHealthReadRow> filtered = snapshot.Rows;
             filtered = MatchesDatabases(filtered, databases, r => r.DatabaseName);

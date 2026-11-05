@@ -89,7 +89,7 @@ public partial class ViewerServerTab : UserControl
     internal const int PgStorageInnerTabIndex = 25;
 
     private readonly ViewerDataService _dataService;
-    private readonly DarlingServer _server;
+    private DarlingServer _server;
     private readonly ViewerServerStore? _serverStore;
 
     private bool _refreshInFlight;
@@ -137,11 +137,17 @@ public partial class ViewerServerTab : UserControl
         PerformanceMonitor.Ui.ChartLayout.KeepWheelOnPlot(
             QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
             FileIoReadChart, FileIoWriteChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
-            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart);
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            // #7385: the other chart groups that now scroll the same way
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadThroughputChart, FileIoWriteThroughputChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
         /* #5565: every filtered grid below this tab keeps its column filters across a restart under this server. */
         ColumnFilterScope.SetServer(this, _server.ServerName);
 
-        /* Per-server toolbar identity label: the display name is static (it also heads the tab), while the
+        /* Per-server toolbar identity label (UpdateServer refreshes it after a rename (#7212)); the
            freshness readout to its right is filled on the first (and every) refresh from the shared
            collection-time read (UpdateServerFreshnessLabelAsync). */
         ServerNameText.Text = _server.DisplayName;
@@ -248,6 +254,18 @@ public partial class ViewerServerTab : UserControl
     public DarlingServer Server => _server;
 
     /// <summary>
+    /// Swaps in the reloaded server record after the operator renamed it (#7212), so the export file names and the Block Chain
+    /// and Deadlock window titles use the new display name without closing and reopening the tab. The id is the same, so
+    /// every read keeps its key.
+    /// </summary>
+    public void UpdateServer(DarlingServer server)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        _server = server;
+        ServerNameText.Text = server.DisplayName;
+    }
+
+    /// <summary>
     /// Lazy per-inner-tab load: switching inner tabs loads the newly visible one. SelectionChanged is
     /// a bubbling routed event, so selections inside the tab content (a grid) reach here too — only
     /// react to the inner TabControl's own. Gated on <see cref="System.Windows.FrameworkElement.IsLoaded"/>
@@ -298,6 +316,9 @@ public partial class ViewerServerTab : UserControl
             await RefreshServerClockAsync();
             ApplyServerClockToHelper();
 
+            /* #7386: the server's data start, for the charts' X axis. One cached read for the whole tab. */
+            await RefreshServerDataStartAsync();
+
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
             await UpdateServerFreshnessLabelAsync();
@@ -334,8 +355,8 @@ public partial class ViewerServerTab : UserControl
     }
 
     /// <summary>
-    /// #1591: badges the Collection Health tab header with the number of collectors that were permission-denied.
-    /// Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
+    /// #1591, #7241: badges the Collection Health tab header with the number of collectors refused on their latest
+    /// attempt after their last success (<c>denied_since_last_success</c> in <c>get_collection_health</c>). Mirrors Lite's <c>RefreshPermissionDeniedBadgeAsync</c>. Best-effort chrome like the freshness readout
     /// above — a read failure leaves the plain header rather than disturbing the tab load.
     /// <see cref="ViewerDataService.GetPermissionDeniedCollectorCountAsync"/> reads the shared fleet-by-server
     /// rollup read (#4226), not a raw <c>collection_log</c> scan of its own — this refresh (auto default 1 min,
@@ -380,7 +401,7 @@ public partial class ViewerServerTab : UserControl
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = FreshnessLabel(
                 freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone);
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone, _server.ConnectDownSince, _server.LastConnectError);
         }
         catch
         {
@@ -395,9 +416,19 @@ public partial class ViewerServerTab : UserControl
     /// The time is written in <paramref name="zone"/>, the tab's own server clock, because the process-wide clock may belong to
     /// another server's tab by the time this awaited read returns.
     /// </summary>
-    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null)
+    internal static string FreshnessLabel(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null,
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
-        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
+        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) == ServerFreshness.Offline;
+        /* #7590: the service's connect failed. The header says so, with the last values' age and the error, in place of the age-based note. */
+        if (connectDownSinceUtc.HasValue)
+        {
+            var known = ServerHealthClassifier.LastKnownLabel(lastCollectionUtc, nowUtc);
+            return $"{ServerHealthClassifier.UnreachableReason(connectDownSinceUtc.Value, lastConnectError).TrimEnd('.')}. Values shown are {known}";
+        }
+
         if (lastCollectionUtc is null)
         {
             return offline ? "no collection retained" : "no data collected yet";

@@ -96,7 +96,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal("OPTION (RECOMPILE)", (string?)journaled["hints"]);
             Assert.Single(await RowsAsync(c, "action_done"));
 
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(GuideKind, change.Kind);
             Assert.True(change.CanTryUndo(DateTime.UtcNow), "a plan guide create can be undone");
 

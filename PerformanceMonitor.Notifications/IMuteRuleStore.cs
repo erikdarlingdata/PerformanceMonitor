@@ -50,4 +50,11 @@ public interface IMuteRuleStore
 
     /// <summary>Deletes the given expired rules. Lite: DELETE per id. Dash: removeAll + single rewrite.</summary>
     Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds);
+
+    /// <summary>The refusal text when this store cannot keep the rule's repeat schedule (#7040), or null when it can. The rule has already
+    /// passed <see cref="MuteRule.TryNormalizeRecurrence"/>, which asks the service host; a store that resolves zone names itself
+    /// (Darling's PostgreSQL) also asks them here, so a zone its tzdata lacks is refused on write instead of read as outside the window.
+    /// Every write path calls it before <see cref="InsertAsync"/> or <see cref="UpdateAsync"/>. The default accepts every rule.</summary>
+    Task<string?> RecurrenceRefusalAsync(MuteRule rule, CancellationToken cancellationToken = default) =>
+        Task.FromResult<string?>(null);
 }

@@ -83,7 +83,7 @@ internal sealed class BundleAliaser
     internal static readonly string[] KeptFirstLabels = { "mcp", "web", "dashboard", "proxy" };
 
     /// <summary>The product's own store roles. A <c>role_name</c> in this set is kept; any other role name is a login and is aliased.</summary>
-    internal static readonly string[] ProductRoles = { "owner", "admin", "viewer", "mcp" };
+    internal static readonly string[] ProductRoles = { "owner", "admin", "viewer", "web", "mcp" };
 
     /// <summary>The JSON keys whose string value is a name the harvest pass adds to the name set, with the kind it is.</summary>
     internal static readonly IReadOnlyDictionary<string, AliasKind> HarvestKeys = new Dictionary<string, AliasKind>(StringComparer.OrdinalIgnoreCase)

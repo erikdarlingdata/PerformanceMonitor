@@ -122,8 +122,7 @@ public sealed partial class ViewerDataService
 
             if (qs.Allowed.Count == 0)
             {
-                unavailable[QueryTagRollupSection.QueryStore.Name] = "Query Store is read from the composed interval table only, and it is not readable here: "
-                    + (qs.Refused.Count == 0 ? "no server was read" : string.Join("; ", qs.Refused.Values.Distinct())) + ".";
+                unavailable[QueryTagRollupSection.QueryStore.Name] = QueryTagUsageNotes.QueryStoreNotReadable(qs.Refused.Values);
             }
         }
 
@@ -160,5 +159,39 @@ public sealed partial class ViewerDataService
         }
 
         return new QueryTagRollupData(tags, sections, deadlocks, scanTruncated, unavailable, qs.Refused, notes);
+    }
+
+    /// <summary>
+    /// #7376: the servers whose Query Store section reads not_collected because each is a readable secondary Darling does not collect Query Store
+    /// from, with the reason <c>get_query_store_top</c> gives (<see cref="DarlingQueryStoreReadableSecondary"/>, the one source of the wording). It is
+    /// asked AFTER the read, and only of a server the Query Store gate refused that holds no Query Store rows and is not already in
+    /// <paramref name="skip"/> (a server that reads not_collected in every section): a server with Query Store rows keeps them. One small read
+    /// per such server, and none when the gate refused nobody.
+    /// </summary>
+    public async Task<Dictionary<int, string>> GetQueryStoreNotCollectedAsync(
+        QueryTagRollupData data, IEnumerable<DarlingServer> servers, IReadOnlyDictionary<int, string> skip, CancellationToken cancellationToken = default)
+    {
+        var reasons = new Dictionary<int, string>();
+        if (data.Refused.Count == 0)
+        {
+            return reasons;
+        }
+
+        var withRows = data.Sections.GetValueOrDefault(QueryTagRollupSection.QueryStore.Name)?.Select(f => f.ServerId).ToHashSet() ?? [];
+        foreach (var server in servers)
+        {
+            if (!data.Refused.ContainsKey(server.ServerId) || withRows.Contains(server.ServerId) || skip.ContainsKey(server.ServerId))
+            {
+                continue;
+            }
+
+            if (await DarlingQueryStoreReadableSecondary.MessageAsync(
+                    _dataSource, server.ServerId, server.DisplayName, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken) is { } reason)
+            {
+                reasons[server.ServerId] = reason;
+            }
+        }
+
+        return reasons;
     }
 }

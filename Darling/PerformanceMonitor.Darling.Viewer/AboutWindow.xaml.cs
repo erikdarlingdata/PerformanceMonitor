@@ -163,9 +163,9 @@ public partial class AboutWindow : Window
                 UseShellExecute = true
             });
         }
-        catch
+        catch (Exception ex)
         {
-            MessageBox.Show($"Could not open URL: {url}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not open {url} in your browser: {ex.Message}. Copy the address and paste it into a browser.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 }

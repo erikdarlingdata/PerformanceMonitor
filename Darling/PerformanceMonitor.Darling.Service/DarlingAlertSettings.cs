@@ -195,12 +195,25 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// <summary>#6875: the warning bar, 1 to 100 percent used. The critical bar below never falls under it.</summary>
     public int IdentityCapacityWarningPercent => Math.Clamp(_config.Alerts.IdentityCapacityWarningPercent, 1, 100);
     public int IdentityCapacityCriticalPercent => Math.Clamp(_config.Alerts.IdentityCapacityCriticalPercent, IdentityCapacityWarningPercent, 100);
+    /// <summary>#7041: the Daily Health Report's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such report.</summary>
+    public bool DailyReportEnabled => _config.Alerts.DailyReportEnabled;
+    /// <summary>#7041: the local time of day the report goes out, in <see cref="DailyReportTimeZone"/>. An unparseable stored value reads as the shipped 07:00.</summary>
+    public TimeOnly DailyReportSendAt => Reports.DailyHealthReportSettings.ResolveSendAt(_config.Alerts.DailyReportSendAt);
+    /// <summary>#7041: the zone the report is scheduled in: the configured IANA id, or the service host's local zone when unset or unknown to the host.</summary>
+    public TimeZoneInfo DailyReportTimeZone => Reports.DailyHealthReportSettings.ResolveZone(_config.Alerts.DailyReportTimeZone);
+    /// <summary>#7041: the report's title; the shipped "Daily Health Report" when unset.</summary>
+    public string DailyReportTitle => Reports.DailyHealthReportSettings.ResolveTitle(_config.Alerts.DailyReportTitle);
     /// <summary>#6874: the Agent Alert Gaps alert's switch. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alert.</summary>
     public bool AgentAlertGapsEnabled => _config.Alerts.AgentAlertGapsEnabled;
     /// <summary>#6873: the three database protection alerts' switches. Off by default; not on <see cref="IAlertEngineSettings"/> because Lite has no such alerts.</summary>
     public bool BackupOverdueEnabled => _config.Alerts.BackupOverdueEnabled;
     public bool LogBackupOverdueEnabled => _config.Alerts.LogBackupOverdueEnabled;
     public bool CheckDbOverdueEnabled => _config.Alerts.CheckDbOverdueEnabled;
+    /// <summary>#7611: the three overdue ages. The bounds are <c>DarlingThresholdKeys</c>' (a full backup 1 to 1440 hours, a log backup 1 to 86400 minutes, CHECKDB 1 to 8760 hours),
+    /// so a hand-edited file cannot give the judgment a zero or a negative age.</summary>
+    public int BackupOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.BackupOverdueThresholdHours, DatabaseProtectionThresholdSettings.BackupHoursKey);
+    public int LogBackupOverdueThresholdMinutes => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.LogBackupOverdueThresholdMinutes, DatabaseProtectionThresholdSettings.LogBackupMinutesKey);
+    public int CheckDbOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey);
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);

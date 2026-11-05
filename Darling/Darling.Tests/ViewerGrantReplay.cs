@@ -88,10 +88,10 @@ internal static class ViewerGrantReplay
         || statement.StartsWith($"REVOKE ALL ON FUNCTION {PgSchemaGenerator.ConfigSchema}.read_mcp_command_result(", StringComparison.Ordinal)
         || string.Equals(statement, SubmitFunctionRevoke, StringComparison.Ordinal);
 
-    /// <summary>The batch's REVOKE of the submission function from admin, viewer and mcp, as the batch writes it.</summary>
+    /// <summary>The batch's REVOKE of the submission function from admin, viewer, web and mcp, as the batch writes it.</summary>
     internal static readonly string SubmitFunctionRevoke =
         $"REVOKE ALL ON FUNCTION {PgSchemaGenerator.ConfigSchema}.submit_external_alert({DarlingManagedRoles.ExternalAlertSubmitSignature}) FROM "
-        + string.Join(", ", DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName);
+        + string.Join(", ", DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName);
 
     /// <summary>
     /// A replayed GRANT / REVOKE head (everything before <c>TO</c> / <c>FROM</c>), with the managed store's database

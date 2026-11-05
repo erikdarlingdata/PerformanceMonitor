@@ -30,8 +30,8 @@ namespace PerformanceMonitorLite.Analysis.Recommendations;
 /// <see cref="PerformanceMonitor.Analysis.RemediationAction"/> (built at analysis time from the
 /// drill-down, serialized into <c>remediation_action_json</c>, deserialized on read) rendered by the
 /// SHARED <see cref="FactRemediation.RenderCopyPasteCommand"/> — the SAME source the Darling viewer's
-/// Copy-fix delegates to, so Lite and Darling produce byte-identical commands for all seven remediation
-/// shapes (the two destructive ones carry a two-sided risk-disclosure header). The live
+/// Copy-fix delegates to, so Lite and Darling produce byte-identical commands for all five remediation
+/// shapes (the destructive RCSI one carries a two-sided risk-disclosure header). The live
 /// <see cref="FactRemediation.GenerateForFinding"/> path is kept only as a fallback for a finding still
 /// carrying its ephemeral drill-down (no persisted action). Findings with no execution shape carry a
 /// null action and render advise-only.
@@ -180,9 +180,9 @@ public sealed class LiteRecommendationsReader
     /// Rebuilds the copy-paste T-SQL for a card from the finding's PERSISTED
     /// <see cref="RemediationAction"/> by delegating to the shared
     /// <see cref="FactRemediation.RenderCopyPasteCommand"/> — the SAME renderer the Darling viewer's
-    /// Copy-fix uses, so a Lite card and a Darling card produce byte-identical commands for all seven
-    /// remediation shapes (force-plan, clear-plan, server-config, RCSI, safe DB-config, file-growth,
-    /// missing-index; the two destructive shapes carry a two-sided risk-disclosure comment header).
+    /// Copy-fix uses, so a Lite card and a Darling card produce byte-identical commands for all five
+    /// remediation shapes (force-plan, RCSI, safe DB-config, file-growth, missing-index; the
+    /// destructive RCSI shape carries a two-sided risk-disclosure comment header).
     /// Lite has NO in-app executor — this is a copyable command only. A thin <c>internal</c> seam over
     /// the shared renderer so the reader can be unit-tested directly and cannot drift from the viewer.
     /// Null when the action is null or carries no renderable target.

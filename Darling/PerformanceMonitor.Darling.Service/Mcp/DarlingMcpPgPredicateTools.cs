@@ -42,13 +42,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPredicateTools
 {
-    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from pg_qualstats: which columns are filtered, with which operator, rows evaluated and rows filtered out. filtered_pct is 100*rows_filtered/rows_evaluated (a percent), NULL when nothing was evaluated, never a false 0%. worst_estimate_error_ratio large means the PLANNER is misjudging this predicate (a stats/correlation problem), not that it needs an index. SAMPLED: counts are raw at sample_rate (often 0.01) and are NEVER scaled up here. queryid is a STRING and joins get_pg_top_queries. <<GUIDE>> Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. These are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries.")]
+    [McpServerTool(Name = "get_pg_predicate_stats"), Description("Gets PostgreSQL predicate selectivity from pg_qualstats: which columns are filtered, with which operator, rows evaluated and rows filtered out. filtered_pct is 100*rows_filtered/rows_evaluated (a percent), NULL when nothing was evaluated, never a false 0%. worst_estimate_error_ratio large means the PLANNER is misjudging this predicate (a stats/correlation problem), not that it needs an index. SAMPLED: counts are raw at sample_rate (often 0.01) and are NEVER scaled up here. queryid is a STRING and joins get_pg_top_queries. query_text is the statement behind queryid. <<GUIDE>> Gets PostgreSQL predicate selectivity from the pg_qualstats extension: which columns queries actually filter on, with which operator, how many rows each predicate evaluated and how many it filtered out. This is the evidence behind an index recommendation - a predicate that evaluates many rows and filters nearly all of them away is a column doing work an index could do instead. filtered_pct is that ratio. worst_estimate_error_ratio compares what the planner expected against what it got, so a large value marks a predicate the planner is misjudging, which is a statistics or correlated-column problem rather than an indexing one. These are SAMPLED counts - pg_qualstats records only a fraction of executions, given per row as sample_rate (commonly 0.01), and the counts are NOT scaled up here. queryid joins get_pg_top_queries. query_text is the statement behind each queryid (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly capture reaches that queryid and always null for queryid 0, so a person need not look the id up.")]
     public static async Task<string> GetPgPredicateStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 25.")] int limit = 25,
+        [Description("Maximum rows to return. Default 25. This is what bounds the page - read truncated to know whether the window held more predicates than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -62,8 +63,12 @@ public sealed class DarlingMcpPgPredicateTools
 
         try
         {
-            var rows = await DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch, so the reply can say whether the window held
+               more than the page. It reported only the count of the rows returned, which a reader takes for
+               the size of the window. */
+            var fetched = await DarlingPgPredicateStatsReader.GetPgPredicateStatsAsync(
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
@@ -111,6 +116,10 @@ public sealed class DarlingMcpPgPredicateTools
                 column_name = r.ColumnName,
                 @operator = r.Operator,
                 queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+                /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+                   that id (the same rules as get_pg_top_queries), and always null for queryid 0. */
+                query_text = DarlingMcpPgStatementTools.StatementTextFor(r.QueryText, full_text).Text,
+                query_text_truncated = DarlingMcpPgStatementTools.StatementTextFor(r.QueryText, full_text).Truncated,
                 sampled_executions = r.SampleCount,
                 rows_evaluated = r.RowsEvaluated,
                 rows_filtered = r.RowsFiltered,
@@ -130,12 +139,14 @@ public sealed class DarlingMcpPgPredicateTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 predicate_count = rows.Count,
+                truncated,
                 sample_rates = rates,
                 note = "Counts are SAMPLED and are not scaled up here: multiply by 1/sample_rate to "
                      + "estimate the true volume, and treat the product as an estimate. A predicate with "
                      + "a high filtered_pct over many rows is an indexing candidate; a high "
                      + "worst_estimate_error_ratio is a planner-estimate problem instead, which an index "
                      + "will not fix."
+                     + (truncated ? " This page is cut at limit: the window held more predicates than it shows." : string.Empty)
                      + (rates.Length > 1
                          ? " The sample rate CHANGED inside this window, so rows are not directly comparable."
                          : string.Empty),

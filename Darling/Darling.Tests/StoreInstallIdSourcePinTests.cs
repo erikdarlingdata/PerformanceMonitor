@@ -44,7 +44,9 @@ public sealed class StoreInstallIdSourcePinTests
         var callers = ProductSourceFiles()
             .Where(path => CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path))
                 .Contains("StoreInstallId.EnsureAsync(", StringComparison.Ordinal))
-            .Select(Path.GetFileName)
+            /* #7024: DarlingWorker is split into DarlingWorker.<Area>.cs files; they count as the one worker. */
+            .Select(path => Path.GetFileName(path).StartsWith("DarlingWorker.", StringComparison.Ordinal) ? "DarlingWorker.cs" : Path.GetFileName(path))
+            .Distinct()
             .ToList();
 
         Assert.Equal(new[] { "DarlingWorker.cs" }, callers);

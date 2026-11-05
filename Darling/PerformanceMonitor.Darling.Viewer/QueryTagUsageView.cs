@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -73,9 +74,67 @@ public static class QueryTagUsageView
         return paths;
     }
 
-    public static QueryTagUsageResult Build(
-        QueryTagRollupData data, IReadOnlyList<(int Id, string Name)> scope, bool allServers, int? tagFilter, int limit = 200)
+    /// <summary>
+    /// #7374: the servers whose engine cannot run the collectors every section here reads (a PostgreSQL target has none of the six SQL Server
+    /// sources), each with the engine reason. It is asked AFTER the read, and only of a server the read found no rows for in any section (a Query
+    /// Store section the interval-table gate refused counts as none), as <c>get_resource_use_by_tag</c> does through the same
+    /// <see cref="CollectorEngineCapability.NotCollectedMessage"/>: a server whose registry row says PostgreSQL but that holds SQL Server rows in
+    /// the window (a re-registration, a restored database) keeps its data, the contract <c>DarlingEngineCapability</c> states. A server the
+    /// engine can serve is left out.
+    /// </summary>
+    public static Dictionary<int, string> NotCollectedReasons(IEnumerable<DarlingServer> servers, QueryTagRollupData data)
     {
+        var withRows = ServersWithRows(data);
+        var reasons = new Dictionary<int, string>();
+        foreach (var server in servers)
+        {
+            if (withRows.Contains(server.ServerId))
+            {
+                continue;
+            }
+
+            var reason =CollectorEngineCapability.NotCollectedMessage(server.DisplayName, server.EngineEdition, server.EngineKind, "query_stats", server.AwsRdsKind);
+            if (reason is not null)
+            {
+                reasons[server.ServerId] = reason;
+            }
+        }
+
+        return reasons;
+    }
+
+    /// <summary>The servers with at least one row in any of the six sections (before any tag filter).</summary>
+    public static HashSet<int> ServersWithRows(QueryTagRollupData data)
+    {
+        var ids = new HashSet<int>();
+        foreach (var facts in data.Sections.Values)
+        {
+            foreach (var fact in facts)
+            {
+                ids.Add(fact.ServerId);
+            }
+        }
+
+        foreach (var deadlock in data.Deadlocks)
+        {
+            ids.Add(deadlock.ServerId);
+        }
+
+        return ids;
+    }
+
+    /// <param name="notCollected">#7374: servers in <paramref name="scope"/> that the read found no rows for and whose engine collects none of these sources (see <see cref="NotCollectedReasons"/>): each reads not_collected in every table, with the engine reason.</param>
+    public static QueryTagUsageResult Build(
+        QueryTagRollupData data, IReadOnlyList<(int Id, string Name)> scope, bool allServers, int? tagFilter, int limit = 200,
+        IReadOnlyDictionary<int, string>? notCollected = null, IReadOnlyDictionary<int, string>? queryStoreNotCollected = null)
+    {
+        /* #7376: a missing interval table is a gap that can close, so the section stays unavailable with the Missing reason, whatever a server reads (the tool's `!unavailable` guard). */
+        var tableMissing = QueryStoreTableMissing(data);
+        if (tableMissing)
+        {
+            queryStoreNotCollected = null;
+        }
+
         var tables = new List<QueryTagUsageTable>();
         var notServed = new List<string>();
         var anyUnfiltered = data.Deadlocks.Count > 0;
@@ -89,12 +148,33 @@ public static class QueryTagUsageView
             anyUnfiltered |= facts.Count > 0;
             anyData |= tagFilter is null ? facts.Count > 0 : facts.Any(f => f.TagId is int id && IsUnder(id, tagFilter.Value, data.Tags));
             data.Unavailable.TryGetValue(section.Name, out var why);
+            string? sectionNotCollected = null;
+            var qsExcluded = section == QueryTagRollupSection.QueryStore && !tableMissing ? ExcludedFromGate(notCollected, queryStoreNotCollected) : [];
+            if (why is not null && qsExcluded.Count > 0 && data.Refused.Count > 0)
+            {
+                /* #7374: the gate's refusal of a server that reads not_collected is no reason Query Store is unserved: say only what the others were refused for. */
+                var remaining = data.Refused.Where(r => !qsExcluded.ContainsKey(r.Key)).Select(r => r.Value).ToList();
+                if (remaining.Count > 0)
+                {
+                    why = QueryTagUsageNotes.QueryStoreNotReadable(remaining);
+                }
+                else
+                {
+                    /* #7376: every server the gate refused reads not_collected, so the section is not_collected and is not named under "Sections not served". */
+                    why = null;
+                    sectionNotCollected = allServers
+                        ? "Query Store is not collected for any server in this read: each server says why."
+                        : qsExcluded[scope[0].Id];
+                }
+            }
+
             if (why is not null)
             {
                 notServed.Add($"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(section.Name)} is unavailable: {why}");
             }
 
-            var block = Wrap(section, facts, scope, allServers, data.Tags, tagFilter, limit, why, why is null && section == QueryTagRollupSection.QueryStore ? data.Refused : null);
+            var block = Wrap(section, facts, scope, allServers, data.Tags, tagFilter, limit, why, why is null && section == QueryTagRollupSection.QueryStore ? data.Refused : null, notCollected,
+                sectionNotCollected, section == QueryTagRollupSection.QueryStore ? queryStoreNotCollected : null);
             if (data.Notes.TryGetValue(section.Name, out var note))
             {
                 block["note"] = note;
@@ -103,6 +183,12 @@ public static class QueryTagUsageView
                 {
                     foreach (var server in perServer.OfType<Dictionary<string, object?>>())
                     {
+                        /* #7374: a section note says how the read reached the window, which says nothing about a server the engine never collects for. */
+                        if (server.GetValueOrDefault("status") as string == "not_collected")
+                        {
+                            continue;
+                        }
+
                         server["note"] = note;
                     }
                 }
@@ -117,7 +203,7 @@ public static class QueryTagUsageView
             notServed.Add($"{PerformanceMonitor.Common.QueryTagUsageLabels.SectionTitle(QueryTagRollupSection.Deadlocks.Name)} is unavailable: {deadlockWhy}");
         }
 
-        Add(tables, WrapDeadlocks(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy), QueryTagRollupSection.Deadlocks);
+        Add(tables, WrapDeadlocks(data.Deadlocks, scope, allServers, data.Tags, tagFilter, limit, data.ScanTruncated, deadlockWhy, notCollected), QueryTagRollupSection.Deadlocks);
 
         string? message = null;
         if (tagFilter is int tagId && !anyData && anyUnfiltered)
@@ -137,6 +223,31 @@ public static class QueryTagUsageView
         return new QueryTagUsageResult(message, tables);
     }
 
+    /// <summary>#7376: the read found the Query Store interval table missing (its section is unavailable with the Missing reason), as opposed to the gate refusing every server. A missing table is a gap that can close, so no server is read not_collected for it.</summary>
+    public static bool QueryStoreTableMissing(QueryTagRollupData data) =>
+        data.Unavailable.TryGetValue(QueryTagRollupSection.QueryStore.Name, out var why)
+        && string.Equals(why, QueryTagUsageNotes.Missing(QueryTagRollupSection.QueryStore.Name), StringComparison.Ordinal);
+
+    /// <summary>#7376: the servers the Query Store gate's refusal says nothing true about: those that read not_collected in every section (the engine, #7374) and those that read it in Query Store alone (a readable secondary).</summary>
+    private static Dictionary<int, string> ExcludedFromGate(IReadOnlyDictionary<int, string>? notCollected, IReadOnlyDictionary<int, string>? queryStoreNotCollected)
+    {
+        var excluded = new Dictionary<int, string>();
+        foreach (var source in new[] { notCollected, queryStoreNotCollected })
+        {
+            if (source is null)
+            {
+                continue;
+            }
+
+            foreach (var (id, reason) in source)
+            {
+                excluded.TryAdd(id, reason);
+            }
+        }
+
+        return excluded;
+    }
+
     private static bool IsUnder(int tagId, int ancestor, IReadOnlyList<QueryTagNode> tags)
     {
         var byId = tags.ToDictionary(t => t.Id);
@@ -145,16 +256,18 @@ public static class QueryTagUsageView
 
     private static Dictionary<string, object?> Wrap(
         QueryTagRollupSection section, List<QueryTagRollupFact> facts, IReadOnlyList<(int Id, string Name)> scope, bool allServers,
-        IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit, string? unavailableWhy, IReadOnlyDictionary<int, string>? refused)
+        IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit, string? unavailableWhy, IReadOnlyDictionary<int, string>? refused,
+        IReadOnlyDictionary<int, string>? notCollected, string? sectionNotCollected = null, IReadOnlyDictionary<int, string>? sectionServerNotCollected = null)
     {
-        var status = unavailableWhy is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok";
-        var message = unavailableWhy ?? (facts.Count == 0 ? "No rows in the window." : null);
+        var status = sectionNotCollected is not null ? "not_collected" : unavailableWhy is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok";
+        var message = sectionNotCollected ?? unavailableWhy ?? (facts.Count == 0 ? "No rows in the window." : null);
         if (!allServers)
         {
             var one = facts.Count == 0
                 ? DarlingQueryTagRollupReader.Empty(section, status, message ?? string.Empty, tagFilter)
                 : DarlingQueryTagRollupReader.Assemble(section, facts, tags, tagFilter, limit);
-            if (refused is not null && refused.TryGetValue(scope[0].Id, out var why))
+            if (refused is not null && refused.TryGetValue(scope[0].Id, out var why) && sectionNotCollected is null
+                && !(sectionServerNotCollected?.ContainsKey(scope[0].Id) ?? false))
             {
                 one["status"] = "unavailable";
                 one["message"] = "Not readable for this server: " + why + ".";
@@ -166,7 +279,11 @@ public static class QueryTagUsageView
         var servers = scope.Select(s =>
         {
             var mine = facts.Where(f => f.ServerId == s.Id).ToList();
-            var block = refused is not null && refused.TryGetValue(s.Id, out var why)
+            var block = notCollected is not null && notCollected.TryGetValue(s.Id, out var engineReason)
+                ? DarlingQueryTagRollupReader.Empty(section, "not_collected", engineReason, tagFilter)
+                : sectionServerNotCollected is not null && sectionServerNotCollected.TryGetValue(s.Id, out var sectionReason)
+                ? DarlingQueryTagRollupReader.Empty(section, "not_collected", sectionReason, tagFilter)
+                : refused is not null && refused.TryGetValue(s.Id, out var why)
                 ? DarlingQueryTagRollupReader.Empty(section, "unavailable", "Not readable for this server: " + why + ".", tagFilter)
                 : mine.Count == 0
                     ? DarlingQueryTagRollupReader.Empty(section, status == "ok" ? "empty" : status, message ?? "No rows in the window for this server.", tagFilter)
@@ -186,7 +303,8 @@ public static class QueryTagUsageView
 
     private static Dictionary<string, object?> WrapDeadlocks(
         List<QueryTagDeadlockFact> facts, IReadOnlyList<(int Id, string Name)> scope, bool allServers,
-        IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit, bool scanTruncated, string? unavailableWhy)
+        IReadOnlyList<QueryTagNode> tags, int? tagFilter, int limit, bool scanTruncated, string? unavailableWhy,
+        IReadOnlyDictionary<int, string>? notCollected)
     {
         var section = QueryTagRollupSection.Deadlocks;
         var status = unavailableWhy is not null ? "unavailable" : facts.Count == 0 ? "empty" : "ok";
@@ -211,7 +329,9 @@ public static class QueryTagUsageView
 
         var servers = scope.Select(s =>
         {
-            var block = One(facts.Where(f => f.ServerId == s.Id).ToList());
+            var block = notCollected is not null && notCollected.TryGetValue(s.Id, out var engineReason)
+                ? DarlingQueryTagRollupReader.Empty(section, "not_collected", engineReason, tagFilter)
+                : One(facts.Where(f => f.ServerId == s.Id).ToList());
             block["server"] = s.Name;
             return (object)block;
         }).ToList();

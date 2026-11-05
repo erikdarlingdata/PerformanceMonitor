@@ -181,6 +181,37 @@ LIMIT $3";
     }
 
     /// <summary>
+    /// The findings attached to an engine alert, one display line each, oldest first (#7084 part 4; the Viewer's
+    /// <c>GetAttachedFindingsAsync</c> twin): read when the alert's detail opens, by the alert's own identity (server, metric,
+    /// time) through <c>v_config_alert_log</c> so a finding that ordinary archival moved to Parquet still lists. Empty for a metric
+    /// no finding attaches to, with no read. A line is the finding's time on the alert's clock, then its metric name (its story).
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetAttachedFindingsAsync(AlertHistoryRow alert)
+    {
+        var lines = new List<string>();
+        if (!OpenEngineAlerts.IsAttachable(alert.MetricName)) return lines;
+
+        var alertUtc = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Utc);
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = OpenEngineAlerts.AttachedFindingsSql("v_config_alert_log");
+        command.Parameters.Add(new DuckDBParameter { Value = alert.ServerId });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(alert.AlertTime, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(OpenEngineAlerts.AttachedUntil(alertUtc), DateTimeKind.Unspecified) });
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (OpenEngineAlerts.Names(
+                    AlertContextSerializer.TryReadAttachedTo(reader.IsDBNull(2) ? null : reader.GetString(2)), alert.MetricName, alertUtc))
+            {
+                lines.Add(alert.FormatSameZone(reader.GetDateTime(0)) + "  " + reader.GetString(1));
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>
     /// #6261: the streak of each row of <paramref name="page"/>, aligned with it, from one read of the alert log for the whole
     /// page (Darling's <c>GetAlertStreaksAsync</c> twin; the rule is <see cref="InvestigationAlertStreak"/>). Muted and dismissed
     /// rows are in: they fired. The history is read through <c>v_config_alert_log</c>, so rows ordinary archival moved to Parquet
@@ -311,14 +342,14 @@ AND   dismissed = TRUE";
     /// If alerts only exist in archived parquet, inserts into dismissed_archive_alerts instead.
     /// Logs structured telemetry and verifies dismissal success.
     /// </summary>
-    public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts)
+    public async Task<int> DismissAlertsAsync(List<AlertHistoryRow> alerts, string action = "DismissSelected")
     {
         if (alerts.Count == 0) return 0;
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         if (App.LogAlertDismissals)
-            AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Requested={alerts.Count}");
+            AppLogger.Info("AlertDismiss", $"Action={action}, Requested={alerts.Count}");
 
         using var connection = await OpenUserWriteConnectionAsync();
         PreservedTableRestore.ThrowIfRestorePending(_duckDb.ArchivePath, "dismissed_archive_alerts");
@@ -387,7 +418,7 @@ AND NOT EXISTS (
             sw.Stop();
 
             if (App.LogAlertDismissals)
-                AppLogger.Info("AlertDismiss", $"Action=DismissSelected, Result=Complete, Requested={alerts.Count}, LiveUpdated={totalAffected}, ArchivedDismissed={archivedDismissed}, Duration={sw.ElapsedMilliseconds}ms");
+                AppLogger.Info("AlertDismiss", $"Action={action}, Result=Complete, Requested={alerts.Count}, LiveUpdated={totalAffected}, ArchivedDismissed={archivedDismissed}, Duration={sw.ElapsedMilliseconds}ms");
 
             // Post-dismiss verification: confirm the dismissed rows are no longer visible
             if (totalAffected > 0)
@@ -414,16 +445,7 @@ AND NOT EXISTS (
     }
 
     /// <summary>
-    /// Dismisses all visible (non-dismissed) alerts matching the current filter criteria.
-    /// Uses an exclusive write lock to prevent race conditions with archival.
-    /// Updates the live table, then inserts any remaining archived alerts into the sidecar table.
-    /// Logs structured telemetry and verifies dismissal success.
-    /// </summary>
-    public Task<int> DismissAllVisibleAlertsAsync(int hoursBack, int? serverId = null)
-        => DismissAllVisibleAlertsWindowAsync(DateTime.UtcNow.AddHours(-hoursBack), null, serverId);
-
-    /// <summary>
-    /// <see cref="DismissAllVisibleAlertsAsync"/> over the window <see cref="GetAlertHistoryWindowAsync"/> shows (#5562): the
+    /// Dismisses all visible (non-dismissed) alerts over the window <see cref="GetAlertHistoryWindowAsync"/> shows (#5562): the
     /// alerts from <paramref name="sinceUtc"/> up to but not including <paramref name="untilUtc"/> (<c>null</c> = to now), so a
     /// finished range's Dismiss All touches exactly the rows its grid shows and none raised after its end. The Darling Viewer's
     /// <c>DismissAllVisibleAlertsWindowAsync</c> scopes the same way.
@@ -714,6 +736,14 @@ public class AlertHistoryRow
             Clock ?? ServerTimeHelper.ActiveServerClock),
         "yyyy-MM-dd HH:mm:ss");
 
+    /// <summary>A stored naive-UTC instant of another row on this row's server, in the same display zone as <see cref="TimeLocal"/>
+    /// (#7084 part 4: the attached findings of an engine alert read on the alert's own clock).</summary>
+    public string FormatSameZone(DateTime storedUtc) => ServerTimeHelper.FormatInstant(
+        storedUtc, ServerTimeHelper.DisplayZoneFor(
+            PerformanceMonitor.Ui.MultiServerTime.EffectiveMode(ServerTimeHelper.CurrentDisplayMode, MixedServers),
+            Clock ?? ServerTimeHelper.ActiveServerClock),
+        "yyyy-MM-dd HH:mm:ss");
+
     /// <summary>True when the list this row sits in holds rows of several servers (#6137), stamped with <see cref="Clock"/>. Server
     /// time cannot apply across servers, so such a row reads in this machine's time like every other row of the list.</summary>
     public bool MixedServers { get; set; }
@@ -737,6 +767,25 @@ public class AlertHistoryRow
        Viewer's, the web page and get_alert_history — and its summary is where the fallback's reasons are. */
     public bool IsCritical => AlertHistoryRowSeverity.IsCritical(MetricName, ContextJson);
     public bool IsWarning => AlertHistoryRowSeverity.IsWarning(MetricName, ContextJson);
+
+    /* #7124: why the alert was held for the digest or paged, the status text's tooltip (Lite's Alert Detail window shows the same text).
+       The tooltip binding is read when the grid realizes the row, not on hover, so the parse is cached: a row parses its
+       context at most once, however often scrolling realizes it again. */
+    private bool _routingReasonRead;
+    private string? _routingReason;
+
+    public string? RoutingReason
+    {
+        get
+        {
+            if (!_routingReasonRead)
+            {
+                _routingReason = AlertDetailText.RoutingReasonFromJson(ContextJson);
+                _routingReasonRead = true;
+            }
+            return _routingReason;
+        }
+    }
 
     /* #5642: how old the newest sample was when the alert FIRED, read off the context the row persisted. The engine
        computed the age once at fire time and the history store kept it; this reads it back and never works it out

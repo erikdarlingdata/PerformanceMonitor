@@ -56,6 +56,14 @@ public sealed partial class ViewerDataService
     /// the list reads the statements without it and every route shows as Both.</summary>
     internal const int RouteSeveritiesStoreSchemaVersion = 229;
 
+    /// <summary>The store version that added <c>config_notification_routes.report_notice</c> (V233, #6979). A store below it has no column,
+    /// so the list reads the statements without it and every route shows as Off.</summary>
+    internal const int RouteReportNoticeStoreSchemaVersion = 233;
+
+    /// <summary>The store version that added <c>config_notification_routes.action_approval</c> and <c>approval_single_person</c> (V238, #7109).
+    /// A store below it has neither column, so the list reads the statements without them and every route shows the defaults.</summary>
+    internal const int RouteActionApprovalStoreSchemaVersion = 238;
+
     /// <summary>The full row, for an <c>admin</c> seat, with the two scope columns (V181, #5750), for a store below V229 (no
     /// <c>severities</c> column). Ordered by <c>route_id</c>; the window re-sorts the grid newest first. The resolver's order is the
     /// scope tier, then the metric level, then the route id, so the id order is no longer the order routes are consulted in.</summary>
@@ -76,6 +84,22 @@ public sealed partial class ViewerDataService
     public const string NotificationRoutesSelectNoSecretWithSeveritiesSql =
         "SELECT " + NotificationRoutesNoSecretColumns + ", severities FROM config_notification_routes ORDER BY route_id";
 
+    /// <summary>The full row with the severity filter and the report notice setting as the last two columns (V233, #6979).</summary>
+    public const string NotificationRoutesSelectWithReportNoticeSql =
+        "SELECT " + NotificationRoutesAdminColumns + ", severities, report_notice FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The secret-free projection with the severity filter and the report notice setting as the last two columns (V233, #6979). Neither is a secret.</summary>
+    public const string NotificationRoutesSelectNoSecretWithReportNoticeSql =
+        "SELECT " + NotificationRoutesNoSecretColumns + ", severities, report_notice FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The full row with the severity filter, the report notice setting and the two approval columns last (V238, #7109).</summary>
+    public const string NotificationRoutesSelectWithActionApprovalSql =
+        "SELECT " + NotificationRoutesAdminColumns + ", severities, report_notice, action_approval, approval_single_person FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>The secret-free projection with the two approval columns last (V238, #7109). Neither is a secret.</summary>
+    public const string NotificationRoutesSelectNoSecretWithActionApprovalSql =
+        "SELECT " + NotificationRoutesNoSecretColumns + ", severities, report_notice, action_approval, approval_single_person FROM config_notification_routes ORDER BY route_id";
+
     /// <summary>Inserts one route (#6231: the one copy is <see cref="NotificationRouteWriter.InsertSql"/>, which the MCP tools share).</summary>
     public const string NotificationRouteInsertSql = NotificationRouteWriter.InsertSql;
 
@@ -88,22 +112,31 @@ public sealed partial class ViewerDataService
 
     public const string NotificationRouteDeleteSql = NotificationRouteWriter.DeleteSql;
 
+    /// <summary>Which of the newer route columns the list reads (V229 severities, V233 report notice, V238 approval, #6928, #6979, #7109). A probe that
+    /// cannot tell (null: timed out, or a network blip) reads as "all present", as the People and Proposals reads do (#7208). The connect gate already
+    /// refuses a store below V238, so a null probe is a current store, and a failed read of it throws. Reading the older statement instead would show
+    /// every stored severity filter, report notice and approval setting as its default, and the next save would write those defaults over the real ones.</summary>
+    internal static (bool Severities, bool ReportNotice, bool Approval) RouteColumnsPresent(int? version) =>
+        version is not int known
+            ? (true, true, true)
+            : (known >= RouteSeveritiesStoreSchemaVersion, known >= RouteReportNoticeStoreSchemaVersion, known >= RouteActionApprovalStoreSchemaVersion);
+
     /// <summary>Every route, in resolution order. A read-only seat gets the secret-free projection.</summary>
     public async Task<IReadOnlyList<NotificationRouteRow>> GetNotificationRoutesAsync(CancellationToken cancellationToken = default)
     {
         var rows = new List<NotificationRouteRow>();
         /* V229 (#6928): a store below it has no severities column, so the list reads the older statements and every route shows as Both. */
         var version = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
-        var hasSeverities = version is int known && known >= RouteSeveritiesStoreSchemaVersion;
+        var (hasSeverities, hasReportNotice, hasApproval) = RouteColumnsPresent(version);
         var sql = IsReadOnly
-            ? (hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
-            : (hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
+            ? (hasApproval ? NotificationRoutesSelectNoSecretWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectNoSecretWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectNoSecretWithSeveritiesSql : NotificationRoutesSelectNoSecretSql)
+            : (hasApproval ? NotificationRoutesSelectWithActionApprovalSql : hasReportNotice ? NotificationRoutesSelectWithReportNoticeSql : hasSeverities ? NotificationRoutesSelectWithSeveritiesSql : NotificationRoutesSelectSql);
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader, hasSeverities) : ReadRouteRow(reader, hasSeverities));
+            rows.Add(IsReadOnly ? ReadRouteRowNoSecret(reader, hasSeverities, hasReportNotice, hasApproval) : ReadRouteRow(reader, hasSeverities, hasReportNotice, hasApproval));
         }
 
         foreach (var row in rows.Where(r => r.FallbackRouteId.HasValue))
@@ -324,7 +357,7 @@ public sealed partial class ViewerDataService
         }
     }
 
-    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader, bool hasSeverities) => new()
+    private static NotificationRouteRow ReadRouteRow(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -346,11 +379,14 @@ public sealed partial class ViewerDataService
         SendResolutions = reader.IsDBNull(17) ? null : reader.GetBoolean(17),
         FallbackRouteId = reader.IsDBNull(18) ? null : reader.GetInt32(18),
         Severities = hasSeverities ? NotificationRouteKinds.NormalizeSeverities(reader.GetString(19)) : NotificationRouteKinds.SeveritiesBoth,
+        ReportNotice = hasReportNotice ? NotificationRouteKinds.NormalizeReportNotice(reader.GetString(20)) : NotificationRouteKinds.ReportNoticeOff,
+        ActionApproval = hasApproval ? NotificationRouteKinds.NormalizeActionApproval(reader.GetString(21)) : NotificationRouteKinds.ActionApprovalRequired,
+        ApprovalSinglePerson = hasApproval && reader.GetBoolean(22),
     };
 
     /// <summary>The secret-free reader: the four carved destinations stay empty (the seat cannot author them
     /// anyway) and every later column shifts ordinal, the <c>ReadNotificationRowNoSecret</c> idiom.</summary>
-    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader, bool hasSeverities) => new()
+    private static NotificationRouteRow ReadRouteRowNoSecret(NpgsqlDataReader reader, bool hasSeverities, bool hasReportNotice, bool hasApproval = false) => new()
     {
         RouteId = reader.GetInt32(0),
         MetricMatch = reader.GetString(1),
@@ -372,6 +408,9 @@ public sealed partial class ViewerDataService
         SendResolutions = reader.IsDBNull(13) ? null : reader.GetBoolean(13),
         FallbackRouteId = reader.IsDBNull(14) ? null : reader.GetInt32(14),
         Severities = hasSeverities ? NotificationRouteKinds.NormalizeSeverities(reader.GetString(15)) : NotificationRouteKinds.SeveritiesBoth,
+        ReportNotice = hasReportNotice ? NotificationRouteKinds.NormalizeReportNotice(reader.GetString(16)) : NotificationRouteKinds.ReportNoticeOff,
+        ActionApproval = hasApproval ? NotificationRouteKinds.NormalizeActionApproval(reader.GetString(17)) : NotificationRouteKinds.ActionApprovalRequired,
+        ApprovalSinglePerson = hasApproval && reader.GetBoolean(18),
     };
 }
 
@@ -431,6 +470,24 @@ public sealed class NotificationRouteRow
         NotificationRouteKinds.SeveritiesCritical => "Critical only",
         NotificationRouteKinds.SeveritiesWarning => "Warning only",
         _ => "Both",
+    };
+
+    /// <summary>The report notice setting (V233, #6979): <see cref="NotificationRouteKinds.ReportNoticeOff"/>, <see cref="NotificationRouteKinds.ReportNoticeNeedsPersonOrChange"/>
+    /// or <see cref="NotificationRouteKinds.ReportNoticeAll"/>.</summary>
+    public string ReportNotice { get; set; } = NotificationRouteKinds.ReportNoticeOff;
+
+    /// <summary>Whether a Level 3 action on the route waits for a person's approval (V238, #7109): required (the default) or off.</summary>
+    public string ActionApproval { get; set; } = NotificationRouteKinds.ActionApprovalRequired;
+
+    /// <summary>Whether a person who asked for an action may approve it on this route (V238, #7109).</summary>
+    public bool ApprovalSinglePerson { get; set; }
+
+    /// <summary>The Report notice column: Off, Needs a person or made a change, or All reports (#6979).</summary>
+    public string ReportNoticeDisplay => NotificationRouteKinds.NormalizeReportNotice(ReportNotice) switch
+    {
+        NotificationRouteKinds.ReportNoticeNeedsPersonOrChange => "Needs a person or made a change",
+        NotificationRouteKinds.ReportNoticeAll => "All reports",
+        _ => "Off",
     };
 
     /// <summary>The route an expired investigation request goes to first (#6036, D8 of #5632 Phase C), or null for none.
@@ -525,6 +582,9 @@ public sealed class NotificationRouteRow
         SendResolutions = SendResolutions,
         FallbackRouteId = FallbackRouteId,
         Severities = Severities,
+        ReportNotice = ReportNotice,
+        ActionApproval = ActionApproval,
+        ApprovalSinglePerson = ApprovalSinglePerson,
         ModifiedAtUtc = ModifiedAtUtc == default ? null : ModifiedAtUtc,
     };
 
@@ -551,6 +611,9 @@ public sealed class NotificationRouteRow
         FallbackRouteId = FallbackRouteId,
         FallbackRouteName = FallbackRouteName,
         Severities = Severities,
+        ReportNotice = ReportNotice,
+        ActionApproval = ActionApproval,
+        ApprovalSinglePerson = ApprovalSinglePerson,
         ScopeDisplay = ScopeDisplay,
         StatusDisplay = StatusDisplay,
     };

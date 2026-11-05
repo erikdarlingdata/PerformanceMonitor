@@ -119,7 +119,7 @@ public class SlackDetailsSizeTests
                 Key = "PLAN_REGRESSION", Value = 14.2, Severity = 0.9,
                 Metadata = new()
                 {
-                    ["worst_regression_factor"] = 14.2, ["offender_count"] = 3,
+                    ["lead_regression_factor"] = 14.2, ["offender_count"] = 3,
                     ["latest_cpu_per_exec_us"] = 2_480_000, ["best_cpu_per_exec_us"] = 174_600,
                     ["latest_is_forced"] = 0, ["force_failure_count"] = 0
                 }
@@ -497,10 +497,10 @@ public class SlackDetailsSizeTests
         Assert.All(dropped, h => Assert.Contains(h, omission, StringComparison.Ordinal));
         Assert.Contains(Pointer, omission, StringComparison.Ordinal);
 
-        /* The omission item is the LAST detail — after it come only the triage button and the footer. */
+        /* The omission item is the LAST detail — after it come only the triage link and the footer. */
         var omissionIndex = blocks.FindIndex(b => SectionText(b)?.StartsWith(OmissionHeading, StringComparison.Ordinal) == true);
         Assert.Equal("divider", blocks[omissionIndex - 1].GetProperty("type").GetString());
-        Assert.Equal("actions", blocks[omissionIndex + 1].GetProperty("type").GetString());
+        Assert.Equal("context", blocks[omissionIndex + 1].GetProperty("type").GetString());
         Assert.Equal("context", blocks[omissionIndex + 2].GetProperty("type").GetString());
     }
 
@@ -588,7 +588,7 @@ public class SlackDetailsSizeTests
             context.Details.Add(item);
         }
 
-        /* Head 2 + 20×2 = 42; footer 1 (no triage button); the details' budget is 47, so five blocks remain
+        /* Head 2 + 20×2 = 42; footer 1 (no triage link); the details' budget is 47, so five blocks remain
            for this body's divider and sections after the omission item's two are charged. */
         var lines = Enumerable.Range(0, 5000).Select(i => string.Create(CultureInfo.InvariantCulture, $"advice-line-{i:D4} {new string('x', 40)}"));
         context.Details.Add(new AlertDetailItem { Heading = "Long advice", Body = string.Join('\n', lines) });

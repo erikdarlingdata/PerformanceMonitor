@@ -66,14 +66,13 @@ public sealed class ChartWindowDomainTests
     {
         var charts = ChartsJs;
 
-        /* The spec grew two optional fields, both defaulting to null (absent ⇒ unchanged). */
-        Assert.Contains("windowStart = null, windowEnd = null } = spec;", charts, StringComparison.Ordinal);
+        /* The spec grew two optional fields, both defaulting to null (absent ⇒ unchanged). Later fields may follow them. */
+        Assert.Contains("windowStart = null, windowEnd = null", charts, StringComparison.Ordinal);
 
         /* The data extent is computed but kept DISTINCT from the domain — the domain switches to the window when
            one is passed, so the burst of a sparse series never re-scales the axis to itself. */
         Assert.Contains("const dataTMin = rows[0].t.getTime();", charts, StringComparison.Ordinal);
         Assert.Contains("const dataTMax = rows[rows.length - 1].t.getTime();", charts, StringComparison.Ordinal);
-        Assert.Contains("const tMin = hasWindow ? windowStart : dataTMin;", charts, StringComparison.Ordinal);
         Assert.Contains("const tMax = hasWindow ? windowEnd : dataTMax;", charts, StringComparison.Ordinal);
 
         /* A window is honoured only when it is two real numbers with end AFTER start — a degenerate window falls

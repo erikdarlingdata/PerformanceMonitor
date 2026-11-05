@@ -121,7 +121,8 @@ public sealed partial class DarlingMcpServerAdminTools
     /// <summary>The fixed answer when the store has no edit function the calling role may run (#5240): a self-managed store
     /// whose roles were provisioned before the function existed. Never PostgreSQL's own text.</summary>
     internal const string EditStoreNeedsRolesText =
-        "This store's roles predate server edits: re-run provision-roles.sql against the store, then try again.";
+        "This store's roles predate server edits. On your own PostgreSQL, run " + DarlingManagedRoles.ProvisionRolesScriptPath
+        + " on the store as a superuser, then try again. On the bundled store, restart the Darling service so it provisions the roles again.";
 
     /// <summary>The refusal when a role is set or changed and darling.json lists no role the web and MCP may set (#5452).</summary>
     internal const string EditAwsRoleNoListText =
@@ -1042,8 +1043,14 @@ LIMIT 1";
             return true;
         }
 
+        /* #7197: no AllowThousands. NumberStyles.Number accepts a comma anywhere in the digits, so a decimal-comma
+           "120,50" stored 12050. A string is a plain decimal number: digits, an optional sign and an optional point. */
         return v.TryGetValue<string>(out var text)
-            && decimal.TryParse(text, NumberStyles.Number, CultureInfo.InvariantCulture, out value);
+            && decimal.TryParse(
+                text,
+                NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign | NumberStyles.AllowLeadingWhite | NumberStyles.AllowTrailingWhite,
+                CultureInfo.InvariantCulture,
+                out value);
     }
 
     /* ─────────────────────────────── plan (pure) ─────────────────────────────── */

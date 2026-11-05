@@ -35,8 +35,12 @@ public sealed class McpWaitTools
             var rows = await dataService.GetWaitStatsAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
             {
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
+                /* #7005: the empty answer says whether the store holds the window too. */
+                var emptyStart = windowEnd.AddHours(-hours_back);
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "wait_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range."),
+                    dataService, QueryWindowRelation.WaitStats, resolved.ServerId, emptyStart, windowEnd, "wait_stats");
             }
 
             var truncated = rows.Count > limit;
@@ -103,6 +107,7 @@ public sealed class McpWaitTools
 
             var types = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
+            var typesStart = windowEnd.AddHours(-hours_back);
             if (types.Count == 0)
             {
                 /*
@@ -117,21 +122,22 @@ public sealed class McpWaitTools
                     return gated;
                 }
 
-                return await dataService.HasAnyWaitStatAsync(resolved.ServerId)
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(await dataService.HasAnyWaitStatAsync(resolved.ServerId)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        await McpQueryTools.QuietWindowMessageAsync(dataService, QueryWindowRelation.WaitStats, resolved.ServerId, typesStart, windowEnd, "wait_stats", $"No wait types recorded for {resolved.DisplayName} in the last {hours_back} hour(s)", ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."))
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
+                        $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled."),
+                    dataService, QueryWindowRelation.WaitStats, resolved.ServerId, typesStart, windowEnd, "wait_stats");
             }
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
                 wait_types = types
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), dataService, QueryWindowRelation.WaitStats, resolved.ServerId, typesStart, windowEnd, "wait_stats");
         }
         catch (Exception ex)
         {
@@ -164,6 +170,7 @@ public sealed class McpWaitTools
             if (bucketError != null) return bucketError;
 
             var points = await dataService.GetWaitBucketsAsync(resolved.ServerId, wait_type, hours_back, windowEnd, bucketMinutes);
+            var trendStart = windowEnd.AddHours(-hours_back);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
@@ -181,7 +188,9 @@ public sealed class McpWaitTools
                 var collected = await dataService.GetDistinctWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
                 /* #6446: the collector skips the ignored (benign) waits, so only those are never collected; a wait type it would
                    store that had no waiting in the window is empty, not not_collected. The hint stays for a typo. */
-                return TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitTypes.Load(), collected);
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    TrendPayloads.WaitTrendMiss(wait_type, hours_back, IgnoredWaitTypes.Load(), collected),
+                    dataService, QueryWindowRelation.WaitStats, resolved.ServerId, trendStart, windowEnd, "wait_stats");
             }
 
             /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the trend whose step a restart
@@ -189,9 +198,10 @@ public sealed class McpWaitTools
                every trend tool of both SKUs — see BaselineDiscontinuities. */
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return TrendPayloads.WaitTrend(
+            return await McpQueryTools.WithDataWindowNoticeAsync(TrendPayloads.WaitTrend(
                 resolved.DisplayName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)),
+                dataService, QueryWindowRelation.WaitStats, resolved.ServerId, trendStart, windowEnd, "wait_stats");
         }
         catch (Exception ex)
         {
@@ -207,6 +217,7 @@ public sealed class McpWaitTools
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(McpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -227,7 +238,7 @@ public sealed class McpWaitTools
 
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The read was UNBOUNDED with a Take(limit) on top, and the envelope stated no bound. */
-            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1);
+            var rows = await dataService.GetWaitingTasksAsync(resolved.ServerId, hours_back, databaseNames: database == null ? null : new[] { database }, asOfUtc: windowEnd, limit: limit + 1, includeMonitor: include_monitor);
 
             /* #4966: where this server's waiting_tasks start for the window, beside the page cut below — truncated
                says the window held more than limit, this says the store did not hold the window's head. The page's
@@ -247,12 +258,13 @@ public sealed class McpWaitTools
                    not_collected), and only then says the CHOSEN database had none, in Darling's words: it is not a
                    verdict on the databases nobody read. */
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "waiting_tasks", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         database == null
-                            ? "No waiting tasks captured in the specified time range."
+                            ? "No waiting tasks captured in the specified time range." + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them.")
                             : $"No waiting tasks captured in the specified time range{McpDatabaseSelection.ForChosen(new[] { database })}. "
-                              + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds.",
-                        notice.AsHints());
+                              + "The filter was applied in SQL over the whole window, so waiting tasks of other databases may well exist; drop it to see what the window holds."
+                              + (include_monitor ? "" : " The monitor's own statements are left out. Pass include_monitor=true to include them."),
+                        notice.AsHints()));
             }
 
             var truncated = rows.Count > limit;

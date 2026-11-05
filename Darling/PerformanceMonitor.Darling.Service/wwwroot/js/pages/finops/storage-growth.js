@@ -13,7 +13,7 @@
    computes nothing. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip, gatedSections } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -52,7 +52,7 @@ function accessText(v) {
 }
 
 const DATABASE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "current_size_mb", label: "Current (MB)", format: "num2" },
   { key: "size_7d_ago_mb", label: "7 days ago (MB)", format: "num2", nullKey: "size_7d_ago_note" },
   { key: "size_30d_ago_mb", label: "30 days ago (MB)", format: "num2", nullKey: "size_30d_ago_note" },
@@ -159,7 +159,7 @@ function heatmap(section) {
 // One section by its own status: ok shows the notice and the table, empty an empty strip, not_collected its message.
 function sectionContent(section, columns, emptyText, notice, lead) {
   const s = section || {};
-  if (s.status === "ok") return [noticeStrip(notice(s)), VIZ.table(s, { rowsKey: "rows", columns: lead ? [lead, ...columns] : columns, emptyText })];
+  if (s.status === "ok") return [captionStrip(notice(s), s.truncated === true), VIZ.table(s, { rowsKey: "rows", columns: lead ? [lead, ...columns] : columns, emptyText })];
   if (s.status === "empty") return [emptyStrip(emptyText)];
   return [noticeStrip(s.message ?? "This section was not collected.")];
 }
@@ -257,7 +257,7 @@ export const tab = {
           const s = data.objects || {};
           const parts = [el("h3", { text: "Objects by Growth" })];
           if (data.database && data.database.status === "empty") parts.push(noticeStrip("This database is not in the latest snapshot."));
-          if (s.status === "ok") parts.push(noticeStrip(objectNotice(s)), noticeStrip(OBJECT_GROWTH_NOTE), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
+          if (s.status === "ok") parts.push(captionStrip(objectNotice(s), s.truncated === true), noticeStrip(OBJECT_GROWTH_NOTE), heatmap(s), VIZ.table(s, { rowsKey: "rows", columns: [drillColumn("Show indexes", openIndexes), ...OBJECT_COLUMNS], emptyText: "No object size data for this database yet." }));
           else parts.push(...sectionContent(s, OBJECT_COLUMNS, "No object size data for this database yet.", objectNotice));
           chrome(parts);
         } else {

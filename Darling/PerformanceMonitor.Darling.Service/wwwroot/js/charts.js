@@ -16,12 +16,12 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked } from "./util.js";
-import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
 /* Re-exported so every existing import of the gap rule from charts.js keeps working (it moved to chart-gaps.js, #6291). */
-export { gapThresholdMs, splitAtGaps };
+export { gapThresholdMs, splitAtGaps, bucketMsOf };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -43,6 +43,8 @@ const BAR_LABEL_CHARS = 30;
 const BAR_CHAR_PX = 7.6;
 const BAR_CHAR_BUDGET_PX = BAR_CHAR_PX * 1.16;
 const BAR_TRACK_MIN = 40;
+const STACKED_BAR_MIN_PX = 8;
+const STACKED_BAR_MAX_PX = 64;
 /* Top margin leaves headroom for the y-axis unit caption to sit fully clear of the top tick's label. */
 const M = { l: 58, r: 16, t: 26, b: 30 };
 /* The margins as declared; a chart whose tick labels are wider than the left margin keeps a copy of its own named M (#6158). */
@@ -238,9 +240,17 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *                the caller's query-time "now", NEVER the last data point — anchoring to the last point would slide
  *                an old burst to the right edge and read as current. Absent/degenerate ⇒ the original data-extent
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
+ *   gapSeamMs  — optional UTC-epoch ms (#7508): where a series joins two grains (hourly points, then per-interval points).
+ *                The collection-gap rule judges each side against its own spacing. Absent => one rule for the series, as before.
+ *   bucketMs   — optional ms (#7572): the width of one bucket of a trend whose reply states it (`bucket_minutes`). A step longer than
+ *                one bucket breaks the line, so a quiet series thinned to its buckets with readings still shows its silences, and a
+ *                lone reading is a dot. Absent => the cadence the series shows for itself, as before.
+ *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
+ *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
+ *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, windowStart = null, windowEnd = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -257,6 +267,12 @@ export function renderLineChart(spec) {
   const stackedBar = mode === "stacked-bar";
   /* Both stacked modes share the cumulative pre-pass, the sum-based y-domain, and the hover-at-stack-top dots. */
   const usesStack = stacked || stackedBar;
+  /* #7401: a repeated color is drawn dashed on a line. The stacked bands and bars have no stroke to dash, so they take none. */
+  const dashes = usesStack ? new Map() : seriesDashes(allSeries);
+  /* The keys whose dashed polyline the plot actually drew: a series that is only dots (one bucket, or runs of one) draws no dash,
+     so its legend and tooltip swatches show none either. A hidden series draws nothing, so its entry keeps its assigned look. */
+  const dashDrawn = new Set();
+  const swatchDash = (key) => (dashDrawn.has(key) || hiddenSet.has(key) ? dashes.get(key) : undefined);
   const filled = mode === "area" || stacked;
 
   /* Parse + sort the x axis (naive UTC -> real Date via parseUtc). */
@@ -285,11 +301,20 @@ export function renderLineChart(spec) {
   const hasWindow =
     typeof windowStart === "number" && typeof windowEnd === "number" &&
     isFinite(windowStart) && isFinite(windowEnd) && windowEnd > windowStart;
-  const tMin = hasWindow ? windowStart : dataTMin;
+  /* #7386: a window longer than the server's history starts at the server's data start, so a server with three hours under "Past
+     day" does not spend seven eighths of the plot on empty time. The picked start stays the floor, and the data start moves back
+     to the earliest row this chart plotted when that is older (another relation, its own retention), so a chart never hides a
+     point it drew. A zoomed window (windowExact) is the exact span the reader asked for and is never trimmed. With no server
+     claim the axis is the picked window, as before. */
+  const tMin = hasWindow
+    ? (spec.windowExact === true || chartDataStart() === null
+      ? windowStart
+      : xStartMs(windowStart, windowEnd, Math.min(chartDataStart(), dataTMin)))
+    : dataTMin;
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
   const rowTimes = rows.map((p) => p.t.getTime());
-  const gapMs = gapThresholdMs(rowTimes);
+  const gapMs = gapThresholdMs(rowTimes, gapSeamMs, bucketMs);
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -325,7 +350,7 @@ export function renderLineChart(spec) {
     }
     if (dataMax === -Infinity) {
       /* With a series hidden the legend must stay on screen to bring it back, so draw an empty axis instead. */
-      if (legendHidden.size === 0) return el("div", { class: "chart" }, [emptyStrip("No numeric values to chart.")]);
+      if (legendHidden.size === 0) return el("div", { class: "chart" }, [emptyStrip("No point in this period holds a value, so there is nothing to draw.")]);
       dataMax = 1;
     }
     dataMin = Math.min(0, dataMin);
@@ -334,7 +359,9 @@ export function renderLineChart(spec) {
 
   /* Nice-rounded domain so gridline labels land on round values; percentage charts (clampMax=100) cap the top
      at 100 and never exceed it, so a 96% reading no longer rounds the axis up to a "120%" tick. */
-  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks);
+  /* #7488: a size axis whose labels step up to the next unit (60,000 MB reads "GB") picks its ticks in that unit, so it reads 20, 40, 60 GB
+     and not 19.5, 39.1, 58.6. Under 1,024 of its own unit (or with no sizeUnit) the ticks are exactly what they were. */
+  const scale = sizedScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeUnit);
   const yMin = scale.min;
   const yMax = scale.max;
 
@@ -359,7 +386,7 @@ export function renderLineChart(spec) {
     if (m2 === -Infinity) { m2 = 1; n2 = 0; }
     n2 = Math.min(0, n2);
     if (m2 === n2) m2 = n2 + 1;
-    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true);
+    scale2 = sizedScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, series2.sizeUnit);
     yLabels2 = axisTickLabels(scale2.ticks, scale2.step, series2.formatValue || ((v) => String(v)));
     rightGutter = axisGutterPx(yLabels2, 56);
   }
@@ -483,6 +510,11 @@ export function renderLineChart(spec) {
       } else {
         barW = Math.max(1, (plotW / rows.length) * 0.7);
       }
+      /* #7571: a window with a few far-apart (or close-together) collections drew hairlines when the tightest gap was small and
+         plotW-wide slabs when the only gap was huge. A bar is at least STACKED_BAR_MIN_PX wide (but never more than the tiling
+         width, so a dense chart does not overlap itself more than before), and in a windowed chart at most STACKED_BAR_MAX_PX. */
+      barW = Math.max(barW, Math.min(STACKED_BAR_MIN_PX, (plotW / rows.length) * 0.7));
+      if (hasWindow) barW = Math.min(barW, STACKED_BAR_MAX_PX);
       for (let i = 0; i < rows.length; i++) {
         const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
         for (let k = 0; k < series.length; k++) {
@@ -547,7 +579,7 @@ export function renderLineChart(spec) {
         /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. The
            threshold comes from THIS series' own spacing: a 15-minute series on a chart of 1-minute buckets is not a
            run of gaps. */
-        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i])))) {
+        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
           const linePts = run.map((i) => xs[i] + "," + plotY(readVal(rows[i].r, s.key)));
           /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
              reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
@@ -569,7 +601,8 @@ export function renderLineChart(spec) {
               })
             );
           }
-          root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color) }));
+          if (dashes.has(s.key)) dashDrawn.add(s.key);
+          root.appendChild(svg("polyline", { class: "series-line", "clip-path": clipAttr, points: linePts.join(" "), stroke: normalizeColor(s.color), ...(dashes.has(s.key) ? { "stroke-dasharray": dashes.get(s.key).svg } : {}) }));
         }
       }
     }
@@ -585,7 +618,7 @@ export function renderLineChart(spec) {
       }
       /* Broken at collection gaps like a primary line (#5644 W7), by its own spacing (a 15-minute overlay over
          1-minute buckets draws one line, not a dot per sample). */
-      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i])))) {
+      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
         const pts2 = run.map((i) => xs[i] + "," + Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(rows[i].r[series2.key])))));
         if (pts2.length === 1) {
           /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped
@@ -747,7 +780,7 @@ export function renderLineChart(spec) {
         const v = r[s.key];
         tooltip.appendChild(
           el("div", { class: "t-row" }, [
-            el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) }),
+            el("span", { class: "swatch", style: swatchStyle(s.color, swatchDash(s.key)) }),
             el("span", { text: s.label }),
             el("span", { class: "t-val", text: v == null || isNaN(v) ? "—" : formatValue(v) }),
           ])
@@ -785,7 +818,7 @@ export function renderLineChart(spec) {
   const plotHost = el("div", { class: "chart-plot", style: `height:${H}px` }, [buildPlot(seedW)]);
   const chart = el("div", { class: "chart" }, [plotHost]);
   chart.appendChild(tooltip);
-  chart.appendChild(buildLegend(series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries, onSelect, legendHidden, onLegend));
+  chart.appendChild(buildLegend((series2Spec ? allSeries.concat([{ key: series2Spec.key, label: series2Spec.label, color: series2Spec.color }]) : allSeries).map((s) => (swatchDash(s.key) ? { ...s, dash: swatchDash(s.key) } : s)), onSelect, legendHidden, onLegend));
   if (annotationKey.length) chart.appendChild(buildAnnotationLegend(annotationKey));
   watchPlotWidth(plotHost, (width) => {
     tooltip.style.display = "none";
@@ -1009,7 +1042,7 @@ export function renderPieChart(spec) {
  * Render a two-measure SCATTER into a returned `.chart` node (#1606 — the compose "scatter" viz): one point
  * per ranked group, x = the primary measure's value, y = the overlay's. Both axes get nice scales + unit
  * captions; each point carries a native <title> (label · x · y) and an optional drill click (design D6).
- * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, onSelect? }
+ * spec: { items:[{label, x, y, drill?}], formatX?, formatY?, unitX?, unitY?, sizeUnitX?, sizeUnitY?, onSelect? }
  */
 export function renderScatterChart(spec) {
   const widthKey = spec.widthKey || null;
@@ -1019,8 +1052,9 @@ export function renderScatterChart(spec) {
 
   const xMax = Math.max(...pts.map((d) => Number(d.x)));
   const yMax = Math.max(...pts.map((d) => Number(d.y)));
-  const sx = niceScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null);
-  const sy = niceScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null);
+  /* #7586: a size or duration axis picks its ticks in the unit its labels print in, as a line chart does. */
+  const sx = sizedScale(0, xMax > 0 ? xMax : 1, Y_TICKS, null, false, spec.sizeUnitX);
+  const sy = sizedScale(0, yMax > 0 ? yMax : 1, Y_TICKS, null, false, spec.sizeUnitY);
   /* Tick labels with the step each axis moved by, and the room the widest y label needs (#6158). */
   const yLabels = axisTickLabels(sy.ticks, sy.step, formatY);
   const xLabels = axisTickLabels(sx.ticks, sx.step, formatX);
@@ -1153,7 +1187,7 @@ function buildLegend(series, onSelect, hidden, onLegend) {
     const switchable = !!(onLegend && s.key != null);
     const off = switchable && hiddenSet.has(s.key);
     const props = { class: "item" + (drillable ? " drillable" : "") + (switchable ? " switchable" : "") + (off ? " legend-off" : "") };
-    const swatch = el("span", { class: "swatch", style: "background:" + normalizeColor(s.color) });
+    const swatch = el("span", { class: "swatch", style: swatchStyle(s.color, s.dash) });
     /* A drillable entry drills from its label, and the label is a real control: Enter or Space on it drills, as a click
        does. When the entry is also a switch the swatch is the switch and the label stays the drill, so the two gestures
        never overlap; with no switch (no onLegend) the whole entry drills, as it did before the legend could hide a
@@ -1221,27 +1255,63 @@ function buildAnnotationLegend(entries) {
 }
 
 /**
- * A NEUTRAL categorical ramp for chart series — deliberately NOT the ok/warn/err severity colors, so a chart's
- * lines never imply a health state (the alert/band palette stays severity-only). Distinct, colorblind-tolerant.
+ * The one chart-series palette (#7401): line, bar, pie and composed charts all draw from it. Cool blues, violets and
+ * neutrals plus one magenta, deliberately NOT the ok/warn/err severity colors, so a chart's lines never imply a health
+ * state (the alert/band palette stays severity-only). Ordered so neighbors differ in hue AND lightness: the first two
+ * (the accent blue, then a near-white) stay apart at the 2 px line width, and a six-series chart gets six different
+ * colors. The page is dark-only (theme.css), so one value per color serves. All #rrggbb literals (air-gap safe). A line
+ * chart with more series than colors draws the repeats dashed (seriesDashes).
  */
-export const SERIES_COLORS = ["#2eaef1", "#4dd0e1", "#b39ddb", "#7f8fa6", "#e0e0e0"];
-
-/**
- * The wider categorical palette for composed multi-series / bar / pie charts (#1563) — the five SERIES_COLORS
- * (so the family reads the same) plus five more cool/neutral hues, staying clear of the ok/warn/err severity
- * colors for the same reason. All #rrggbb literals (air-gap safe); cycled when a chart has more categories.
- */
-export const CATEGORICAL_COLORS = [
-  "#2eaef1", "#4dd0e1", "#b39ddb", "#7f8fa6", "#e0e0e0",
-  "#64b5f6", "#9575cd", "#4fc3f7", "#ba68c8", "#90a4ae",
+export const SERIES_COLORS = [
+  "#2eaef1", "#e8eaf0", "#e75fe7", "#3fd5e4", "#a577d9",
+  "#3a97a6", "#d9a3d9", "#5985ff", "#8f9fbf", "#8cc9ff",
 ];
+
+/** The palette for composed multi-series / bar / pie charts (#1563): the same list as SERIES_COLORS, so a series reads
+ *  the same on every kind of chart. */
+export const CATEGORICAL_COLORS = SERIES_COLORS;
+
+/* Dash look for a series whose color an earlier series in the same chart already uses (#7401). `svg` is the line's
+   stroke-dasharray, `swatch` the same pattern as segment lengths in px for the 12 px legend swatch. */
+const SERIES_DASHES = [
+  { svg: "6 3", swatch: [4, 2] },
+  { svg: "2 2", swatch: [2, 2] },
+  { svg: "10 3 2 3", swatch: [5, 2, 1, 2] },
+];
+
+/** Per series key, the dash look of a repeated color: its first use is solid, its n-th repeat takes the n-th pattern
+ *  (cycling). Keyed by series key so hiding a series in the legend never changes how the others look. */
+function seriesDashes(series) {
+  const seen = new Map();
+  const out = new Map();
+  for (const s of series) {
+    const c = normalizeColor(s.color).toLowerCase();
+    const n = seen.get(c) || 0;
+    seen.set(c, n + 1);
+    if (n > 0) out.set(s.key, SERIES_DASHES[(n - 1) % SERIES_DASHES.length]);
+  }
+  return out;
+}
+
+/** The legend / tooltip swatch background for a series color and its dash look (a solid bar when it has none). */
+function swatchStyle(color, dash) {
+  const c = normalizeColor(color);
+  if (!dash) return "background:" + c;
+  let x = 0;
+  const stops = dash.swatch.map((len, i) => {
+    const stop = (i % 2 === 0 ? c : "transparent") + " " + x + "px " + (x + len) + "px";
+    x += len;
+    return stop;
+  });
+  return "background:repeating-linear-gradient(90deg," + stops.join(",") + ")";
+}
 
 /** The muted color for a pie's pooled "Other" wedge — a neutral gray that recedes behind the real categories. */
 const NEUTRAL_SLICE = "#5b626e";
 
 /**
  * The event-annotation marker palette (#1563 D5) — deliberately DISJOINT from both CATEGORICAL_COLORS (the cool
- * blues/purples/grays the data series use) and the ok/warn/err severity colors, so an annotation marker never
+ * blues/purples/grays and the one magenta the data series use) and the ok/warn/err severity colors, so an annotation marker never
  * reads as a data series OR as a health state. Warm/distinct hues (pink, orange, brown, indigo), one per source,
  * cycled at the D5 cap of four. All #rrggbb literals (air-gap safe); pass through normalizeColor like every color.
  */
@@ -1274,13 +1344,22 @@ function niceNum(range, round) {
 
 /**
  * The labels for one axis's ticks (#6158): each tick formatted with its step (so a small range prints the decimals it
- * needs), and a label that repeats one already drawn is left blank, so no two ticks on an axis ever read the same even
- * when a custom formatter ignores the step. The gridline of a blanked tick stays.
+ * needs). #7587: when two ticks still format to the same text (a formatter that rounds a little too hard), every tick is
+ * formatted again with a step one tenth as large, at most twice, so the labels grow decimals and each stays on its own
+ * gridline. Only a label that still repeats after that (a formatter that ignores the step altogether) is left blank, so
+ * no two ticks on an axis ever read the same. The gridline of a blanked tick stays.
  */
 export function axisTickLabels(ticks, step, format) {
+  /* #7555: the largest tick goes with each one, so a size formatter prints the whole axis in one unit (0 GB, 0.5 GB, 1.0 GB, 1.5 GB). */
+  const axisMax = Math.max(0, ...ticks.map((t) => Math.abs(Number(t)) || 0));
+  let texts = [];
+  for (let finer = 0; finer <= 2; finer++) {
+    const s = step > 0 ? step / Math.pow(10, finer) : step;
+    texts = ticks.map((t) => String(format(t, { step: s, axisMax })));
+    if (new Set(texts).size === texts.length || !(step > 0)) break;
+  }
   const seen = new Set();
-  return ticks.map((t) => {
-    const text = String(format(t, { step }));
+  return texts.map((text) => {
     if (seen.has(text)) return "";
     seen.add(text);
     return text;
@@ -1293,14 +1372,33 @@ export function axisGutterPx(labels, minPx) {
 }
 
 /**
+ * #7555: a size axis's scale, with its ticks and its labels on one basis. The labels print in the unit of the TOP TICK (axisTickLabels), so the
+ * ticks have to be picked in that same unit. The data max alone is not enough: 1,023 MB of data rounds up to a 1,500 MB top tick, which labels in
+ * GB, so a grid picked in MB (500, 1000, 1500) would print 0.5, 1.0, 1.5 GB and the 1,000 MB line would read 1.0 GB (1,024 MB). So the axis is
+ * first scaled in its own unit, and when its top tick steps up a unit it is scaled again in that unit (0.2 ... 1.0 GB). A unit that is not a
+ * size, or a top tick under 1,024, keeps the first scale (#7488).
+ */
+function sizedScale(min, max, maxTicks, clampMax, integer, sizeUnit) {
+  const first = niceScale(min, max, maxTicks, clampMax, integer);
+  const per = sizeAxisPer(sizeUnit, first.max);
+  return per > 1 ? niceScale(min, max, maxTicks, clampMax, integer, per) : first;
+}
+
+/**
  * A "nice" y-axis over [min, max]: rounded bounds and evenly-spaced tick values that land on round numbers.
  * `clampMax` caps the top (percentage charts pass 100 so the axis never exceeds 100%).
  * `integer` keeps every tick on a whole number: a domain narrower than about five units would otherwise step by
  * 0.2 or 0.5, and a chart of COUNTS (events, sessions) labels those ticks through a whole-number formatter, so a
  * 0-1 axis read "1 1 1 0 0 0". With the step held at 1 or more the ticks are distinct whole numbers, and a
  * small-count chart shows a few honest gridlines (0, 1, 2) instead of a column of repeated labels.
+ * `per` (> 1) is for a size axis whose labels print in a unit `per` times larger than the data's (#7488): the ticks are chosen in
+ * that larger unit and handed back in the data's, so a 0-60,000 MB axis steps by 20,480 MB and its labels read 20, 40, 60 GB.
  */
-export function niceScale(min, max, maxTicks, clampMax, integer = false) {
+export function niceScale(min, max, maxTicks, clampMax, integer = false, per = 1) {
+  if (per > 1) {
+    const s = niceScale(min / per, max / per, maxTicks, clampMax == null ? null : clampMax / per, integer);
+    return { min: s.min * per, max: s.max * per, step: s.step * per, ticks: s.ticks.map((t) => Number((t * per).toPrecision(12))) };
+  }
   const range = niceNum(max - min || 1, false);
   const niceStep = niceNum(range / Math.max(1, maxTicks), true) || 1;
   const step = integer ? Math.max(1, Math.ceil(niceStep)) : niceStep;
@@ -1768,7 +1866,7 @@ export function applyChartZoom(spec, zoom) {
   const lo = first > 0 ? first - 1 : first;
   const hi = last + 1 < timed.length ? last + 1 : last;
   const inside = timed.slice(lo, hi + 1).map((p) => p.r);
-  return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to }, zoomed: true };
+  return { spec: { ...spec, points: inside, windowStart: zoom.from, windowEnd: zoom.to, windowExact: true }, zoomed: true };
 }
 
 /**

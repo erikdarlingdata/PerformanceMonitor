@@ -199,17 +199,21 @@
                                     </ComboBox>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking sessions &#x2265;" VerticalAlignment="Center"
+                                    <CheckBox x:Name="AlertBlockingCheckBox" Content="Blocking events &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="1" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingCheckBox}" x:Name="AlertBlockingThresholdBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="Pages when this many blocking events land in the last hour and the longest wait among them is 15 seconds or more (the 15 is fixed). Each blocked session counts as one event, at its longest wait."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
-                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Total blocked wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
+                                    <TextBlock x:Name="AlertBlockingWaitSecondsLabel" TextWrapping="Wrap" Text="Long blocking wait &#x2265;" VerticalAlignment="Center" Margin="24,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="0" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertBlockingWaitSecondsLabel}" x:Name="AlertBlockingWaitSecondsBox" Width="45" Text="60" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="seconds (0 = off)" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </WrapPanel>
+                                <TextBlock TextWrapping="Wrap" Margin="44,2,0,0" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           Text="One blocked session that waits this long pages at once, whatever the count above. It is also the bar for the total blocked wait across the latest blocking snapshot (the Blocking Wait Time alert). 0 turns both off."/>
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertDeadlockCheckBox" Content="Deadlocks &#x2265;" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
@@ -252,11 +256,11 @@
                                              ToolTip="Critical floor: client timeouts and cancels (attentions) per minute (same span as the Warning floor). Never below the Warning floor. Default 60. The bar is the higher of this floor and the Critical multiple times the server's own baseline."/>
                                     <TextBlock Text="(floors), or" VerticalAlignment="Center" Margin="6,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, warning multiple" x:Name="AlertClientTimeoutsWarningMultipleBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Warning multiple: the Warning bar is at least this many times the server's own baseline (the p99.9 of its 3-minute average rate over the last 7 days). At least 1. Default 3. A server with under a day of capture (or under 720 minutes with a successful run) has no baseline and uses the floors."/>
                                     <TextBlock Text="x /" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="35" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
+                                    <TextBox AutomationProperties.Name="Client timeouts, critical multiple" x:Name="AlertClientTimeoutsCriticalMultipleBox" Width="45" Text="10" Margin="6,0,0,0" VerticalAlignment="Center"
                                              ToolTip="Critical multiple: the Critical bar is at least this many times the server's own baseline. Never below the Warning multiple. Default 10."/>
                                     <TextBlock Text="x the server's own baseline" VerticalAlignment="Center" Margin="4,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
@@ -351,7 +355,7 @@
                                 <WrapPanel Orientation="Horizontal" Margin="20,6,0,0">
                                     <CheckBox x:Name="AlertLongRunningJobCheckBox" Content="Agent jobs running over" VerticalAlignment="Center"
                                               Foreground="{DynamicResource ForegroundBrush}"/>
-                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="35" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=AlertLongRunningJobCheckBox}" x:Name="AlertLongRunningJobMultiplierBox" Width="45" Text="3" Margin="6,0,0,0" VerticalAlignment="Center"/>
                                     <TextBlock Text="x historical average" VerticalAlignment="Center" Margin="2,0,0,0"
                                                Foreground="{DynamicResource ForegroundBrush}"/>
                                 </WrapPanel>
@@ -523,8 +527,6 @@
                                              "Send Test Notification" before, which are three identical labels visible at
                                              once on one scrolling page and so could not carry distinct access keys. -->
                                         <Button x:Name="TestTeamsButton" Content="Send Test to _Teams" Click="TestTeamsButton_Click"/>
-                                        <TextBlock x:Name="TeamsStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -564,8 +566,6 @@
 
                                     <WrapPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestSlackButton" Content="Send Test to Slac_k" Click="TestSlackButton_Click"/>
-                                        <TextBlock x:Name="SlackStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -620,8 +620,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestGenericButton" Content="Send Test to _Webhook" Click="TestGenericButton_Click"/>
-                                        <TextBlock x:Name="GenericStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <!-- #6012: the signing key of the generic URL (Standard Webhooks headers). The key is shown once, here, and never again. -->
@@ -706,8 +704,6 @@
 
                                     <WrapPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
                                         <Button x:Name="TestPagerDutyButton" Content="Send Test Notification" Click="TestPagerDutyButton_Click"/>
-                                        <TextBlock x:Name="PagerDutyStatusText" FontSize="11" FontStyle="Italic"
-                                                   Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" Margin="8,0,0,0"/>
                                     </WrapPanel>
                                 </Grid>
                                 <TextBlock Margin="20,8,0,0" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}">
@@ -931,7 +927,7 @@
                                     </ComboBox>
                                     <TextBlock TextWrapping="Wrap" Text="auto-detected from locale"
                                                FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
-                                               VerticalAlignment="Center" Margin="6,0,0,0" x:Name="CsvSeparatorHint"/>
+                                               VerticalAlignment="Center" Margin="6,0,0,0"/>
                                 </WrapPanel>
                                 <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <TextBlock x:Name="TimeDisplayModeLabel" Text="Show timestamps in:" VerticalAlignment="Center"

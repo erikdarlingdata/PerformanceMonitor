@@ -107,11 +107,9 @@ public sealed class PgTargetQueriesTests
            it by name). */
         var bucket = new BaselineBucket { HourOfDay = 12, DayOfWeek = 2, Mean = mean, StdDev = stddev, Median = mean, Mad = 0.6745 * stddev, SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full };
         Assert.True(bucket.IsTrustworthy);
-        /* The detector's call, argument for argument (pinned on the source in TheDetector_… below). */
-        var decision = AnomalyGate.EvaluateZScore(
-            bucket, windowShare, windowShare,
-            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgStatementShare),
-            PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, AnomalyThresholds.SigmaDisplayCap);
+        /* The detector's own per-candidate verdict (#7396 pulled it out of the loop), window share, peak and mean all the one
+           number here, over the 4-hour reference window (where the peak's Sidak correction is a no-op). */
+        var decision = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare, windowShare, windowShare, TimeSpan.FromHours(4));
         if (!decision.Fire)
             return (null, decision, bucket);
 
@@ -126,6 +124,7 @@ public sealed class PgTargetQueriesTests
             {
                 ["baseline_mean"] = bucket.Mean,
                 ["baseline_stddev"] = bucket.EffectiveStdDev,
+                ["baseline_robust_sigma"] = bucket.EffectiveRobustSigma,
                 ["baseline_median"] = bucket.Median,
                 ["baseline_mad"] = bucket.Mad,
                 ["deviation_sigma"] = decision.Sigma,
@@ -150,6 +149,129 @@ public sealed class PgTargetQueriesTests
         foreach (var (otherId, verdict) in others)
             fact.Metadata[PgTargetAnomalyDetector.OwnNormalMetadataPrefix + otherId.ToString(CultureInfo.InvariantCulture)] = verdict;
         return (fact, decision, bucket);
+    }
+
+    /* ── #7396: a quiet collection must not make a vanishing statement a bad actor ── */
+
+    /// <summary>The bucket of the quiet PostgreSQL 18 target in #7396: a statement whose hour-of-week share is about zero
+    /// with a few spiky hours (classical stddev 25.4 %, MAD tiny), so a peak of 100 % and a mean of 30.6 % are far beyond it
+    /// in either frame.</summary>
+    private static BaselineBucket QuietTargetBucket() => new()
+    {
+        HourOfDay = 12, DayOfWeek = 2, Mean = 0.0004, StdDev = 0.254, Median = 0.0, Mad = 0.002,
+        SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full,
+    };
+
+    [Fact]
+    public void EvaluateCandidate_StaysSilent_ForAStatementHoldingAVanishingShareOfTheWindow_EvenWhenOneQuietCollectionMadeItThePeak()
+    {
+        var bucket = QuietTargetBucket();
+        Assert.True(bucket.IsTrustworthy);
+        var window = TimeSpan.FromHours(4);
+
+        /* The issue's numbers: peak 100 %, mean 30.6 %, but 0.04 % of the window's execution time. The pair gate alone
+           (what the detector asked before the window-share floor) fires on them at the display cap. */
+        var pairOnly = AnomalyGate.EvaluateZScore(
+            bucket, 1.0, 0.306, AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgStatementShare),
+            PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, AnomalyThresholds.SigmaDisplayCap, window: window);
+        Assert.True(pairOnly.Fire);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, pairOnly.Sigma);
+
+        var quiet = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.0004, peakShare: 1.0, meanShare: 0.306, window);
+        Assert.False(quiet.Fire);
+    }
+
+    [Fact]
+    public void EvaluateCandidate_StillFires_ForAStatementWithARealWindowShare_AndTheFloorIsTheConcerningLineInclusive()
+    {
+        var bucket = QuietTargetBucket();
+        var window = TimeSpan.FromHours(4);
+
+        var real = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.45, peakShare: 1.0, meanShare: 0.306, window);
+        Assert.True(real.Fire);
+        Assert.Equal(AnomalyThresholds.SigmaDisplayCap, real.Sigma);
+
+        /* The floor is PgTargetScorer.BadActorShareConcerning by reference: at the line fires, a hair under does not. */
+        Assert.True(PgTargetAnomalyDetector.EvaluateCandidate(bucket, PgTargetScorer.BadActorShareConcerning, 1.0, 0.306, window).Fire);
+        Assert.False(PgTargetAnomalyDetector.EvaluateCandidate(bucket, PgTargetScorer.BadActorShareConcerning - 0.001, 1.0, 0.306, window).Fire);
+    }
+
+    [Fact]
+    public void ComposeBadActorShareAnomaly_NamesTheRoutineInTheSameFrameAsTheSigma_AndKeepsTheOldClauseForAFactWithoutTheRobustKey()
+    {
+        var bucket = QuietTargetBucket();
+        var decision = PgTargetAnomalyDetector.EvaluateCandidate(bucket, windowShare: 0.45, peakShare: 1.0, meanShare: 0.306, TimeSpan.FromHours(4));
+        Assert.True(decision.Fire);
+
+        Fact Anomaly(bool withRobustKey)
+        {
+            var fact = new Fact
+            {
+                Source = "anomaly",
+                Key = PgTargetFactKeys.AnomalyBadActorShare,
+                Value = 0.45,
+                ServerId = 1,
+                ObjectName = "42",
+                Metadata =
+                {
+                    ["baseline_mean"] = bucket.Mean,
+                    ["baseline_stddev"] = bucket.EffectiveStdDev,
+                    ["baseline_median"] = bucket.Median,
+                    ["baseline_mad"] = bucket.Mad,
+                    ["deviation_sigma"] = decision.Sigma,
+                    ["mean_sigma"] = decision.MeanSigma ?? 0,
+                    ["window_share"] = 0.45,
+                    ["peak_share"] = 1.0,
+                    ["mean_share"] = 0.306,
+                    ["candidates_evaluated"] = 1,
+                    ["candidates_fired"] = 1,
+                    [PgTargetAnomalyDetector.OwnNormalMetadataPrefix + "42"] = 2,
+                },
+            };
+            if (withRobustKey)
+                fact.Metadata["baseline_robust_sigma"] = bucket.EffectiveRobustSigma;
+            return fact;
+        }
+
+        /* The sigma was measured against the median and the MAD-derived sigma (about 0.3 %), so that is the routine named. */
+        var robust = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(Anomaly(withRobustKey: true)))!;
+        Assert.Contains("against its own routine of 0% ± 0.3% for this hour-of-week", robust.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("± 25.4%", robust.Investigation, StringComparison.Ordinal);
+
+        /* A fact written before the key existed reads exactly as it did. */
+        var legacy = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(Anomaly(withRobustKey: false)))!;
+        Assert.Contains("against its own routine of 0% ± 25.4% for this hour-of-week", legacy.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>The detector loop itself (#7396), past its two reads: the candidate rows and the keyed baselines are handed in, so the
+    /// order of the window and peak shares at the <c>EvaluateCandidate</c> call and the <c>baseline_robust_sigma</c> stamp are driven
+    /// without a database. A bucket whose robust sigma (0.1) differs from its classical one (0.15) tells the two stamps apart.</summary>
+    [Fact]
+    public void BuildBadActorShareAnomaly_GradesThePeakAndTheWindowShareEachAsItself_AndStampsTheRobustSigmaTheGateUsed()
+    {
+        var bucket = new BaselineBucket { HourOfDay = 12, DayOfWeek = 2, Mean = 0.2, StdDev = 0.15, Median = 0.2, Mad = 0.06745, SampleCount = 48, DistinctDays = 4, Tier = BaselineTier.Full };
+        Assert.True(bucket.IsTrustworthy);
+        Assert.Equal(0.1, bucket.EffectiveRobustSigma, 3);
+        Assert.NotEqual(bucket.EffectiveRobustSigma, bucket.EffectiveStdDev);
+
+        var context = new AnalysisContext { ServerId = 1, TimeRangeStart = new DateTime(2026, 11, 1, 8, 0, 0, DateTimeKind.Utc), TimeRangeEnd = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc) };
+        var candidates = new List<(long QueryId, double WindowShare, double PeakShare, double MeanShare, long Samples)> { (42L, 0.4, 0.7, 0.6, 48L) };
+        var baselines = new Dictionary<string, BaselineBucket> { ["42"] = bucket };
+
+        /* The peak (0.7) is five robust sigmas over the median 0.2. Were the call to hand the window share (0.4) in as the peak, that is
+           two sigmas, under the cutoff, and nothing would fire. */
+        var anomaly = PgTargetAnomalyDetector.BuildBadActorShareAnomaly(context, candidates, baselines);
+
+        Assert.NotNull(anomaly);
+        Assert.Equal(PgTargetFactKeys.AnomalyBadActorShare, anomaly.Key);
+        Assert.Equal("42", anomaly.ObjectName);
+        Assert.Equal(0.4, anomaly.Value, 6);
+        Assert.Equal(0.4, anomaly.Metadata["window_share"], 6);
+        Assert.Equal(0.7, anomaly.Metadata["peak_share"], 6);
+        Assert.Equal(0.6, anomaly.Metadata["mean_share"], 6);
+        Assert.Equal(5.0, anomaly.Metadata["deviation_sigma"], 3);
+        Assert.Equal(bucket.EffectiveRobustSigma, anomaly.Metadata["baseline_robust_sigma"], 6);
+        Assert.Equal(2, anomaly.Metadata[PgTargetAnomalyDetector.OwnNormalMetadataPrefix + "42"]);
     }
 
     private static Dictionary<string, Fact> Lookup(params Fact[] facts) => facts.ToFactLookup();
@@ -459,7 +581,7 @@ public sealed class PgTargetQueriesTests
         /* Named by the anomaly: the routine and the sigma are the sentence that says what decided. */
         var named = Detect(HeavyQueryId, 0.6002, mean: 0.22, stddev: 0.04, (MediumQueryId, 1), (LightQueryId, 0)).Anomaly!;
         var beyond = PgTargetAdvice.Compose(key, Lookup(fact, named))!;
-        Assert.Equal("One statement shape held 60% of the window's execution time — 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
+        Assert.Equal("One statement shape held 60% of the window's execution time — and its peak share of a single collection ran 9.5 times its usual variation above its own normal for this hour", beyond.Headline);
         Assert.Contains("This is 9.5 times its usual variation above the statement's OWN hour-of-week normal (its own routine of 22% ± 4% for this hour-of-week) — which is the grade (ANOMALY_PG_BAD_ACTOR_SHARE, walked into this card)", beyond.Investigation, StringComparison.Ordinal);
 
         /* Within its own normal (the anomaly names another statement, this one's verdict is 1): context, said so. */
@@ -480,7 +602,7 @@ public sealed class PgTargetQueriesTests
         var also = Detect(MediumQueryId, 0.55, mean: 0.10, stddev: 0.02, (HeavyQueryId, 2)).Anomaly!;
         var alsoBeyond = PgTargetAdvice.Compose(key, Lookup(fact, also))!;
         Assert.Contains("This statement is also beyond its OWN hour-of-week normal this window; the pass's own-normal anomaly (ANOMALY_PG_BAD_ACTOR_SHARE) names queryid 42", alsoBeyond.Investigation, StringComparison.Ordinal);
-        Assert.EndsWith(" — 22.5 times its usual variation above its own normal for this hour", alsoBeyond.Headline, StringComparison.Ordinal);
+        Assert.EndsWith(" — and its peak share of a single collection ran 22.5 times its usual variation above its own normal for this hour", alsoBeyond.Headline, StringComparison.Ordinal);
     }
 
     /// <summary>#3691: <c>max_exec_peakmem_bytes</c> is a CONTEXT fact carried the same way <c>max_exec_ms</c>
@@ -540,6 +662,44 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("a new index can change other statements' plans", statik.Remediation, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #7567: a zero-history bucket is scored at the display cap with no spread, so the card must not print the bucket's
+    /// classical stddev as the spread the deviation used, must word the capped value as a floor, and must not put the
+    /// window's share beside a deviation that was measured on a per-collection share.
+    /// </summary>
+    [Fact]
+    public void ComposeBadActorShareAnomaly_ZeroHistory_NamesNoSpread_WordsTheCapAsAFloor_AndLeavesTheWindowShareOutOfTheHeadline()
+    {
+        var named = Detect(HeavyQueryId, 0.612, mean: 0.22, stddev: 0.04, (MediumQueryId, 1), (LightQueryId, 0)).Anomaly!;
+        named.Metadata["baseline_zero_history"] = 1;
+        named.Metadata["baseline_median"] = 0;
+        named.Metadata["baseline_mean"] = 0;
+        named.Metadata["baseline_robust_sigma"] = 0;
+        named.Metadata["baseline_stddev"] = 0.305;
+        named.Metadata["deviation_sigma"] = AnomalyThresholds.SigmaDisplayCap;
+        named.Metadata["mean_sigma"] = AnomalyThresholds.SigmaDisplayCap;
+        named.Metadata["window_share"] = 0.0006;
+        named.Metadata["peak_share"] = 1.0;
+        var card = BadActor(HeavyQueryId, 0.0006);
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
+
+        Assert.Equal("One statement reached 100% of a single collection's execution time — against a history in which it held none of this hour", block.Headline);
+        Assert.DoesNotContain("30.5", block.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("±", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("never above zero at this hour-of-week", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("it was scored at the display cap (25) on the window's peak per-collection share (100%) and on its mean", block.Investigation, StringComparison.Ordinal);
+        /* The routine part says no spread was measured, so no part of the same text may claim a measured variation. */
+        Assert.DoesNotContain("usual variation", block.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", block.Investigation, StringComparison.Ordinal);
+
+        /* The statement's own card walks into the same anomaly: its headline suffix and verdict sentence read the same way. */
+        var walked = PgTargetAdvice.Compose(PgTargetFactKeys.BadActorKey(HeavyQueryId), Lookup(BadActor(HeavyQueryId, 0.0006), named))!;
+        Assert.EndsWith(" — and its peak share of a single collection came against a history in which it held none of this hour", walked.Headline, StringComparison.Ordinal);
+        Assert.Contains("This was scored at the display cap (25) against the statement's OWN hour-of-week normal", walked.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", walked.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("usual variation", walked.Investigation, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ComposeBadActorShareAnomaly_StatesTheShareAgainstTheRoutine_BothSigmas_TheCardsFigures_AndTheCandidateCount()
     {
@@ -547,8 +707,8 @@ public sealed class PgTargetQueriesTests
         var card = BadActor(HeavyQueryId, 0.612);
         var block = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyBadActorShare, Lookup(named, card))!;
 
-        Assert.Equal("One statement held 61% of the window's execution time — 9.8 times its usual variation above its own normal for this hour", block.Headline);
-        Assert.Contains("Statement queryid -1234567890123456789 held 61.2% of the window's total statement execution time against its own routine of 22% ± 4% for this hour-of-week — 9.8 times its usual variation above normal on the window's peak per-collection share (61.2%) and 9.8 times on its mean (61.2%), over 48 baseline samples.", block.Investigation, StringComparison.Ordinal);
+        Assert.Equal("One statement reached 61% of a single collection's execution time — 9.8 times its usual variation above its own normal for this hour", block.Headline);
+        Assert.Contains("Statement queryid -1234567890123456789 held 61.2% of the window's total statement execution time. Its own normal is judged on its share of each collection's execution time, not on that window total: against its own routine of 22% ± 4% for this hour-of-week, it sat 9.8 times its usual variation above normal on the window's peak per-collection share (61.2%) and 9.8 times on its mean (61.2%), over 48 baseline samples.", block.Investigation, StringComparison.Ordinal);
         /* The card's figures, borrowed so the anomaly's story states the same numbers. */
         Assert.Contains("The statement ran 2,640 calls averaging 227.4 ms per call this window; its PG_BAD_ACTOR card carries the rest", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("Of the window's 3 top statements, 1 was beyond its own normal and 1 has no trustworthy own-normal yet; this card names the one furthest beyond it.", block.Investigation, StringComparison.Ordinal);
@@ -680,17 +840,9 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("SUM(SUM(p.total_exec_ms)) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(p.total_exec_ms) > 0", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
-        /* The three-state interval (V128): stored → NULLIF, NULL → LAG, and no fabricated zero. */
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY queryid ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
-        /* The rate is calls over the KNOWN span only. */
-        Assert.Contains("FILTER (WHERE p.interval_seconds IS NOT NULL)", sql, StringComparison.Ordinal);
+        /* The rate's denominator is the collector's runs (#7566); PgTargetBadActorCallsPerSecondLiveTests runs it. */
         /* Units: the ≥ 13 column name is the collector's; no pre-13 branch exists to write. */
         Assert.DoesNotContain("total_time", sql.Replace("total_exec_time", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
-        /* No text join here — the census confines this collector to collector tables; the text is the drill-down's. */
-        Assert.DoesNotContain("pg_statement_text", sql, StringComparison.Ordinal);
 
         Assert.Equal(5, PgTargetFactCollector.TopStatementCount);
 
@@ -965,7 +1117,10 @@ public sealed class PgTargetQueriesTests
                 Assert.InRange(card.GetProperty("root_fact").GetProperty("value").GetDouble(), 0.58, 0.62);
 
                 var advice = card.GetProperty("advice");
-                Assert.Equal("One statement held 60% of the window's execution time — 25 times its usual variation above its own normal for this hour", advice.GetProperty("headline").GetString());
+                /* #7567: the share beside the deviation is the per-collection peak it was measured on, and the capped value reads as a floor. */
+                var headline = advice.GetProperty("headline").GetString()!;
+                Assert.StartsWith("One statement reached ", headline, StringComparison.Ordinal);
+                Assert.EndsWith("% of a single collection's execution time — at least 25 times its usual variation above its own normal for this hour", headline, StringComparison.Ordinal);
                 var investigation = advice.GetProperty("investigation").GetString()!;
                 Assert.Contains("queryid -1234567890123456789", investigation, StringComparison.Ordinal);
                 Assert.Contains("against its own routine of 10% ± 0.1% for this hour-of-week", investigation, StringComparison.Ordinal);

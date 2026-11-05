@@ -108,13 +108,19 @@ SELECT to_regclass('collect.store_statement_history') IS NOT NULL AND to_regclas
 
     /// <summary>
     /// The fleet roll-up with its tag forest reduced to a count. A tag name is text the operator chose (often a client's
-    /// name), and the bundle has no use for it.
+    /// name), and the bundle has no use for it. The pause note's <c>paused_by</c> is dropped too: the bundle keeps <c>paused</c>.
     /// </summary>
     internal static JsonNode? ShapeFleetOverview(JsonNode? fleet)
     {
         if (fleet is JsonObject obj && obj["tags"] is JsonArray tags)
         {
             obj["tags"] = new JsonObject { ["count"] = tags.Count };
+        }
+
+        // The bundle only needs to say collection is paused; who paused it is text a person typed.
+        if (fleet is JsonObject root && root["collection"] is JsonObject collection)
+        {
+            collection.Remove("paused_by");
         }
 
         return fleet;

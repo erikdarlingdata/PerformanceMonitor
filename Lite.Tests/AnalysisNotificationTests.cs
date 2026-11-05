@@ -149,6 +149,34 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
     }
 
     [Fact]
+    public void BuildContext_CpuFindingWithAbnormalCpuPlansDrillDown_OffersNoClearPlanAction()
+    {
+        /* #7220: the clear-cached-plan builder read an abnormal_cpu_plans drill-down that nothing in Lite or
+           Darling writes, so it never produced an item and was removed. A finding that does carry the key
+           (only the retired Dashboard collector wrote it) must not grow a destructive DBCC FREEPROCCACHE item
+           or a remediation on any detail row. */
+        var finding = MakeFinding("clrplan000000001", severity: 2.0, rootFactKey: "CPU_SQL_PERCENT",
+            drillDown: new Dictionary<string, object>
+            {
+                ["abnormal_cpu_plans"] = new List<object>
+                {
+                    new
+                    {
+                        database = "SalesDB", query_hash = "0xABCDEF0123456789",
+                        current_cpu_per_exec_ms = 45.0, baseline_cpu_per_exec_ms = 9.0, anomaly_ratio = 5.0,
+                        cpu_percent = 62
+                    }
+                }
+            });
+
+        var context = FindingMessageFormatter.BuildContext(finding, notifyThreshold: 1.5);
+
+        Assert.DoesNotContain(context.Details, d => d.Heading.StartsWith("Clear cached plan", StringComparison.Ordinal));
+        Assert.DoesNotContain(context.Details, d => d.Remediation is not null);
+        Assert.Null(FactAdvice.GetForFinding(finding)?.Risks);
+    }
+
+    [Fact]
     public void BuildContext_BlockingDrillDown_EmitsContentiousObjectIncident()
     {
         var finding = MakeFinding("blfp000000000001", category: "blocking_events", rootFactKey: "BLOCKING_EVENTS",
@@ -241,6 +269,15 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         Assert.Equal("Analysis: cpu_pressure [aaaaaaaa]", a);
         Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void CurrentValue_NoRootFactKey_ShowsThePlainCategoryName()
+    {
+        var value = FindingMessageFormatter.CurrentValue(MakeFinding("h", category: "bad_actor", rootValue: null, rootFactKey: ""));
+
+        Assert.Contains("Expensive query", value, StringComparison.Ordinal);
+        Assert.DoesNotContain("bad_actor", value, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -725,9 +762,51 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
         });
         await notifier.FlushPendingAsync();
 
+        /* #7084: the labelled member is recurring, so it goes to the digest and the unlabelled 1.6 leads the page. */
         var alert = Assert.Single(sender.Sent.Concat(sender.Summaries.SelectMany(s => s)));
-        Assert.Equal(2.0, alert.Severity);
+        Assert.Equal(1.6, alert.Severity);
+        Assert.Equal(FindingRoute.Page, alert.Route);
         Assert.False(alert.RecurringAtThisHour);
+    }
+
+    /// <summary>#7084: a recurring story (the same weekday and hour for 3 weeks) alone in its incident is routed to the digest at its
+    /// unchanged severity, with the reason on the row.</summary>
+    [Fact]
+    public async Task NotifyAsync_ARecurringStoryAlone_TakesTheDigestRoad_AtItsUnchangedSeverity()
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var (notifier, sender) = MakeCapturingNotifier();
+
+        await notifier.NotifyAsync(new[] { MakeAnomalyFinding("aaaa000000000001", "ANOMALY_WRITE_LATENCY", 2.0, labelled: true) });
+        await notifier.FlushPendingAsync();
+
+        var alert = Assert.Single(sender.Sent.Concat(sender.Summaries.SelectMany(s => s)));
+        Assert.Equal(FindingRoute.Digest, alert.Route);
+        Assert.Equal(2.0, alert.Severity);
+        Assert.Contains("recurring: this weekday and hour for 3 weeks", alert.Context.Routing!.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>#7084: a one-fact story with a matched amplifier at 1.55 against a bar of 1.5 is held; at 1.80 it pages.</summary>
+    [Theory]
+    [InlineData(1.55, FindingRoute.Digest)]
+    [InlineData(1.80, FindingRoute.Page)]
+    public async Task NotifyAsync_AOneFactStoryWithAnAmplifierMatch_PagesOnlyClearOfTheMargin(double severity, FindingRoute expected)
+    {
+        App.AnalysisNotifySeverity = 1.5;
+        App.AnalysisNotifyCooldownMinutes = 360;
+        var (notifier, sender) = MakeCapturingNotifier();
+
+        var finding = MakeFinding("cccc000000000003", severity: severity, rootFactKey: "ANOMALY_CPU_SPIKE", category: "anomaly");
+        finding.FactCount = 1;
+        finding.MatchedAmplifiers = 1;
+        finding.DefinedAmplifiers = 4;
+        await notifier.NotifyAsync(new[] { finding });
+        await notifier.FlushPendingAsync();
+
+        var alert = Assert.Single(sender.Sent.Concat(sender.Summaries.SelectMany(s => s)));
+        Assert.Equal(expected, alert.Route);
+        Assert.Equal(severity, alert.Severity);
     }
 
     /// <summary>#6596 review round: when every member of the incident is labelled, the alert is flagged.</summary>
@@ -1091,9 +1170,23 @@ public class AnalysisNotificationTests : IClassFixture<SharedDuckDbFixture>, IDi
 
         var (title, message) = FindingMessageFormatter.BalloonText(finding);
 
-        Assert.Contains("blocking", title);
+        Assert.Contains("Blocking", title);
         Assert.Contains("TestServer", title);
         Assert.Contains("BLOCKING_CHAIN", message);
+    }
+
+    [Fact]
+    public void BalloonText_NamesTheCategoryInPlainWords_NotItsInternalName()
+    {
+        var finding = MakeFinding("balloon000000002", severity: 2.0, category: "bad_actor",
+            rootFactKey: "BAD_ACTOR_CPU", rootValue: 5);
+
+        var (title, _) = FindingMessageFormatter.BalloonText(finding);
+
+        Assert.Contains("Expensive query", title);
+        Assert.DoesNotContain("bad_actor", title);
+        // The metric name is a key that routes and mutes match on, so it keeps the raw category.
+        Assert.Contains("Analysis: bad_actor [", FindingMessageFormatter.MetricName(finding));
     }
 
     private async Task<long> CountAlertLogRowsAsync()

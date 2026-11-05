@@ -166,10 +166,10 @@ public class DeadlocksTelemetryCursorLiteTests
         foreach (var (host, readText, write, serverWriteText) in new[]
         {
             ("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs", "batch = await definition.ReadAsync(dbReader", "WriteBatchAsync(pgConnection, definition, batch", "WriteBatchAsync(pgConnection, definition, rows"),
-            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(duckConnection, definition, rows"),
+            ("Lite/Services/RemoteCollectorService.DefinitionRunner.cs", "batch = await definition.ReadAsync(openedRead.Reader", "WriteBatch(duckConnection, definition, batch", "WriteBatch(openingConnection, definition, rows"),
         })
         {
-            var source = File.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
+            var source = SplitRepoFile.ReadAllText(Path.Combine(root!, host.Replace('/', Path.DirectorySeparatorChar)));
             var read = source.IndexOf(readText, StringComparison.Ordinal);
             Assert.True(read > 0, $"{host}: per-database read not found");
             var drop = source.LastIndexOf("context.DropStagedItemState();", read, StringComparison.Ordinal);

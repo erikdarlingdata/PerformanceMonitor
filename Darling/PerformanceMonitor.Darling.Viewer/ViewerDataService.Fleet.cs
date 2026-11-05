@@ -71,7 +71,7 @@ public sealed partial class ViewerDataService
     /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
     /// A store older than V223 has no table: that is no chip, not an error on the card.
     /// </summary>
-    internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
+    internal async Task<(string? Value, string? Detail, int Count)> GetDatabaseProtectionChipAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         try
@@ -80,17 +80,20 @@ public sealed partial class ViewerDataService
                 _dataSource, serverId, nowUtc - DatabaseProtectionBands.CaptureFreshness, nowUtc, cancellationToken: cancellationToken);
             if (read.NewestCapture is null)
             {
-                return (null, null);
+                return (null, null, 0);
             }
 
-            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
+            /* #7611: each database against its own ages, as the alerts and the tool judge it. */
+            var resolver = await DatabaseProtectionThresholdSettings.ReadAsync(
+                _dataSource, serverId, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
+            var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc), resolver.ForDatabase);
             return overdue.Count == 0
-                ? (null, null)
-                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue));
+                ? (null, null, 0)
+                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue), overdue.Count);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return (null, null);
+            return (null, null, 0);
         }
     }
 
@@ -660,7 +663,7 @@ public sealed class FleetRollup
            name as the stable tiebreak. The composite score keeps offline > critical > warning and, within
            a band, ranks by how many metrics are bad — see FleetHealthScore. */
         var problems = summaries
-            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy)
+            .Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile)
             .OrderByDescending(FleetHealthScore)
             .ThenBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -790,7 +793,10 @@ public sealed class FleetRollup
            its first collection — see ServerCollectionStatus. */
         if (s.CardStatus == ServerCollectionStatus.Offline)
         {
-            return OfflineNote;
+            /* #7590: the service's own connect failed, so the reason is that and its error, not an age. */
+            return s.ConnectDownSince.HasValue
+                ? ServerHealthClassifier.UnreachableReason(s.ConnectDownSince.Value, s.LastConnectError)
+                : OfflineNote;
         }
 
         if (s.CardStatus == ServerCollectionStatus.AwaitingFirstCollection)
@@ -823,11 +829,10 @@ public sealed class FleetRollup
         }
         if (s.BlockingSeverity >= HealthSeverity.Warning && s.BlockingCount > 0)
         {
-            /* #3539 A3: the RATE is what the count arm banded, so the reason names it — the deadlock line's
-               rule and the service's wording; an unrateable window prints the count alone. */
-            parts.Add(s.BlockingRatePerHour.HasValue
-                ? $"Blocking {s.BlockingCount} ({s.BlockingRatePerHour.Value.ToString("0.0", CultureInfo.InvariantCulture)}/hr)"
-                : $"Blocking {s.BlockingCount}");
+            /* #7444: the arm that fired the band (the longest block, the peak snapshot or the rate), through the
+               helper the service's fleet card uses, so the two surfaces read alike. #3539 A3: an unrateable window
+               with no wait fired prints the count alone. */
+            parts.Add(ServerHealthClassifier.BlockingReason(s.ToHealthMetrics()));
         }
         if (s.DeadlockSeverity >= HealthSeverity.Warning && s.DeadlockCount > 0)
         {
@@ -848,6 +853,22 @@ public sealed class FleetRollup
         if (s.CollectionStale)
         {
             parts.Add("collection stale");
+        }
+        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
+        {
+            /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
+               (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+        }
+
+        if (s.AgentAlertGaps.Count > 0)
+        {
+            parts.Add($"Agent alerts {s.AgentAlertGaps.Count} gap{(s.AgentAlertGaps.Count == 1 ? "" : "s")}");
+        }
+
+        if (s.HasDatabaseProtectionOverdue)
+        {
+            parts.Add(ServerHealthClassifier.ProtectionReason(s.DatabaseProtectionOverdueCount));
         }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)
@@ -1006,7 +1027,8 @@ public sealed class FleetRollup
     {
         ArgumentNullException.ThrowIfNull(summaries);
 
-        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy).ToList();
+        /* #7561: the same predicate as the web page's Needs attention filter: a band away from Healthy, or a Healthy server with a tile no band reads. */
+        return summaries.Where(s => ClassifyBand(s) != FleetHealthBand.Healthy || s.HasAdvisoryTile).ToList();
     }
 
     /// <summary>

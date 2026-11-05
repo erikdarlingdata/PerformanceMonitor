@@ -107,7 +107,10 @@ internal sealed class WindowNoticeAggregateCases(
             Assert.False(root.TryGetProperty("effective_start", out _));
             Assert.False(root.TryGetProperty("window_truncated", out _));
             Assert.False(root.TryGetProperty("truncation_note", out _));
-            Assert.False(root.TryGetProperty("hints", out _));
+            /* #7010: an unavailable answer carries the notice under hints (the top level stays bare): a window the store never collected is not a report that nothing happened. */
+            var hints = root.GetProperty("hints");
+            Assert.True(hints.GetProperty("window_truncated").GetBoolean());
+            Assert.False(string.IsNullOrEmpty(hints.GetProperty("truncation_note").GetString()));
         });
 
     public Task AShortWindow_WithRows_StartsNoProbe(string? cs) =>

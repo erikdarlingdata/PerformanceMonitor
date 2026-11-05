@@ -241,7 +241,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(
-                        "MCP server configuration could not be loaded ({Message}) — retrying in {Backoff}s. The worker logs a missing/broken config as critical; a transient read failure self-heals here.",
+                        "MCP server configuration could not be loaded ({Message}). Retrying in {Backoff}s. The service log shows a missing or broken configuration at Critical level. A short read failure clears itself on the next try.",
                         ex.Message, (int)FailedStartBackoff.TotalSeconds);
                     lastFailedStartUtc = DateTime.UtcNow;
                 }
@@ -477,7 +477,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     if (!namedOnly && string.IsNullOrWhiteSpace(token))
                     {
                         _logger.LogCritical(
-                            "MCP network token resolved to empty after decryption; MCP server not started.");
+                            "MCP network token (mcp.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. MCP server not started.");
                         await DisposeFailedStartAsync();
                         return false;
                     }
@@ -513,7 +513,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogCritical(
-                        "MCP network token could not be decrypted ({Message}); MCP server not started.",
+                        "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
                         ex.Message);
                     await DisposeFailedStartAsync();
                     return false;
@@ -681,7 +681,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             {
                 _logger.LogWarning(
                     "MCP named tokens are served: {Tokens}. Each request's tools follow its token's role; every MCP request, loopback included, must present a token.",
-                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ")")));
+                    string.Join(", ", tokenSet.Named.Select(t => t.Name + " (" + t.Role + ", " +
+                        McpDataDetailModes.Word(DarlingMcpTokenSet.DetailFor(McpDataDetailModes.Resolve(config.Mcp.DataDetail), new McpCaller(t.Name, default, t.DataDetail))) + ")")));
                 writes = tokenSet.Union;
             }
 
@@ -872,7 +873,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
-            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys);
+            /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
+               process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
+            RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
+                _processServices?.GetService<DailyHealthReportHub>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -914,9 +918,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* #5632: mcp.dataDetail, read once per start (file-only, restart-only). McpDataDetailFilter reads the level
-               from this singleton on every call; an unrecognized value runs as metadataOnly, the strictest level, and
+               from the setting registered here on every call (per request: a named token's dataDetail can narrow it, #7023); an unrecognized value runs as metadataOnly, the strictest level, and
                says so once here. */
-            builder.Services.AddSingleton(new McpDataDetailSetting(ResolveDataDetail(config.Mcp.DataDetail, _logger)));
+            var serviceDataDetail = ResolveDataDetail(config.Mcp.DataDetail, _logger);
+            RegisterDataDetail(builder.Services, serviceDataDetail);
+
+            /* #7414: mcp.allowAgentMuteRules (default on), read once per start; the seat reads it per request. */
+            builder.Services.AddSingleton(new AgentMuteRulesSetting(config.Mcp.AllowAgentMuteRules));
 
             /* Register MCP server with the analysis tool class. */
             ConfigureMcpServices(
@@ -926,7 +934,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                    of TriageBaseUrl, not a copy of it. */
                 DarlingAlertSettings.TriageBaseUrlOf(config),
                 tokenSet,
-                frontDoor);
+                frontDoor,
+                config.Mcp.AllowAgentMuteRules);
 
             _app = builder.Build();
 
@@ -1231,8 +1240,12 @@ public sealed class DarlingMcpHostService : BackgroundService
         ILogger logger,
         BaselineCache baselineCache,
         StoreOwnerSource? ownerSource = null,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null,
+        DailyHealthReportHub? dailyReportHub = null)
     {
+        /* #7041: send_daily_health_report_now takes the hub as a service parameter. Always registered, so the MCP SDK never advertises it as a
+           schema property (and the front door's schema stays the tool's own plus store). */
+        services.AddSingleton(dailyReportHub ?? new DailyHealthReportHub());
         /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
@@ -1289,7 +1302,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true)
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
@@ -1311,9 +1324,11 @@ public sealed class DarlingMcpHostService : BackgroundService
            arm they go through the agent_action gate and under the writes arm they write as before. A service parameter, so a
            client cannot supply it. */
         if (perRequest)
-            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>(), tokens!.AgentNames));
+            services.AddTransient<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(PolicyOf(sp), sp.GetService<StoreOwnerSource>(), tokens!.AgentNames,
+                sp.GetService<AgentMuteRulesSetting>()?.Allowed ?? true));
         else
-            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>()));
+            services.AddSingleton<DarlingAgentActionSeat>(sp => new DarlingAgentActionSeat(writes, sp.GetService<StoreOwnerSource>(), null,
+                sp.GetService<AgentMuteRulesSetting>()?.Allowed ?? true));
 
         /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
            worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
@@ -1341,11 +1356,12 @@ public sealed class DarlingMcpHostService : BackgroundService
 
         /* #5632 Phase A: claim_investigation_request composes the brief at claim time through this composer, a service
            parameter, so it must be registered wherever the tools are. The reader reads the store the host registered;
-           the composer masks at the host's mcp.dataDetail level (none registered: full, as the host filter passes
-           through). */
+           the composer masks at the calling token's level (the setting, per request; none registered: full, as the host filter
+           passes through). */
         services.AddSingleton<IInvestigationBriefSourceReader>(sp =>
             new PgInvestigationBriefSourceReader(sp.GetRequiredService<NpgsqlDataSource>(), readLatencyLogger, publicBaseUrl: publicBaseUrl));
-        services.AddSingleton<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
+        /* #7023: transient, not a singleton: the composer holds the request's setting, and a named token's dataDetail can narrow it per caller. */
+        services.AddTransient<InvestigationBriefComposer>(sp => new InvestigationBriefComposer(
             sp.GetRequiredService<IInvestigationBriefSourceReader>(),
             sp.GetService<McpDataDetailSetting>() ?? new McpDataDetailSetting(McpDataDetail.Full),
             DarlingInvestigationBriefTools.Tools,
@@ -1404,7 +1420,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             options.ServerInstructions = DarlingMcpInstructions.Build(
-                declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection));
+                declaredPeers, catalog, DarlingMcpWritePolicy.ToolNames(options.ToolCollection), agentMuteRules);
 
             if (tokens is { HasNamed: true })
             {
@@ -1413,7 +1429,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 {
                     roleInstructions[LegacyRoleKey] = DarlingMcpInstructions.Build(
                         declaredPeers, catalog,
-                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, tokens.LegacyPolicy)));
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, tokens.LegacyPolicy)), agentMuteRules);
                 }
 
                 foreach (var entry in tokens.Named)
@@ -1421,7 +1437,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                     var policy = tokens.PolicyFor(entry);
                     roleInstructions[entry.Role] = DarlingMcpInstructions.BuildForNamedToken(
                         declaredPeers, catalog,
-                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy);
+                        DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(options.ToolCollection, policy)), policy, agentMuteRules);
                 }
             }
         });
@@ -1518,6 +1534,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpWhoDroveItTools>()
             /* #6074: find_database, which monitored server holds a database. */
             .WithGeminiCompatibleTools<DarlingMcpFindDatabaseTools>()
+            /* #7609: get_query_fleet_summary, one statement's cost on every server. */
+            .WithGeminiCompatibleTools<DarlingMcpQueryFleetSummaryTools>()
             /* #5983: get_resource_use_by_tag, resource use rolled up by query tag (wave 2 of #5971). */
             .WithGeminiCompatibleTools<DarlingMcpQueryTagRollupTools>()
             /* The core data-read tools (resource metrics, query performance, discovery/health —
@@ -1752,6 +1770,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                routes serve — one reader, one shape, the zero-drift rule get_fleet_overview and /api/fleet
                established, applied to the sweep rows. */
             .WithGeminiCompatibleTools<DarlingMcpFleetSweepTools>()
+            /* The Daily Health Report read - get_daily_health_report (#7041) - the report the scheduler sends, built on demand and never sent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyReportTools>()
             /* The change watch read - get_change_watches (#6234) - a server's watch windows, each with its changes, its measures and
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
@@ -1761,6 +1781,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
                functions the web editor calls; write tools (mcp.allowWrites), never offered to an investigation agent. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternWriteTools>()
+            /* The manual Daily Health Report send - send_daily_health_report_now (#7041) - a write tool (mcp.allowWrites), never offered to an investigation agent. */
+            .WithGeminiCompatibleTools<DarlingMcpDailyHealthReportTools>()
             /* The system_health parse-on-read family — get_health_parser_cpu_tasks / _io_issues /
                _memory_broker / _memory_conditions / _memory_node_oom / _scheduler_issues /
                _severe_errors / _significant_waits / _system_health — the same names the Dashboard
@@ -1856,6 +1878,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
             /* #6269: set_server_action (a server-admin write, never offered to an agent) turns one server's agent action switch on or off; get_server_actions reads them. */
             .WithGeminiCompatibleTools<DarlingMcpServerActionTools>()
+            /* #7107: get_people reads the people directory (people, identities, grants). A read only: no MCP tool writes a person. */
+            .WithGeminiCompatibleTools<DarlingMcpPeopleTools>()
             /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
@@ -1915,7 +1939,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
                The mcp.dataDetail filter (#5632, McpDataDetailFilter) sits just outside the statement filter, so it
                reads the statement filter's output as plain JSON before GCF re-encodes it, and masks every tool answer
-               at the level the host registered (a McpDataDetailSetting singleton; none, or full, passes through). */
+               at the level the request is served (the McpDataDetailSetting RegisterDataDetail resolves per request; none, or full, passes through). */
             .WithRequestFilters(filters =>
             {
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
@@ -1932,6 +1956,21 @@ public sealed class DarlingMcpHostService : BackgroundService
                 filters.AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
             });
     }
+
+    /// <summary>
+    /// Registers the data detail setting (#7023): a named token's own <c>dataDetail</c> can narrow <paramref name="serviceLevel"/>, so the
+    /// setting is resolved per request from the matched caller (the bearer gate stored it). The call filter and every tool that takes the
+    /// setting read the caller's level, never a level fixed at start. A request with no matched caller (the legacy token, the start without
+    /// named tokens) gets the service's level, as before. A front door passes its own caller's level in <see cref="DarlingMcpTokenSet.DataDetailHeader"/>,
+    /// and the store serves the stricter of that and the level above (a missing or unrecognized header narrows nothing).
+    /// </summary>
+    internal static void RegisterDataDetail(IServiceCollection services, McpDataDetail serviceLevel) =>
+        services.AddTransient(sp =>
+        {
+            var accessor = sp.GetService<IHttpContextAccessor>();
+            var header = accessor?.HttpContext?.Request.Headers[DarlingMcpTokenSet.DataDetailHeader].ToString();
+            return new McpDataDetailSetting(DarlingMcpTokenSet.DetailFor(serviceLevel, DarlingMcpTokenSet.CallerOf(accessor), header));
+        });
 
     /// <summary>
     /// The <c>mcp.dataDetail</c> level this listener serves (#5632). An unrecognized value runs as
@@ -2084,7 +2123,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             if (string.IsNullOrWhiteSpace(token))
             {
                 logger.LogCritical(
-                    "MCP network token resolved to empty after decryption — refusing to serve the loopback listener without it; MCP server not started.");
+                    "MCP network token (mcp.network.encryptedToken) decrypted to an empty value. Re-create it with PerformanceMonitor.Darling.Service.exe --encrypt-password. The loopback listener is not served without a token, so the MCP server is not started.");
                 return new LoopbackTokenResolution(true, "");
             }
 
@@ -2106,7 +2145,7 @@ public sealed class DarlingMcpHostService : BackgroundService
         catch (Exception ex)
         {
             logger.LogCritical(
-                "MCP network token could not be decrypted ({Message}) — refusing to serve the loopback listener without it; MCP server not started.",
+                "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the MCP server is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
                 ex.Message);
             return new LoopbackTokenResolution(true, "");
         }
@@ -2622,9 +2661,9 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             case McpBindReason.ManagedModeRequired:
                 _logger.Log(level.Value,
-                    "mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container, #1804) " +
-                    "only, so listen and allowFrom are ignored; your own PostgreSQL/reverse proxy governs uncontained BYO exposure. " +
-                    "Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
+                    "mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
                 break;
 
             default:

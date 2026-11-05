@@ -575,8 +575,11 @@ internal static class McpHelpers
     /// one it is still in the tools/list text.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
-        " window_truncated is true when the store did not hold the start of the window; effective_start / " +
-        "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
+        " window_truncated is true when the first point served is later than the start of the window: the store holds nothing earlier in this window at this tier. " +
+        "It does not say why (retention, a query first seen later, a server that collected later); effective_start / " +
+        "effective_hours_back say where the answer begins. A trend that names the tier (get_query_trend and the duration trends) " +
+        "adds start_older_than_tier, true only when the start is older than the tier that answered keeps (tier_keeps_days says how long): " +
+        "only then has the earlier part aged out of that tier. That is the window floor, not a page cut: no limit " +
         "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
@@ -714,6 +717,24 @@ internal static class McpHelpers
 
         endUtc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
         return null;
+    }
+
+    /// <summary>
+    /// The clock a whole-day read rates its last day against (#7504). Such a read keeps only the anchor's UTC date,
+    /// so its counts cover that whole date whatever time the anchor names. Rating them over the hours from midnight
+    /// to the anchor gave no rate at all for a bare date and too high a rate for a mid-day stamp. So the clock is the
+    /// end of the anchor's date, or now while that date is still running. A read with no anchor is already at now.
+    /// </summary>
+    public static DateTime DayAnchorClock(string? asOf, DateTime endUtc)
+    {
+        if (string.IsNullOrWhiteSpace(asOf))
+        {
+            return endUtc;
+        }
+
+        var dayEnd = DateTime.SpecifyKind(endUtc.Date.AddDays(1), DateTimeKind.Utc);
+        var now = DateTime.UtcNow;
+        return dayEnd < now ? dayEnd : now;
     }
 
     /// <summary>
@@ -955,6 +976,26 @@ internal static class McpHelpers
     public static string Refusal(string parameter, string sentence)
     {
         return Status("invalid", sentence, new { parameter });
+    }
+
+    /// <summary>
+    /// The sentence a server-name miss opens with, shared by Darling's and Lite's resolvers (#7077). It always begins
+    /// "Could not resolve server." because callers match on those words. Then it says what the caller did wrong: the name
+    /// it sent matched no monitored server, or it sent none and several servers are monitored. The caller appends
+    /// " Available servers:\n" and the list.
+    /// </summary>
+    /// <param name="serverName">The name the caller sent, or null or blank when it sent none.</param>
+    /// <param name="serverCount">How many servers are monitored.</param>
+    public static string ServerMissOpening(string? serverName, int serverCount)
+    {
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            return $"Could not resolve server. No monitored server matches '{serverName.Trim()}'.";
+        }
+
+        return serverCount > 1
+            ? $"Could not resolve server. server_name is required because {serverCount} servers are monitored."
+            : "Could not resolve server.";
     }
 
     /// <summary>

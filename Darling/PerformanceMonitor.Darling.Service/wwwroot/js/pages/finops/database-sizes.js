@@ -11,7 +11,7 @@
    the read returns them. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtMb, applyFormat, relTime, localTime } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 
 // The desktop's Auto Growth text: a percentage step, a MB step, "Disabled" when growth is off, "-" when unknown.
@@ -28,13 +28,13 @@ function growthSort(row) {
   return row.auto_growth_mb ?? 0;
 }
 
-const COLUMNS = [
-  { key: "database_name", label: "Database" },
-  { key: "file_name", label: "File" },
+export const COLUMNS = [
+  { key: "database_name", label: "Database", name: true },
+  { key: "file_name", label: "File", name: true },
   { key: "file_type", label: "Type" },
-  { key: "total_size_mb", label: "Total", format: "mb" },
-  { key: "used_size_mb", label: "Used", format: "mb" },
-  { key: "free_space_mb", label: "Free MB", format: "mb" },
+  { key: "total_size_mb", label: "Total", format: "mbfit" },
+  { key: "used_size_mb", label: "Used", format: "mbfit" },
+  { key: "free_space_mb", label: "Free MB", format: "mbfit" },
   { key: "used_pct", label: "Used %", format: "num1" },
   {
     key: "max_size_mb",
@@ -54,7 +54,7 @@ const COLUMNS = [
   { key: "vlf_count", label: "VLF count", format: "int" },
   { key: "volume_mount_point", label: "Volume" },
   { key: "volume_total_mb", label: "Volume total", format: "mb" },
-  { key: "volume_free_mb", label: "Volume free", format: "mb" },
+  { key: "volume_free_mb", label: "Volume free", format: "mbfit" },
   { key: "monthly_cost_usd", label: "Monthly cost ($)", format: "num2", hideWhenEmpty: true },
   { key: "size_note", label: "Note", wrap: true, hideWhenEmpty: true },
 ];
@@ -76,7 +76,7 @@ export const tab = {
         const data = res.data || {};
         const files = Array.isArray(data.rows) ? data.rows : [];
         const notes = [];
-        if (typeof data.captured_at === "string" && data.captured_at) notes.push(noticeStrip("Captured " + relTime(data.captured_at) + " (" + localTime(data.captured_at) + ")"));
+        if (typeof data.captured_at === "string" && data.captured_at) notes.push(captionStrip("Captured " + relTime(data.captured_at) + " (" + localTime(data.captured_at) + ")"));
         if (data.truncated) notes.push(noticeStrip("Showing the largest " + files.length + " of " + data.file_count + " files."));
         if (typeof data.note === "string" && data.note.trim()) notes.push(noticeStrip(data.note));
         mount(body, [

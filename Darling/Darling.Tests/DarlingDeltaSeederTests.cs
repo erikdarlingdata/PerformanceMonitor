@@ -717,6 +717,107 @@ public sealed class DarlingDeltaSeederTests
     }
 
     /// <summary>
+    /// #7156: query_stats writes only the statements that moved, so a key idle across a restart has its newest
+    /// row older than the fifteen-minute window every other family seeds from. The query_stats seed reads the gap
+    /// policy's hour instead, so that key's first post-restart interval is credited rather than stored as 0. The row
+    /// here is 40 minutes old (inside the policy, outside fifteen minutes); on the old window it was never read.
+    /// </summary>
+    [Fact]
+    public async Task QueryStatsSeed_KeyIdleLongerThanTheShortWindow_ButInsideTheGapPolicy_IsRestored_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live delta-seeding test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteFamilyRowsAsync(connection, TestContext.Current.CancellationToken);
+
+            var now = WholeSecond(DateTime.UtcNow);
+            await KeyedQueryStatsAsync(connection, now.AddMinutes(-40), "0xSH1", 0, -1, "0xPH1", 10);
+            /* Older than the gap policy: outside even the wider window. */
+            await KeyedQueryStatsAsync(connection, now.AddMinutes(-70), "0xSH2", 0, -1, "0xPH2", 10);
+
+            var deltas = new DarlingDeltaCalculator();
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                await deltas.SeedFromStoreAsync(postgres, null, TestContext.Current.CancellationToken);
+            }
+
+            const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+            Assert.Equal(5, deltas.CalculateDeltaWithInterval(TestServerId, "query_stats_exec", "0xSH1:0:-1:0xPH1", 15, out var interval, now, Gap));
+            Assert.Equal(2400, interval);
+            /* Gap policy off, so only a first sighting reads 0: the 70-minute-old row was not read. */
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "query_stats_exec", "0xSH2:0:-1:0xPH2", 15, now, 0));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFamilyRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #7252: pg_statement_stats and pg_wait_stats write only the keys that moved, so a key idle across a restart has
+    /// its newest row older than the fifteen-minute window. Both seeds read the gap policy's hour, like query_stats
+    /// (#7156), so that key's first post-restart interval is credited instead of stored as 0. The rows here are 40
+    /// minutes old (inside the policy, outside fifteen minutes); on the old window neither was read. The 70-minute rows
+    /// are outside even the wider window.
+    /// </summary>
+    [Fact]
+    public async Task PostgresPairSeed_KeyIdleLongerThanTheShortWindow_ButInsideTheGapPolicy_IsRestored_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live delta-seeding test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteFamilyRowsAsync(connection, TestContext.Current.CancellationToken);
+
+            var now = WholeSecond(DateTime.UtcNow);
+            await PgStatementAsync(connection, now.AddMinutes(-40), 21, 16384, 10, true, 100, 1000.0, 50);
+            await PgStatementAsync(connection, now.AddMinutes(-70), 22, 16384, 10, true, 100, 1000.0, 50);
+            await PgWaitAsync(connection, now.AddMinutes(-40), 2001, 5, 500);
+            await PgWaitAsync(connection, now.AddMinutes(-70), 2002, 5, 500);
+
+            var deltas = new DarlingDeltaCalculator();
+            await using (var postgres = NpgsqlDataSource.Create(connectionString!))
+            {
+                await deltas.SeedFromStoreAsync(postgres, null, TestContext.Current.CancellationToken);
+            }
+
+            const int Gap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
+            Assert.Equal(7, deltas.CalculateDeltaWithInterval(TestServerId, "pg_statement_stats_calls", "21|16384|10|1", 107, out var statementInterval, now, Gap));
+            Assert.Equal(2400, statementInterval);
+            Assert.Equal(4, deltas.CalculateDeltaWithInterval(TestServerId, "pg_wait_stats_waits", "2001", 9, out var waitInterval, now, Gap));
+            Assert.Equal(2400, waitInterval);
+            /* Gap policy off, so only a first sighting reads 0: the 70-minute-old rows were not read. */
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "pg_statement_stats_calls", "22|16384|10|1", 107, now, 0));
+            Assert.Equal(0, deltas.CalculateDelta(TestServerId, "pg_wait_stats_waits", "2002", 9, now, 0));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteFamilyRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// The per-key shape's bound, asked of the planner the way the #1772 pin asks it of the row-value
     /// shape: with one bound on one table read, DISTINCT ON over the window must still exclude the
     /// two-day-old chunk and read the window's. pg_statement_stats is the family with the most rows per
@@ -756,7 +857,7 @@ public sealed class DarlingDeltaSeederTests
             Assert.SkipWhen(string.Equals(recentChunk, oldChunk, StringComparison.Ordinal),
                 $"pg_statement_stats put both timestamps in {recentChunk} — this store has no separate chunk to exclude.");
 
-            var plan = await ExplainAsync(connection, DarlingDeltaCalculator.PgStatementStatsSeedSql, CollectorDeltaCalculator.SeedCutoff());
+            var plan = await ExplainAsync(connection, DarlingDeltaCalculator.PgStatementStatsSeedSql, CollectorDeltaCalculator.GapPolicySeedCutoff());
 
             Assert.DoesNotContain(oldChunk!, plan, StringComparison.Ordinal);
             Assert.Contains(recentChunk!, plan, StringComparison.Ordinal);

@@ -58,7 +58,7 @@ public sealed class ViewerOverviewBlockingLaneDataStartPinTests
         Assert.Contains("blockingTask.Result.Select(d => d.Time)", call, StringComparison.Ordinal);
         Assert.Contains("deadlockTask.Result.Select(d => d.Time)", call, StringComparison.Ordinal);
 
-        var step = Between(code, "private async Task ShowBlockingLaneDataStartAsync(", "private void UpdateBlockingLane(");
+        var step = Between(code, "private async Task ShowBlockingLaneDataStartAsync(", "void UpdateBlockingLane(");
         Assert.Contains("endUtc - startUtc > DurationTrendRouting.TruncationSlack", step, StringComparison.Ordinal);
         Assert.Contains("_dataService!.GetBlockingChartDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);
         Assert.Contains("_dataService!.GetDeadlocksDataStartAsync(_serverId, startUtc, endUtc)", step, StringComparison.Ordinal);

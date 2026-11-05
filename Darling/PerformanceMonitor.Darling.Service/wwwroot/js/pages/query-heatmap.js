@@ -75,6 +75,11 @@ export function renderHeatmapBody(data, opts) {
         "Query Heatmap by " + metricWord + ": " + grid.cellCount + " cells across " + grid.columns + " time bins of " + grid.binMinutes +
         " minutes. A picture; use Show as table for the values.",
     });
+    /* #7542: the columns share the panel's width (app.css: width 100%, fixed layout). The table's minimum keeps each time column at exactly
+       6 px, so a narrow window scrolls inside .qh-wrap instead of squeezing the cells away. With border-spacing 1px a row of `columns` time
+       cells plus the row head has columns + 2 gaps: 6 * columns + (columns + 2) = 7 * columns + 2. The row head's width is the one
+       --qh-head custom property that app.css defines on .qh-grid and also uses for the head cells. */
+    table.style.minWidth = "calc(var(--qh-head) + " + (grid.columns * 7 + 2) + "px)";
     /* A label every 12 columns: hourly at the Viewer's 5 minute bins. */
     const tick = grid.columns < 12 ? 1 : 12;
     const head = el("tr", {}, [el("th", { class: "qh-corner" })]);
@@ -151,7 +156,7 @@ function metricPicker(onPick) {
  * The Query Heatmap card of the Queries tab: the metric picker under the title, the grid (or table) under it. A metric pick draws the card
  * again with the new `metric`, aborting the read before it. `columns` are the table view's columns, `hours` and `label` the tab's range.
  */
-export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
+export function queryHeatmapCard({ server, hours, label, columns, emptyText, emptyLine }) {
   const slot = el("div", {}, []);
   slot.style.display = "contents";
   let drawing = null;
@@ -182,6 +187,7 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText }) {
       viz: "table",
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
+      emptyLine,
       span: 2,
       control,
     });

@@ -103,12 +103,9 @@ public sealed class QueryStatsCollectorDefinitionTests
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(capturePlanXml: true));
 
         AssertPlanXmlSizeGuarded(plan.Text);
-        Assert.Contains(
-            "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
-            Collapse(plan.Text), StringComparison.Ordinal);
-        /* The on-prem plan_attributes join and the row-selection semantics are untouched. */
+        /* The on-prem plan_attributes join is untouched. */
         Assert.Contains("sys.dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
-        Assert.Contains("TOP (200)", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("TOP (" + QueryStatsCollector.MaxCandidateRows + ")", plan.Text, StringComparison.Ordinal);
         Assert.Contains("ORDER BY", plan.Text, StringComparison.Ordinal);
 
         AssertAppliesRunAgainstSurvivorsOnly(plan.Text);
@@ -166,8 +163,11 @@ public sealed class QueryStatsCollectorDefinitionTests
 
         Assert.True(
             collapsed.IndexOf("NOTLIKE", StringComparison.Ordinal) > derivedClose,
-            "the self-filter moved back inside the ranked derived table - the inner TOP's headroom exists because it runs post-ranking");
-        Assert.Contains("TOP(300)", collapsed, StringComparison.Ordinal);
+            "the self-filter moved back inside the ranked derived table - it runs post-ranking so collector-self rows cost no candidate slot");
+
+        /* #7156: the derived table keeps the newest statements, not the heaviest by lifetime elapsed time. */
+        Assert.Contains("TOP(" + QueryStatsCollector.MaxCandidateRows + ")", collapsed, StringComparison.Ordinal);
+        Assert.Contains("ORDERBYqs.last_execution_timeDESC,qs.total_elapsed_timeDESC)ASqs", collapsed, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -176,9 +176,6 @@ public sealed class QueryStatsCollectorDefinitionTests
         var plan = QueryStatsCollector.Instance.BuildQuery(MakeContext(isAzureSqlDb: true, capturePlanXml: true));
 
         AssertPlanXmlSizeGuarded(plan.Text);
-        Assert.Contains(
-            "sys.dm_exec_text_query_plan(qs.plan_handle,qs.statement_start_offset,qs.statement_end_offset)AStqp",
-            Collapse(plan.Text), StringComparison.Ordinal);
         /* Azure SQL DB still skips plan_attributes (dbid=1 for all plans there). */
         Assert.DoesNotContain("dm_exec_plan_attributes", plan.Text, StringComparison.Ordinal);
         Assert.Contains("database_name = DB_NAME()", plan.Text, StringComparison.Ordinal);

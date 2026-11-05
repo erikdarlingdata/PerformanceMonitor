@@ -121,7 +121,7 @@ public sealed partial class PlanForceToolLiveTests
             await AssertUndoneRowAsync(c, called, ForceKind);
             Assert.Null((await RowsAsync(c, "action_undone"))[0]["restored_as"]);
 
-            var row = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var row = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal("person:alice", row.UndoneBy);
             Assert.False(row.CanTryUndo(DateTime.UtcNow));
             Assert.False(row.ForceReview!.Running, "step 8's review mark stops once the force is undone");
@@ -235,7 +235,7 @@ public sealed partial class PlanForceToolLiveTests
             var worked = await UndoAsync(c, failed, confirm: true);
             Assert.Equal("undone", worked.Status);
             Assert.Null(await c.Sql.ForcedPlanAsync(query, c.Ct));
-            Assert.Equal(AgentChangeResult.Failed, (await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes.Single(x => x.CalledId == failed).Result);
+            Assert.Equal(AgentChangeResult.Failed, (await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes.Single(x => x.CalledId == failed).Result);
         });
     }
 

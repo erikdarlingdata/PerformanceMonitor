@@ -1368,6 +1368,56 @@ public class FactScorerTests : IClassFixture<SharedDuckDbFixture>
     private static Fact WaitFact(string key, double fraction, Dictionary<string, double>? metadata = null) =>
         new() { Source = "waits", Key = key, Value = fraction, Metadata = metadata ?? new() };
 
+    // #6959: the write fact is the log and tempdb figure only, so the card must say that scope in its headline and
+    // investigation, not call it a server-wide average, and carry the user data files' figure as its own sentence when
+    // the fact has it. The read card keeps its server-wide wording, and a write fact with no data-file writes adds
+    // no data-file sentence.
+    [Fact]
+    public void IoWriteLatency_Card_NamesLogAndTempdbScope_AndCarriesTheDataFileFigure()
+    {
+        Fact IoFact(Dictionary<string, double> metadata) =>
+            new() { Source = "io", Key = "IO_WRITE_LATENCY_MS", Value = metadata["avg_write_latency_ms"], Metadata = metadata };
+
+        var withData = new Dictionary<string, Fact>
+        {
+            ["IO_WRITE_LATENCY_MS"] = IoFact(new()
+            {
+                ["avg_write_latency_ms"] = 1.2, ["total_writes"] = 500_000, ["total_stall_write_ms"] = 600_000,
+                ["data_file_write_latency_ms"] = 250, ["data_file_writes"] = 400_000
+            })
+        };
+        var card = FactAdvice.Compose("IO_WRITE_LATENCY_MS", withData);
+        Assert.NotNull(card);
+        Assert.StartsWith("Log and tempdb writes averaged 1.2 ms", card!.Headline, StringComparison.Ordinal);
+        Assert.Contains("write latency on log files and tempdb was 1.2 ms", card.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("server-wide", card.Investigation, StringComparison.Ordinal);
+        Assert.Contains("User data files averaged 250 ms across 400,000 writes", card.Investigation, StringComparison.Ordinal);
+
+        var noData = new Dictionary<string, Fact>
+        {
+            ["IO_WRITE_LATENCY_MS"] = IoFact(new()
+            {
+                ["avg_write_latency_ms"] = 1.2, ["total_writes"] = 500_000, ["total_stall_write_ms"] = 600_000
+            })
+        };
+        var logOnly = FactAdvice.Compose("IO_WRITE_LATENCY_MS", noData);
+        Assert.NotNull(logOnly);
+        Assert.DoesNotContain("User data files", logOnly!.Investigation, StringComparison.Ordinal);
+
+        var reads = new Dictionary<string, Fact>
+        {
+            ["IO_READ_LATENCY_MS"] = new()
+            {
+                Source = "io", Key = "IO_READ_LATENCY_MS", Value = 40,
+                Metadata = new() { ["avg_read_latency_ms"] = 40, ["total_reads"] = 1_000_000, ["total_stall_read_ms"] = 40_000_000 }
+            }
+        };
+        var readCard = FactAdvice.Compose("IO_READ_LATENCY_MS", reads);
+        Assert.NotNull(readCard);
+        Assert.StartsWith("Storage reads averaged 40 ms", readCard!.Headline, StringComparison.Ordinal);
+        Assert.Contains("server-wide average", readCard.Investigation, StringComparison.Ordinal);
+    }
+
     // DEADLOCKS is now the alerting layer's measured (5, 20) pair, not the inherited (5, null) that saturated
     // at the WARNING entry: 5/hr roots at 0.5, 20/hr (inside the measured empty interval [16, 89]) saturates,
     // and 90/hr — the smallest storm the 14-day distribution holds — is no longer indistinguishable from 5.

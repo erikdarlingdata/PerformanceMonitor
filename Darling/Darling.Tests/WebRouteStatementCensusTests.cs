@@ -42,6 +42,7 @@ public sealed class WebRouteStatementCensusTests
         "AlertNotebookEndpoint.cs",
         "DarlingFleetSweepEndpoints.cs",
         "DarlingKnownPatternRoutes.cs",
+        "DarlingServerDataStartEndpoint.cs",
         "DarlingServerDatabasesEndpoint.cs",
         "DarlingTriageEndpoint.cs",
         "DarlingWebEndpoints.cs",
@@ -71,6 +72,9 @@ public sealed class WebRouteStatementCensusTests
         ["\"/api/servers\""] = "server registry",
         ["\"/api/servers/{id:int}\""] = "server registry",
         ["\"/api/servers/{id:int}/actions/{action}\""] = "writes one action switch; the answer is a status, server name and on or off (#6269)",
+        ["\"/api/people/{command}\""] = "writes one person, sign-in or grant; the answer is a status, a message and the row ids (#7107)",
+        ["\"/api/proposals/{id:guid}/first-press\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
+        ["\"/api/proposals/{id:guid}/confirm\""] = "presses one proposal through PressAsync, which answers through the sweep; the facts pass the mcp.dataDetail masker first (#7109)",
         ["\"/api/admin/servers/{id:int}\""] = "server registry",
         ["\"/api/collectors/run\""] = "queues one command through a store function; no statement read (#5941)",
         ["\"/api/collectors/run/{commandId:long}\""] = "one command row by id (#5941)",
@@ -125,6 +129,8 @@ public sealed class WebRouteStatementCensusTests
     {
         ["DarlingServerDatabasesEndpoint.cs|Results.Text(Render(resolved.ServerName, names, truncated), \"application/json\")"] =
             "the database picker's list: database names and a truncation flag, no statement text",
+        ["DarlingServerDataStartEndpoint.cs|Results.Text(Render(resolved.ServerName, start), \"application/json\")"] =
+            "when the server was first collected: a server name and one time, no statement text (#7386)",
     };
 
     /// <summary>Writers that sweep, by the one file that defines and uses them (a same-named helper elsewhere does
@@ -376,7 +382,7 @@ public sealed class WebRouteStatementCensusTests
 
             // ErrorResult is a fixed writer only for a literal message or the route's own request-parse error.
             if (m.Success && text.StartsWith("ErrorResult", StringComparison.Ordinal)
-                && !Regex.IsMatch(source[s..e], @"^ErrorResult\s*\(\s*(?:\$?@?""|bodyError\b)")) continue;
+                && !Regex.IsMatch(source[s..e], @"^ErrorResult\s*\(\s*(?:\$?@?""|bodyError\b|ReadOnlyAccountText\b|RequestIdNotGuidText\b|BodyTooLargeText\s*\(\s*Max\w+Bytes\s*\))")) continue;
             if (m.Success && (pattern.ToString().EndsWith('$') || Close(code, s + text.IndexOf('(')) == e - 1)) return Verdict.Fixed;
         }
 
@@ -507,7 +513,10 @@ public sealed class WebRouteStatementCensusTests
         {
             string rel = Path.GetRelativePath(serviceDir, path).Replace('\\', '/');
             if (rel.StartsWith("obj/", StringComparison.Ordinal) || rel.StartsWith("bin/", StringComparison.Ordinal)) continue;
-            string src = File.ReadAllText(path);
+
+            /* #7026: DarlingWebEndpoints.<Area>.cs is part of DarlingWebEndpoints.cs; the one entry holds all the pieces. */
+            if (rel.StartsWith("DarlingWebEndpoints.", StringComparison.Ordinal) && rel != "DarlingWebEndpoints.cs") continue;
+            string src = rel == "DarlingWebEndpoints.cs" ? RepoFile.ReadRepoFile(path) : File.ReadAllText(path);
             files.Add((rel, src, Code(src)));
         }
 
@@ -581,7 +590,7 @@ public sealed class WebRouteStatementCensusTests
     [Fact]
     public void TheSharedWriters_CallTheSweepBeforeAnythingElse()
     {
-        string endpoints = File.ReadAllText(Path.Combine(ServiceDir(), "DarlingWebEndpoints.cs"));
+        string endpoints = RepoFile.ReadRepoFile(Path.Combine(ServiceDir(), "DarlingWebEndpoints.cs"));
         foreach (string method in new[] { "ToHttpResult", "MuteRuleToolResult", "QueryTagToolResult" })
         {
             var bodies = StatementColumnCensusTests.BodiesOf(endpoints, "DarlingWebEndpoints", method);

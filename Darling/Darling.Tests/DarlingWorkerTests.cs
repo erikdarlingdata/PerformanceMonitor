@@ -189,7 +189,7 @@ public sealed class DarlingWorkerTests
            the notice is suppressed there (see the bind ladder's container gate); outside one (this test
            process) it still fires. The postgres.network notice is container-independent: the bundled
            store never runs in BYO mode. */
-        Assert.Contains(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal) && w.Contains("managed-mode (or container, #1804) only", StringComparison.Ordinal));
+        Assert.Contains(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal) && w.Contains("available only with the bundled store", StringComparison.Ordinal));
         /* BYO never emits the admin-pivot warning — the network config is ignored anyway. */
         Assert.DoesNotContain(warnings, w => w.Contains("pivot", StringComparison.OrdinalIgnoreCase) || w.Contains("config_command", StringComparison.Ordinal));
     }

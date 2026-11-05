@@ -44,7 +44,7 @@ public sealed class ComposeReadOnlyTransactionLiveTests
     public async Task ACompiledRead_StillReturnsItsRows()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct, emptyStore: true);
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var rows = await ComposePanelRunner.RunComposedQueryAsync(
@@ -59,7 +59,7 @@ public sealed class ComposeReadOnlyTransactionLiveTests
     public async Task ACompiledStatementThatWrites_IsRefusedByPostgres_AndChangesNothing()
     {
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString, ct, emptyStore: true);
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using (var setup = store.CreateCommand("CREATE TABLE public.compose_readonly_probe (x int)"))
         {

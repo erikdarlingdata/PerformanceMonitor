@@ -516,12 +516,16 @@ public sealed class NotificationRoutingTests
             AgAlertPolicy.SyncFellBehindMetric, AgAlertPolicy.DatabaseSuspendedMetric,
             DarlingSelfAlertEvaluator.CollectorCostDigestMetric, DarlingSelfAlertEvaluator.FleetSweepRollupMetric,
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
+            /* #7041: the scheduled Daily Health Report, fired through the constant. */
+            DarlingSelfAlertEvaluator.DailyHealthReportMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
             /* #5288: the MCP endpoint's twin of the web certificate alert, fired through the descriptor's
                ExpiryMetric (tls.ExpiryMetric), which the FireAsync literal scan below cannot see. */
             DarlingSelfAlertEvaluator.McpTlsCertExpiryMetric,
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
+            /* #7368: fired through the constant, so the FireAsync literal scan below cannot see it. */
+            DarlingSelfAlertEvaluator.AutovacuumBehindMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #5450: fired through the constant, so the FireAsync literal scan below cannot see it. */
@@ -566,6 +570,10 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.CheckDbOverdueMetric,
             /* #6875: the Identity Capacity alert fires through DarlingSelfAlertEvaluator.IdentityCapacityMetric, a constant the FireAsync literal scan cannot see. */
             DarlingSelfAlertEvaluator.IdentityCapacityMetric,
+            /* #7084: the engine's High CPU, Blocking and Deadlocks alerts fire through the OpenEngineAlerts constants,
+               which the AlertOutcome literal scan below cannot see. */
+            OpenEngineAlerts.HighCpuMetric, OpenEngineAlerts.BlockingDetectedMetric,
+            OpenEngineAlerts.BlockingWaitTimeMetric, OpenEngineAlerts.DeadlocksDetectedMetric,
         };
 
         /* The literals: the third argument of every `new AlertOutcome(` in the shared engine and the worker
@@ -587,8 +595,8 @@ public sealed class NotificationRoutingTests
             names.Add(m.Groups[1].Value);
         }
 
-        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" are fired via
-           a `metricName` local in the worker, which the const scan catches through the engine constants;
+        /* Two literals the scans above cannot see: "Blocking Wait Time" and "Blocking Detected" come from the
+           OpenEngineAlerts constants listed above;
            "Capture Down" / "Agent Not Running" / "Collection Stopped" / "Server Unreachable" / "Server
            Restored" / "Collector Cost Regression" are FireAsync literals the regex above reads. Assert the
            scan really found the self-alert literals so a regex drift fails here, not in the census. */

@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
@@ -103,7 +105,115 @@ public sealed class AgAlertEvaluator
 
     private readonly Func<DateTime> _utcNow;
 
-    public AgAlertEvaluator(Func<DateTime>? utcNow = null) => _utcNow = utcNow ?? (() => DateTime.UtcNow);
+    /// <summary>#7068: the alert history the standing "AG Sync Fell Behind" seed reads, or null for none (a test, or a host with no store).</summary>
+    private readonly IAlertHistoryStore? _history;
+
+    /// <summary>#7068: when this evaluator was built. Rows at or after it are this process's own, so the seed reads only earlier ones.</summary>
+    private readonly DateTime _startUtc;
+
+    /// <summary>#7068: the history read of each server, taken once per process start (a failed read is kept as empty, so it is not retried every sweep).</summary>
+    private readonly Dictionary<int, AlertHistoryStanding> _standing = new();
+
+    /// <summary>#7068: the database grains whose seed has been decided this process: seeded from an open row, or seen caught up first.</summary>
+    private readonly HashSet<string> _seeded = new(StringComparer.Ordinal);
+
+    public AgAlertEvaluator(Func<DateTime>? utcNow = null, IAlertHistoryStore? history = null)
+    {
+        _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _history = history;
+        _startUtc = _utcNow();
+    }
+
+    /// <summary>
+    /// #7068: seeds the "already announced" stamp of each database that is behind from the history's open "AG Sync Fell Behind" row
+    /// for that availability group, database and replica, so a restart in the middle of a standing lag is not announced again.
+    /// Call it before <see cref="EvaluateDatabases"/> on each sweep. The history is read once per server per process start, and
+    /// each grain is decided once: a grain seen caught up first is not seeded (a clear while the app was closed writes no
+    /// "AG Sync Recovered" row), a grain whose own row a later "AG Sync Recovered" naming it closed is not seeded, and a failed
+    /// read seeds nothing and is not retried, so the lag is announced as it was before the seed existed. The stamp becomes the
+    /// fire's time, so a repeat follows the refire interval as it would have without the restart.
+    /// </summary>
+    public async Task SeedStandingAsync(
+        int serverId,
+        IReadOnlyList<AgDatabaseReading> databases,
+        int lagThresholdSeconds,
+        long redoThresholdKb,
+        int? sweepGeneration = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_history is null || databases is null || (sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId)))
+        {
+            return;
+        }
+
+        var behind = new List<(string Key, AgDatabaseReading Database)>();
+        foreach (var database in databases)
+        {
+            var key = DatabaseKey(serverId, database.AgName, database.DatabaseName, database.ReplicaServerName);
+            if (_seeded.Contains(key))
+            {
+                continue;
+            }
+
+            var judgement = AgAlertPolicy.JudgeSync(database, lagThresholdSeconds, redoThresholdKb, out _);
+            if (judgement == AgSyncJudgement.Behind)
+            {
+                behind.Add((key, database));
+            }
+            else if (judgement == AgSyncJudgement.CaughtUp)
+            {
+                _seeded.Add(key);
+            }
+        }
+
+        if (behind.Count == 0)
+        {
+            return;
+        }
+
+        if (!_standing.TryGetValue(serverId, out var standing))
+        {
+            try
+            {
+                standing = await _history.GetStandingAsync(
+                    serverId.ToString(CultureInfo.InvariantCulture), AgAlertPolicy.SyncFellBehindMetric,
+                    new[] { "AG Sync Recovered" }, null, _startUtc);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn("AgAlerts", $"Could not read the open AG Sync Fell Behind incidents for server {serverId} from alert history; a standing lag may be announced again after this restart: {ex.Message}");
+                standing = AlertHistoryStanding.Empty;
+            }
+
+            /* The server was removed while the read ran: keep nothing for it. */
+            if (sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId))
+            {
+                return;
+            }
+
+            _standing[serverId] = standing;
+        }
+
+        foreach (var (key, database) in behind)
+        {
+            if (!_seeded.Add(key))
+            {
+                continue;
+            }
+
+            var open = standing.OpenFor(
+                fire => AgAlertContexts.OwnsSyncFire(fire.ContextJson, database.AgName, database.DatabaseName, database.ReplicaServerName),
+                clear => AgAlertContexts.OwnsSyncClear(clear.DetailText, database.AgName, database.DatabaseName, database.ReplicaServerName));
+            if (open is not null)
+            {
+                _lastSyncBehindAlert.TryAdd(key, open.FireAtUtc);
+            }
+        }
+    }
 
     /// <summary>
     /// The replica-grain conditions for one server: "AG Failover" and the disconnect/reconnect pair. Both are
@@ -522,6 +632,8 @@ public sealed class AgAlertEvaluator
         ForgetByPrefix(_replicaConnectedState, prefix);
         ForgetByPrefix(_databaseSuspended, prefix);
         ForgetByPrefix(_lastSyncBehindAlert, prefix);
+        _standing.Remove(serverId);
+        _seeded.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
         ForgetByPrefix(_lastDisconnectAlert, prefix);
         _activeSyncBehind.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
         _retries.ClearPrefix(prefix);

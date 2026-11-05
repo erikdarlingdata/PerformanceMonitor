@@ -114,10 +114,12 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         return rows;
     }
 
+    /// <summary><paramref name="at"/>: the window's end. Without it the end is the clock now, which moves between two reads; a test that compares
+    /// one read with a later one passes the same value to both (#7081: a 24-hour window that starts a 5-minute stamp later drops that stamp's rows).</summary>
     private static async Task<(DateTime Start, DateTime End, PanelPlan Plan, RollupAvailability Rollups, RollupCoverage Coverage)> PrepareAsync(
-        NpgsqlDataSource source, string panel, CancellationToken ct)
+        NpgsqlDataSource source, string panel, CancellationToken ct, DateTime? at = null)
     {
-        var end = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        var end = at ?? DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         var (plan, parseError) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(panel)!, Array.Empty<string>());
         Assert.True(parseError is null, parseError);
         var rollups = await TimescaleSupport.DetectRollupsAsync(source, ct);
@@ -235,12 +237,12 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         + "runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time, execution_count, avg_duration_us, avg_cpu_time_us, "
         + "max_duration_us, max_cpu_time_us";
 
-    /// <summary>One raw Query Store row an hour-ish ago, outside every seeded interval id, carrying <paramref name="executions"/>: a row a
-    /// split panel reads only if it reads that server raw.</summary>
-    private static Task PoisonAsync(NpgsqlConnection connection, int serverId, long executions, CancellationToken ct) =>
+    /// <summary>One raw Query Store row an hour-ish before <paramref name="clock"/>, outside every seeded interval id, carrying <paramref name="executions"/>:
+    /// a row a split panel reads only if it reads that server raw. Its times come from the test's one clock value, not from the store's now() (#7081).</summary>
+    private static Task PoisonAsync(NpgsqlConnection connection, int serverId, long executions, DateTime clock, CancellationToken ct) =>
         ExecAsync(connection,
-            $"INSERT INTO collect.query_store_stats ({RawColumns}) VALUES ({900_000_000 + serverId}, (now() AT TIME ZONE 'UTC') - interval '30 minutes', {serverId}, 'srv{serverId}', 'db0', NULL, NULL, 1, 1, 'Regular', "
-            + $"{900_000_000 + serverId}, (now() AT TIME ZONE 'UTC') - interval '1 hour', (now() AT TIME ZONE 'UTC') - interval '1 hour', (now() AT TIME ZONE 'UTC') - interval '30 minutes', {executions}, 1, 1, 1, 1)", ct);
+            $"INSERT INTO collect.query_store_stats ({RawColumns}) VALUES ({900_000_000 + serverId}, TIMESTAMP '{ComposeStampLiveSupport.At(clock.AddMinutes(-30))}', {serverId}, 'srv{serverId}', 'db0', NULL, NULL, 1, 1, 'Regular', "
+            + $"{900_000_000 + serverId}, TIMESTAMP '{ComposeStampLiveSupport.At(clock.AddHours(-1))}', TIMESTAMP '{ComposeStampLiveSupport.At(clock.AddHours(-1))}', TIMESTAMP '{ComposeStampLiveSupport.At(clock.AddMinutes(-30))}', {executions}, 1, 1, 1, 1)", ct);
 
     /// <summary>#6115: the stamp-rollup route (V173) with a refused server. Servers 1 to 3 have 28 built rollup hours and pass the gate; server 4
     /// has raw rows only and a coverage row an hour old, so the gate refuses it. The statement has four arms (rollup, stale, tail, and the raw half).</summary>
@@ -250,6 +252,10 @@ VALUES (1, (now() AT TIME ZONE 'UTC') - interval '30 hours', now() AT TIME ZONE 
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), ComposeStampLiveSupport.SkipReason);
         var ct = TestContext.Current.CancellationToken;
         var (scratch, connection, source, hourNow) = await ComposeStampLiveSupport.ArrangeAsync(ct);
+        /* #7081: the one clock value of the body. Every window end, the refused server's coverage claim and the poison rows' times come from it.
+           A window end read from the clock at each read moved by a 5-minute stamp between two reads, and the split total of server 1 fell by that
+           stamp's rows (6 million executions) after a row the split does not read had been added. */
+        var clock = ComposeStampLiveSupport.ClockWithin(hourNow);
         var bodySucceeded = false;
         try
         {
@@ -264,7 +270,7 @@ FROM collect.query_store_interval_wide AS w;
 
 INSERT INTO collect.servers (server_id, server_name, is_enabled) VALUES (4, 'srv4', TRUE);
 INSERT INTO collect.query_store_interval_wide_coverage (server_id, filled_since, applied_through)
-VALUES (4, (now() AT TIME ZONE 'UTC') - interval '1 hour', now() AT TIME ZONE 'UTC');
+VALUES (4, TIMESTAMP '{ComposeStampLiveSupport.At(clock.AddHours(-1))}', TIMESTAMP '{ComposeStampLiveSupport.At(clock)}');
 INSERT INTO collect.query_store_stats ({RawColumns})
 SELECT 1000000 + row_number() OVER (ORDER BY r.collection_time, r.runtime_stats_interval_id), r.collection_time, 4, 'srv4', r.database_name, r.module_name,
        r.query_hash, r.query_id, r.plan_id, r.execution_type_desc, 5000000 + r.runtime_stats_interval_id, r.interval_start_time_utc, r.first_execution_time, r.last_execution_time,
@@ -277,7 +283,7 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
 
             async Task<(List<string> Split, List<string> AllRaw, string Sql)> RunBothAsync(string panel)
             {
-                var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct);
+                var (start, end, plan, rollups, coverage) = await PrepareAsync(source, panel, ct, clock);
                 var resolution = await ComposePanelRunner.ResolveQueryStoreWideEligibleAsync(source, null, start, end, null, ct, plan);
                 Assert.True(resolution.Eligible, "servers 1 to 3 pass, so the panel must read the wide route: " + panel);
                 Assert.Equal(new[] { 4 }, resolution.RawServerIds);
@@ -306,12 +312,12 @@ FROM collect.query_store_stats AS r WHERE r.server_id = 1", ct);
             }
 
             /* The raw arm reads the refused server's raw rows: a new raw row for server 4 shows in the split result and in the all-raw one, alike. */
-            await PoisonAsync(connection, 4, 1_000, ct);
+            await PoisonAsync(connection, 4, 1_000, clock, ct);
             var afterRefused = await RunBothAsync(panels[0]);
             Assert.Equal(afterRefused.AllRaw, afterRefused.Split);
 
             /* ... and only that server's: a new raw row for a passing server is read by the all-raw route and by no part of the split. */
-            await PoisonAsync(connection, 1, 5_000_000, ct);
+            await PoisonAsync(connection, 1, 5_000_000, clock, ct);
             var afterPassing = await RunBothAsync(panels[0]);
             Assert.Equal(afterRefused.Split, afterPassing.Split);
             Assert.NotEqual(afterPassing.AllRaw, afterPassing.Split);

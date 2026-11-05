@@ -46,7 +46,8 @@
  */
 
 import { keepScroll, refreshGridInPlace, replaceNodes } from "../refresh-in-place.js";
-import { el, mount, apiGetFleet, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash } from "../util.js";
+import { keepLonePanelsWide } from "../panel-layout.js";
+import { el, mount, apiGet, apiGetFleet, setChartDataStart, onPageLeave, bandClass, loadingStrip, noticeStrip, setActiveRange, setActiveDatabaseFilter, localTime, storeHash, clampTileDetails } from "../util.js";
 import { getDatabaseFilter } from "../viewer-local.js";
 import { databaseFilterControl, databaseFilterUnavailable, closeDatabaseFilter } from "./database-filter.js";
 import { setPanelSignal } from "../panels.js";
@@ -133,12 +134,43 @@ onPageLeave(() => {
   setPanelSignal();
   renderGeneration++;
   current = { server: null, tab: null };
+  setChartDataStart(null);
 });
+
+/* #7386: when each server was first collected (UTC-epoch ms), so a chart over a range longer than the server's history starts its
+   axis where the data starts. One small read per server (/api/server-data-start, not the fleet roll-up), kept for ten minutes.
+   A failed read leaves what the page had, and with nothing it leaves every chart on the picked range. */
+const DATA_START_MAX_AGE_MS = 600000;
+const dataStarts = new Map();
+
+/** Give the charts the data start for `server` now (the kept answer, however old) and read it again when it is older than ten minutes. */
+function loadServerDataStart(server, generation) {
+  const kept = dataStarts.get(server);
+  setChartDataStart(kept ? kept.ms : null);
+  if (kept && Date.now() - kept.at < DATA_START_MAX_AGE_MS) return;
+  (async () => {
+    const res = await apiGet("/api/server-data-start?server=" + encodeURIComponent(server));
+    if (res.kind !== "data") return;
+    const ms = Date.parse(res.data && res.data.data_start_utc);
+    const answer = Number.isFinite(ms) ? ms : null;
+    dataStarts.set(server, { ms: answer, at: Date.now() });
+    if (generation === renderGeneration && current.server === server) setChartDataStart(answer);
+  })();
+}
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
    matches on), module-scoped like pageHours, and bounded by the number of servers visited in one session. */
 const lastCard = new Map();
+
+/* #7395: the header tiles the reader opened on this server (the Protection tile's list of overdue databases), by label. The head is
+   drawn again on every poll and every tab click, and a tile that snapped shut on each one could not be read. Moving to another
+   server starts closed. */
+let openTiles = { server: null, labels: new Set() };
+function openTilesFor(server) {
+  if (openTiles.server !== server) openTiles = { server, labels: new Set() };
+  return openTiles.labels;
+}
 
 /** How long a tab click may reuse the remembered card (#6310): the 60 s poll's cadence, so a click never shows a header older than one poll. */
 export const REMEMBERED_CARD_MAX_AGE_MS = 60000;
@@ -304,6 +336,7 @@ export function renderServer(main, server, tabId, opts) {
   if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
   keepGrid = false;
   current = { server, tab: null };
+  loadServerDataStart(server, generation);
 
   const dot = el("span", { class: "dot" });
   /* The route's server KEY until the fleet card is known; fillServerHead then swaps in the display name. */
@@ -328,7 +361,11 @@ export function renderServer(main, server, tabId, opts) {
   const tabsSlot = el("div", { class: "subtabs-slot" }, [loadingStrip()]);
   /* The notice for a carried-over range this tab reads only part of (reachNoteText), between the tab bar and the panels. */
   reachSlot = el("div", { class: "reach-note-slot" });
-  if (!keep && !inPlace) gridNode = el("div", { class: "panel-grid" });
+  if (!keep && !inPlace) {
+    gridNode = el("div", { class: "panel-grid" });
+    /* #7534: a half-width panel with no partner on its row takes the whole row, whatever tab it is on and whichever panels hide. */
+    keepLonePanelsWide(gridNode);
+  }
   if (inPlace) {
     /* The grid is not detached: replacing only the pieces around it keeps its panels' scroll positions and the reader's place. */
     keepScroll(() => replaceNodes(main, shellNodes, [head, whySlot, tabsSlot, reachSlot]));
@@ -647,6 +684,7 @@ function fillServerHead(title, dot, badgeSlot, engineSlot, whySlot, card, reason
 
   mount(whySlot, [
     reason ? el("div", { class: "server-reason " + bandClass(card.band), text: reason }) : null,
-    metricBands(card),
+    /* current.server is the server this render drew (set at the top of renderServer), so a redraw of the same server keeps its open tiles. */
+    clampTileDetails(metricBands(card), undefined, openTilesFor(current.server)),
   ]);
 }

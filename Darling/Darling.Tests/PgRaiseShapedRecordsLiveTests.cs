@@ -83,7 +83,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
             Assert.Equal("40P01", ex.SqlState);
         }
 
-        await WaitForLogGrowthAsync(targetConnection, ct);
+        await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "Process 9001 waits for ShareLock");
 
         var context = new CollectorContext
         {
@@ -161,7 +161,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
 
             var (victimPid, pidA, pidB) = await ProvokeFunctionDeadlockAsync(target!, ct);
 
-            await WaitForLogGrowthAsync(targetConnection, ct);
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, $"Process {victimPid} waits for");
 
             var context = new CollectorContext
             {
@@ -250,7 +250,7 @@ public sealed class PgRaiseShapedRecordsLiveTests
             await call.ExecuteNonQueryAsync(ct);
         }
 
-        await WaitForLogGrowthAsync(targetConnection, ct);
+        await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, "forged_4058l");
 
         var context = new CollectorContext
         {
@@ -359,34 +359,5 @@ public sealed class PgRaiseShapedRecordsLiveTests
 
         Assert.NotNull(victimPid);
         return (victimPid!.Value, pidA, pidB);
-    }
-
-    /// <summary>Polls <c>pg_ls_logdir()</c> for a <c>.csv</c> file whose size has grown since the call
-    /// started, up to 10 seconds — the same budget <see cref="PgDeadlocksCsvlogLiveTests"/> gives the
-    /// syslogger's asynchronous flush.</summary>
-    private static async Task WaitForLogGrowthAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        long before;
-        await using (var command = new NpgsqlCommand(
-            "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
-        {
-            before = (long)(await command.ExecuteScalarAsync(ct))!;
-        }
-
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (DateTime.UtcNow < deadline)
-        {
-            await using (var command = new NpgsqlCommand(
-                "SELECT coalesce(max(size), 0) FROM pg_catalog.pg_ls_logdir() WHERE name ~* '\\.csv$'", connection))
-            {
-                var after = (long)(await command.ExecuteScalarAsync(ct))!;
-                if (after > before)
-                {
-                    return;
-                }
-            }
-
-            await Task.Delay(200, ct);
-        }
     }
 }

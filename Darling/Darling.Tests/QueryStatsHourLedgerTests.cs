@@ -210,7 +210,7 @@ public sealed class QueryStatsHourLedgerTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the hour ledger rung's live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         var before = DateTime.UtcNow;
@@ -254,7 +254,7 @@ public sealed class QueryStatsHourLedgerTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the hour ledger's live pins (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -300,7 +300,7 @@ public sealed class QueryStatsHourLedgerTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the hour ledger's live pins (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -373,7 +373,7 @@ public sealed class QueryStatsHourLedgerTests
         var ct = TestContext.Current.CancellationToken;
         var roleName = "ledger_ro_" + Guid.NewGuid().ToString("N")[..8];
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

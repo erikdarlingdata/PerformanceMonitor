@@ -46,7 +46,7 @@ public sealed class AgentTableIndexesV215LiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         /* 73,000 requests over three servers, all reported, as a year at the measured rate. One in 200 names a module, so the partial

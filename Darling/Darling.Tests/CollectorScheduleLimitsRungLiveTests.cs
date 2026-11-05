@@ -59,7 +59,7 @@ public sealed class CollectorScheduleLimitsRungLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the V206 collector schedule limit facts (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);

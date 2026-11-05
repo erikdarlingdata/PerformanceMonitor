@@ -116,7 +116,8 @@ export function sectionTable(block, onTag) {
       [el("td", {}, [label]), ...keys.map((k) => el("td", { class: "num", text: fmtFigure(r.figures[k]) }))]
     );
   });
-  return el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)]);
+  /* #7479: a table with no scroll box of its own ran past the panel at 600 px (653 px of table in a 600 px page); in a .table-wrap it scrolls inside the panel. */
+  return el("div", { class: "table-wrap" }, [el("table", { class: "data" }, [el("thead", {}, [head]), el("tbody", {}, body)])]);
 }
 
 /** "the last 24 hours", "the last 7 days", or "this time range" when the window is not a plain preset. */
@@ -196,6 +197,11 @@ function isEmptyBlock(block) {
   return !!block && block.status === "empty";
 }
 
+/** #7376: a section (or one server's part of it) this server does not collect at all: its message is the whole answer, with no table of zeros under it. */
+function isNotCollectedBlock(block) {
+  return !!block && block.status === "not_collected";
+}
+
 /** One section: its heading, then one table (a server) or one table per server with the fleet line (Fleet). */
 export function sectionCard(section, block, onTag, range = "this time range", servers = []) {
   const parts = [el("h3", {}, [section.title, el("span", { class: "panel-sub", text: block && block.source ? " " + sourceText(block.source) : "" })])];
@@ -216,8 +222,12 @@ export function sectionCard(section, block, onTag, range = "this time range", se
   }
   const note = statusLine(block);
   if (note) parts.push(note);
+  if (isNotCollectedBlock(block) && !Array.isArray(block.servers)) return el("div", { class: "panel", "data-section": section.name }, parts);
   if (Array.isArray(block.servers)) {
-    for (const s of block.servers) {
+    /* #7402: the sections run in the sidebar's order (favourites first, then the display name), through the one shared helper, not the connection key's order. */
+    const row = (s) => (Array.isArray(servers) ? servers.find((r) => r && r.server_name === s.server) : undefined);
+    const named = block.servers.map((s) => ({ s, server_name: s.server, display_name: displayNameFor(servers, s.server), server_id: row(s)?.server_id }));
+    for (const { s } of orderServers(named)) {
       /* #6157: the heading is the display name of the server; the read names it by its connection key. */
       parts.push(el("h4", { text: displayNameFor(servers, s.server) }));
       if (isEmptyBlock(s)) {
@@ -226,9 +236,10 @@ export function sectionCard(section, block, onTag, range = "this time range", se
       }
       const sn = statusLine(s);
       if (sn) parts.push(sn);
+      if (isNotCollectedBlock(s)) continue;
       parts.push(sectionTable(s, onTag));
     }
-    if (block.fleet_total) {
+    if (block.fleet_total && !isNotCollectedBlock(block)) {
       const keys = Object.keys(block.fleet_total);
       parts.push(
         el("div", { class: "fleet-total" }, [

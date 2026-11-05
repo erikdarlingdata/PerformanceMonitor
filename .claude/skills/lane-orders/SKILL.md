@@ -229,6 +229,9 @@ finds, in one PR. A flake that stalls every lane outranks the rest of the queue.
   - Clean up through `LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, ...)`, with `bodySucceeded` set
     as the body's last statement.
   - A class that uses `ScratchPostgres` carries the `#1776 own-store` comment.
+  - `ScratchPostgres.CreateAsync` returns a clone of a migrated template, so a test's `MigrateAsync` is a no-op (#7097).
+    A test that applies part of the ladder, stages a store shape first, asserts what `MigrateAsync` applied, or never
+    migrates passes `emptyStore: true`.
   - A fixture on its own database that must not race TimescaleDB's scheduler calls
     `_timescaledb_functions.stop_background_workers()`.
 

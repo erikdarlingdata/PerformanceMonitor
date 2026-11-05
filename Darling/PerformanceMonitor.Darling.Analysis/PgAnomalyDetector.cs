@@ -313,15 +313,17 @@ LIMIT 6";
     public const string BlockingWindowSql = $@"
 /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking. */
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
-         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
          AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql})) AS current_blocking,
     (SELECT COUNT(*) FROM v_deadlocks
-     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks";
+     WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3 AND collection_time >= $4) AS current_deadlocks,
+    /* #7537: the DMV arm fired (no blocked process reports in the window), so the spike text names snapshot rows. */
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $4
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}) AS bpr_count) AS b";
 
     /* The same read for an Azure SQL Database master target ($4 = the names of the databases monitored as their
        own targets, skipped on both arms, a NULL database still counting; $5 = the event-window floor, which takes
@@ -329,16 +331,17 @@ SELECT
        rule, so this read carries no deadlock column. */
     public const string BlockingSkippingSeparateCountSql = $@"
 SELECT
-    COALESCE(NULLIF(
-        (SELECT COUNT(*) FROM v_blocked_process_reports
-         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
-         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
-         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))), 0),
+    COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
          WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
          AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
          AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x))))) AS current_blocking,
-    0::bigint AS current_deadlocks";
+    0::bigint AS current_deadlocks,
+    b.bpr_count = 0 AS from_dmv
+FROM (SELECT (SELECT COUNT(*) FROM v_blocked_process_reports
+         WHERE server_id = $1 AND event_time >= $2 AND event_time < $3 AND collection_time >= $5
+         AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
+         AND   (database_name IS NULL OR NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)))) AS bpr_count) AS b";
 
     /* $4 is the raw scoped list and $5 the event-window floor, as in BlockingSkippingSeparateCountSql. */
     public const string DeadlockGraphsCountSql = @"
@@ -367,20 +370,25 @@ AND   NOT (lower(database_name) = ANY(SELECT lower(x) FROM unnest($4::text[]) x)
        and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
        from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
        (0 local_hour, 1 peak_read, 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write,
-       6 write_sample_count) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
+       6 write_sample_count, 7 read_ops, 8 write_ops - #7417) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
 
        #4731: each side counts its OWN samples, as Lite's twin does. The one COUNT(*) over the (reads OR
        writes) rows counted a write-only row as a read sample (its read peak and mean NULL, read as 0), so the
        read gate admitted tiles Lite rejects and window_samples differed between the products. A tile whose
-       side has no rows now carries 0 samples for that side and never enters that side's gate. */
+       side has no rows now carries 0 samples for that side and never enters that side's gate.
+
+       #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. The three write columns carry the filter, the read columns do not change. */
     public const string IoTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
        COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
-       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
-       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
+       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS peak_write_lat,
+       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS avg_write_lat,
+       COUNT(*) FILTER (WHERE delta_writes > 0 AND (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS write_sample_count,
+       /* #7417: the I/O OPERATIONS behind each side over this same window (the sample counts above count file rows, not I/Os), for IoVolumeFloor. */
+       CAST(COALESCE(SUM(delta_reads), 0) AS BIGINT) AS read_ops,
+       CAST(COALESCE(SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb'), 0) AS BIGINT) AS write_ops
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
 AND   (delta_reads > 0 OR delta_writes > 0)
@@ -831,7 +839,6 @@ ORDER BY ms_delta DESC LIMIT 1";
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
-                ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
 
                 /* #3653 A8 option B (lane L2a), coordinator ruling: only the robust-z arm moves onto
                    EvaluateTiles. A null verdict (no tile scored) falls back to today's whole-window
@@ -860,6 +867,13 @@ ORDER BY ms_delta DESC LIMIT 1";
                 }
                 if (!decision.Fire) return;
                 fireThreshold = decision.ThresholdUsed;
+
+                /* #7177: the ratio is the card's "x its baseline" multiple, so it divides the SAME peak by the
+                   SAME bucket mean the card prints as current_ms_per_sec and baseline_mean. It used to divide the
+                   whole window's peak by the window-start bucket's mean, which is a different bucket than the
+                   worst tile's whenever the window spans more than one local hour. On the never-blind fallback
+                   scoredPeakRate/scoredBaseline are still the whole-window peak and start bucket, as before. */
+                ratio = scoredBaseline.Mean > 0 ? scoredPeakRate / scoredBaseline.Mean : 0;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
@@ -961,35 +975,41 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
-            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
-
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-
-            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+            /* The baselines below stay server-wide: a server-wide baseline against a filtered count can only
                make a master spike less likely, which is accepted. */
             var separate = PgFactCollector.SeparateDatabases(context);
-            using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-            /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
-            if (separate is not null) cmd.Parameters.AddWithValue(separate);
-            cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
-
             long currentBlocking, currentDeadlocks;
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            bool blockingFromDmv;
+            /* #7588: this connection closes before the baselines are fetched. A baseline compute opens its own connection on a
+               cache miss, so holding this one across the calls put two pooled connections on every blocking pass. */
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-                currentBlocking = Convert.ToInt64(reader.GetValue(0));
-                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                /* The scoped read keeps its list at $4 and takes the floor as $5; the plain read has the floor at $4. */
+                if (separate is not null) cmd.Parameters.AddWithValue(separate);
+                cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
+
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+                {
+                    if (!await reader.ReadAsync(context.CancellationToken)) return;
+                    currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                    currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                    blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                }
+                if (separate is not null)
+                    currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
+                        connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                        separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
             }
-            if (separate is not null)
-                currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
-                    connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                    separate, context.CancellationToken, DarlingAnalysisService.AnalysisCommandTimeoutSeconds);
+            /* #7588: the baseline follows the arm the window counted. Report rows are judged against report history and
+               snapshot rows against snapshot history, so the ratio never divides one unit by the other. */
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, blockingFromDmv ? MetricNames.BlockingSnapshot : MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),
@@ -1016,7 +1036,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // baseline; untrustworthy → fire on the count alone).
             if (currentBlocking >= 5 && (!blockingTrust || currentBlockingPerHour / Math.Max(baselineBlockingRate, 1) >= DefaultEventRatioThreshold))
             {
-                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline);
+                var metadata = CountFamilyMetadata.Build(currentBlocking, currentBlockingPerHour, baselineBlockingRate, blockingBaseline, blockingFromDmv);
                 AddBaselineContext(metadata, blockingBaseline);
 
                 anomalies.Add(new Fact
@@ -1052,6 +1072,11 @@ ORDER BY ms_delta DESC LIMIT 1";
         }
     }
 
+    /// <summary>#7417: the read and write I/O operation counts of one <see cref="IoTileWindowSql"/> row (ordinals 7 and 8).
+    /// Not the sample counts at ordinals 3 and 6, which count file rows.</summary>
+    internal static (long Reads, long Writes) ReadIoOps(System.Data.IDataRecord reader) =>
+        (reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)), reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)));
+
     /// <summary>
     /// #4731: turns one <see cref="IoTileWindowSql"/> row into the read tile and the write tile, each with its
     /// OWN sample count (ordinals 3 and 6) - Lite's twin makes the same two <see cref="WindowTiles.ReadTile"/>
@@ -1082,6 +1107,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             // 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write, 6 write_sample_count - #4731).
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
+            long windowReads = 0, windowWrites = 0;
             using (var cmd = new NpgsqlCommand(IoTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 BindTiledWindow(cmd, context, readMap);
@@ -1089,6 +1115,9 @@ ORDER BY ms_delta DESC LIMIT 1";
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     ReadIoTiles(reader, readTiles, writeTiles);
+                    var (rowReads, rowWrites) = ReadIoOps(reader);
+                    windowReads += rowReads;
+                    windowWrites += rowWrites;
                 }
             }
 
@@ -1097,7 +1126,8 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // Read latency anomaly — the reported value and sigma are the worst tile's peak (#3653 A8 B).
             var wholeRead = WindowTiles.WholeWindow(readTiles);
-            if (wholeRead.Samples > 0)
+            // #7417: the I/Os behind the latency, from the rows the tiles came from (IoVolumeFloor).
+            if (wholeRead.Samples > 0 && IoVolumeFloor.ReadsClearFloor(windowReads))
             {
                 var readTv = AnomalyGate.EvaluateTiles(
                     readTiles, readMap,
@@ -1145,7 +1175,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                         ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = readDecision.FallbackExceedance,
                         ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = readBaseline.SampleCount
+                        ["baseline_samples"] = readBaseline.SampleCount,
+                        ["window_io_ops"] = windowReads
                     };
                     AddBaselineContext(metadata, readBaseline);
                     if (readTileMetadata is not null)
@@ -1171,7 +1202,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var writeThreshold = GetDeviationThreshold(MetricNames.IoWriteLatency);
             var writeModifiedZThreshold = ModifiedZThresholdFor(MetricNames.IoWriteLatency, writeThreshold);
             var wholeWrite = WindowTiles.WholeWindow(writeTiles);
-            if (wholeWrite.Samples > 0)
+            if (wholeWrite.Samples > 0 && IoVolumeFloor.WritesClearFloor(windowWrites))
             {
                 var writeTv = AnomalyGate.EvaluateTiles(
                     writeTiles, writeMap,
@@ -1219,7 +1250,8 @@ ORDER BY ms_delta DESC LIMIT 1";
                         ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
                         ["fallback_exceedance"] = writeDecision.FallbackExceedance,
                         ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
-                        ["baseline_samples"] = writeBaseline.SampleCount
+                        ["baseline_samples"] = writeBaseline.SampleCount,
+                        ["window_io_ops"] = windowWrites
                     };
                     AddBaselineContext(metadata, writeBaseline);
                     if (writeTileMetadata is not null)

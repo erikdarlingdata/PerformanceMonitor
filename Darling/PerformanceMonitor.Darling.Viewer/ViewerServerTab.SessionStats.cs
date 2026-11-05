@@ -73,10 +73,11 @@ public partial class ViewerServerTab
     private void RenderSessionStatsChart(List<SessionStatsPoint> data)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        double xMin = startUtc.ToOADate();
+        double xMin = ChartXStart(startUtc, endUtc);
         double xMax = endUtc.ToOADate();
 
         SessionStatsRenderer.Render(SessionStatsChart, _sessionStatsHover, data, xMin, xMax);
+        KeepPlottedInView(SessionStatsChart, startUtc, endUtc);
 
         /* Summary panel reflects the latest snapshot in the window (Dashboard uses the last data point). */
         var ordered = data.OrderBy(d => d.CollectionTime).ToList();

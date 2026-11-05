@@ -51,8 +51,8 @@ internal static class DarlingMcpInstructions
     /// right after <see cref="DarlingMcpWritePolicy.Apply"/> narrows the collection, so the two cannot disagree.
     /// </summary>
     internal static string Build(
-        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served)
-        => Compose(peers, ToolCensus(catalog, served), served.Contains(MuteTool));
+        DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, null, agentMuteRules), served.Contains(MuteTool));
 
     /// <summary>
     /// #6542: the instructions for a request that presented a NAMED token, rendered over the tools that token's role is served
@@ -62,8 +62,8 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static string BuildForNamedToken(
         DarlingPeerDirectory.Snapshot peers, IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served,
-        DarlingMcpWritePolicy.Effective policy)
-        => Compose(peers, ToolCensus(catalog, served, policy), served.Contains(MuteTool), policy);
+        DarlingMcpWritePolicy.Effective policy, bool agentMuteRules = true)
+        => Compose(peers, ToolCensus(catalog, served, policy, agentMuteRules), served.Contains(MuteTool), policy);
 
     private static string Compose(
         DarlingPeerDirectory.Snapshot peers, string census, bool muteServed = true, DarlingMcpWritePolicy.Effective? named = null)
@@ -111,9 +111,10 @@ internal static class DarlingMcpInstructions
 
     /// <summary><see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> for a named token's role (#6542) when
     /// <paramref name="named"/> is set: the sentence that says what is not served names the role, not the settings that govern
-    /// the legacy token. Null leaves the legacy census byte-identical.</summary>
+    /// the legacy token. Null leaves the legacy census byte-identical. <paramref name="agentMuteRules"/> is <c>mcp.allowAgentMuteRules</c> (#7414): when it is
+    /// off, the census does not say an agent may call the four mute rule tools without an <c>agent_action</c>, since every such call is refused.</summary>
     internal static string ToolCensus(
-        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named)
+        IReadOnlyCollection<string> catalog, IReadOnlyCollection<string> served, DarlingMcpWritePolicy.Effective? named, bool agentMuteRules = true)
     {
         var count = served.Count;
         var total = catalog.Count;
@@ -136,8 +137,13 @@ internal static class DarlingMcpInstructions
         if (named is { } role)
         {
             if (role.Investigations)
-                off.Add("this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are " +
-                    "served only to an operator token");
+                off.Add(agentMuteRules
+                    ? "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action`, and beyond " +
+                      "the four mute rule tools it may call without one for a rule that expires within 7 days, are served only to an operator token"
+                    : "this token has the agent role: the write tools beyond the actions an agent may take with an `agent_action` are served only to an operator token");
+            else if (!role.Writes)
+                off.Add("this token has the reader role: the write tools, the server registry tools and the investigation tools are never " +
+                    "served to it, whatever the settings say");
             else
             {
                 off.Add("this token has the operator role: the investigation tools are served only to an agent token");
@@ -150,7 +156,7 @@ internal static class DarlingMcpInstructions
             off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
-                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)"
+                        ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? ", except the four mute rule tools, which an agent token may also call without one for a rule that expires within 7 days (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
@@ -187,7 +193,7 @@ internal static class DarlingMcpInstructions
     /// are identical, so a new tool moves this or fails there.
     /// </summary>
     private const string CatalogCensus =
-        "This server exposes 276 tools. 112 are the same names Lite exposes. The remaining 164 are unique to Darling: " +
+        "This server exposes 280 tools. 112 are the same names Lite exposes. The remaining 168 are unique to Darling: " +
         "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
         "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — " +
         "`get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.";
@@ -266,6 +272,7 @@ internal static class DarlingMcpInstructions
         Every tool below that takes `hours_back` also takes `as_of`: an ISO-8601 UTC instant that moves the window's end off "now"; `hours_back` stays the length. Use it for past-time questions, not a wider `hours_back` (a different aggregate).
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
+        - A stamp with no offset is UTC unless the tool's note puts it on the server's clock.
         - Latest-snapshot reads take no `as_of` — read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
         - The analysis family does take it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 

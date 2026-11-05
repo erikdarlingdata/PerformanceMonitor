@@ -103,8 +103,10 @@ public static class PgLogEntryAssembler
        '%m %u@%d [%p] ' renders them (`UTC app@db [5555] ERROR:  `). Its gap is s_prefixRun's step with '[' taken
        out of the class, so it holds to both rules at once. It cannot cross a label, by the run's own boundaries, so
        it never leaves the line's prefix for its text, which is where a forged bracket or label has to live. And it
-       cannot consume a bracket, so the pid is the FIRST bracket after the zone's space and nothing can backtrack
-       past it to a later one (plan capture's #4008 rule). `rest` after it is the unchanged run, so from the zone to
+       cannot consume a bracket but the exact text '[local]' (#7182: %r and %h render it for a Unix-socket
+       session, so '%m %r [%p] ' writes `UTC [local] [5555] ERROR:  `), so the pid is the FIRST bracket after the
+       zone's space that is not '[local]' and nothing can backtrack past it to a later one (plan capture's #4008
+       rule). '[local]' is not '[digits]', so it can never stand in for the real pid bracket. `rest` after it is the unchanged run, so from the zone to
        the label the whole path crosses no label anywhere, and the label read is the line's first.
 
        Tried LAST, so a line the first two read is read exactly as before: the engine takes the first alternative
@@ -124,7 +126,7 @@ public static class PgLogEntryAssembler
 
     private static readonly string s_prefixRun = @"(?:" + s_prefixRunStep + @"[^\n])*?";
 
-    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
+    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"(?:[^\[\n]|\[local\]))*?";
 
     /// <summary>Every label this reader knows, the severities and the companion fields alike, as the same
     /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="IsForgedLabel"/>
@@ -477,6 +479,50 @@ public static class PgLogEntryAssembler
     public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
         Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: null, zones: null, out foreignZoneLines);
 
+    /// <summary>
+    /// Where the last entry of a slab of log text begins: the start of its last primary line, or -1 when the text has no
+    /// primary line (#7186). That entry is the one the end of a read can cut between its primary line and a DETAIL or
+    /// STATEMENT companion, or through the middle of a line, and <see cref="Assemble(string?)"/> stores or drops it as
+    /// it arrived. The RDS stderr route is consume-once, so <c>RdsLogEventIngestor</c> holds the text from this index
+    /// until the next portion arrives, as the csvlog route holds a partial record.
+    /// </summary>
+    public static int UnfinishedTailStart(string? logBody)
+    {
+        if (string.IsNullOrEmpty(logBody))
+        {
+            return -1;
+        }
+
+        var start = -1;
+        var lineStart = 0;
+
+        while (lineStart < logBody.Length)
+        {
+            var newline = logBody.IndexOf('\n', lineStart);
+            var lineEnd = newline < 0 ? logBody.Length : newline;
+
+            if (logBody[lineStart] != '\t')
+            {
+                var line = logBody.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
+                var match = s_prefixLine.Match(line);
+
+                if (match.Success && s_primaryLabels.Contains(match.Groups["label"].Value))
+                {
+                    start = lineStart;
+                }
+            }
+
+            if (newline < 0)
+            {
+                break;
+            }
+
+            lineStart = newline + 1;
+        }
+
+        return start;
+    }
+
     /// <summary>The walk itself, parameterised over the #4501 forgery rule (see <see cref="IsForgedLabel"/>)
     /// so both the pre-#4501-shaped overloads (a bare check, the store's default separator) and the
     /// prefix-aware overload above share one implementation.</summary>
@@ -654,11 +700,7 @@ public static class PgLogEntryAssembler
                 /* #6866: the server rendered this instant back as exactly this line's text. */
                 _occurredAtUtc = DateTime.SpecifyKind(provenUtc.Value, DateTimeKind.Utc);
             }
-            else if (!DateTime.TryParse(
-                    _stamp,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-                    out _occurredAtUtc))
+            else if (!PgLogEntry.TryParseStampUtc(_stamp, out _occurredAtUtc))
             {
                 /* Unreachable through the pattern, which admits only digits in the stamp's shape; kept so a
                    future loosening of the pattern cannot store DateTime.MinValue as an occurrence. */

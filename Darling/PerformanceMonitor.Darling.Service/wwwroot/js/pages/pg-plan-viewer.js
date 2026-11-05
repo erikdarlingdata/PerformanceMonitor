@@ -22,6 +22,7 @@
 import { el } from "../util.js";
 import { copyText, downloadText } from "../grid-tools.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
+import { isWithheldMarker, WITHHELD_PLAN_WORDS } from "../mute-context.js";
 
 const UNPARSED_NOTE = "This stored plan is not valid JSON (the log line may have been cut), so it is shown as stored and Download is off.";
 const CAPTURE_NOTE = "This capture's figures; other captures of the same shape may differ.";
@@ -80,17 +81,19 @@ export function pgPlanFileName(row) {
 
 function panelFor(row) {
   const plan = row.plan;
+  /* #7548: a plan the statement filter withheld whole is stored as the marker, which is not a plan. The page says so in words. */
+  if (isWithheldMarker(plan)) return el("div", { class: "plan-panel" }, [el("div", { class: "strip empty", text: WITHHELD_PLAN_WORDS })]);
   const unparsed = typeof plan === "string";
   const pretty = prettyPrintPgPlan(plan);
   const status = el("span", { class: "grid-tools-status", role: "status", "aria-live": "polite" });
 
-  const copy = el("button", { type: "button", class: "grid-tool", text: "Copy" });
+  const copy = el("button", { type: "button", class: "btn grid-tool", text: "Copy" });
   copy.addEventListener("click", async () => {
     const out = await copyText(pretty);
     status.textContent = out.message;
   });
 
-  const download = el("button", { type: "button", class: "grid-tool", text: "Download .json" });
+  const download = el("button", { type: "button", class: "btn grid-tool", text: "Download .json" });
   if (unparsed) {
     download.disabled = true;
     download.setAttribute("disabled", "");
@@ -131,7 +134,7 @@ export function pgPlanCell(server, row) {
   const draw = () => {
     while (host.firstChild) host.removeChild(host.firstChild);
     const open = openPlans.has(key);
-    const button = el("button", { type: "button", class: "grid-tool", text: open ? "Hide plan" : "Plan" });
+    const button = el("button", { type: "button", class: "btn grid-tool", text: open ? "Hide plan" : "Plan" });
     button.setAttribute("aria-expanded", open ? "true" : "false");
     button.setAttribute("title", "Show the captured plan JSON");
     button.addEventListener("click", () => {

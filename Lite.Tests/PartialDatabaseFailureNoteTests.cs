@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Lite.Tests;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -142,7 +143,7 @@ public class PartialDatabaseFailureNoteTests
     [InlineData("Lite/Services/RemoteCollectorService.DefinitionRunner.cs")]
     public void BothRunnersComposeThePartialFailureNote(string relativePath)
     {
-        var source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
+        var source = SplitRepoFile.ReadAllText(Path.Combine(RepoRoot(), relativePath));
 
         Assert.Contains("EnumeratedCollectorDriver.BuildPartialFailureNote(", source, StringComparison.Ordinal);
         Assert.Contains("EnumeratedCollectorDriver.MergeNotes(", source, StringComparison.Ordinal);

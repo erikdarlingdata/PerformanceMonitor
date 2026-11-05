@@ -33,7 +33,7 @@ public sealed class DarlingMcpSignatureMergeTools
 
     internal const string PreconditionMessage =
         "The service's mcp store role may not add rows to config.investigation_signature_merges. A bring-your-own store needs " +
-        "Darling/tools/provision-roles.sql re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
+        DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
 
     [McpServerTool(Name = "merge_deadlock_signatures"), Description(
         "Agent arm: needs agent_action, request's server only. Merges one deadlock signature into another, so the rollup, the agent gate and the digest count them as one. Changes the monitoring store only. " +
@@ -42,7 +42,7 @@ public sealed class DarlingMcpSignatureMergeTools
         "merged_into from then on, with its past days. Merges are one level deep: refused as merge_chain when merged_into is itself merged away " +
         "or signature has signatures merged into it, as already_merged when signature is already merged, and as unknown_signature when " +
         "either was not counted in the last 30 days. The reason is the agent_action reason (writes arm: the reason argument, required). " +
-        "A merge is journaled and undone from Agent changes, which keeps the row and splits the counts again. Answers status merged " +
+        "A merge is journaled (actor mcp on the writes arm) and undone from Agent changes, which keeps the row and splits the counts again. Answers status merged " +
         "with merge_id, previous (the signature was counted as itself), undo null and an undo_note naming where the undo is (no tool call undoes a merge), refused with a reason, or precondition (the store role lacks the grant).")]
     public static Task<string> MergeDeadlockSignatures(
         NpgsqlDataSource postgres,
@@ -77,14 +77,21 @@ public sealed class DarlingMcpSignatureMergeTools
 
             if (!gated)
             {
-                await using var connection = await postgres.OpenConnectionAsync(ct);
+                /* #7185: the writes arm journals the merge like the gated arm does (an action_called and an action_done row, no request), so Agent
+                   changes lists it and its undo works. Those rows are the store owner's alone, so the merge and its rows run in one transaction on
+                   the owner's connection. A host with no owner source (a test host) merges as the mcp login and the answer says it has no undo. */
+                var owner = seat?.Owner?.Read();
+                await using var connection = await (owner ?? postgres).OpenConnectionAsync(ct);
                 await using var transaction = await connection.BeginTransactionAsync(ct);
                 await DeadlockSignatureStore.LockMergesAsync(connection, transaction, resolved.ServerId, ct);
                 if (await DeadlockSignatureStore.CheckMergeAsync(connection, transaction, resolved.ServerId, signature, merged_into, ct) is { } problem)
                     return Refused(problem.Code, problem.Message);
                 var id = await DeadlockSignatureStore.InsertMergeAsync(connection, transaction, resolved.ServerId, signature, merged_into, reason!.Trim(), "mcp", ct);
+                if (owner is not null)
+                    await InvestigationRequestStore.JournalDirectChangeAsync(connection, transaction, DateTime.UtcNow, resolved.ServerId, "mcp", reason.Trim(),
+                        ToolName, SignatureMergeImage.Kind, signature, JsonSerializer.Serialize(new SignatureMergeImage(id, signature, merged_into)), ct);
                 await transaction.CommitAsync(ct);
-                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, id);
+                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, id, journaled: owner is not null);
             }
 
             _ = InvestigationToolCore.ParseAgentAction(agent_action, out var action);
@@ -112,7 +119,7 @@ public sealed class DarlingMcpSignatureMergeTools
                     }, ct, seat.NamedAgentNames);
                 if (outcome.Refusal is { } refusal)
                     return DarlingAgentActionGate.RefusalAnswer(refusal);
-                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, mergeId);
+                return Answer(resolved.DisplayName, resolved.ServerId, signature, merged_into, mergeId, journaled: true);
             }
             catch (AgentToolOutcomeException ex)
             {
@@ -129,7 +136,7 @@ public sealed class DarlingMcpSignatureMergeTools
         }
     }
 
-    private static string Answer(string server, int serverId, string signature, string mergedInto, long mergeId) =>
+    private static string Answer(string server, int serverId, string signature, string mergedInto, long mergeId, bool journaled) =>
         JsonSerializer.Serialize(new
         {
             status = "merged",
@@ -140,7 +147,11 @@ public sealed class DarlingMcpSignatureMergeTools
             merge_id = mergeId,
             previous = new { signature, counted_as = signature, merged_into = (string?)null },
             undo = (string?)null,
-            undo_note = "No MCP tool call undoes a merge: undo it from Agent changes (the merge is journaled there), which keeps the row and splits the counts again.",
-            message = "The signature is counted as merged_into from now on. Undo it from Agent changes to split the counts again.",
+            undo_note = journaled
+                ? "No MCP tool call undoes a merge: undo it from Agent changes (the merge is journaled there), which keeps the row and splits the counts again."
+                : "No MCP tool call undoes a merge, and this one was not journaled (the service has no store owner connection), so Agent changes does not list it either.",
+            message = journaled
+                ? "The signature is counted as merged_into from now on. Undo it from Agent changes to split the counts again."
+                : "The signature is counted as merged_into from now on. This merge has no undo.",
         }, McpHelpers.JsonOptions);
 }

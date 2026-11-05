@@ -25,7 +25,7 @@
          CA1001: the copied CorrelatedTimelineLanesControl owns the disposable crosshair manager but is
          deliberately NOT disposable (WPF fires Unloaded transiently — see the control's header), matching
          Lite's suppression. -->
-    <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;NU1701;CA1001;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
+    <NoWarn>$(NoWarn);NU1701;CA1001</NoWarn>
     <WarningsAsErrors>CS4014</WarningsAsErrors>
     <!-- #6244: stamp the git commit into this assembly's informational version (3.10.0+sha), which Help > About shows.
          Directory.Build.props turns the source-revision suffix off tree-wide so the shipped apps keep a clean version

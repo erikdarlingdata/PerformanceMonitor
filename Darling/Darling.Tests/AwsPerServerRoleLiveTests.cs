@@ -145,7 +145,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -208,7 +208,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -279,7 +279,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         string? login = null;
         var bodySucceeded = false;
         try
@@ -319,7 +319,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -383,7 +383,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -439,7 +439,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         string? login = null;
         var bodySucceeded = false;
         try
@@ -495,7 +495,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var bodySucceeded = false;
         try
         {
@@ -523,7 +523,7 @@ public sealed class AwsPerServerRoleLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live AWS role tests (each mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         string? login = null;
         var bodySucceeded = false;
         try

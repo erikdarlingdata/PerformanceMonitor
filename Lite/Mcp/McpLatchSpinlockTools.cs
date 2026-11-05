@@ -71,13 +71,16 @@ public sealed class McpLatchSpinlockTools
                snapshot's population. */
             var rows = await dataService.GetLatchStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "latch_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "latch_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range."),
+                    dataService, QueryWindowRelation.LatchStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "latch_stats");
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -110,7 +113,8 @@ public sealed class McpLatchSpinlockTools
                     wait_ms_per_second = PerSecond(r.DeltaWaitTimeMs, r.SampleIntervalSeconds),
                     interval_seconds = KnownInterval(r.SampleIntervalSeconds)
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.LatchStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "latch_stats");
         }
         catch (Exception ex)
         {
@@ -141,13 +145,16 @@ public sealed class McpLatchSpinlockTools
             /* #3653: limit + 1 fetched, the extra row read as truncation — see get_latch_stats. */
             var rows = await dataService.GetSpinlockStatsSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, limit: limit + 1);
             if (rows.Count == 0)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "spinlock_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "spinlock_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range."),
+                    dataService, QueryWindowRelation.SpinlockStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "spinlock_stats");
 
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -171,7 +178,8 @@ public sealed class McpLatchSpinlockTools
                     spins_per_second = PerSecond(r.DeltaSpins, r.SampleIntervalSeconds),
                     interval_seconds = KnownInterval(r.SampleIntervalSeconds)
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.SpinlockStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "spinlock_stats");
         }
         catch (Exception ex)
         {

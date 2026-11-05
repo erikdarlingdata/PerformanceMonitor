@@ -39,7 +39,7 @@ public sealed class CiShardCommandLineBudgetTests
         Assert.True(int.Parse(budget.Groups["n"].Value) <= MaxBudget,
             $"'{stepName}' budget {budget.Groups["n"].Value} leaves less than 2,767 characters under the 32,767 limit.");
 
-        Assert.Matches(@"(?s)foreach\s*\(\$chunk\s+in\s+\$chunks\)\s*\{.*dotnet\s+run\s+--project\s+\S+.*@chunkArgs", step);
+        Assert.Matches(@"(?s)foreach\s*\(\$chunk\s+in\s+\$chunks\)\s*\{.*(dotnet\s+run\s+--project\s+\S+|&\s+\$TestRunner).*@chunkArgs", step);
         Assert.Matches(@"-gt\s+\$argBudget", step);
     }
 
@@ -50,7 +50,7 @@ public sealed class CiShardCommandLineBudgetTests
     {
         var step = ReadStep(stepName);
 
-        foreach (Match run in Regex.Matches(step, @"dotnet\s+run\s+[^\r\n]*"))
+        foreach (Match run in Regex.Matches(step, @"(dotnet\s+run|&\s+\$TestRunner)\s+[^\r\n]*"))
         {
             if (run.Value.Contains("-list classes/json", StringComparison.Ordinal))
             {

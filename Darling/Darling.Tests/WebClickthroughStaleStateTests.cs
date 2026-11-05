@@ -94,6 +94,68 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal(detail, agent.GetProperty("detailTitle").GetString());
     }
 
+    /// <summary>
+    /// #7395: on the server page a long tile detail (20 overdue backup items) stops at about three lines and opens on demand with the full text on its
+    /// title, a short one shows in full, and the fleet card's tiles are left as they were built.
+    /// </summary>
+    [Fact]
+    public void TheServerPageTiles_ClampALongDetailAndOpenItOnDemand_AndLeaveShortOnesAndTheFleetCardAlone()
+    {
+        var r = Run("serverTiles");
+        var server = r.GetProperty("server").EnumerateArray().ToArray();
+        var protection = server.Single(t => t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal));
+        Assert.Equal("detail clamp-lines", protection.GetProperty("cls").GetString());
+        Assert.Equal("button", protection.GetProperty("role").GetString());
+        Assert.Equal("false", protection.GetProperty("expanded").GetString());
+        Assert.Equal(protection.GetProperty("textLen").GetInt32(), protection.GetProperty("titleLen").GetInt32());
+
+        /* The short tiles (CPU, Threads, the one Agent alerts gap) are not clamped: no class, no button role. */
+        foreach (var t in server.Where(t => t.TryGetProperty("cls", out _) && !t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal)))
+        {
+            Assert.DoesNotContain("clamp-lines", t.GetProperty("cls").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, t.GetProperty("role").ValueKind);
+        }
+
+        /* The fleet card keeps its one-line ellipsis: the same long detail has no clamp class and no button role. */
+        var card = r.GetProperty("fleetCard").EnumerateArray().Single(t => t.GetProperty("label").GetString()!.StartsWith("Protection", StringComparison.Ordinal));
+        Assert.Equal("detail", card.GetProperty("cls").GetString());
+        Assert.Equal(JsonValueKind.Null, card.GetProperty("role").ValueKind);
+
+        /* A click opens it, Enter closes it again, and each stops its event so a card around the tile is not also activated. */
+        Assert.Equal("false", r.GetProperty("before").GetString());
+        Assert.Equal("true", r.GetProperty("afterClick").GetString());
+        Assert.Equal("false", r.GetProperty("afterEnter").GetString());
+        Assert.Equal(2, r.GetProperty("stopped").GetInt32());
+    }
+
+    /// <summary>
+    /// #7395: a tile the reader opened stays open when the server head is drawn again (every poll and tab click), matched by its label
+    /// since its text changes. A tile that went short has nothing to reopen and starts closed if it grows back, and another server's head
+    /// (its own remembered set) starts closed.
+    /// </summary>
+    [Fact]
+    public void AnOpenedServerTile_StaysOpenWhenTheHeadIsDrawnAgain_AndStartsClosedOnAnotherServerOrAfterItWentShort()
+    {
+        var r = Run("serverTilesReopen");
+        Assert.Equal("false", r.GetProperty("closedAtFirst").GetString());
+        Assert.Equal("true", r.GetProperty("openedByClick").GetString());
+        // The CSS reads the open class (.detail.clamp-lines.open), not aria-expanded, so the class is what shows the tile open.
+        Assert.Contains("open", r.GetProperty("clsAfterClick").GetString()!.Split(' '));
+        Assert.Equal(["Protection"], r.GetProperty("labelsAfterClick").EnumerateArray().Select(l => l.GetString()).ToArray());
+
+        var poll = r.GetProperty("afterPoll");
+        Assert.Equal("true", poll.GetProperty("expanded").GetString());
+        Assert.Contains("clamp-lines", poll.GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Contains("open", poll.GetProperty("cls").GetString()!.Split(' '));
+        Assert.Single(r.GetProperty("labelsAfterPoll").EnumerateArray());
+
+        Assert.DoesNotContain("clamp-lines", r.GetProperty("afterShort").GetProperty("cls").GetString(), StringComparison.Ordinal);
+        Assert.Empty(r.GetProperty("labelsAfterShort").EnumerateArray());
+        Assert.Equal("false", r.GetProperty("afterRegrown").GetProperty("expanded").GetString());
+        Assert.DoesNotContain("open", r.GetProperty("afterRegrown").GetProperty("cls").GetString()!.Split(' '));
+        Assert.Equal("false", r.GetProperty("afterAnotherServer").GetProperty("expanded").GetString());
+    }
+
     /// <summary>#6828: the server header's Collectors chip counts a WARNING collector as a warning, not as healthy.</summary>
     [Fact]
     public void TheCollectorsChip_ShowsTheWarningCount_AndDoesNotCountWarningsAsHealthy()
@@ -121,13 +183,38 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal("Threadsn/a", Texts(r.GetProperty("box"))[1]);
     }
 
+    /// <summary>#7590: a server whose connect failed shows its last values as "last known" in the Unknown tone and a Collectors chip that says collection is waiting on the connection with the error, not "Stale" and not the stale-server n/a tiles.</summary>
+    [Fact]
+    public void AnUnreachableServer_ShowsLastKnownValuesAndCollectorsWaitingOnTheConnection()
+    {
+        var r = Run("unreachable");
+        var down = r.GetProperty("down");
+        var texts = Texts(down);
+
+        foreach (var i in new[] { 0, 1, 2 })
+        {
+            Assert.Contains("last known, 2h ago", texts[i], StringComparison.Ordinal);
+            Assert.Contains("sev-Unknown", down[i].GetProperty("cls").GetString(), StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("last collected", string.Concat(texts), StringComparison.Ordinal);
+        Assert.Equal("CollectorsWaitingwaiting on the connection · Login failed for user 'pm'.", texts[5]);
+        Assert.Contains("sev-Unknown", down[5].GetProperty("cls").GetString(), StringComparison.Ordinal);
+
+        Assert.Equal("CollectorsWaitingwaiting on the connection · server unreachable", Texts(r.GetProperty("downNeverCollected"))[5]);
+        Assert.Contains("last known, no value", Texts(r.GetProperty("downNeverCollected"))[0], StringComparison.Ordinal);
+
+        /* Only a stale server (no failed connect) keeps the n/a tiles. */
+        Assert.StartsWith("CollectorsStale", Texts(r.GetProperty("stale"))[5], StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AnOnlineServer_KeepsItsLiveValues()
     {
         var online = Texts(Run("cards").GetProperty("online"));
         Assert.Equal("Total CPU0%SQL 0%", online[0]);
         Assert.StartsWith("Threads77 free", online[1], StringComparison.Ordinal);
-        Assert.StartsWith("Memoryok", online[2], StringComparison.Ordinal);
+        Assert.StartsWith("MemoryOK", online[2], StringComparison.Ordinal);
     }
 
     [Fact]

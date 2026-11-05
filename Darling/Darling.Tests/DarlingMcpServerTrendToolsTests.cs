@@ -39,6 +39,22 @@ public sealed class DarlingMcpServerTrendToolsTests
         Assert.Contains("DarlingMcpServerTrendTools", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"), StringComparison.Ordinal);
     }
 
+    /// <summary>#7586: every figure was rounded to 2 places, so a file moving 0.0042 MB/s read 0.00 and a steady small rate jumped between 0.01 and
+    /// 0.02. A rate keeps 4 significant digits (and never fewer than 2 places); a latency or any other figure keeps 2 places.</summary>
+    [Theory]
+    [InlineData("write_mb_per_sec", 0.00423456, 0.004235)]
+    [InlineData("read_mb_per_sec", 0.01234, 0.01234)]
+    [InlineData("collisions_per_second", 1234.5678, 1234.57)]
+    [InlineData("wait_time_ms_per_second", 12.3456, 12.35)]
+    [InlineData("write_mb_per_sec", 0, 0)]
+    [InlineData("avg_read_latency_ms", 0.0042345, 0)]
+    [InlineData("avg_read_latency_ms", 12.3456, 12.35)]
+    [InlineData("size_mb", 0.016, 0.02)]
+    public void ARate_Keeps4SignificantDigits_AndEveryOtherFigureKeeps2Places(string key, double value, double expected)
+    {
+        Assert.Equal(expected, DarlingMcpServerTrendTools.Rounded(value, DarlingMcpServerTrendTools.IsRate(key)));
+    }
+
     [Fact]
     public void TheMetricList_IsTheElevenShipped_AndEveryOneIsNamedInTheDescription()
     {

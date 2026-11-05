@@ -217,6 +217,53 @@ public sealed class DarlingSelfAlertTests
             return Task.CompletedTask;
         }
 
+        /// <summary>#7068: the open fire row the history answers <c>GetOpenFireAsync</c> with (null: none), and the metrics asked.</summary>
+        public AlertHistoryFire? OpenFire { get; set; }
+
+        public List<string> OpenFireAsked { get; } = new();
+
+        /// <summary>#7068: when set, the open fire per (server key, metric) instead of <see cref="OpenFire"/>; a failing read when
+        /// <see cref="OpenFireThrows"/>. Every question is kept in <see cref="OpenFireQuestions"/> with the resolution titles asked.</summary>
+        public Func<string, string, AlertHistoryFire?>? OpenFireFor { get; set; }
+
+        public bool OpenFireThrows { get; set; }
+
+        public List<(string ServerKey, string Metric, string[] Titles)> OpenFireQuestions { get; } = new();
+
+        public Task<AlertHistoryFire?> GetOpenFireAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            OpenFireAsked.Add(metricName);
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return Task.FromResult(OpenFireFor is null ? OpenFire : OpenFireFor(serverId, metricName));
+        }
+
+        /// <summary>#7068: every fire and clear the history answers <c>GetStandingAsync</c> with, per (server key, metric); when null the
+        /// standing read is the one open fire above.</summary>
+        public Func<string, string, AlertHistoryStanding>? StandingFor { get; set; }
+
+        public async Task<AlertHistoryStanding> GetStandingAsync(
+            string serverId, string metricName, IReadOnlyList<string> resolutionMetricNames, DateTime? sinceUtc, DateTime? untilUtc, bool countMuted = true)
+        {
+            if (StandingFor is null)
+            {
+                return AlertHistoryStanding.Of(await GetOpenFireAsync(serverId, metricName, resolutionMetricNames, sinceUtc, untilUtc, countMuted));
+            }
+
+            OpenFireQuestions.Add((serverId, metricName, resolutionMetricNames.ToArray()));
+            if (OpenFireThrows)
+            {
+                throw new InvalidOperationException("history is down");
+            }
+
+            return StandingFor(serverId, metricName);
+        }
+
         public Task<DateTime?> GetLastEmailSentUtcAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
 
@@ -311,6 +358,7 @@ public sealed class DarlingSelfAlertTests
         public bool BackupOverdueEnabled { get; set; }
         public bool LogBackupOverdueEnabled { get; set; }
         public bool CheckDbOverdueEnabled { get; set; }
+        public Func<DatabaseProtectionGlobalThresholds>? ProtectionThresholds { get; set; }
         /// <summary>#6874: the Agent Alert Gaps switch, read live. Default off, the shipped default.</summary>
         public bool AgentAlertSetupEnabled { get; set; }
         /// <summary>#6875: the Identity Capacity switch, read live. Default off, the shipped default. The bars default to 70 and 90, and an override
@@ -324,7 +372,18 @@ public sealed class DarlingSelfAlertTests
         /// can be asserted rather than assumed.</summary>
         public CapturingLogger Log { get; } = new();
 
-        public DarlingSelfAlertEvaluator Build() => new(
+        public DarlingSelfAlertEvaluator Build()
+        {
+            var e = BuildCore();
+            e.HoldSelfHealth = HoldSelfHealth;
+            return e;
+        }
+
+        /// <summary>#7086: false (the default here) lets the self-health conditions page on a first breach, as the older tests
+        /// in this file assume. The hold tests set it true.</summary>
+        public bool HoldSelfHealth { get; set; }
+
+        private DarlingSelfAlertEvaluator BuildCore() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
             logger: Log, utcNow: () => Now,
@@ -344,6 +403,7 @@ public sealed class DarlingSelfAlertTests
             backupOverdueEnabled: () => BackupOverdueEnabled,
             logBackupOverdueEnabled: () => LogBackupOverdueEnabled,
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
+            protectionThresholds: ProtectionThresholds,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
             resolveThreshold: ResolveThreshold);
     }
@@ -2998,6 +3058,104 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
+    /// #7183: a recurring window (#7040) and a digest rule (#7083) are permanent by design, so neither is a
+    /// forgotten rule however old, blanket or scoped. A plain open-ended mute of the same age still is.
+    /// </summary>
+    [Fact]
+    public async Task StaleMute_RecurringAndDigestRules_AreNotFlagged_HoweverOldOrBlanket()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var blanketRecurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring-blanket");
+        MakeRecurring(blanketRecurring);
+        var scopedRecurring = Mute(StaleDays + 30, id: "rule-recurring-scoped");
+        MakeRecurring(scopedRecurring);
+        var blanketDigest = Mute(StaleDays + 30, metric: null, id: "rule-digest-blanket");
+        blanketDigest.Action = MuteRuleActions.Digest;
+        var scopedDigest = Mute(StaleDays + 30, id: "rule-digest-scoped");
+        scopedDigest.Action = MuteRuleActions.Digest;
+
+        await e.ApplyStaleMuteRulesAsync(
+            new[] { blanketRecurring, scopedRecurring, blanketDigest, scopedDigest }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task StaleMute_PlainOpenEndedMutes_StillFlag_BesideRecurringAndDigestRules()
+    {
+        var h = new Harness();
+
+        var recurring = Mute(StaleDays + 30, metric: null, id: "rule-recurring");
+        MakeRecurring(recurring);
+        var digest = Mute(StaleDays + 30, metric: null, id: "rule-digest");
+        digest.Action = MuteRuleActions.Digest;
+
+        await h.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, id: "rule-plain-scoped") }, Ct);
+
+        var scoped = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("1", scoped.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Warning, scoped.Severity);
+        Assert.Contains("rule-plain-scoped", scoped.DetailText);
+        Assert.DoesNotContain("rule-recurring", scoped.DetailText);
+        Assert.DoesNotContain("rule-digest", scoped.DetailText);
+
+        var h2 = new Harness();
+        await h2.Build().ApplyStaleMuteRulesAsync(
+            new[] { recurring, digest, Mute(StaleDays + 1, metric: null, id: "rule-plain-blanket") }, Ct);
+
+        var blanket = Assert.Single(h2.Deliverer.Outcomes);
+        Assert.Equal("1", blanket.CurrentValue);
+        Assert.Equal(AlertSeverityLevel.Critical, blanket.Severity);
+        Assert.Contains("rule-plain-blanket", blanket.DetailText);
+    }
+
+    /// <summary>
+    /// #7183: the validator accepts a recurring window of 00:00-23:59 every day, or 00:01-00:00 across midnight,
+    /// so those schedules mute nearly around the clock with no expiry. They are no bound, so the stale check
+    /// still reports them. A window that leaves an hour a day unmuted, or skips a day, is bounded and is not reported.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 0, 23, 59, null, true)]
+    [InlineData(0, 1, 0, 0, null, true)]
+    [InlineData(0, 0, 23, 59, 0x7F, true)]
+    [InlineData(1, 0, 5, 0, null, false)]
+    [InlineData(0, 0, 23, 59, 0x40, false)]
+    [InlineData(0, 1, 0, 0, 0x3F, false)]
+    [InlineData(0, 0, 22, 59, null, false)]
+    public async Task StaleMute_RecurringWindow_IsReportedOnlyWhenItIsNoRealBound(
+        int startH, int startM, int endH, int endM, int? days, bool reported)
+    {
+        var h = new Harness();
+        var rule = Mute(StaleDays + 30, metric: null, id: "rule-recurring-window");
+        rule.RecurStartTime = new TimeOnly(startH, startM);
+        rule.RecurEndTime = new TimeOnly(endH, endM);
+        rule.RecurDays = days;
+        rule.RecurTimeZone = "UTC";
+
+        await h.Build().ApplyStaleMuteRulesAsync(new[] { rule }, Ct);
+
+        if (reported)
+        {
+            var outcome = Assert.Single(h.Deliverer.Outcomes);
+            Assert.Contains("rule-recurring-window", outcome.DetailText);
+        }
+        else
+        {
+            Assert.Empty(h.Deliverer.Outcomes);
+        }
+    }
+
+    private static void MakeRecurring(MuteRule rule)
+    {
+        rule.RecurStartTime = new TimeOnly(1, 0);
+        rule.RecurEndTime = new TimeOnly(5, 0);
+        rule.RecurTimeZone = "UTC";
+    }
+
+    /// <summary>
     /// #3432: a rule taken out of force through <c>set_mute_rule_enabled</c> and put back is stale to THIS
     /// condition on the age it actually has. The claim is driven through the real evaluator rather than
     /// asserted about a timestamp, because what a reset costs is measured in what this alert does and does
@@ -3774,9 +3932,12 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal("(matches all alerts)", unconstrained.Summary);
         Assert.True(unconstrained.Matches(anyAlert));
 
-        /* Not a match dimension: the rule's identity and the operator's note. Everything else that is a
-           writable string IS one, which is what makes this loop cover a dimension added later. */
-        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason) };
+        /* Not a match dimension: the rule's identity and the operator's note. RecurTimeZone is not one either:
+           it names the clock a recurring window reads (#7040) and narrows when a rule applies, not which alerts
+           it matches. Action (#7083) is not one either: it says what a matching alert is handed to (a mute or the
+           daily digest), not which alerts match. Everything else that is a writable string IS one, which is what
+           makes this loop cover a dimension added later. */
+        var notDimensions = new[] { nameof(MuteRule.Id), nameof(MuteRule.Reason), nameof(MuteRule.RecurTimeZone), nameof(MuteRule.Action) };
         var dimensions = typeof(MuteRule).GetProperties()
             .Where(p => p.PropertyType == typeof(string) && p.CanWrite && p.CanRead)
             .Where(p => !notDimensions.Contains(p.Name, StringComparer.Ordinal))
@@ -4189,6 +4350,92 @@ public sealed class DarlingSelfAlertTests
 
         await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
         Assert.Equal(2, rearm.Calls.Count);  /* re-stuck after recovery -> re-armed fresh */
+    }
+
+    /* ---------------- #7076: the restart seed of a stuck policy job, and the close of an ended episode ---------------- */
+
+    private static Harness HarnessWithOpenJobRow(string? step)
+    {
+        var h = new Harness();
+        h.History.OpenFireFor = (key, metric) => metric == "Compression Job Stuck" && key == "compressjob:1001"
+            ? new AlertHistoryFire(
+                h.Now.AddDays(-2), 0,
+                step is null ? null : AlertContextSerializer.Serialize(new AlertContext { PolicyJobStep = step }))
+            : null;
+        return h;
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_SeededReArmed_SendsTheReHungPageOnce_WithoutReArmingAgain()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepReArmed);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("re-hung after self-heal", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.Equal(AlertContextSerializer.PolicyJobStepEscalated, fired.Context?.PolicyJobStep);
+
+        /* The re-hang was announced, so the job is now escalated: the next pass sends nothing and still does not re-arm. */
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        Assert.Empty(rearm.Calls);
+        Assert.Single(h.Deliverer.Outcomes);
+    }
+
+    [Theory]
+    [InlineData("Escalated")]
+    [InlineData(null)]
+    public async Task CompressionJobs_FirstPass_SeededEscalated_NeitherReArmsNorPages(string? step)
+    {
+        var h = HarnessWithOpenJobRow(step);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+        await e.ApplyPolicyJobsStuckAsync(Stuck(1001), rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Contains(h.History.OpenFireQuestions, q => q.ServerKey == "compressjob:1001" && q.Metric == "Compression Job Stuck");
+    }
+
+    [Fact]
+    public async Task CompressionJobs_FirstPass_HealthyJobWithAnOpenRow_WritesItsResolution_SoALaterStickIsANewEpisode()
+    {
+        var h = HarnessWithOpenJobRow(AlertContextSerializer.PolicyJobStepEscalated);
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal("Compression Job Recovered", resolved.MetricName);
+        Assert.Equal("compressjob:1001", resolved.AlertKey);
+
+        /* Checked once: the same healthy job on the next pass reads the history no more. */
+        var asked = h.History.OpenFireQuestions.Count;
+        await e.ApplyPolicyJobsStuckAsync(healthy, rearm.Delegate, Ct);
+        Assert.Equal(asked, h.History.OpenFireQuestions.Count);
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CompressionJobs_HealthyJobWithNoOpenRow_WritesNoResolution()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var healthy = Reading(StuckJobs(), new PolicyJobRunReading(
+            1001, TimescaleSupport.StorePolicyJobFamily.Compression, "wait_stats", Held: false, LastRunStatus: null, TotalFailures: 0));
+
+        await e.ApplyPolicyJobsStuckAsync(healthy, new RearmRecorder().Delegate, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Empty(h.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -5695,7 +5942,6 @@ public sealed class DarlingSelfAlertTests
         var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
         Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
         var handlerCode = source[(start + handler.Index)..end];
-        var handlerRaw = raw[(start + handler.Index)..end];
 
         var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
         Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
@@ -5705,14 +5951,14 @@ public sealed class DarlingSelfAlertTests
             "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
         var checkEnd = check.Index + check.Length;
 
-        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        /* #7067: the connect-failure log lines (first failure, changed cause, hourly "still failing") moved into
+           LogConnectFailure, which the handler calls once. The ordering rule is unchanged: that call, like the count and
+           the backoff, comes after the Retired return. */
         var after = new (string What, int At)[]
         {
             ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
             ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
-            ("the first log call", firstLog.Success ? firstLog.Index : -1),
-            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
-            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the connect-failure log call", handlerCode.IndexOf("LogConnectFailure(", StringComparison.Ordinal)),
             ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
         };
 
@@ -5837,25 +6083,25 @@ public sealed class DarlingSelfAlertTests
             logger: null,
             utcNow: () => now);
 
-        /* Fire: total CPU 90 >= 80, held for AlertEngine.CpuBreachSamples distinct samples (#3282 — one
+        /* Fire: total CPU 90 >= 80, held for AlertEngine.SqlCpuBreachSamples distinct samples (#3282 — one
            sample over the bar is no longer an incident). */
         var sampleAt = new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
-        for (var i = 0; i < AlertEngine.CpuBreachSamples; i++)
+        for (var i = 0; i < AlertEngine.SqlCpuBreachSamples; i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 90, 90, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
 
         Assert.Single(deliverer.Outcomes);
         Assert.Empty(history.Records); /* no resolution yet */
 
-        /* Clear: CPU back below threshold for AlertEngine.CpuClearSamples distinct samples => the engine
+        /* Clear: CPU back below threshold for fifteen minutes of distinct samples => the engine
            emits a resolution => a history row is written. */
         now = now.AddMinutes(1);
-        for (var i = 0; i < AlertEngine.CpuClearSamples; i++)
+        for (var i = 0; i < ((int)AlertEngine.SqlCpuClearHold.TotalMinutes + 1); i++)
         {
             sampleAt = sampleAt.AddMinutes(1);
-            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt), Ct);
+            await engine.EvaluateServerAsync(new AlertServerSnapshot(Key, Name, IsOnline: true, 10, 10, false, false, sampleAt) { CpuSampleUtcOnly = sampleAt }, Ct);
         }
         var resolved = Assert.Single(history.Records);
         Assert.Equal("CPU Resolved", resolved.MetricName);

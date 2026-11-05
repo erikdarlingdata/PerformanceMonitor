@@ -23,8 +23,8 @@
  * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
-import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash } from "../util.js";
+import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
+         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -247,7 +247,12 @@ function detailCell(a) {
       mount(placeholder, detailBody(a, items));
       return;
     }
-    mount(placeholder, detailBody(a));
+    /* #7084 part 4: any other alert asks get_alert_details too, once, on its first open. The server decides which alerts
+     * findings attach to, so the page keeps no list of its own: it shows the findings the reply carries in attached_findings
+     * (empty for an alert nothing attaches to). A failed or empty read leaves the list off. */
+    mount(placeholder, [loadingStrip()]);
+    const read = await alertDetailRead(a);
+    mount(placeholder, detailBody(a, null, read?.attached_findings));
   });
   return node;
 }
@@ -261,12 +266,13 @@ function isAnalysisAlert(a) {
   return typeof a.metric_name === "string" && a.metric_name.startsWith("Analysis:");
 }
 
-function alertAdvice(a) {
+/* get_alert_details for one row: { details, attached_findings }, or null when it could not be read. Cached like the advice. */
+function alertDetailRead(a) {
   const key = alertKey(a);
   if (!adviceCache.has(key)) {
     const pending = readTool("get_alert_details", { server_id: a.server_id, metric_name: a.metric_name, alert_time: a.alert_time })
       .then((res) => {
-        if (res.kind === "data") return Array.isArray(res.data?.details) && res.data.details.length > 0 ? res.data.details : null;
+        if (res.kind === "data") return res.data ?? null;
         if (res.kind === "empty") return null;
         adviceCache.delete(key);
         return null;
@@ -274,6 +280,11 @@ function alertAdvice(a) {
     adviceCache.set(key, pending);
   }
   return adviceCache.get(key);
+}
+
+async function alertAdvice(a) {
+  const read = await alertDetailRead(a);
+  return Array.isArray(read?.details) && read.details.length > 0 ? read.details : null;
 }
 
 /* #5642: "Newest Query Store sample: 15:43:29 UTC, 5m 20s old", or "CPU reading: 15:43:29 UTC, 5m 20s old" for a source that
@@ -297,7 +308,7 @@ function sampleAgeLine(sample) {
 }
 
 /* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
-function detailBody(a, details) {
+function detailBody(a, details, attached) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   /* #5241: an Analysis row's stored context holds advice; opening the row fetches it (detailCell) as `details`: the
    * structured items the desktop's Alert Detail window shows - heading, labelled fields, the advice prose and
@@ -321,6 +332,13 @@ function detailBody(a, details) {
     body.push(el("div", { class: "detail-fields" }, fields.map(fieldRow)));
   } else if (hasDetail) {
     body.push(el("div", { class: "detail-raw", text: shownDetail }));
+  }
+  /* #7084 part 4: the analysis findings held back from paging because this engine alert was open (get_alert_details'
+   * attached_findings, read when the row opened): each finding's time and story. */
+  if (Array.isArray(attached) && attached.length > 0) {
+    const rows = [["", "Attached findings"]];
+    for (const f of attached) rows.push([parseUtc(f.alert_time)?.toLocaleString() ?? String(f.alert_time), f.metric_name]);
+    body.push(el("div", { class: "detail-fields" }, rows.map(fieldRow)));
   }
   /* #5825: what a resolution row's send did. get_alert_history sets the three fields on such a row only. */
   if (a.resolution_outcome) {
@@ -617,7 +635,7 @@ async function dismissRows(state, rows) {
     if (res.kind === "data" && res.data && typeof res.data === "object") {
       for (const k of Object.keys(totals)) totals[k] += Number(res.data[k]) || 0;
     } else if (res.status === 403) {
-      failure = res.message && !/^Request failed/.test(res.message) ? res.message : "This session is read-only, so nothing was dismissed.";
+      failure = res.message && !res.message.startsWith(NO_MESSAGE_TEXT_PREFIX) ? res.message : "This session is read-only, so nothing was dismissed.";
     } else if (res.kind === "auth") {
       failure = res.message || "Your session has expired. Sign in again.";
     } else {
@@ -862,6 +880,14 @@ async function refreshInvestigations(state) {
  * the new page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at
  * all. A changed window or server reconciles the same way: rows that left the window are removed, new ones land
  * in order. A reply that arrives after a newer request was made is dropped. */
+/* #7410: an empty alert list. When the default filter hid dismissed alerts, the reply carries their count in `hints`, and the page says
+   that in its own words (the tick box it names is on this page) with the tool's sentence behind "More detail". */
+export function emptyAlertsStrip(res) {
+  const n = res.hints && Number(res.hints.dismissed_excluded_count);
+  if (n > 0) return plainEmptyStrip(res, n + (n === 1 ? " alert in this range was dismissed, so it is hidden." : " alerts in this range were dismissed, so they are hidden.") + " Tick Show dismissed to see them.");
+  return emptyStrip(res.message);
+}
+
 async function refreshAlerts(state) {
   /* #5632 Phase A: an open Investigations panel is re-read with the alerts; a closed one is not read at all. */
   if (state.investigations && state.investigations.panel.open) await refreshInvestigations(state.investigations);
@@ -878,7 +904,7 @@ async function refreshAlerts(state) {
     state.truncated = false;
     /* The checked set survives a failed read; it is pruned only against a successful one. */
     updateDismissBar(state);
-    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
+    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyAlertsStrip(res));
     return;
   }
   state.alerts = trimAlertsToStart(res.data.alerts || [], req.startMs);

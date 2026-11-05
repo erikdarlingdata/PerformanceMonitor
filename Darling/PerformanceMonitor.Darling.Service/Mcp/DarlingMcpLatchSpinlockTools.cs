@@ -76,11 +76,17 @@ public sealed class DarlingMcpLatchSpinlockTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
             var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
+                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "latch_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
+                    /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
+                       keys ride on it under hints, as get_waiting_tasks writes them. A failed probe leaves the hints off. */
+                    ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.",
+                        (await DarlingMcpWindowNotice.ReadAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "latch_stats", resolved.ServerName, windowStart, now, cancellationToken),
+                            windowStart, now, "latch_stats", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var latches = rows.Select(r => new
             {
@@ -123,9 +129,8 @@ public sealed class DarlingMcpLatchSpinlockTools
 
             /* #4966: the window-floor notice. The read windows on collection_time over the raw latch_stats (through its view, no rollup tier),
                the column the probe reads. A rank cap hides no time range, so the coverage rule applies on a capped page too and
-               the two flags are independent. Only a data answer carries it; the no-rows answers above stay bare. A window of 90
+               the two flags are independent. A data answer carries the keys at the top level; a no-rows answer (#7010) carries them under hints, and a never-collected one stays bare. A window of 90
                minutes or less that answered rows starts no probe. */
-            var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "latch_stats", resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "latch_stats", logger: logger, cancellationToken: cancellationToken);
@@ -169,11 +174,17 @@ public sealed class DarlingMcpLatchSpinlockTools
         try
         {
             var now = windowEnd;
+            var windowStart = now.AddHours(-hours_back);
             var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
+                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "spinlock_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
+                    /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
+                       keys ride on it under hints, as get_waiting_tasks writes them. A failed probe leaves the hints off. */
+                    ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.",
+                        (await DarlingMcpWindowNotice.ReadAsync(
+                            () => DarlingMcpWindowNotice.Probe(postgres, "spinlock_stats", resolved.ServerName, windowStart, now, cancellationToken),
+                            windowStart, now, "spinlock_stats", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints());
 
             var spinlocks = rows.Select(r => new
             {
@@ -197,9 +208,8 @@ public sealed class DarlingMcpLatchSpinlockTools
 
             /* #4966: the window-floor notice. The read windows on collection_time over the raw spinlock_stats (through its view, no rollup tier),
                the column the probe reads. A rank cap hides no time range, so the coverage rule applies on a capped page too and
-               the two flags are independent. Only a data answer carries it; the no-rows answers above stay bare. A window of 90
+               the two flags are independent. A data answer carries the keys at the top level; a no-rows answer (#7010) carries them under hints, and a never-collected one stays bare. A window of 90
                minutes or less that answered rows starts no probe. */
-            var windowStart = now.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadAsync(
                 () => DarlingMcpWindowNotice.Probe(postgres, "spinlock_stats", resolved.ServerName, windowStart, now, cancellationToken),
                 windowStart, now, "spinlock_stats", logger: logger, cancellationToken: cancellationToken);

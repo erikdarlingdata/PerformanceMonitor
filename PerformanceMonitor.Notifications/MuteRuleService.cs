@@ -45,6 +45,21 @@ public class MuteRuleService
         }
     }
 
+    /// <summary>Whether a digest rule (#7083) is in force for <paramref name="context"/> now. Digest rules never mute:
+    /// <see cref="IsAlertMuted"/> ignores them, so a caller asks this second and only when the alert is not muted.</summary>
+    public bool IsInDigestWindow(AlertMuteContext context) => DigestWindowReason(context) is not null;
+
+    /// <summary>The reason line of the first digest rule in force for <paramref name="context"/> now (see <see cref="MuteRule.DigestHoldReason"/>),
+    /// or null when none is. The engines pass this as their digest-window delegate.</summary>
+    public string? DigestWindowReason(AlertMuteContext context)
+    {
+        var now = DateTime.UtcNow;
+        lock (_lock)
+        {
+            return _rules.FirstOrDefault(r => r.MatchesDigestAt(context, now))?.DigestHoldReason();
+        }
+    }
+
     public List<MuteRule> GetRules()
     {
         lock (_lock)
@@ -57,7 +72,7 @@ public class MuteRuleService
     {
         lock (_lock)
         {
-            return _rules.Where(r => r.Enabled && !r.IsExpired && !r.IsUpcomingAt(DateTime.UtcNow)).ToList();
+            return _rules.Where(r => r.IsInEffectAt(DateTime.UtcNow)).ToList();
         }
     }
 

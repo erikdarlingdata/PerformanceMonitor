@@ -277,6 +277,12 @@ public static partial class DarlingCliCommands
     public static bool IsSelfCheckPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--self-check-password-key", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The hidden verb <see cref="DarlingLaunchMemorySelfCheck"/> handles: <c>--self-check-launch-memory [&lt;expected-limit-mib&gt;]</c>
+    /// samples the Linux launch guard's reader once and fails unless it reads resident memory against the cgroup limit (#6995).
+    /// It is not in <see cref="UsageText"/>: the container smoke runs it, an operator has no use for it.</summary>
+    public static bool IsSelfCheckLaunchMemoryVerb(string arg) =>
+        string.Equals(arg, "--self-check-launch-memory", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The text <c>--reset-password-key</c> prints when the key was marked replaced. <paramref name="sealedPasswords"/>
     /// is how many saved passwords are sealed to the old key and must be entered again.</summary>
     public static string ResetPasswordKeyRestartSentence(int sealedPasswords) =>
@@ -409,7 +415,8 @@ public static partial class DarlingCliCommands
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
         || IsResetPasswordKeyVerb(arg)
-        || IsSelfCheckPasswordKeyVerb(arg);
+        || IsSelfCheckPasswordKeyVerb(arg)
+        || IsSelfCheckLaunchMemoryVerb(arg);
 
     /// <summary>
     /// Classifies the exe's command line from its FIRST argument (#1581): no args → run the host; a recognized
@@ -4540,7 +4547,7 @@ public static partial class DarlingCliCommands
     /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
     /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
-    private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
+    internal readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
     /// <summary>One file <see cref="TlsKeyFilesNamed"/> lists: the path as written, the setting that names it, and what
     /// its content has to be.</summary>
@@ -4952,7 +4959,7 @@ public static partial class DarlingCliCommands
     /// location when the config did not load.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
+    internal static List<HardenTarget> HardenTargets(string resolvedConfig, string dataDirectory, string? keyDirectory)
     {
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
@@ -4971,14 +4978,20 @@ public static partial class DarlingCliCommands
         if (!string.IsNullOrEmpty(storeRoot))
         {
             /* Operator-group traverse, never list: the operator walks through it to the admin and viewer credentials,
-               never to the rest. Mirrors DarlingManagedPostgres' own call. */
-            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+               never to the rest. Mirrors DarlingManagedPostgres' own call, which leaves a drive root alone (#7363): its
+               permissions are the whole drive's, and the files beside the data directory are hardened one by one below. */
+            if (!DarlingManagedPostgres.IsDriveRoot(storeRoot))
+            {
+                targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
+            }
+
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             /* The same posture the service applies on every start (DarlingManagedRoles.EnsureProvisionedAsync): the
                admin and viewer credentials are read by the operator's Viewer, the mcp credential only by the service. */
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the admin credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-viewer-credential.dpapi"), AllowInteractive: true, IsDirectory: false, "the viewer credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-mcp-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the mcp credential"));
+            targets.Add(new(Path.Combine(storeRoot, "pg-web-credential.dpapi"), AllowInteractive: false, IsDirectory: false, "the web credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
             /* #5700: the store's own TLS key, read only by the service like the mcp credential. Absent until the store
                has TLS on, and then skipped like every other store file that is not there. */
@@ -5061,6 +5074,15 @@ public static partial class DarlingCliCommands
 
         var targets = HardenTargets(resolvedConfig, dataDirectory, keyDirectory);
         var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (Path.GetDirectoryName(Path.GetFullPath(dataDirectory)) is { Length: > 0 } driveRootCandidate
+            && DarlingManagedPostgres.IsDriveRoot(driveRootCandidate))
+        {
+            output.WriteLine(
+                $"NOTE: the store directory {driveRootCandidate} is a drive root, so its permissions were not changed: they are the whole drive's. " +
+                "The credential files beside the data directory are hardened one by one below. " +
+                DarlingManagedPostgres.DriveRootMoveText(driveRootCandidate, dataDirectory));
+            output.WriteLine();
+        }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -9724,11 +9746,11 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
         output.WriteLine("the Retention Held alert resolves on the hour after that. To arm immediately instead, restart the");
         output.WriteLine("PerformanceMonitor Darling service: the same gate runs on the start path.");
         output.WriteLine();
-        output.WriteLine($"Do not let it wait a day. The hourly rollups carry their OWN retention policy ({TimescaleSupport.HourlyRetentionInterval}), already");
-        output.WriteLine("armed on these stores, which will trim the coverage this run just built when it next fires");
-        output.WriteLine("(roughly daily). The hourly re-evaluation, or a restart now, is what lets the raw policies arm off");
-        output.WriteLine("that coverage first. If the trim wins the race nothing is lost — raw is still held — and re-running");
-        output.WriteLine("this verb rebuilds it.");
+        /* #7114: this used to warn that a rollup's own retention could trim the coverage this run built before
+           the hourly re-evaluation armed off it, putting the hold back. The gate now checks a rollup whose own
+           retention is armed only as far back as that retention keeps, so that trim cannot re-hold anything. */
+        output.WriteLine("A rollup's own retention may trim the older days this run built before then. That does not undo it:");
+        output.WriteLine("the gate checks a rollup whose own retention is armed only as far back as that retention keeps.");
         return 0;
     }
 

@@ -294,6 +294,46 @@ LIMIT 1";
         return await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) ? reader.GetString(0) : null;
     }
 
+    /// <summary>One analysis finding held because an engine alert was open (#7084 part 4): its own row's time and metric,
+    /// and the routing reason it carries.</summary>
+    public sealed record AttachedFindingRead(DateTime AlertTimeUtc, string MetricName, string? Reason);
+
+    /// <summary>
+    /// The findings attached to one engine alert, oldest first (#7084 part 4). Read when the alert's detail opens, by the
+    /// alert's own identity (<paramref name="serverId"/>, <paramref name="metricName"/>, <paramref name="alertTimeUtc"/>): a
+    /// finding is a digest row on the same server inside the window after the fire, whose stored context names that metric
+    /// and time (<see cref="OpenEngineAlerts.Names"/>). Empty for a metric no finding attaches to, with no read.
+    /// </summary>
+    public static async Task<List<AttachedFindingRead>> GetAttachedFindingsAsync(
+        NpgsqlDataSource postgres, int serverId, string metricName, DateTime alertTimeUtc, CancellationToken cancellationToken = default)
+    {
+        var found = new List<AttachedFindingRead>();
+        if (!OpenEngineAlerts.IsAttachable(metricName))
+        {
+            return found;
+        }
+
+        await using var command = postgres.CreateCommand(OpenEngineAlerts.AttachedFindingsSql("config_alert_log"));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, alertTimeUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, OpenEngineAlerts.AttachedUntil(alertTimeUtc));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var contextJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (OpenEngineAlerts.Names(AlertContextSerializer.TryReadAttachedTo(contextJson), metricName, alertTimeUtc))
+            {
+                found.Add(new AttachedFindingRead(
+                    DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc), reader.GetString(1),
+                    AlertContextSerializer.TryReadRouting(contextJson)?.Reason));
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>One <see cref="AlertHistoryReadRow"/> from a reader positioned on a row of
     /// <see cref="AlertHistorySelectColumns"/> (both the page read and the first-row-after reads use it, so the
     /// two can never disagree about a column).</summary>
@@ -543,11 +583,23 @@ LIMIT 1";
         bool IdentityCapacityEnabled,
         int IdentityCapacityWarningPercent,
         int IdentityCapacityCriticalPercent,
-        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 reports per hour and 10, 60 seconds). */
+        /* #6927 (V228): the four blocking band tiers (double precision NOT NULL, 5, 20 waits per hour and 10, 60 seconds). */
         double BlockingWarnPerHour,
         double BlockingCriticalPerHour,
         double BlockingWarnWaitSeconds,
-        double BlockingCriticalWaitSeconds);
+        double BlockingCriticalWaitSeconds,
+        /* #7028 (V230): the two blocking band snapshot wait tiers (double precision NOT NULL, 0 means the tier is off). */
+        double BlockingWarnSnapshotWaitSeconds,
+        double BlockingCriticalSnapshotWaitSeconds,
+        /* #7041 (V232): the Daily Health Report's switch (boolean NOT NULL, default off), send time (time NOT NULL, 07:00, carried as HH:mm), zone (text, NULL = the service host's zone) and title (text, NULL = the shipped title). */
+        bool DailyReportEnabled,
+        string DailyReportSendAt,
+        string? DailyReportTimeZone,
+        string? DailyReportTitle,
+        /* #7611 (V245): the three Database Protection ages (integer NOT NULL: 168 hours, 60 minutes, 336 hours). APPENDED, same reason. */
+        int BackupOverdueThresholdHours,
+        int LogBackupOverdueThresholdMinutes,
+        int CheckDbOverdueThresholdHours);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -588,7 +640,10 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        client_timeouts_warning_multiple, client_timeouts_critical_multiple,
        agent_alert_gaps_enabled, backup_overdue_enabled, log_backup_overdue_enabled, checkdb_overdue_enabled,
        identity_capacity_enabled, identity_capacity_warning_percent, identity_capacity_critical_percent,
-       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds
+       blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
+       blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
+       daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -661,7 +716,16 @@ WHERE id = 1";
             /* #6875 (V224): the Identity Capacity switch and bars at 83-85. */
             reader.GetBoolean(83), reader.GetInt32(84), reader.GetInt32(85),
             /* #6927 (V228): the four blocking band tiers at 86-89. */
-            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89));
+            reader.GetDouble(86), reader.GetDouble(87), reader.GetDouble(88), reader.GetDouble(89),
+            /* #7028 (V230): the two blocking band snapshot wait tiers at 90-91. */
+            reader.GetDouble(90), reader.GetDouble(91),
+            /* #7041 (V232): the Daily Health Report switch, send time, zone and title at 92-95. */
+            reader.GetBoolean(92),
+            PerformanceMonitor.Darling.Service.Reports.DailyHealthReportSettings.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
+            reader.IsDBNull(94) ? null : reader.GetString(94),
+            reader.IsDBNull(95) ? null : reader.GetString(95),
+            /* #7611 (V245): the three Database Protection ages at 96-98. */
+            reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

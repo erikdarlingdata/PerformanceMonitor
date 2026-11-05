@@ -423,7 +423,7 @@ public sealed class InvestigationFeedbackLiveTests
     [Fact]
     public async Task OnTheManagedStore_ASignedInAdminSeat_RecordsThroughTheArm_AndCanRecordIsTrue()
     {
-        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, request, Send, ct) =>
         {
             var list = await Send("GET", "/api/investigation-feedback", null, null);
             Assert.Equal(200, list.Status);
@@ -441,7 +441,7 @@ public sealed class InvestigationFeedbackLiveTests
     [Fact]
     public async Task OnTheManagedStore_AViewerSeat_NeverOpensTheArm_AndAnswersAsToday()
     {
-        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, request, Send, ct) =>
         {
             Assert.False((bool)(await Send("GET", "/api/investigation-feedback", null, null)).Body!["can_record"]!);
             var refused = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
@@ -455,7 +455,7 @@ public sealed class InvestigationFeedbackLiveTests
     [Fact]
     public async Task OnTheManagedStore_WithTheSwitchOff_TheSignedInAdminGets403_NamingTheSwitch()
     {
-        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, request, Send, ct) =>
         {
             Assert.False((bool)(await Send("GET", "/api/investigation-feedback", null, null)).Body!["can_record"]!);
             var refused = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
@@ -469,7 +469,7 @@ public sealed class InvestigationFeedbackLiveTests
     [Fact]
     public async Task TheWebRoutes_AsTheManagedViewerRole_ListFeedback_ButRefuseARecord_With403_AndWriteNothing()
     {
-        await WithWebRoutesAsync("viewer", async (owner, request, Send, ct) =>
+        await WithWebRoutesAsync("web", async (owner, request, Send, ct) =>
         {
             var answer = await Send("PUT", "/api/investigation-feedback/" + request, "application/json", "{\"verdict\":\"wrong\"}");
             Assert.Equal(403, answer.Status);

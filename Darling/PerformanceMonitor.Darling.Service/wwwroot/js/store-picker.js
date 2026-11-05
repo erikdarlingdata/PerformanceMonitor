@@ -17,7 +17,7 @@
  * Every store name and server name reaches the page through el() (text and attributes, never markup).
  */
 
-import { el, mount, apiGet, currentStore, setStore, setFrontDoor, frontDoor, storeHash, splitStoreHash } from "./util.js";
+import { el, mount, apiGet, currentStore, setStore, setFrontDoor, frontDoor, storeHash, splitStoreHash, networkErrorText } from "./util.js";
 import { setStoreScope } from "./viewer-local.js";
 import { peekSession } from "./views-api.js";
 
@@ -195,7 +195,7 @@ export async function locateServer(name) {
   try {
     resp = await fetch("/api/front-door/locate?server=" + encodeURIComponent(name), { headers: { Accept: "application/json" } });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   let body = null;
   try {

@@ -448,16 +448,35 @@ public sealed class FinOpsOptimizationViewLiveTests
     }
 
     [Fact]
-    public async Task ServerWithNoRows_IsExactlyEmpty()
+    public async Task ServerWithNoRows_IsUnavailable_BecauseNothingCoveredTheSpan()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await SeedAsync(Cs()!, ct);
         await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
 
+        /* #7010: the answer carries the window notice under hints. #7459: a server the store holds no collection for is not a true negative,
+           so it says unavailable, the word its idle_databases section would give. */
         var body = await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", EmptyServerName, 24, 10, cancellationToken: ct);
-        Assert.Equal(
-            McpHelpers.Status("empty", "No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show."),
-            body);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("No idle-database, tempdb, wait, query or memory-grant data was found for this server in the windows read, so there is no optimization data to show.",
+            doc.RootElement.GetProperty("message").GetString());
+        Assert.True(doc.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
+    }
+
+    /// <summary>#7010: a window that starts before the first wait or query row says so, and a window the rows cover does not.</summary>
+    [Fact]
+    public async Task WindowPastTheData_SaysWindowTruncated()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await SeedAsync(Cs()!, ct);
+        await using var ds = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpFinOpsTools.GetFinOps(ds, "optimization", ServerName, 24, 10, cancellationToken: ct));
+        Assert.True(doc.RootElement.GetProperty("window_truncated").GetBoolean());
+        Assert.StartsWith("The window reaches further back", doc.RootElement.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+        Assert.True(DateTime.Parse(doc.RootElement.GetProperty("effective_start").GetString()!, System.Globalization.CultureInfo.InvariantCulture).ToUniversalTime()
+            > DateTime.UtcNow.AddHours(-24).AddMinutes(90));
     }
 
     [Fact]
@@ -500,7 +519,10 @@ public sealed class FinOpsOptimizationViewLiveTests
         using var tool = await ToolAsync(ds, TempdbOnlyServerName, 24, 10, ct);
         Assert.Equal("ok", Section(tool, "tempdb_pressure").GetProperty("status").GetString());
         Assert.Equal(4, Section(tool, "tempdb_pressure").GetProperty("rows").GetArrayLength());
-        foreach (var name in new[] { "idle_databases", "wait_categories", "expensive_queries", "memory_grant_efficiency" })
+        /* #7459: this server has no query-stats coverage, so idle_databases cannot say which databases are idle. */
+        Assert.Equal("unavailable", Section(tool, "idle_databases").GetProperty("status").GetString());
+        Assert.Equal(0, Section(tool, "idle_databases").GetProperty("rows").GetArrayLength());
+        foreach (var name in new[] { "wait_categories", "expensive_queries", "memory_grant_efficiency" })
         {
             Assert.Equal("empty", Section(tool, name).GetProperty("status").GetString());
             Assert.Equal(0, Section(tool, name).GetProperty("rows").GetArrayLength());

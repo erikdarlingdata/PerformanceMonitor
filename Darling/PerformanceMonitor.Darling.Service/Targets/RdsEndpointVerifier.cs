@@ -308,7 +308,7 @@ public sealed class RdsEndpointVerifier
             await using var source = DarlingServerConnector.OpenWithoutTypeLoading(builder.ConnectionString);
             await using var connection = source.CreateConnection();
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand("SELECT 1;", connection) { CommandTimeout = LoginProbeSeconds };
+            await using var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark("SELECT 1;"), connection) { CommandTimeout = LoginProbeSeconds };
             await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 
             return null;

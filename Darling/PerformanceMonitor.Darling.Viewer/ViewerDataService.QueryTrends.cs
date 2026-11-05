@@ -41,7 +41,10 @@ public sealed class QueryTrendPoint
 /// <param name="EffectiveStartUtc">The first served point, or the requested start when nothing came back — <see cref="DurationTrendRouting.DescribeCoverage"/>.</param>
 /// <param name="Truncated">True when the series' head sits more than <see cref="DurationTrendRouting.TruncationSlack"/> after the requested start: the tier did not hold the window's head.</param>
 /// <param name="BucketMinutes">The width the raw tier gathered its points at (#4234), or 0 when every point is one collection (every bucket held one, or the tier is hourly).</param>
-public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated, int BucketMinutes = 0)
+/// <param name="StartOlderThanTier">True when the series is truncated AND the requested start is older than the tier that answered keeps (#7416 item 21): the only case the chart may say the earlier part aged out.</param>
+/// <param name="TierKeepsDays">How many days the answering tier keeps, or null when it keeps everything (<see cref="DurationTrendRouting.TierKeepsDays"/>).</param>
+public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated, int BucketMinutes = 0,
+    bool StartOlderThanTier = false, int? TierKeepsDays = null)
 {
     /// <summary>The payload word for the tier — <see cref="DurationTrendRouting.SourceWord"/>, so the chart and the tool use one vocabulary.</summary>
     public string Source => DurationTrendRouting.SourceWord(Tier);
@@ -431,22 +434,7 @@ public sealed partial class ViewerDataService
     /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>: a collection the chosen database had no rows in
     /// still counts its seconds, so the rate is the true per-second rate over the bucket.</summary>
     public static readonly string ExecutionCountTrendSql = $"""
-        WITH raw AS
-        (
-            SELECT
-                collection_time,
-                COALESCE(SUM(delta_execution_count) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)), 0) AS total_executions,
-                COUNT(*) FILTER (WHERE $4::text[] IS NULL OR database_name = ANY($4)) AS matched_rows,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END AS interval_seconds
-            FROM query_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
-        ),
+        WITH {DurationTrendRouting.QueryExecutionCollectionsCte()},
         rated AS
         (
             SELECT
@@ -546,8 +534,11 @@ public sealed partial class ViewerDataService
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
            collection's own instant, the instant the MCP payload's effective_start names. */
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
+        var rawRetentionApplies = hourlyAvailable(rollups);
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            firstServedUtc, startUtc, DurationTrendRouting.TierFloorUtc(tier, rawRetentionApplies, nowUtc ?? DateTime.UtcNow));
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, rawRetentionApplies));
     }
 
     /// <summary>
@@ -878,7 +869,9 @@ public sealed partial class ViewerDataService
         }
         /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
            collection's own instant, the instant the MCP payload's effective_start names. */
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
+        var (effectiveStart, truncated, startOlderThanTier) = DurationTrendRouting.DescribeCoverage(
+            firstServedUtc, startUtc, DurationTrendRouting.TierFloorUtc(tier, rollups.QueryGrainHourly, nowUtc ?? DateTime.UtcNow));
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes, startOlderThanTier,
+            DurationTrendRouting.TierKeepsDays(tier, rollups.QueryGrainHourly));
     }
 }

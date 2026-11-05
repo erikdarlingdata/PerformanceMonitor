@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Analysis;
 
@@ -450,28 +451,32 @@ public class FactScorer
 
     /// <summary>
     /// Scores plan-cache single-use bloat off the PLAN_CACHE_BLOAT fact (Value = single_use_percent =
-    /// single_use_plans * 100 / total_plans over the LATEST plan_cache_stats snapshot). Tiers mirror the
-    /// Dashboard's report.plan_cache_bloat bloat_level CASE
-    /// (install/47_create_reporting_views.sql lines 1485-1487): &gt; 50 CRITICAL, &gt; 30 HIGH, &gt; 20
+    /// single-use COMPILED plans * 100 / COMPILED plans over the LATEST plan_cache_stats snapshot; the fact's
+    /// single_use_plans, total_plans and single_use_size_mb are the compiled figures too, #7445). Bands and floor
+    /// are <see cref="PlanCacheBloatRule"/>'s, the rule the live badges use, so the card and the badge read one
+    /// population (the bands mirror the Dashboard's report.plan_cache_bloat bloat_level CASE,
+    /// install/47_create_reporting_views.sql lines 1485-1487): &gt; 50 CRITICAL, &gt; 30 HIGH, &gt; 20
     /// MEDIUM, else NORMAL. Base maxes at 1.0 (WARNING) like every base fact — the &gt; 50 "CRITICAL"
     /// tier caps at 1.0 here; the CRITICAL band is earned only via corroboration.
     ///
     /// <para>NOISE-CONTROL GUARD (not in the Dashboard's raw report view, appropriate for a SCORED
     /// recommendation): only score when the single-use footprint is materially large
-    /// (single_use_size_mb &gt;= 100). A tiny or idle cache can show a high single-use % on a handful of
-    /// MB — that is not memory bloat worth a card, so it stays context-only (score 0) below the size
-    /// floor. The percentage still rides in Value for the AI surface either way.</para>
+    /// (single_use_size_mb &gt;= <see cref="PlanCacheBloatRule.SingleUseFloorMb"/>). A tiny or idle cache can show a
+    /// high single-use % on a handful of MB — that is not memory bloat worth a card, so it stays context-only
+    /// (score 0) below the size floor. The percentage still rides in Value for the AI surface either way.</para>
     /// </summary>
     private static double ScorePlanCacheBloat(Fact fact)
     {
         // Real memory bloat only — a high % on a trivially small single-use footprint is noise.
-        if (fact.Metadata.GetValueOrDefault("single_use_size_mb") < 100.0) return 0.0;
+        if (fact.Metadata.GetValueOrDefault("single_use_size_mb") < PlanCacheBloatRule.SingleUseFloorMb) return 0.0;
 
-        var singleUsePercent = fact.Value; // single_use_plans * 100 / total_plans (latest snapshot)
-        if (singleUsePercent > 50) return 1.0;   // CRITICAL - single-use plans > 50% (install/47:1485)
-        if (singleUsePercent > 30) return 0.75;  // HIGH     - single-use plans > 30% (install/47:1486)
-        if (singleUsePercent > 20) return 0.5;   // MEDIUM   - single-use plans > 20% (install/47:1487)
-        return 0.0;
+        return PlanCacheBloatRule.LevelFor(fact.Value) switch
+        {
+            "CRITICAL" => 1.0,   // single-use plans > 50% (install/47:1485)
+            "HIGH" => 0.75,      // single-use plans > 30% (install/47:1486)
+            "MEDIUM" => 0.5,     // single-use plans > 20% (install/47:1487)
+            _ => 0.0
+        };
     }
 
     /// <summary>
@@ -524,7 +529,9 @@ public class FactScorer
             // Parameter sensitivity: worst max/min worker-time ratio. Magnitude-driven —
             // concerning at 10x, critical at 100x — so a lone catastrophic plan still scores high.
             "PARAMETER_SENSITIVITY" => ApplyThresholdFormula(fact.Value, 10, 100),
-            // Plan regression: worst per-exec cost factor vs the best plan. Concerning 2x, critical 10x.
+            // Plan regression: the LEAD offender's per-exec cost factor vs its best plan. Concerning 2x, critical 10x.
+            // #7417: the lead is the regression that lost the most CPU, not the largest factor, so a modest factor on a
+            // costly statement scores modestly (2.1x scores 0.51, still past the 0.5 display bar: every kept row is 2x or more).
             "PLAN_REGRESSION" => ApplyThresholdFormula(fact.Value, 2, 10),
             // WS4: plan-XML advisories (advise-only), parsed from the top collected query plans.
             // Each scores only when >=1 was found (Value = count) and roots a standalone card via
@@ -671,14 +678,25 @@ public class FactScorer
     }
 
     /// <summary>
-    /// Scores disk space facts. Low free space is critical.
+    /// Scores disk space facts (Value = the tightest volume's free fraction, <c>min_free_mb</c> = that volume's
+    /// free MB). Free space is a measurement, so unlike a signal that can be noise it needs no corroboration to
+    /// reach Critical (#7583): once the tightest volume is under the low disk alert's critical cut
+    /// (<see cref="DiskCriticalCut"/>, percent or GB) the score is 1.5, the Critical band every finding surface
+    /// cuts at, so the alert and the finding agree about the same disk. Above that cut the base stays under
+    /// Critical: a flat 1.0 (Warning) under 5% free, easing down to 0 at 20% free.
+    /// The cut is the alert's shipped default (3 percent, 2 GB), not the operator's setting: the scorer is a
+    /// settings-free instance and the fact carries no alert settings, so a changed critical_free_percent does
+    /// not move it.
     /// </summary>
     private static double ScoreDiskFact(Fact fact)
     {
         if (fact.Key != "DISK_SPACE") return 0.0;
 
         var freePct = fact.Value;
-        // Invert: lower free space is worse. Critical < 5%, concerning < 10%
+        /* min_free_mb is the scoring volume's own free MB (#7179); a fact without it skips the GB side. */
+        var freeGb = fact.Metadata.TryGetValue("min_free_mb", out var freeMb) ? freeMb / 1024.0 : double.PositiveInfinity;
+        if (DiskCriticalCut.IsCriticallyLow(freePct * 100.0, freeGb, DiskCriticalCut.FreePercent, DiskCriticalCut.FreeGb)) return 1.5;
+        // Invert: lower free space is worse. Under 5% is a flat Warning, concerning < 10%
         if (freePct < 0.05) return 1.0;
         if (freePct < 0.10) return 0.5 + 0.5 * (0.10 - freePct) / 0.05;
         if (freePct < 0.20) return 0.5 * (0.20 - freePct) / 0.10;
@@ -1333,7 +1351,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits present — grant pressure visible in wait stats",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && rs.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
@@ -1410,13 +1428,13 @@ public class FactScorer
         {
             Description = "CPU spike present — regressed plan likely driving it",
             Boost = 0.25,
-            Predicate = facts => facts.TryGetValue("CPU_SPIKE", out var f) && f.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("CPU_SPIKE", out var f) && ClearsRootBar(f)
         },
         new()
         {
             Description = "SQL Server CPU elevated — regressed plan contributing",
             Boost = 0.2,
-            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var f) && f.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("CPU_SQL_PERCENT", out var f) && ClearsRootBar(f)
         }
     ];
 
@@ -1553,7 +1571,7 @@ public class FactScorer
         {
             Description = "TempDB usage elevated — latch contention likely on TempDB allocation pages",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && t.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
@@ -1644,7 +1662,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE also present — broad memory starvation, not isolated compile pressure",
             Boost = 0.2,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }
     ];
 
@@ -1663,8 +1681,8 @@ public class FactScorer
         {
             Description = "Reader/writer lock waits present — RCSI could prevent some deadlocks",
             Boost = 0.3,
-            Predicate = facts => (facts.ContainsKey("LCK_M_S") && facts["LCK_M_S"].BaseSeverity > 0)
-                              || (facts.ContainsKey("LCK_M_IS") && facts["LCK_M_IS"].BaseSeverity > 0)
+            Predicate = facts => (facts.TryGetValue("LCK_M_S", out var lckS) && ClearsRootBar(lckS))
+                              || (facts.TryGetValue("LCK_M_IS", out var lckIS) && ClearsRootBar(lckIS))
         },
         new()
         {
@@ -1712,7 +1730,9 @@ public class FactScorer
         {
             Description = "I/O latency elevated — auto_shrink may be causing fragmentation and I/O pressure",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && io.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
+                              && db.Metadata.GetValueOrDefault("auto_shrink_on_count") > 0
+                              && facts.TryGetValue("IO_READ_LATENCY_MS", out var io) && ClearsRootBar(io)
         },
         new()
         {
@@ -1720,7 +1740,7 @@ public class FactScorer
             Boost = 0.5,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
-                              && facts.TryGetValue("LCK_M_S", out var lckS) && lckS.BaseSeverity > 0
+                              && facts.TryGetValue("LCK_M_S", out var lckS) && ClearsRootBar(lckS)
         },
         new()
         {
@@ -1728,7 +1748,7 @@ public class FactScorer
             Boost = 0.4,
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
-                              && facts.TryGetValue("LCK_M_IS", out var lckIS) && lckIS.BaseSeverity > 0
+                              && facts.TryGetValue("LCK_M_IS", out var lckIS) && ClearsRootBar(lckIS)
         },
         new()
         {
@@ -1737,8 +1757,8 @@ public class FactScorer
             Predicate = facts => facts.TryGetValue("DB_CONFIG", out var db)
                               && db.Metadata.GetValueOrDefault("rcsi_off_count") > 0
                               && facts.TryGetValue("DEADLOCKS", out var dl) && dl.BaseSeverity > 0
-                              && (facts.TryGetValue("LCK_M_S", out var s) && s.BaseSeverity > 0
-                               || facts.TryGetValue("LCK_M_IS", out var i) && i.BaseSeverity > 0)
+                              && (facts.TryGetValue("LCK_M_S", out var s) && ClearsRootBar(s)
+                               || facts.TryGetValue("LCK_M_IS", out var i) && ClearsRootBar(i))
         }
     ];
 
@@ -1751,7 +1771,7 @@ public class FactScorer
         {
             Description = "TempDB usage elevated — growing TempDB on a nearly full volume",
             Boost = 0.3,
-            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && t.BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("TEMPDB_USAGE", out var t) && ClearsRootBar(t)
         },
         new()
         {
@@ -1788,9 +1808,9 @@ public class FactScorer
     [
         new()
         {
-            Description = "SOS_SCHEDULER_YIELD present — scheduler pressure during CPU spike",
+            Description = "SOS_SCHEDULER_YIELD elevated — scheduler pressure during CPU spike",
             Boost = 0.3,
-            Predicate = facts => facts.ContainsKey("SOS_SCHEDULER_YIELD") && facts["SOS_SCHEDULER_YIELD"].BaseSeverity > 0
+            Predicate = facts => HasSignificantWait(facts, "SOS_SCHEDULER_YIELD", 0.25)
         },
         new()
         {
@@ -1842,7 +1862,7 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits present — memory grant pressure in wait stats",
             Boost = 0.3,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         },
         new()
         {
@@ -1867,9 +1887,26 @@ public class FactScorer
         {
             Description = "RESOURCE_SEMAPHORE waits — grant pressure visible in wait stats",
             Boost = 0.2,
-            Predicate = facts => facts.ContainsKey("RESOURCE_SEMAPHORE") && facts["RESOURCE_SEMAPHORE"].BaseSeverity > 0
+            Predicate = facts => facts.TryGetValue("RESOURCE_SEMAPHORE", out var rs) && ClearsRootBar(rs)
         }
     ];
+
+    /// <summary>
+    /// Does this fact's BASE severity clear the bar the InferenceEngine uses for a fact to root a story on its own
+    /// (<see cref="InferenceEngine.MinimumSeverityThreshold"/>, 0.5)? The test an amplifier or a relationship edge
+    /// uses on a CONTINUOUSLY scored peer (a wait fraction, a latency, CPU %, TEMPDB_USAGE).
+    ///
+    /// <para>#7464: those facts score a tiny positive base on ANY trace (<see cref="ApplyThresholdFormula"/>
+    /// grades 0.5 * value / concerning below the concerning bar), so <c>BaseSeverity &gt; 0</c> meant "the wait or
+    /// the read happened at all". On an idle server that matched 15 ms of LCK_M_S, 2.75 MB of tempdb and a 5 ms
+    /// read, and the boost (<c>Severity = Base * (1 + boost)</c>) lifted a 0.3 settings fact past the root bar the
+    /// 0.3 exists to stay under. A peer must be at a level that could root its own story to corroborate another.</para>
+    ///
+    /// <para>Not for a PRESENCE fact, whose base is 0 or a real band and never a trace: an event count that is
+    /// exactly 0 when nothing happened (DEADLOCKS, BLOCKING_EVENTS, MEMORY_PRESSURE_EVENTS), a fact gated before it
+    /// scores (THREADPOOL, see <see cref="ScoreAll"/>), or an anomaly that fired. Those keep <c>&gt; 0</c>.</para>
+    /// </summary>
+    internal static bool ClearsRootBar(Fact fact) => fact.BaseSeverity >= InferenceEngine.MinimumSeverityThreshold;
 
     /// <summary>
     /// Checks if a wait type is present with at least the given fraction of period.

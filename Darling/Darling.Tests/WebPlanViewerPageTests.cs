@@ -135,7 +135,8 @@ public sealed class WebPlanViewerPageTests
     public void TheServerTabsImport_NamesTheFactories()
     {
         var tabs = Js("pages", "server-tabs.js");
-        var line = tabs.Split('\n').Single(l => l.EndsWith("from \"./plan-viewer.js\";", StringComparison.Ordinal));
+        /* #7027: the factories are imported by the tab modules that use them, so the lines are read together. */
+        var line = string.Join("\n", tabs.Split('\n').Where(l => l.EndsWith("plan-viewer.js\";", StringComparison.Ordinal)));
         foreach (var name in new[] { "activePlanColumns", "blockingPlanColumns", "deadlockPlanColumn", "planColumn", "procedurePlanColumn", "queryStorePlanColumn" })
             Assert.Contains(name, line, StringComparison.Ordinal);
     }

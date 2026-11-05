@@ -89,6 +89,45 @@ The token is a secret in `darling.json`. The `web.network` and `mcp.network` blo
 
 `--configure-network` can also make a token for you. It generates 32 random characters.
 
+## People, sign-ins and grants
+
+Darling keeps a list of people. Each person has a name, the sign-ins that belong to them, and grants that say what they can do and where. Removing a server or a tag removes the grants on it, so adding the same server back does not bring them back. Only the `approve` grant is read today, when a person approves a server action that an agent proposed (see [Level 3 server actions: approval](security.md#level-3-server-actions-approval)). Adding any other grant changes no power. An administrator sign-in with no person mapped can approve only on a route that lets one person approve alone. For who can write the list and what is recorded, see [People, identities and grants](security.md).
+
+A sign-in is one of two kinds:
+
+- **Web sign-in**: the sign-in key of a person who signs in to the web dashboard through the identity provider.
+- **Slack**: the Slack team id and user id, such as `T0123ABCD` and `U0123ABCD`.
+
+A grant names what the person can do and where. Where is one server, one tag, or all servers. What is one of these:
+
+- Ask the agent (reads only).
+- Request Level 2 changes.
+- Request server actions, with the server actions it covers.
+- Approve server actions, with the server actions it covers.
+- Undo agent changes.
+- Approve or reject agent notes.
+- Give report feedback.
+
+### On the web dashboard
+
+Open the **Admin** page, then the **People** tab. For an admin, the tab lists every person with their sign-ins and grants. Click **Open** on a row to see one person.
+
+Only an admin who is signed in to the dashboard sees the list, and that includes a session signed in with the shared web token. The list shows each person's sign-in keys and Slack ids, so any other session sees only its own sign-in key and its **Copy** button. An admin can make changes only when the web's store login can make them. Otherwise the admin sees the list and a sentence that says why it cannot be changed.
+
+To add a person, type the name and click **Add person**. In a person's details you can rename them, disable or enable them, add or remove a sign-in, and add or remove a grant. A grant cannot be edited. Remove it and add it again instead.
+
+### Link a web sign-in to a person
+
+Darling keeps no list of who signs in. So a person gives their sign-in key to an administrator:
+
+1. The person signs in to the web dashboard through the identity provider and opens **Admin**, then **People**.
+2. The tab shows **Your sign-in key** at the top. A person who is not an admin sees only that. The person clicks **Copy** and sends the key to an administrator.
+3. The administrator opens the person's details, picks **Web sign-in**, pastes the key and clicks **Add sign-in**.
+
+An administrator who links their own sign-in can click **Add my own sign-in** in the person's details instead.
+
+The key is a hash of the sign-in that Darling works out when you sign in. It is not a password. Knowing it signs nobody in. The shared web token has no key, so a session signed in with it cannot be linked to a person, and the tab says so. A session from a build before sign-in keys has none either: open `/auth/logout` and sign in again.
+
 ## Pause and resume collection
 
 To pause all collection:
@@ -111,6 +150,8 @@ To turn one collector off for the whole fleet, run `.\PerformanceMonitor.Darling
 
 ## Upgrade
 
+To upgrade or uninstall without PowerShell, see [Where PowerShell is used, and installing without it](install.md#where-powershell-is-used-and-installing-without-it).
+
 Do the steps from an elevated PowerShell on the service host.
 
 1. Download the new zip. Take its SHA256 from the release page.
@@ -121,7 +162,11 @@ Do the steps from an elevated PowerShell on the service host.
 4. The script stops the service and copies the old files to `_rollback_manual_<stamp>`. It lays the new build down, checks that `darling.json` did not change, and starts the service. If it fails, run it again. That is safe.
 5. Work the checklist that the script prints about 10 to 15 minutes later. A running service does not prove that it collects.
 
+Windows PowerShell 5.1 and PowerShell 7 both run the script. Add `-Check` to the command from step 3 to see whether the upgrade can run. It runs the checks that come before the stop, tries the backup-folder step on a throwaway folder, prints the PowerShell version, and changes nothing.
+
 The script refuses to run from the install folder itself. It never kills a process. If it names a process that blocks the upgrade, close that process and run it again. It keeps the newest three rollback backups. To clear old ones, run `& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly`.
+
+The script also refuses a build made with a plain `dotnet publish` over a release install. Such a build carries no .NET runtime, and the old runtime files left in the folder stop the service from starting. The refusal comes before the service stops, so nothing changes. Use the release zip, or publish with `--runtime win-x64 --self-contained`.
 
 If you installed with the MSI, do not use this script. Run the newer MSI instead. It upgrades in place and keeps `darling.json` and the store.
 
@@ -191,6 +236,16 @@ An older build ignores what those migrations added, so it can read some newer da
 - **V221**: an older build does not know the Query Store hash-hourly table ([#6800](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6800)). Rolling back leaves `collect.query_store_hash_hourly`, the day tables `collect.query_store_hash_daily`, `collect.query_store_hash_daily_built` and `collect.query_store_hash_daily_failures`, and the `hash_built_seq` column of `collect.query_store_compose_stamp_built` in place. The older build neither reads nor fills them, so the tables stop growing and their hours and days go stale. Nothing to do before rolling back. If you roll forward again, the next hourly passes rebuild the stale hours, newest first, and the next cleanup removes the hash-hourly rows of any hour the older build retired without deleting them (it deletes by the retention floor, not by the hours it just retired)
 - **V227**: an older build does not know a threshold override held for a server tag ([#6926](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6926)). Rolling back leaves the `scope_tag_id` column on `config.config_threshold_overrides` (and `server_id` nullable), and any tag override rows stay. An older build reads the whole overrides table when it loads, and a row with no server stops that read, so it applies **no** threshold override at all (server or database ones included) until the tag rows are gone. Before rolling back past V227, remove every tag override (the Viewer's Threshold Overrides window, the web Admin tab, or `set_alert_threshold_override` with `clear` and a tag), or run `DELETE FROM config.config_threshold_overrides WHERE server_id IS NULL;` as the owner.
 - **V229**: an older build does not know the severity filter on a notification route ([#6928](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6928)). Rolling back leaves `config.config_notification_routes.severities` in place. The older build ignores it. A route set to `critical` or `warning` takes alerts of both severities again. A Warning alert then reaches the channels of a route that was meant for Critical alerts only. Before you roll back, run `get_notification_routes` and look at every route whose `severities` is not `both`. If its channels must not see the other severity, change the route's destinations or disable it. A route set to `both` is unchanged. If you roll forward again, the filters you set are still there.
+- **V231**: an older build does not know that a mute rule can repeat on a schedule ([#7040](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7040)). Rolling back leaves `config.config_mute_rules.recur_days`, `recur_start_time`, `recur_end_time` and `recur_time_zone` in place. The older service and Viewer ignore them, so a recurring rule mutes all day, from its start to its expiry, instead of only inside its windows. Upgrade the service before you create recurring rules. Before you roll back, delete or pause every rule that has a schedule. `get_mute_rules` lists them with a `schedule`. A rule with no schedule is unchanged. If you roll forward again, the schedules you set are still there.
+- **V232**: an older build does not know the Daily Health Report ([#7041](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7041)). Rolling back leaves `daily_report_enabled`, `daily_report_send_at`, `daily_report_time_zone` and `daily_report_title` on `config.config_alert_settings` in place. The older build ignores them and sends no daily report, so a report that was on stops going out. Nothing needs doing before you roll back. If you roll forward again the saved settings apply as they were.
+- **V233**: an older build does not know the report notice setting on a notification route ([#6979](https://github.com/erikdarlingdata/PerformanceMonitor/issues/6979)). Rolling back leaves `config.config_notification_routes.report_notice` in place. The older build ignores it and posts no report notices, so a route that posted them stops. Nothing needs doing before you roll back. If you roll forward again the saved settings apply as they were.
+- **V234**: an older build does not know the alert key on the alert history ([#7076](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7076)). Rolling back leaves `config.config_alert_log.alert_key` in place. The older build ignores it and does not write it. Store Job Over Cadence, Retention Held, Raw Purge Over Horizon, Compose Rollup Hours Stuck and the compression, refresh and retention job alerts are then announced again after each service start while their condition stands. That is how they behaved before V234. Nothing needs doing before you roll back. If you roll forward again, the rows the older build wrote have no key. Each of those alerts that still stands is announced once more, then stays quiet across restarts.
+- **V235**: an older build does not know the new blocking bars ([#7083](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7083)). The rung moved `config.config_alert_settings.blocking_count_threshold` from 1 to 3, `blocking_wait_seconds_threshold` from 0 to 60 and `pg_blocking_count_threshold` from 1 to 3, each only where it still held the old default. Rolling back leaves those values in place. The older build reads them as plain numbers: it pages when 3 blocked events fall in the last hour, whatever their wait, and it runs the total blocked wait alert at 60 seconds. Nothing needs doing before you roll back. To get the old paging back, set the count bars to 1 and the wait bar to 0 first. If you roll forward again the saved values apply as they were.
+- **V236**: an older build does not know what a mute rule does with a matching alert ([#7083](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7083)). Rolling back leaves `config.config_mute_rules.action` in place. The older build ignores it, so a rule set to send alerts to the daily digest mutes those alerts instead: they are recorded as muted and reach nobody, not even the digest. Before you roll back, delete the digest rules or change them to mute rules on purpose (Manage Mute Rules, or the `update_mute_rule` tool with `action` set to `mute`).
+- **V238**: an older build does not know action approval ([#7109](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7109)). Rolling back leaves `config.config_notification_routes.action_approval`, `config.config_notification_routes.approval_single_person` and the `config.agent_action_proposals` table in place. The older build ignores them, so a Level 3 route set to need approval lets the agent run its server actions with no approval, and pending proposals are never decided. Before you roll back, lower every Level 3 route whose approval is required to Level 2 or below.
+- **V239**: an older build does not know the fleet rollup of the Query Store compose stamp ([#7146](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7146)). Rolling back leaves `collect.query_store_compose_fleet` and the `fleet_built_seq` column of `collect.query_store_compose_stamp_built` in place. The older build neither reads nor fills them, so the rollup stops growing and its hours go stale. Nothing to do before rolling back. If you roll forward again, an hour the older build rebuilt reads from the stamp until the next hourly pass rebuilds its fleet rows, newest first, and the next cleanup removes the fleet rows of any hour the older build retired. Until then those leftover rows are not read, because a read trusts the fleet rows of an hour only when the hour still has a ledger row.
+- **V240**: an older build does not know the execution-weighted sums on the Query Store daily table ([#7169](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7169)). Rolling back leaves the six `avg_*_wsum` columns of `collect.query_store_top_daily` in place. The older build ignores them and reads its own `_sum` and `_n` columns, so nothing is read differently and nothing needs doing before you roll back. Days the older build builds while it runs are written with NULL weighted sums, and so are the days built before V240. The newer build does not trust such a day: `get_query_store_top` reads it from the wide table, which gives the exact answer but is slower for a long window, and the service rebuilds it, newest day first, 60 builds an hour. That holds when you roll forward again and when an older and a newer instance share one store. Nothing needs doing in either case. After the upgrade itself, a store with 211 servers takes at least 35 hours, and probably 45 hours or more, to rebuild all of its roughly 10 days. The 35 hours is 2,110 builds at 60 an hour. The routine builds of each new day also use some of those 60, and a long hourly pass can stop early. Short windows return to the summary within the first hours, because the newest days come first.
+- **V241**: an older build does not read the blocking process's open transaction count from a blocked process report ([#7497](https://github.com/erikdarlingdata/PerformanceMonitor/issues/7497)). Rolling back leaves `collect.blocked_process_reports.blocking_open_transaction_count` in place. The older build ignores it, so nothing is read differently and nothing needs doing before you roll back. Reports the older build stores while it runs have NULL there, as do reports stored before V241. Leave the column in place: the view `collect.v_blocked_process_reports` includes it, so a manual `DROP COLUMN` is refused until that view is dropped and recreated.
 
 ### Upgrading from a build that predates the script
 
@@ -226,6 +281,8 @@ With `-PurgeData`:
 2. The script prints what it will delete. Type `DELETE` to confirm. Any other answer keeps the data.
 3. It then deletes `C:\ProgramData\PerformanceMonitorDarling`. This removes the store in that folder (all collected history), the generated store credentials and the service logs. You cannot undo this. If `postgres.dataDirectory` in `darling.json` names a folder outside `C:\ProgramData\PerformanceMonitorDarling`, the script leaves that store folder alone. Delete it yourself.
 
+After the store is deleted, `-PurgeData` also removes the local group `PerformanceMonitor Darling Operators`, with its members, but only when the install made it. The script judges that by the group's description: the installer gives the group it makes a fixed description, and a group that still has it is removed. A group an administrator made first has a different description, so the script leaves it and prints the command to remove it yourself (`net localgroup "PerformanceMonitor Darling Operators" /delete`). If you answer anything but `DELETE`, the store stays and so does the group. On a domain controller the script never looks up or removes a group. A plain uninstall without `-PurgeData` keeps the group, so a reinstall gets back the same members.
+
 `-PurgeData` does not delete the program folder or `darling.json`. To remove them, delete them yourself. It also does not delete the Viewer's per-user files under `%APPDATA%\PerformanceMonitorDarling`.
 
 For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeData`. It deletes without the `DELETE` prompt.
@@ -237,7 +294,7 @@ For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeDa
 | Config file | `darling.json`, beside `PerformanceMonitor.Darling.Service.exe`. The default install folder is `C:\Program Files\PerformanceMonitorDarling` |
 | Service logs | `%ProgramData%\PerformanceMonitorDarling\logs\darling-service_<yyyyMMdd>.log`. The service also writes to the Windows Event Log, source `PerformanceMonitor Darling` |
 | Store (the bundled PostgreSQL) | `%ProgramData%\PerformanceMonitorDarling\pg`, unless `postgres.dataDirectory` names another folder |
-| Store credential files | `pg-credential.dpapi`, `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi` and `pg-mcp-credential.dpapi`, beside the store folder in `%ProgramData%\PerformanceMonitorDarling` |
+| Store credential files | `pg-credential.dpapi`, `pg-admin-credential.dpapi`, `pg-viewer-credential.dpapi`, `pg-web-credential.dpapi` and `pg-mcp-credential.dpapi`, beside the store folder in `%ProgramData%\PerformanceMonitorDarling` |
 | Password key | `password-key.dpapi`. See [Who can read `darling.json` and the credentials](security.md#security--least-privilege-roles) for who can open it |
 | Log-hash key | `log-hash-key.dpapi`. A managed store on Windows keeps it beside `pg-credential.dpapi`. An own store (`postgres.managed` off) keeps it in a `darling-keys` folder beside `darling.json`. On Linux the file is `log-hash-key`, and under Docker Compose it is in the `darling-credentials` volume. The service uses the key to hash log text before it stores it. The key is kept outside the store, so someone who can read the store cannot test guesses against the hashes |
 | Rollback backups | `_rollback_manual_<stamp>` folders in the install folder |

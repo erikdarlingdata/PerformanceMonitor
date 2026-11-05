@@ -127,7 +127,7 @@ public sealed class QueryStoreBackfillReadFailureWarningTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the live #4772 backfill read-failure test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
             await connection.OpenAsync(ct);

@@ -39,6 +39,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -88,7 +89,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
-        _crosshairManager.AddLane(BlockingChart, "Blocking", "events");
+        _crosshairManager.AddLane(BlockingChart, "Blocking", PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit);
         _crosshairManager.AddLane(MemoryChart, "Buffer Pool", "MB");
         _crosshairManager.AddLane(FileIoChart, "I/O Latency", "ms");
     }
@@ -182,7 +183,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);
             var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc);
             var memoryTask = _dataService.GetMemoryTrendAsync(_serverId, startUtc, endUtc);
-            var fileIoTask = _dataService.GetFileIoLatencyTrendAsync(_serverId, startUtc, endUtc);
+            var fileIoTask = _dataService.GetFileIoOverviewLatencyTrendAsync(_serverId, startUtc, endUtc);
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. referenceTime stays UTC
             // (the baseline buckets key on hour-of-day / day-of-week of the naive-UTC store timestamps).
@@ -234,7 +235,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
                     ? deadlockTask.Result.Select(d => (d.Time.ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
-                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays);
+                var blockingUnit = blockingTask.IsCompletedSuccessfully
+                    ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
+                    : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
+                UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
@@ -246,12 +250,17 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (fileIoTask.IsCompletedSuccessfully)
             {
+                /* #6970: the read already returns one weighted point per time, not one per file. */
                 var ioGrouped = fileIoTask.Result
-                    .GroupBy(d => d.CollectionTime)
-                    .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.ToOADate(), IoLatencyWeighting.Weighted(g.Select(x => (x.AvgReadLatencyMs, x.Reads)))))
+                    .Select(d => (d.CollectionTime.ToOADate(), d.ReadLatencyMs))
                     .ToList();
-                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
+                /* #7624: the lane marks a point only when its reads reach the web strip's bar for the span they were counted over. */
+                var ioPoints = fileIoTask.Result;
+                var (ioReads, ioMinReads) = OverviewIoReadFloor.LaneInputs(
+                    ioPoints.Select(d => (d.CollectionTime, d.Reads, d.BucketMinutes)).ToList(),
+                    PgTargetScorer.IoBaselineBucketMinimumReads);
+                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
+                    pointReads: ioReads, minPointReads: ioMinReads);
             }
             else
                 ShowEmpty(FileIoChart, "I/O ms");
@@ -301,8 +310,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         ViewerServerTab.UpdateTruncationBanner(BlockingLaneDataStartBanner, start, startUtc);
     }
 
-    private void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
-        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0)
+    internal void UpdateBlockingLane(List<(double Time, double Value)> blockingData,
+        List<(double Time, double Value)> deadlockData, BaselineBucket? baseline = null, double windowSpanDays = 0,
+        string blockingUnit = PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit)
     {
         ClearChart(BlockingChart);
         ApplyTheme(BlockingChart);
@@ -314,6 +324,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var deadValues = deadlockData.Select(d => d.Value).ToArray();
 
         // First series clears any previous data
+        /* #7219: the blocking lane counts blocked-process reports, or DMV snapshot rows when the window holds no reports. */
+        _crosshairManager?.SetLaneUnit(BlockingChart, blockingUnit);
         _crosshairManager?.SetLaneData(BlockingChart, blockTimes, blockValues, isEventBased: true,
             hoverToleranceDays: EventLaneGeometry.HoverToleranceDays(windowSpanDays));
         // Rename the auto-created series and add the second
@@ -331,6 +343,22 @@ public partial class CorrelatedTimelineLanesControl : UserControl
            bar is a sub-pixel sliver in a 24-hour window, and a hover that reached one minute read 0 over it. */
         double barWidth = EventLaneGeometry.BarWidthDays(windowSpanDays);
         double maxCount = 0;
+
+        // Baseline band for blocking: added before the bars so it paints behind them (#7433)
+        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
+        {
+            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
+            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
+
+            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
+
+            PerformanceMonitor.Ui.BaselineBand.Add(BlockingChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineBlocking"));
+
+            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
+            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
+            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
+            meanLine.LineWidth = 1;
+        }
 
         // Blocking bars — red
         if (blockingData.Count > 0)
@@ -362,24 +390,6 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             maxCount = Math.Max(maxCount, deadlockData.Max(d => d.Value));
         }
 
-        // Baseline band for blocking
-        if (baseline != null && baseline.SampleCount > 0 && baseline.EffectiveStdDev > 0)
-        {
-            var upper = baseline.Mean + 2 * baseline.EffectiveStdDev;
-            var lower = Math.Max(0, baseline.Mean - 2 * baseline.EffectiveStdDev);
-
-            _crosshairManager?.SetLaneBaseline(BlockingChart, lower, upper, isEventBased: true);
-
-            var band = BlockingChart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(25);
-            band.LineStyle.Width = 0;
-
-            var meanLine = BlockingChart.Plot.Add.HorizontalLine(baseline.Mean);
-            meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineBlocking")).WithAlpha(60);
-            meanLine.LinePattern = ScottPlot.LinePattern.Dashed;
-            meanLine.LineWidth = 1;
-        }
-
         BlockingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         ReapplyAxisColors(BlockingChart);
@@ -398,7 +408,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
        plotting it directly avoids the "alert says 95% but chart shows 60%"
        confusion (PM #1004). Baseline band + anomaly markers stay on SQL
        because that's the metric the CPU baseline was computed from. */
-    private void UpdateCpuLane(
+    internal void UpdateCpuLane(
         List<(double Time, double Value)> sqlData,
         List<(double Time, double Value)> totalData,
         BaselineBucket? baseline = null)
@@ -429,9 +439,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             _crosshairManager?.SetLaneBaseline(CpuChart, lower, upper, 10);
 
-            var band = CpuChart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(25);
-            band.LineStyle.Width = 0;
+            PerformanceMonitor.Ui.BaselineBand.Add(CpuChart.Plot, lower, upper, ChartPalette.AccentColor("BaselineCpu"));
 
             var meanLine = CpuChart.Plot.Add.HorizontalLine(baseline.Mean);
             meanLine.Color = ScottPlot.Color.FromHex(ChartPalette.AccentColor("BaselineCpu")).WithAlpha(60);
@@ -493,10 +501,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         CpuChart.Refresh();
     }
 
-    private void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
+    internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
         List<(double Time, double Value)> data, string colorHex,
         double? yMin = null, double? yMax = null, BaselineBucket? baseline = null,
-        double minAnomalyValue = 0)
+        double minAnomalyValue = 0, IReadOnlyList<long>? pointReads = null, long minPointReads = 0)
     {
         ClearChart(chart);
         ApplyTheme(chart);
@@ -518,9 +526,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             _crosshairManager?.SetLaneBaseline(chart, lower, upper, minAnomalyValue);
 
-            var band = chart.Plot.Add.HorizontalSpan(lower, upper);
-            band.FillStyle.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(25);
-            band.LineStyle.Width = 0;
+            PerformanceMonitor.Ui.BaselineBand.Add(chart.Plot, lower, upper, colorHex);
 
             var meanLine = chart.Plot.Add.HorizontalLine(baseline.Mean);
             meanLine.Color = ScottPlot.Color.FromHex(colorHex).WithAlpha(60);
@@ -531,7 +537,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var anomalyIndices = new List<int>();
             for (int i = 0; i < values.Length; i++)
             {
-                if ((values[i] > upper && values[i] >= minAnomalyValue) || values[i] < lower)
+                /* #7624: a lane with a read floor (I/O) marks only a point whose reads reach it, as the web strip does. */
+                var reads = pointReads != null && i < pointReads.Count ? pointReads[i] : 0;
+                if (OverviewIoReadFloor.IsAnomaly(values[i], upper, lower, minAnomalyValue, reads, pointReads == null ? 0 : minPointReads))
                     anomalyIndices.Add(i);
             }
 
@@ -554,7 +562,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         scatter.LegendText = title;
         scatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
 
-        _crosshairManager?.SetLaneData(chart, times, values);
+        _crosshairManager?.SetLaneData(chart, times, values,
+            reads: pointReads?.ToArray(), minReads: pointReads == null ? 0 : minPointReads);
 
         chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         // Hide bottom tick labels on all lanes except the last (File I/O)
@@ -602,14 +611,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// identical left-hand pixel geometry, so the same instant sits at the same X pixel in all five.
     /// Limits alone were never enough; each plot still sized its own gutter from its own Y tick labels.
     /// </summary>
-    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    /// <summary>When the server was first collected (#7386), set by the server tab from its own read. The lanes' shared X axis does
+    /// not start before it. Null leaves the axis as picked.</summary>
+    internal DateTime? ServerDataStartUtc { get; set; }
+
+    internal void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
-        double xMin = xStart.ToOADate();
+        var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
+
+        /* #7386: all five lanes get the same start, so they keep one ruler. It is never later than the earliest point any lane
+           drew, whichever relation fed that lane. */
+        double xMin = ChartAxisStart.XStart(xStart, xEnd, ServerDataStartUtc, charts.Select(c => c.Plot).ToArray()).ToOADate();
         double xMax = xEnd.ToOADate();
 
-        var charts = new[] { CpuChart, WaitStatsChart, BlockingChart, MemoryChart, FileIoChart };
         foreach (var chart in charts)
             chart.Plot.Axes.SetLimitsX(xMin, xMax);
 

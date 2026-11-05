@@ -43,7 +43,7 @@ public sealed class DiagnosticsBundleSeedFailureLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the live seed-failure test.");
         var ct = TestContext.Current.CancellationToken;
-        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
         var root = Directory.CreateTempSubdirectory("darling-bundle-seedfail-");
         var ok = false;
         try

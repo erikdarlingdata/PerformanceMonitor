@@ -19,7 +19,7 @@
  */
 
 import { FILTERED, readScope } from "./database-filter-reads.js";
-import { plainText } from "./plain-text.js";
+import { plainText, shortEmptyLine } from "./plain-text.js";
 
 /* ─────────────────────────── DOM builders (textContent-only) ─────────────────────────── */
 
@@ -106,12 +106,23 @@ export function truncate(s, max = 120) {
  * A native <details> disclosure: a one-line truncated `summaryText` that expands to reveal `detail`. Built on
  * the platform <details>/<summary> so it is keyboard-accessible with no JS handlers; every piece of text goes
  * through el()/textContent (R4 — never innerHTML). `detail` may be a node, an array of nodes, or a string.
+ * `opts.cell` marks the disclosure as a grid cell's detail (#6154, #7482).
  */
 export function disclosure(summaryText, detail, opts = {}) {
   const summary = el("summary", { class: "disc-summary", title: opts.title || null }, [
     truncate(summaryText, opts.max || 120),
   ]);
-  return el("details", { class: "disclosure" }, [summary, el("div", { class: "disc-body" }, detail)]);
+  const body = el("div", { class: "disc-body" }, detail);
+  const box = el("details", { class: opts.cell ? "disclosure cell-detail" : "disclosure" }, [summary, body]);
+  /* #7482: a grid cell's detail opens in place. In a right-hand column of a grid that scrolls sideways the opened text
+     started at the cell and ran past the grid's edge, so it sat out of sight until the reader scrolled. Opening it
+     scrolls the grid just far enough to show the text, and does nothing when it is already in view. */
+  if (opts.cell && typeof box.addEventListener === "function") {
+    box.addEventListener("toggle", () => {
+      if (box.open && typeof body.scrollIntoView === "function") body.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  }
+  return box;
 }
 
 /* Text longer than this many characters (or holding a line break) gets the expand toggle; shorter text fits a cell as is. */
@@ -127,9 +138,23 @@ const CLAMP_MIN_CHARS = 60;
  */
 export function clampText(text, opts = {}) {
   const full = String(text == null ? "" : text);
-  const node = el("span", { class: "clamp-text", title: full || null, text: full });
+  /* #7533 review: a file path is told apart by its END (the file name), so a path cell cuts the start: the span runs right to left, which
+     puts the ellipsis at the left, and its text sits in a <bdi> so the drive letter, the backslashes and the colon keep their own order
+     instead of jumping to the other end. The title and the text node still hold the whole path. */
+  const node = opts.path
+    ? el("span", { class: "clamp-text path-text", dir: "rtl", title: full || null }, [el("bdi", { text: full })])
+    : el("span", { class: "clamp-text", title: full || null, text: full });
   const long = full.length > CLAMP_MIN_CHARS || /[\r\n]/.test(full);
   if (opts.expandable === false || !long) return node;
+  return makeClampToggle(node);
+}
+
+/**
+ * Make `node` open and close in place on a click, or Enter/Space (`.open` and aria-expanded): the one toggle every clamped text
+ * shares (clampText's one-line cell, a tile's three-line detail). The click that ends a text selection is the reader copying,
+ * not opening, and the toggle stops its event so a clickable row or card around it is not also activated.
+ */
+export function makeClampToggle(node, onToggle) {
   node.setAttribute("role", "button");
   node.setAttribute("tabindex", "0");
   node.setAttribute("aria-expanded", "false");
@@ -143,6 +168,7 @@ export function clampText(text, opts = {}) {
     const open = node.getAttribute("aria-expanded") !== "true";
     node.setAttribute("aria-expanded", open ? "true" : "false");
     node.classList.toggle("open", open);
+    if (typeof onToggle === "function") onToggle(open);
   };
   node.addEventListener("click", toggle);
   node.addEventListener("keydown", (e) => {
@@ -152,6 +178,56 @@ export function clampText(text, opts = {}) {
     }
   });
   return node;
+}
+
+/* A server page tile's detail longer than this many characters is clamped to about three lines (#7395). A tile is at least 13rem
+   wide and a line holds about 36 characters there, so three lines show about 100: a shorter detail shows in full. */
+const TILE_DETAIL_CLAMP_CHARS = 100;
+
+/**
+ * #7395: the server page's metric tiles let a detail wrap, so a long one (the Protection tile names every overdue backup and
+ * CHECKDB, and grows with the number of databases) pushed every tab down. A detail past TILE_DETAIL_CLAMP_CHARS stops at about
+ * three lines (`.clamp-lines`) and opens on demand like clampText; its title keeps the full text. A shorter detail is left as it
+ * is, and so is every tile the caller does not pass through here (the fleet cards keep their one-line ellipsis). Returns `root`.
+ */
+export function clampTileDetails(root, minChars = TILE_DETAIL_CLAMP_CHARS, openLabels) {
+  const hasClass = (n, name) => typeof n.className === "string" && (" " + n.className + " ").includes(" " + name + " ");
+  const remember = openLabels instanceof Set ? openLabels : null;
+  const stillOpen = [];
+  const walk = (n, label) => {
+    if (!n || typeof n !== "object") return;
+    if (hasClass(n, "detail") && String(n.textContent || "").length > minChars) {
+      n.className += " clamp-lines";
+      /* #7395: a tile the reader opened stays open when the head is drawn again. The tile is told apart by its label, since its
+         text changes between polls. A detail that is now short enough not to clamp is not here, so there is nothing to reopen. */
+      const open = remember !== null && label !== null && remember.has(label);
+      makeClampToggle(n, remember === null || label === null ? undefined : (isOpen) => (isOpen ? remember.add(label) : remember.delete(label)));
+      if (open) {
+        n.setAttribute("aria-expanded", "true");
+        n.classList.add("open");
+        stillOpen.push(label);
+      }
+      return;
+    }
+    const here = hasClass(n, "metric-chip") ? tileLabel(n) : label;
+    Array.from(n.children || []).forEach((c) => walk(c, here));
+  };
+  walk(root, null);
+  /* What is remembered is what is open on screen now: a label whose tile went short or went away is forgotten. */
+  if (remember !== null) {
+    remember.clear();
+    stillOpen.forEach((l) => remember.add(l));
+  }
+  return root;
+}
+
+/** A metric tile's label (its first line, without the severity badge beside it), or null when the tile has none. */
+function tileLabel(chip) {
+  const first = Array.from(chip.children || [])[0];
+  if (!first) return null;
+  const named = Array.from(first.children || [])[0];
+  const text = String((named || first).textContent || "").trim();
+  return text === "" ? null : text;
 }
 
 /*
@@ -186,6 +262,20 @@ export function errorStrip(message) {
 export function emptyStrip(message) {
   return el("div", { class: "strip empty" }, [localizeIsoText(plainText(message))]);
 }
+/**
+ * #7410: an empty reply as the page shows it. When the reply names a setup step in its structured `hints` (shortEmptyLine) the strip
+ * says one plain sentence and the tool's full text sits behind a click ("More detail", the native disclosure above). A reply with no
+ * such field shows its text as emptyStrip always did. `line` (optional) is the sentence to use in place of the one built from `hints`.
+ */
+export function plainEmptyStrip(res, line) {
+  const short = line === undefined ? shortEmptyLine(res) : line;
+  if (!short) return emptyStrip(res.message);
+  const nodes = [localizeIsoText(short)];
+  if (typeof res.message === "string" && res.message && res.message !== short) {
+    nodes.push(disclosure("More detail", localizeIsoText(res.message), { title: "What the read said, in full" }));
+  }
+  return el("div", { class: "strip empty plain-empty" }, nodes);
+}
 /** #6445: the note a page that lists only shows. The advice depends on the store: a managed store refuses postgres.webConnectionString,
     so it says only that this dashboard lists and the Viewer app makes the change; a store you brought yourself may give the web an
     admin store login. `lists` finishes "so ..." and `toChange` starts the sentence that names the Viewer. The service's own 403
@@ -193,20 +283,79 @@ export function emptyStrip(message) {
     store whose web.allowAdminWrites is off, and then the note also names that switch, in the 403's words. */
 export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
   return managedStore === true
-    ? "This dashboard lists only on this store, so " + lists + ". " + toChange + ", use the Viewer app." +
-      (adminWritesOff === true ? " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service." : "")
+    ? (adminWritesOff === true
+      ? "Changes from this page are turned off, so " + lists + ". " + toChange + ", use the Viewer app." +
+        " To let a signed-in admin make it here, set web.allowAdminWrites to true in darling.json and restart the service."
+      /* #7402: with the switch on (or not known) nothing was turned off: the refusal is about the store login's privilege, so no switch is claimed. */
+      : "This dashboard's store login has no write access, so " + lists + ". " + toChange + ", use the Viewer app.")
     : "This dashboard's store login cannot make changes, so " + lists + ". " + toChange +
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
+}
+
+/** The browser's IANA zone ("America/New_York"), or "" when the browser does not say. (time-range.js's browserZone answers "UTC" instead.) */
+export function browserZoneOrBlank() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+/** #7416: the service writes its window notices for an MCP client in lowercase ("partial window: ..."). A notice drawn on a page starts a
+    sentence, so the opening word is capitalised here, the one place every notice strip passes through. */
+function startOfSentence(text) {
+  return typeof text === "string" ? text.replace(/^partial window:/, "Partial window:") : text;
+}
+
+/**
+ * #7402: what a line chart says when the read returned points and not one of them holds a number to draw. A message the read itself
+ * carries (its `message`) is used as the tool wrote it for a person. Without one, a read that counted points whose rate could not be
+ * known (`unrated_points`, as a server just after a restart answers) says so in plain words. The read's `unrated_note` is written for a
+ * tool client and is not shown.
+ */
+export function noValuesText(data) {
+  const message = data && typeof data.message === "string" ? plainText(data.message).trim() : "";
+  if (message) return message;
+  if (data && Number(data.unrated_points) > 0) return "No rate can be worked out yet for this period, so there is nothing to draw.";
+  return "No point in this period holds a value, so there is nothing to draw.";
 }
 
 /** A non-fatal caveat about otherwise-good data (e.g. the #1665 partial-window notice). The sentence may be one the service
     wrote for an MCP caller (a width note, a truncation note), so it passes through plainText like every message (#5644 W8). */
 export function noticeStrip(message) {
-  return el("div", { class: "strip notice", role: "status" }, [localizeIsoText(plainText(message))]);
+  return el("div", { class: "strip notice", role: "status" }, [startOfSentence(localizeIsoText(plainText(message)))]);
 }
-/** A note line under a chart, from a payload's own `aggregate_note`: written for an MCP caller, said in the page's words (#5644 W8). */
-export function metricNote(text) {
-  return el("div", { class: "mp-metric-note", text: plainText(text) });
+
+/**
+ * #7410: a yellow note with a long tool text behind it. `short` is the one plain sentence the strip shows. The tool's whole note sits
+ * behind "More detail" (the same disclosure plainEmptyStrip uses), so nothing is lost.
+ */
+export function noticeStripWithDetail(short, full) {
+  if (typeof full !== "string" || !full.trim() || plainText(full) === short) return noticeStrip(short);
+  return el("div", { class: "strip notice plain-note", role: "status" }, [
+    localizeIsoText(short),
+    disclosure("More detail", localizeIsoText(plainText(full)), { title: "What the read said, in full" }),
+  ]);
+}
+
+/**
+ * #7410: the strip a read's `note` draws above a grid that has rows. A panel that names `noteShort` shows that plain sentence and keeps
+ * the tool's note one click away. Any other note is drawn as it always was: a caveat about the data (a cut window, a floor) is not
+ * shortened by a rule, only by a sentence somebody wrote for that panel.
+ */
+export function noteStrip(desc, note, data) {
+  /* `noteShort` is a sentence, or a function of the read's data for a note that has two cases (Statement Evictions: unknown, or a pass count). */
+  const short = desc && typeof desc.noteShort === "function" ? desc.noteShort(data) : desc && desc.noteShort;
+  if (typeof short === "string" && short) return noticeStripWithDetail(short, note);
+  return noticeStrip(note);
+}
+
+/** #7402: a routine line under a tab's heading (a row count, a window, when a snapshot was taken). It is the quiet `strip source`, not the
+    yellow `strip notice`, which is for a caveat about otherwise good data. `caveat` is true when the line also carries one (a cut list, a
+    shortened window): it then stays yellow, so a tab's few real caveats are not lost among its captions. A tab's usage note (what the tab reads and leaves to the desktop viewer) is a caption too (#7416). */
+export function captionStrip(message, caveat) {
+  if (caveat) return noticeStrip(message);
+  return el("div", { class: "strip source", role: "status" }, [localizeIsoText(plainText(message))]);
 }
 
 /**
@@ -246,6 +395,22 @@ export function chartNoteText(data, kind) {
  * the read's own `source` field is "hourly", never from the note's text; without it the empty right edge reads as missing data.
  */
 const HOURLY_TRAIL_TEXT = "The newest hour or two is not in this chart yet: hourly totals are added after each hour ends.";
+
+/**
+ * The notice for a trend read whose first point is later than the window's start (#7416 item 21): where the history begins, then the
+ * one reason the read can name. A late first point alone proves nothing aged out (a query first run five hours ago, or a server that
+ * was off earlier, gives the same one), so "aged out" is said only when the read's own `start_older_than_tier` is true, with how long
+ * the tier keeps data from `tier_keeps_days`. Otherwise the note says only that the store holds nothing earlier at this tier.
+ * `subject` is the lead ("History", "History for this query").
+ */
+export function trendHeadNote(d, subject) {
+  const head = subject + " starts " + d.effective_hours_back + " hours back, not the " + d.hours_back + " the window asked for. ";
+  if (d.start_older_than_tier === true) {
+    const days = Number(d.tier_keeps_days);
+    return head + "The earlier part has aged out of this tier" + (days > 0 ? ", which keeps " + days + (days === 1 ? " day" : " days") + " of data." : ".");
+  }
+  return head + "The store holds nothing earlier in this window at this tier.";
+}
 
 /** The note line under a chart for a trend read (see chartNoteText), or null when the read states no width. */
 export function chartNote(data, kind) {
@@ -308,16 +473,37 @@ export function localizeAlertDetail(text, sample) {
 export const BLOCKING_SOURCES = ["blocked-process-report", "DMV snapshot"];
 
 /**
- * Which collector answered a blocking read, as a line above the chart (#5244). A filter of [A] can draw A's DMV-only event that
- * [A, B] drops, and nothing on the chart said which collector it was reading. `desc.sourceKey` names the answer's field (`source`
- * on get_blocking_trend and get_blocking_stats). Null when the descriptor names no field, when the answer carries no source (no
- * rows: the empty answer and the zero-row answer both leave it null), or when the value is not one of the two tags. The tag is
- * text, never markup (R4).
+ * Which collector answered a blocking read, as text in the panel's subtitle (#5244, moved from a row above the chart by #7543 so it
+ * takes no height from the plot). A filter of [A] can draw A's DMV-only event that [A, B] drops, and nothing on the chart said which
+ * collector it was reading. `desc.sourceKey` names the answer's field (`source` on get_blocking_trend and get_blocking_stats). Null
+ * when the descriptor names no field, when the answer carries no source (no rows: the empty answer and the zero-row answer both
+ * leave it null), or when the value is not one of the two tags. The tag is text, never markup (R4).
  */
-export function sourceStrip(data, desc) {
+export function sourceText(data, desc) {
   if (!desc || !desc.sourceKey) return null;
   const tag = getPath(data, desc.sourceKey);
-  return BLOCKING_SOURCES.includes(tag) ? el("div", { class: "strip source", role: "status" }, ["Source: " + tag]) : null;
+  return BLOCKING_SOURCES.includes(tag) ? "Source: " + tag : null;
+}
+
+/** The empty `.panel-source` span renderPanel puts after the subtitle of a panel that names a `sourceKey` (#7543). */
+export function sourceSpan(desc) {
+  if (!desc || !desc.sourceKey) return null;
+  const span = el("span", { class: "panel-sub panel-source" });
+  span.hidden = true; // an empty flex item would still take the heading's gap
+  return span;
+}
+
+/**
+ * Fills that span with the source text (#7543). It is the span's own text, set again on every answer, so a rerun cannot double it and
+ * a later subtitle rewrite (applyDataSubtitle, markPartialSubtitle) leaves it alone. An answer with no recognised source leaves it empty.
+ */
+export function applySourceSubtitle(panel, data, desc) {
+  const head = panel ? Array.from(panel.children || [])[0] : null;
+  const span = head ? Array.from(head.children || []).find((c) => String(c.className).split(" ").includes("panel-source")) : null;
+  if (!span) return;
+  const text = sourceText(data, desc);
+  span.textContent = text ? " " + text : "";
+  span.hidden = !text;
 }
 /**
  * Render a read error, degrading the "window too wide" case to a notice (#2780). A range wider than a read can
@@ -333,6 +519,11 @@ export function readErrorStrip(message) {
     return noticeStrip(readLimitText(hours) + ". Pick a shorter range.");
   }
   return errorStrip(message);
+}
+
+/** #7257: true for the "window too wide" refusal readErrorStrip shows as a notice. Running the same range again shows the same notice. */
+export function isWindowTooWide(message) {
+  return keptHoursOf(message) != null;
 }
 
 /* The M of a "window too wide" refusal (`... exceeds maximum of M hours ...`), or null for any other message.
@@ -462,7 +653,7 @@ export function cappedReadNote(data, desc) {
   const total = Number(data.total_snapshots);
   const counts = shown > 0 && total > shown ? shown.toLocaleString() + " of " + total.toLocaleString() + " snapshots" : "rows";
   return {
-    text: "partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
+    text: "Partial window: this " + noun + " shows only the newest " + counts + ", back to " + localTime(oldest) + ", because it stops at its row limit.",
     oldest,
   };
 }
@@ -482,10 +673,9 @@ export function partialWindowSubtitle(data, desc) {
   return capped ? "newest rows only, back to " + localTime(capped.oldest) : null;
 }
 
-/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
-export function markPartialSubtitle(panel, data, desc) {
-  const text = partialWindowSubtitle(data, desc);
-  if (!text || !panel) return;
+/** The heading's `.panel-sub` span of a panel node, or null. */
+function panelSubNode(panel) {
+  if (!panel) return null;
   const find = (node) => {
     for (const c of Array.from(node.children || [])) {
       const k = c.className || (typeof c.getAttribute === "function" ? c.getAttribute("class") : null);
@@ -496,8 +686,42 @@ export function markPartialSubtitle(panel, data, desc) {
     return null;
   };
   const head = Array.from(panel.children || [])[0];
-  const sub = head ? find(head) : null;
+  return head ? find(head) : null;
+}
+
+/** Replaces the window label in a panel's heading (its `.panel-sub` span) when the read was row-capped. A no-op otherwise. */
+export function markPartialSubtitle(panel, data, desc) {
+  const text = partialWindowSubtitle(data, desc);
+  if (!text) return;
+  const sub = panelSubNode(panel);
   if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * A subtitle that depends on the answer (#7428). A panel's subtitle is written before its read, so it cannot name what the
+ * read chose (the wait event, the backend and context, the statement, the database a trend follows). A descriptor that
+ * carries `subtitleFrom(data)` gets its heading's `.panel-sub` span replaced with the string that returns once the answer is
+ * in. A function that returns anything but a non-empty string leaves the static subtitle as it was.
+ */
+export function applyDataSubtitle(panel, data, desc) {
+  if (!desc || typeof desc.subtitleFrom !== "function") return;
+  const text = desc.subtitleFrom(data);
+  if (typeof text !== "string" || !text.trim()) return;
+  const sub = panelSubNode(panel);
+  if (sub) sub.textContent = " " + text;
+}
+
+/**
+ * How a trend's subject is worded in its subtitle: the name, then "(chosen automatically)" when the answer's `*_source`
+ * sentence says the read chose it, or "(partly chosen automatically)" when only half was (the I/O pair). The sentence is
+ * the server's own ("as requested", or one that says "chosen automatically"), so a subject somebody named is not
+ * labelled as a guess. An answer with no source sentence gets the bare name.
+ */
+export function trendSubject(name, source) {
+  if (typeof name !== "string" || !name) return null;
+  if (typeof source !== "string" || !source || source === "as requested") return name;
+  if (source.startsWith("chosen automatically")) return name + " (chosen automatically)";
+  return source.includes("chosen automatically") ? name + " (partly chosen automatically)" : name;
 }
 
 /**
@@ -524,14 +748,14 @@ export function windowNoteText(data) {
   const first = at(data.data_start_utc);
   if (start && end && oldest) {
     return (
-      "partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
-      "The window started at " + start + ". The grid covers " + oldest + " to " + end + "."
+      "Partial window: this grid shows only the newest rows, back to " + oldest + ", because it stops at its row limit. " +
+      "The window you asked for runs from " + start + " to " + end + "."
     );
   }
   if (start && end && first) {
     return (
-      "partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
-      "The panel covers " + first + " to " + end + "."
+      "Partial window: this panel's data starts at " + first + ", after the window's start at " + start + ". " +
+      "It runs to " + end + "."
     );
   }
 
@@ -572,6 +796,18 @@ export function loadingStrip(label) {
   return el("div", { class: "strip loading" }, [label || "Loading…"]);
 }
 
+/** #7257: the Retry button under a failed panel read. `onRetry` runs that one panel again. */
+export function retryButton(onRetry) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Retry" });
+  btn.addEventListener("click", () => onRetry());
+  return btn;
+}
+
+/** #7257: what a panel shows while it waits for one of the page's long-read slots (a loading strip, so a poll waits for it too). */
+export function waitingStrip() {
+  return loadingStrip("Waiting for the panels above to finish…");
+}
+
 /* ─────────────────────────── time (UTC -> local) ─────────────────────────── */
 
 /** Parse a naive-UTC ISO string (no zone) as UTC; pass through strings that already carry a zone. */
@@ -605,6 +841,20 @@ export function emptyMessageText(body) {
 export function localTime(s) {
   const d = parseUtc(s);
   return d ? d.toLocaleString() : "—";
+}
+
+/**
+ * A monitored server's own wall-clock stamp ("2025-12-07T13:32:48", as msdb stores it) in the grids' date-time format, with no zone
+ * shift (#7243). localTime reads a naive stamp as UTC and moves it into the browser's zone, which would state the wrong hour for a
+ * value that is already the server's local time, so the fields are read as written (through a UTC date, so a browser hour that a
+ * clock change skips cannot move them). Null or empty is an em dash, and text that is not a stamp comes back as given.
+ */
+export function serverClockTime(s) {
+  if (s == null || s === "") return "—";
+  const m = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)/.exec(String(s));
+  if (!m) return String(s);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  return d.toLocaleString(undefined, { timeZone: "UTC" });
 }
 
 /** Time-of-day only (HH:MM local), or an em dash — for compact "last collect" lines where the date is implied. */
@@ -667,6 +917,39 @@ export function windowFromHours(hours) {
   }
   const windowEnd = Date.now();
   return { windowStart: windowEnd - h * 3600000, windowEnd };
+}
+
+/* #7386: the shortest axis a data start may produce (two points of the slowest, 15 minute, collector cadence), and the run-in
+   left before the first collection (one fiftieth of the span) so the first marker is not cut by the plot edge. The same two
+   numbers as PerformanceMonitor.Ui.ChartAxisStart, which the desktop charts use. */
+const MIN_AXIS_SPAN_MS = 30 * 60000;
+const AXIS_RUN_IN_DIVISOR = 50;
+
+/**
+ * #7386: where the X axis of a time chart starts, in UTC-epoch ms: the LATER of the picked start and the server's data start,
+ * the first time the server was collected at all. The JS twin of ChartAxisStart.XStart. Returns the picked start when the data
+ * start is missing (no claim), at or before the picked start, at or after the picked end (a window the server was not collected
+ * in stays as picked), or when the axis it would give is shorter than 30 minutes. Otherwise the data start less its run-in,
+ * never earlier than the picked start. The picked start is the floor, so a data start never widens a window.
+ */
+export function xStartMs(pickedStart, pickedEnd, dataStart) {
+  if (typeof dataStart !== "number" || !isFinite(dataStart) || dataStart <= pickedStart || dataStart >= pickedEnd) return pickedStart;
+  const start = Math.max(pickedStart, dataStart - Math.floor((pickedEnd - dataStart) / AXIS_RUN_IN_DIVISOR));
+  return pickedEnd - start < MIN_AXIS_SPAN_MS ? pickedStart : start;
+}
+
+/* The server's data start for the server page on screen (UTC-epoch ms), or null. Set by the server page when its read answers
+   and dropped when the page is left, so a chart on any other page, and a chart on a server whose read failed, keeps the picked range. */
+let chartDataStartMs = null;
+
+/** #7386: tell every line chart where the server on screen was first collected (ms), or null for no claim. */
+export function setChartDataStart(ms) {
+  chartDataStartMs = typeof ms === "number" && isFinite(ms) ? ms : null;
+}
+
+/** #7386: the data start the charts use, or null. */
+export function chartDataStart() {
+  return chartDataStartMs;
 }
 
 /**
@@ -761,17 +1044,44 @@ export function fmtMs(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs < 1000) return fmtInt(n, stepArg(o)) + " ms";
-  if (abs < 60000) return fmtNum(n / 1000, placesFor(o, 1, 1000)) + " s";
-  if (abs < 3600000) return fmtNum(n / 60000, placesFor(o, 1, 60000)) + " min";
-  return fmtNum(n / 3600000, placesFor(o, 1, 3600000)) + " h";
+  /* #7586: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "500 ms, 1.0 s, 1.5 s"; a
+     tooltip or grid cell (no axisMax) picks the unit from its own value. */
+  const top = axisTopOf(o);
+  const basis = top == null ? Math.abs(n) : top;
+  if (basis < 1000) return fmtInt(n, stepArg(o)) + " ms";
+  const per = basis < 60000 ? 1000 : basis < 3600000 ? 60000 : 3600000;
+  const unit = per === 1000 ? " s" : per === 60000 ? " min" : " h";
+  if (top != null && n === 0) return "0" + unit;
+  return fmtNum(n / per, placesFor(o, top == null ? 1 : wholeStepMin(o, per), per)) + unit;
+}
+/* A number as a chart prints it: up to two decimals, no padding, grouped (1,234.57), and as many decimals as the tick step needs when it is
+   finer than that (a 0.002 step prints 0.002, 0.004, not 0, 0, 0 or 0.01 on the wrong gridline, #7587). Without a step (a tooltip) it is the
+   old two-place rounding, except that a small value keeps two significant digits (0.0042) so a real rate in a tooltip never reads 0. */
+export function fmtPlain(v, o) {
+  const n = Number(v);
+  if (!isFinite(n)) return String(n);
+  if (stepOf(o) == null && n !== 0 && Math.abs(n) < 0.1) return n.toLocaleString(undefined, { maximumSignificantDigits: 2 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: Math.max(2, placesFor(o)) });
 }
 export function fmtMb(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, 1, 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+  /* #7555: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "512 MB, 1.0 GB". */
+  const top = axisTopOf(o);
+  if ((top == null ? n : top) < 1024) return fmtInt(n, stepArg(o)) + " MB";
+  return top != null && n === 0 ? "0 GB" : fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB";
+}
+/* #7555: the largest tick of the axis a label belongs to, which axisTickLabels hands each formatter as o.axisMax. Null for a tooltip or a
+   grid cell (no options, or the index `array.map` passes), which keep choosing a unit by their own value. */
+function axisTopOf(o) {
+  return o && typeof o === "object" && isFinite(o.axisMax) ? Math.abs(Number(o.axisMax)) : null;
+}
+/* #7488: the decimals a stepped-up axis label keeps at least. A tick step that is a whole number of the larger unit (20 GB) prints "20 GB";
+   a step that is not (a 10,000 MB step is 9.77 GB) keeps one decimal, as a tooltip or table cell does. */
+function wholeStepMin(o, per) {
+  const step = stepOf(o);
+  return step != null && Number.isInteger(Number((step / per).toPrecision(12))) ? 0 : 1;
 }
 /* A size in `unit` (kb, mb, gb or tb, any case) stepped up to the unit that keeps it under 1,024, written "MB", "GB": the
    same rule fmtMb applies, so 80,000 MB reads "78.1 GB" and never a cut-off "80,000.0 mb". Null when `unit` is not a size. */
@@ -782,29 +1092,79 @@ export function fmtSize(v, unit, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  let value = n;
+  /* #7555: on an axis the unit comes from the largest tick, so every label reads in one unit; otherwise from the value itself. */
+  const top = axisTopOf(o);
+  let basis = top == null ? Math.abs(n) : top;
   let i = at;
   let per = 1;
-  while (Math.abs(value) >= 1024 && i < SIZE_UNITS.length - 1) {
-    value /= 1024;
+  while (basis >= 1024 && i < SIZE_UNITS.length - 1) {
+    basis /= 1024;
     per *= 1024;
     i++;
   }
+  if (top != null && n === 0 && i > at) return "0 " + SIZE_UNITS[i];
+  const value = n / per;
   /* A tooltip or table cell keeps one decimal, as every composed value does; an axis tick prints as many as its step needs. */
-  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? 1 : 0, per);
+  const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? wholeStepMin(o, per) : 0, per);
   return fixed(value, places) + " " + SIZE_UNITS[i];
+}
+/* #7488: how many of a size axis's own units one step-up unit holds, for an axis whose largest value is `max` in `unit` (kb, mb, gb or tb):
+   1 while the labels stay in `unit` (max under 1,024), 1024 once they print in the next unit up (60,000 MB reads GB), and so on, the
+   same ladder fmtSize and fmtMb climb. The chart picks its ticks in that larger unit so the labels land on round numbers there
+   (20 GB, 40 GB) and not on round numbers of the smaller one (58.6 GB). 1 for a unit that is not a size. */
+export function sizeAxisPer(unit, max) {
+  /* #7586: "ms" is a duration whose labels (fmtMs) climb ms, s, min and h on the same top-tick rule. */
+  if (String(unit == null ? "" : unit).toLowerCase() === "ms") {
+    const t = Math.abs(Number(max));
+    return !isFinite(t) || t < 1000 ? 1 : t < 60000 ? 1000 : t < 3600000 ? 60000 : 3600000;
+  }
+  /* #7555: "bytes" is a count of bytes, whose labels (fmtBytes) climb B, KB, MB, GB and stop there. */
+  if (String(unit == null ? "" : unit).toLowerCase() === "bytes") {
+    const t = Math.abs(Number(max));
+    let p = 1;
+    while (isFinite(t) && t / p >= 1024 && p < 1024 * 1024 * 1024) p *= 1024;
+    return p;
+  }
+  let i = SIZE_UNITS.indexOf(String(unit == null ? "" : unit).toUpperCase());
+  const top = Math.abs(Number(max));
+  if (i < 0 || !isFinite(top)) return 1;
+  let per = 1;
+  while (top / per >= 1024 && i < SIZE_UNITS.length - 1) {
+    per *= 1024;
+    i++;
+  }
+  return per;
 }
 /* A byte count in human units (B, KB, MB, GB; 1024-based). A null is the dash, never 0 bytes: 0 is a real answer. The table sorts
    a column on the raw number, so "900 KB" sorts below "2.0 MB" whatever the text says. */
-export function fmtBytes(v) {
+export function fmtBytes(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs < 1024) return fmtInt(n) + " B";
-  if (abs < 1024 * 1024) return fmtNum(n / 1024, 1) + " KB";
-  if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
-  return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
+  /* #7555: an axis tick (o.axisMax, the largest tick) prints in the axis's one unit, with the decimals its step needs. A cell or tooltip,
+     called without options, keeps one decimal in the unit that fits its own value. */
+  const top = axisTopOf(o);
+  const basis = top == null ? Math.abs(n) : top;
+  if (basis < 1024) return fmtInt(n, stepArg(o)) + " B";
+  const at = basis < 1024 * 1024 ? 1 : basis < 1024 * 1024 * 1024 ? 2 : 3;
+  const per = Math.pow(1024, at);
+  const unit = ["B", "KB", "MB", "GB"][at];
+  if (top != null && n === 0) return "0 " + unit;
+  return (stepOf(o) == null ? fmtNum(n / per, 1) : fixed(n / per, placesFor(o, wholeStepMin(o, per), per))) + " " + unit;
+}
+/* A size given in megabytes, written in the unit that fits it (#7410, #7564): a table that holds 140 KB read "0 MB" under fmtMb, which
+   prints whole megabytes. From 1 MB up it steps through fmtBytes (1.5 MB, 2.0 GB). Under 1 MB it stays in MB and prints as many decimals
+   as the input has, up to six: a service that rounded an index of 456 KB to 0.45 MB sends 0.45, and 0.45 MB x 1,048,576 is "460.8 KB",
+   digits nobody measured. Where the reply has the bytes, use the "bytes" format instead. A zero reads "0 MB" and never "0 B": a rounded
+   MB of 0 stands for any size under about half the input's last place (16 KB rounds to 0 at either precision), and "0 B" would claim
+   an empty object. Null is the dash. */
+export function fmtMbFit(v) {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (!isFinite(n)) return "—";
+  if (Math.abs(n) >= 1) return fmtBytes(n * 1024 * 1024);
+  const places = n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "").split(".")[1];
+  return fmtNum(n, places ? places.length : 0) + " MB";
 }
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
@@ -817,6 +1177,15 @@ export function fmtSemaphore(v) {
   if (n === 0) return "Regular";
   if (n === 1) return "Small query";
   return String(v);
+}
+/** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
+    and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
+    starts with a capital, and a word the service already capitalised is left as it is. */
+export function fmtStatusWord(v) {
+  if (typeof v !== "string" || !v.trim()) return fmtText(v);
+  const word = v.trim();
+  if (word.toLowerCase() === "ok") return "OK";
+  return /^[a-z][a-z_ ]*$/.test(word) ? word[0].toUpperCase() + word.slice(1).replace(/_/g, " ") : word;
 }
 export function fmtBool(v) {
   return v === true ? "yes" : v === false ? "no" : "—";
@@ -832,11 +1201,13 @@ export const FORMATTERS = {
   ms: fmtMs,
   mb: fmtMb,
   bytes: fmtBytes,
+  mbfit: fmtMbFit,
   time: localTime,
   reltime: relTime,
   bool: fmtBool,
   semaphore: fmtSemaphore,
   text: fmtText,
+  status: fmtStatusWord,
 };
 
 export function applyFormat(name, value, opts) {
@@ -1016,6 +1387,13 @@ export function storeHeaders(headers, store) {
   return { ...headers, [STORE_HEADER]: s };
 }
 
+/** The text for a request that got no answer at all (the service is down, the address is wrong, the network dropped).
+    The browser's own words ("Failed to fetch") go in parentheses, since they say nothing about what to do next. */
+export function networkErrorText(e) {
+  const reason = e && e.message ? e.message : String(e);
+  return "Could not reach the Darling service (" + reason + "). Check that the service is running and that you can open this address, then reload.";
+}
+
 /**
  * GET a same-origin API path and classify the response into one of four kinds, mirroring the service's
  * response shapes (DarlingWebEndpoints):
@@ -1036,7 +1414,7 @@ export async function apiGet(path, signal) {
       resp = await fetch(path, { headers: storeHeaders({ Accept: "application/json" }), signal });
     } catch (e) {
       if (e && e.name === "AbortError") return { kind: "aborted" };
-      return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+      return { kind: "error", message: networkErrorText(e) };
     }
     return await classifyResponse(resp);
   } finally {
@@ -1135,10 +1513,33 @@ export async function apiGetFleet(store) {
 
     const shared = await request;
     if (shared.transportError) return { kind: "error", message: shared.transportError };
-    return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    const res = await classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+    if (res.kind === "data") stampFleetWindow(res.data);
+    return res;
   } finally {
     scope.n--;
   }
+}
+
+/** #7507: the roll-up carries its window once (window_start / window_end), but the Blocking and Deadlocks tiles sit on each card, so
+    every card is stamped with the window length in hours. The tile then names the window the SERVER read, whatever it was, and no page
+    hardcodes "past hour". A reply with no usable window leaves the cards unstamped and their tiles as they were. */
+export function stampFleetWindow(data) {
+  if (!data || !Array.isArray(data.cards)) return data;
+  const start = parseUtc(data.window_start);
+  const end = parseUtc(data.window_end);
+  const minutes = start && end ? Math.round((end.getTime() - start.getTime()) / 60000) : 0;
+  if (minutes > 0) for (const c of data.cards) if (c && typeof c === "object") c.window_hours = minutes / 60;
+  return data;
+}
+
+/** #7507: a window length in hours as the words a tile uses: "past hour", "past 6 hours", "past day", "past 3 days", "past 90 minutes". */
+export function windowPhrase(hours) {
+  if (!(hours > 0)) return null;
+  if (hours === 1) return "past hour";
+  if (hours >= 24 && hours % 24 === 0) return hours === 24 ? "past day" : "past " + hours / 24 + " days";
+  if (Number.isInteger(hours)) return "past " + hours + " hours";
+  return "past " + Math.round(hours * 60) + " minutes";
 }
 
 /** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
@@ -1149,7 +1550,7 @@ async function fetchBody(path, signal, store) {
     return { ok: resp.ok, status: resp.status, raw: await resp.text(), retryAfter: retryAfterOf(resp) };
   } catch (e) {
     if (e && e.name === "AbortError") return { aborted: true };
-    return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { transportError: networkErrorText(e) };
   }
 }
 
@@ -1172,7 +1573,7 @@ export async function apiSend(method, path, body) {
       body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { kind: "error", message: networkErrorText(e) };
   }
   return classifyResponse(resp);
 }
@@ -1184,7 +1585,7 @@ export async function apiSend(method, path, body) {
  * It is the transport Manage Tags' write always had, lifted here with its behaviour unchanged:
  *   { status, body }                    - the answer. `body` is the parsed JSON, or null when the text is not JSON (an
  *                                         empty body included). A 400, 404, 409, 429, 500 and the rest come back this way.
- *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is "Network error: ..."
+ *   { status: 0, body: null, message }  - no answer at all (a network error); `message` is networkErrorText(e)
  *   { status, body, expired: true }     - the session is gone: a 401, or a 2xx whose text is not JSON at all (a sign-in
  *                                         page in front of the API, or an empty body). The shell has been told once
  *                                         (reportSessionExpired, with the house message and "/", never the body's own
@@ -1207,7 +1608,7 @@ export async function apiWrite(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    return { status: 0, body: null, message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    return { status: 0, body: null, message: networkErrorText(e) };
   }
   let parsed = null;
   let isJson = false;
@@ -1219,7 +1620,7 @@ export async function apiWrite(method, path, body) {
   }
   const succeeded = resp.status >= 200 && resp.status < 300;
   if (resp.status === 401 || (succeeded && !isJson)) {
-    reportSessionExpired("Your session has expired. Sign in again.", "/");
+    reportSessionExpired(SESSION_EXPIRED_TEXT, "/");
     return { status: resp.status, body: parsed, expired: true };
   }
   if (succeeded && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) return { status: resp.status, body: parsed, unexpected: true };
@@ -1330,6 +1731,25 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   return waited ? read() : { kind: "aborted" };
 }
 
+/** The one sentence for a 401 or a signed-out page, wherever the transport finds it. */
+const SESSION_EXPIRED_TEXT = "Your session has expired. Sign in again.";
+
+/** The start of the sentence noMessageText builds. A caller that tests whether a message is that fallback (alerts.js)
+    matches on this constant, so the two cannot drift apart. */
+export const NO_MESSAGE_TEXT_PREFIX = "The Darling service answered HTTP";
+
+/** A failed answer that carried no sentence of its own: say which status it was and for which address. The address is
+    the path only, never the query string. */
+function noMessageText(resp) {
+  let path = "";
+  try {
+    path = new URL(resp.url).pathname;
+  } catch {
+    path = "";
+  }
+  return NO_MESSAGE_TEXT_PREFIX + " " + resp.status + (path ? " for " + path : "") + " with no message. Check the service log.";
+}
+
 async function classifyResponse(resp) {
   const raw = await resp.text();
   let body = null;
@@ -1342,7 +1762,7 @@ async function classifyResponse(resp) {
   }
 
   if (resp.status === 401) {
-    const message = body && typeof body.error === "string" ? body.error : "Session expired";
+    const message = body && typeof body.error === "string" ? body.error : SESSION_EXPIRED_TEXT;
     const login = body && typeof body.login === "string" ? body.login : "/";
     reportSessionExpired(message, login);
     return { kind: "auth", message, login };
@@ -1353,7 +1773,7 @@ async function classifyResponse(resp) {
   if (!resp.ok) {
     const msg = body && typeof body.error === "string" ? body.error
       : isEnvelope ? plainText(body.message)
-      : "Request failed (HTTP " + resp.status + ")";
+      : noMessageText(resp);
     /* #6800: a read refused busy (429) carries the seconds its Retry-After names, for retryOnceWhenBusy. */
     const retryAfterSeconds = resp.status === 429 ? retryAfterSecondsOf(resp.retryAfter !== undefined ? resp.retryAfter : retryAfterOf(resp)) : null;
     return retryAfterSeconds === null ? { kind: "error", message: msg, status: resp.status } : { kind: "error", message: msg, status: resp.status, retryAfterSeconds };
@@ -1371,7 +1791,7 @@ async function classifyResponse(resp) {
   }
 
   if (resp.ok && raw && body === null) {
-    const message = "Session expired";
+    const message = SESSION_EXPIRED_TEXT;
     reportSessionExpired(message, "/");
     return { kind: "auth", message, login: "/" };
   }

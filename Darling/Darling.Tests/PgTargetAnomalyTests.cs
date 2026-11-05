@@ -204,6 +204,10 @@ public sealed class PgTargetAnomalyTests
            table alone a quiet month has no baseline and a server that blocks once a week has a baseline of blocking. Not a
            v_ view, not a SQL Server table by another name; nothing else is admitted. */
         tables.Add("collection_log");
+        /* One more (#7567): the statement arms drop the service's own entries with PgOwnStatement.NotOwnOnStats, a NOT EXISTS over
+           pg_statement_text, the store's own text lookup (a plain table the statements' text fetch writes, not a collector table).
+           It is scoped to the row's server in the splice itself (own.server_id = pg_statement_stats.server_id). */
+        tables.Add("pg_statement_text");
         foreach (var (metric, table) in s_metricTables)
         {
             var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric)!;
@@ -341,6 +345,8 @@ public sealed class PgTargetAnomalyTests
         /* The same one admission as the baseline census above (lane 17): the blocked-sessions window read shares the
            arm's zero rule, so it reads the same log. */
         tables.Add("collection_log");
+        /* And the statement-share read's own-entry exclusion (#7567): the pg_statement_text lookup, server-scoped in the splice. */
+        tables.Add("pg_statement_text");
         foreach (var sql in s_detectorSql)
         {
             var upper = sql.ToUpperInvariant();
@@ -465,7 +471,7 @@ public sealed class PgTargetAnomalyTests
            precedes the gate and the absolute-fallback bar is unreachable (PositiveInfinity) — the ruling's "never the
            old absolute grade silently". */
         var queriesDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Queries.cs"));
-        Assert.Contains("baseline, candidate.PeakShare, candidate.MeanShare,", queriesDetector, StringComparison.Ordinal);
+        Assert.Contains("baseline, peakShare, meanShare,", queriesDetector, StringComparison.Ordinal);
         /* #3901: the keyed seam as ONE set read for the candidate list, ahead of the loop — never a keyed call per
            candidate, which re-read the 30-day slice once per statement. */
         Assert.Contains("MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken", queriesDetector, StringComparison.Ordinal);
@@ -1043,7 +1049,7 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("averaged 62.5% across 48 five-minute samples", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("The raw cpu_percent peaked at 100% of the capacity currently allocated — a core was pinned — which is reported, not graded.", block.Investigation, StringComparison.Ordinal);
         Assert.Contains("about the 99.8th and 99.9th percentile of the measured fleet's five-minute samples (threshold_lineage = 1)", block.Investigation, StringComparison.Ordinal);
-        Assert.Contains("get_pg_statement_stats", block.Remediation, StringComparison.Ordinal);
+        Assert.Contains("get_pg_top_queries", block.Remediation, StringComparison.Ordinal);
         Assert.DoesNotContain("SQL Server", block.Headline + block.Investigation + block.Remediation, StringComparison.Ordinal);
 
         var raw = CpuFact(100, measured: false);

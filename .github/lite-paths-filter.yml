@@ -68,6 +68,7 @@ darling_reads_shard:
 # Darling.Tests tree); DarlingReadsTraitGuardTests pins this list to the project's linked compiles.
 lite_linked_shard:
   - 'Darling/Darling.Tests/CSharpSourceWalker.cs'
+  - 'Darling/Darling.Tests/ChartLayoutProbe.cs'
   - 'Darling/Darling.Tests/ClippedTextProbe.cs'
   - 'Darling/Darling.Tests/InputNamesProbe.cs'
   - 'Darling/Darling.Tests/McpInProcessHost.cs'
@@ -75,6 +76,7 @@ lite_linked_shard:
   - 'Darling/Darling.Tests/InvestigationToolContract.cs'
   - 'Darling/Darling.Tests/StatementScrubCanary.cs'
   - 'Darling/Darling.Tests/StaTestThread.cs'
+  - 'Darling/Darling.Tests/StaThreadProbe.cs'
   - 'Darling/Darling.Tests/TimingTestScanner.cs'
   - 'Darling/Darling.Tests/TestTimeHelpers.cs'
   - 'Darling/Darling.Tests/WpfExitSwitchTests.cs'

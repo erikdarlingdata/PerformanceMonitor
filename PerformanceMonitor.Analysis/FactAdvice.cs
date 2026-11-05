@@ -193,15 +193,12 @@ public static class FactAdvice
         if (tsql is not null)
             advice = advice with { RemediationTsql = tsql };
 
-        // B3 Phase 3 (§6) + Clear-cached-plan (§5): when the finding offers a DESTRUCTIVE
-        // remediation, append the two-sided RiskDisclosure so every read-only surface
-        // (email / webhook / MCP) SHOWS the operator the same risks they'd see in-app —
-        // they simply cannot click Apply off-app (no consent gate there; consent is
-        // enforced only by the dialog). A finding carries exactly one root fact key, so at
-        // most ONE of these parallel builders returns non-null: a DB_CONFIG finding may
-        // offer RCSI; a CPU finding (CPU_SQL_PERCENT / CPU_SPIKE) may offer CLEAR_PLAN.
-        var destructiveAction = FactRemediation.BuildRcsiAction(finding)
-                                ?? FactRemediation.BuildClearPlanAction(finding);
+        // B3 Phase 3 (§6): when the finding offers a DESTRUCTIVE remediation, append the
+        // two-sided RiskDisclosure so every read-only surface (email / webhook / MCP) SHOWS the
+        // operator the same risks they'd see in-app — they simply cannot click Apply off-app
+        // (no consent gate there; consent is enforced only by the dialog). A DB_CONFIG finding
+        // may offer RCSI.
+        var destructiveAction = FactRemediation.BuildRcsiAction(finding);
         if (destructiveAction is not null)
         {
             var risks = FactRiskDisclosure.GetForAction(destructiveAction, finding);
@@ -291,6 +288,7 @@ public static class FactAdvice
             "PARAMETER_SENSITIVITY" => ComposeParameterSensitivity(factsByKey),
             "PLAN_REGRESSION" => ComposePlanRegression(factsByKey),
             "TEMPDB_USAGE" => ComposeTempdbUsage(factsByKey),
+            "MEMORY_PRESSURE_EVENTS" => ComposeMemoryPressureEvents(factsByKey),
             // I/O latency + general lock contention.
             "IO_READ_LATENCY_MS" => ComposeIoLatency(factsByKey, "IO_READ_LATENCY_MS"),
             "IO_WRITE_LATENCY_MS" => ComposeIoLatency(factsByKey, "IO_WRITE_LATENCY_MS"),
@@ -311,14 +309,14 @@ public static class FactAdvice
             // Anomaly facts: state the observed value, how many times its usual variation above the hour-of-week normal level, and
             // the baseline itself — "X is N times its usual variation above its normal level for this time of week".
             "ANOMALY_CPU_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_CPU_SPIKE", "peak_cpu", "SQL CPU", Pct, "A brief CPU burst well above what this hour-of-week normally sees.", "avg_cpu_in_window"),
-            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does.", "avg_latency_ms"),
-            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes ran slower than this hour-of-week normally does.", "avg_latency_ms"),
+            "ANOMALY_READ_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_READ_LATENCY", "current_latency_ms", "Read latency", Ms, "Storage reads ran slower than this hour-of-week normally does" + AnomalyIoOpsClause(factsByKey, "ANOMALY_READ_LATENCY", "reads") + ".", "avg_latency_ms"),
+            "ANOMALY_WRITE_LATENCY" => ComposeAnomaly(factsByKey, "ANOMALY_WRITE_LATENCY", "current_latency_ms", "Write latency", Ms, "Storage writes (log files and tempdb) ran slower than this hour-of-week normally does" + AnomalyIoOpsClause(factsByKey, "ANOMALY_WRITE_LATENCY", "writes") + ".", "avg_latency_ms"),
             "ANOMALY_BATCH_REQUESTS" => ComposeAnomaly(factsByKey, "ANOMALY_BATCH_REQUESTS", "peak_batch_requests", "Batch requests/sec", Rate, "Throughput jumped well above the usual level for this hour-of-week.", "avg_batch_requests"),
             "ANOMALY_SESSION_SPIKE" => ComposeAnomaly(factsByKey, "ANOMALY_SESSION_SPIKE", "peak_connections", "Connection count", Num, "Far more sessions connected than this hour-of-week normally sees — often a connection-pool leak or a retry storm.", "avg_connections"),
             "ANOMALY_QUERY_DURATION" => ComposeAnomaly(factsByKey, "ANOMALY_QUERY_DURATION", "peak_total_elapsed_us", "Total query duration", Micros, "Queries ran far longer in aggregate than this hour-of-week normally does.", "avg_total_elapsed_us"),
             "ANOMALY_MEMORY_PRESSURE" => ComposeAnomalyMemoryPressure(factsByKey),
             "ANOMALY_WAIT_PROFILE" => ComposeAnomalyWaitProfile(factsByKey),
-            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event"),
+            "ANOMALY_BLOCKING_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_BLOCKING_SPIKE", "blocking event", "blocked process report", BlockingSpikeUnitNote, "blocking snapshot row", BlockingSpikeDmvUnitNote),
             "ANOMALY_DEADLOCK_SPIKE" => ComposeAnomalyRatio(factsByKey, "ANOMALY_DEADLOCK_SPIKE", "deadlock"),
             "ANOMALY_OBJECT_GROWTH" => ComposeAnomalyObjectGrowth(factsByKey),
             "ANOMALY_OBJECT_CONTENTION" => ComposeAnomalyObjectContention(factsByKey),
@@ -597,7 +595,18 @@ public static class FactAdvice
         string headline, remediation;
         if (maxdop == 0)
         {
-            headline = "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)";
+            /* #7417: the server's own scheduler count when SERVER_HARDWARE carries it (its cpu_count; an Azure SQL Database's vCores).
+               MAXDOP 0 stops at 64, so a bigger box says "up to 64 of N". With no fact the sentence carries no number. */
+            var schedulers = facts.TryGetValue("SERVER_HARDWARE", out var hardwareFact)
+                             && hardwareFact.Metadata.TryGetValue("cpu_count", out var cpuCount) && cpuCount >= 1
+                ? (int)cpuCount
+                : 0;
+            var schedulerNote = schedulers == 0
+                ? ""
+                : schedulers > 64
+                    ? $" (up to 64 of this {(basis.FromVcores ? "database" : "server")}'s {schedulers})"
+                    : $" ({schedulers} on this {(basis.FromVcores ? "database" : "server")})";
+            headline = $"MAXDOP is 0 — a single query can fan out across every scheduler{schedulerNote}";
             remediation =
                 $"Set MAXDOP to {rec} — this {(basis.FromVcores ? "database" : "server")}'s {cappedFrom} capped at 8{coresNote}, the per-NUMA-node " +
                 $"proxy; the SKU is irrelevant to the right value. {applySentence} On hardware with more than 16 logical processors " +
@@ -970,7 +979,7 @@ public static class FactAdvice
     /// <summary>#6267: PLAN_REGRESSION fired on a cost regression (a fact raised by timeouts or errors alone carries no cost
     /// figures), the case the "force the historically faster plan" text is true for.</summary>
     private static bool CostRegressionFired(IReadOnlyDictionary<string, Fact> facts) =>
-        Fired(facts, "PLAN_REGRESSION") && FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor") is not null;
+        Fired(facts, "PLAN_REGRESSION") && FactMeta(facts, "PLAN_REGRESSION", "lead_regression_factor") is not null;
 
     /// <summary>
     /// Names the query-level findings that ACTUALLY co-fired this window (plan regression, parameter
@@ -1190,6 +1199,8 @@ public static class FactAdvice
         if (perHour is > 0)
             inv.Append($", about {perHour.Value:0.#} per hour");
         inv.Append('.');
+        // #7537: say what is counted. A blocked process report row is not a wait; the spike anomaly counts rows.
+        inv.Append(" Each is one wait: a blocked session waiting on one blocker counts once, however many blocked process reports it produced.");
         if (heads is > 0)
             inv.Append($" {Plural(heads.Value, "distinct head blocker")}.");
         if (avgWait is > 0)
@@ -1519,6 +1530,14 @@ public static class FactAdvice
         };
     }
 
+    /// <summary>#7417: " (across N reads in the window)" from the anomaly's <c>window_io_ops</c> metadata, so the card shows the
+    /// volume the <see cref="IoVolumeFloor"/> let through. Empty on a fact stored before the metadata existed.</summary>
+    private static string AnomalyIoOpsClause(IReadOnlyDictionary<string, Fact> facts, string key, string verb)
+    {
+        var ops = FactMeta(facts, key, "window_io_ops");
+        return ops is > 0 ? $" (across {ops.Value:N0} {verb} in the window)" : "";
+    }
+
     /// <summary>
     /// IO_READ_LATENCY_MS / IO_WRITE_LATENCY_MS composed: states the average latency, the operation
     /// count, and total stall. Falls back to the static block when the metadata is absent.
@@ -1535,12 +1554,24 @@ public static class FactAdvice
         var stall = FactMeta(facts, key, read ? "total_stall_read_ms" : "total_stall_write_ms");
         var verb = read ? "reads" : "writes";
 
-        var inv = new StringBuilder($"Average {(read ? "read" : "write")} latency was {avg.Value:0.#} ms this window");
+        // #6959: the write figure covers log files and tempdb data files only, so the card says so, and the
+        // user data files' own write latency (unscored metadata on the fact) gets its own sentence.
+        var scope = read ? "" : " on log files and tempdb";
+        var inv = new StringBuilder($"Average {(read ? "read" : "write")} latency{scope} was {avg.Value:0.#} ms this window");
         if (totalOps is > 0)
             inv.Append($" across {totalOps.Value:N0} {verb}");
         if (stall is > 0)
             inv.Append($", {Duration(stall.Value)} of total stall");
-        inv.Append($". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is a server-wide average — a single hot file can be worse than the number suggests.");
+        inv.Append(read
+            ? ". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is a server-wide average — a single hot file can be worse than the number suggests."
+            : ". Latency in the tens of milliseconds is slow enough to surface as query latency, and this is an average over the log files and tempdb only — a single hot file can be worse than the number suggests.");
+        if (!read)
+        {
+            var dataLatency = FactMeta(facts, key, "data_file_write_latency_ms");
+            var dataWrites = FactMeta(facts, key, "data_file_writes");
+            if (dataLatency is not null && dataWrites is > 0)
+                inv.Append($" User data files averaged {dataLatency.Value:0.#} ms across {dataWrites.Value:N0} writes this window, which is not part of the figure above because checkpoint and lazy-writer writes are not something a session waits on.");
+        }
 
         var rem = new StringBuilder();
         if (read)
@@ -1563,7 +1594,9 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"Storage {verb} averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency",
+            Headline = read
+                ? $"Storage reads averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency"
+                : $"Log and tempdb writes averaged {avg.Value:0.#} ms this window — slow enough to surface as query latency",
             Investigation = inv.ToString(),
             Remediation = rem.ToString()
         };
@@ -1813,7 +1846,7 @@ public static class FactAdvice
     private static AdviceBlock ComposePlanRegression(IReadOnlyDictionary<string, Fact> facts)
     {
         var fallback = _byKey["PLAN_REGRESSION"];
-        var factor = FactMeta(facts, "PLAN_REGRESSION", "worst_regression_factor");
+        var factor = FactMeta(facts, "PLAN_REGRESSION", "lead_regression_factor");
         var failureOffenders = FactMeta(facts, "PLAN_REGRESSION", "failure_offender_count");
         /* #6267: a fact raised by timeouts or errors alone carries no cost figures. */
         if (factor is null)
@@ -1889,6 +1922,35 @@ public static class FactAdvice
                 : $"A query regressed to {factor.Value:0.#}× its best plan's cost",
             Investigation = inv.ToString(),
             Remediation = rem
+        };
+    }
+
+    /// <summary>
+    /// MEMORY_PRESSURE_EVENTS composed (#7449): the static card said the finding carries the event count and the peak
+    /// process/system indicators, but the reply showed only the peak in the root fact's value. This states the count and
+    /// both peaks from the fact's metadata. Falls back to the static block, which points at get_memory_pressure_events, when
+    /// the metadata is absent.
+    /// </summary>
+    private static AdviceBlock ComposeMemoryPressureEvents(IReadOnlyDictionary<string, Fact> facts)
+    {
+        var fallback = _byKey["MEMORY_PRESSURE_EVENTS"];
+        var process = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "max_process_indicator");
+        var system = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "max_system_indicator");
+        if (process is null && system is null)
+            return fallback;
+
+        var count = FactMeta(facts, "MEMORY_PRESSURE_EVENTS", "event_count");
+        var stated = new StringBuilder();
+        if (count is > 0)
+            stated.Append($"The window logged {count.Value:N0} pressure notification{(count.Value == 1 ? "" : "s")} at medium or worse");
+        else
+            stated.Append("The window logged pressure notifications");
+        stated.Append($". The process indicator peaked at {(process ?? 0):0.#} and the system indicator at {(system ?? 0):0.#}.");
+
+        const string Sentence = "`get_memory_pressure_events` lists each notification with its process and system indicators.";
+        return fallback with
+        {
+            Investigation = fallback.Investigation.Replace(Sentence, stated + " " + Sentence, StringComparison.Ordinal)
         };
     }
 
@@ -2081,6 +2143,29 @@ public static class FactAdvice
             : "this server's hour-of-week baseline";
 
     /// <summary>
+    /// #7537: ANOMALY_BLOCKING_SPIKE counts blocked process report ROWS (the detector's COUNT(*), and its baseline
+    /// is in the same unit), while BLOCKING_EVENTS counts WAITS. The blocked process threshold fires again every
+    /// interval while a session waits, so a long wait is one wait and several rows. The sentence says which unit
+    /// the figure is in, so the two counts are never read as one number.
+    /// </summary>
+    private const string BlockingSpikeUnitNote =
+        " This counts blocked process report rows, and the blocked process threshold fires again every interval a session " +
+        "keeps waiting, so one long wait adds several. It is not the blocking event count, which counts each wait once; " +
+        "the two figures for the same window will differ. The baseline it is compared with is in report rows too.";
+
+    /// <summary>
+    /// #7537: the same figure when the detector took its DMV arm (the window holds no blocked process reports, as on
+    /// RDS and Azure), so the rows are blocking snapshots. The baseline is built from snapshot rows too (#7588), so the
+    /// note names the source it counted and says the baseline counts the same thing.
+    /// </summary>
+    private const string BlockingSpikeDmvUnitNote =
+        " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports for the " +
+        "databases this target covers, and " +
+        "the snapshot job adds a row at every sample a session keeps waiting, so one long wait adds several. It is not " +
+        "the blocking event count, which counts each wait once; the two figures for the same window will differ. " +
+        "The baseline it is compared with is built from snapshot rows too.";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
@@ -2093,9 +2178,17 @@ public static class FactAdvice
     /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
     /// </para>
     /// </summary>
-    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
+    private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun, string? countNoun = null, string unitNote = "", string? dmvCountNoun = null, string dmvUnitNote = "")
     {
         var fallback = _byKey[key];
+        // #7537: what the number counts. The remediation still names the regular finding's threshold by `noun`.
+        var counted = countNoun ?? noun;
+        // #7537: the detector stamps the arm that counted. On the DMV snapshot arm the rows are not reports, and (#7588) the baseline is built from snapshot rows too.
+        if (dmvCountNoun is not null && (FactMeta(facts, key, CountFamilyMetadata.FromDmvSnapshotsKey) ?? 0) >= 1)
+        {
+            counted = dmvCountNoun;
+            unitNote = dmvUnitNote;
+        }
         var current = FactMeta(facts, key, "current_count");
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
@@ -2105,11 +2198,11 @@ public static class FactAdvice
         {
             var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
             var invZero =
-                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"{Plural(current.Value, counted)} this window. This server's baseline for this hour-of-week is not thin — " +
                 $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
                 "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
                 "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
-                "treating it as chronic.";
+                "treating it as chronic." + unitNote;
             var remZero =
                 "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
                 "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
@@ -2117,7 +2210,7 @@ public static class FactAdvice
                 $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
             return fallback with
             {
-                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Headline = $"{Plural(current.Value, counted)} this window — against a month in which this hour saw none",
                 Investigation = invZero,
                 Remediation = remZero
             };
@@ -2130,25 +2223,26 @@ public static class FactAdvice
         if (isNew)
         {
             var invNew =
-                $"{Plural(current.Value, noun)} this window — a first occurrence, with no established baseline for this " +
+                $"{Plural(current.Value, counted)} this window — a first occurrence, with no established baseline for this " +
                 "hour-of-week yet to compare against. Treat it as a new event, not a proven regression: check whether it " +
-                "coincides with a workload change, a deploy, or a one-off before treating it as chronic.";
+                "coincides with a workload change, a deploy, or a one-off before treating it as chronic." + unitNote;
             var remNew =
                 $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
                 "with its chain or graph detail on a later window; treat it then. A one-time event that matches a known cause needs only awareness.";
             return fallback with
             {
-                Headline = $"{Plural(current.Value, noun)} this window — first occurrence, no baseline yet",
+                Headline = $"{Plural(current.Value, counted)} this window — first occurrence, no baseline yet",
                 Investigation = invNew,
                 Remediation = remNew
             };
         }
 
         var baseRate = FactMeta(facts, key, "baseline_rate");
-        var inv = new StringBuilder($"{Plural(current.Value, noun)} this window — about {ratio.Value:0.#}× the normal rate for this hour-of-week");
+        var inv = new StringBuilder($"{Plural(current.Value, counted)} this window — about {ratio.Value:0.#}× the normal rate for this hour-of-week");
         if (baseRate is not null)
             inv.Append($" (baseline {baseRate.Value:0.#})");
         inv.Append(". This is a spike against the time-of-week baseline, not necessarily a sustained problem — check whether it coincides with a workload change or a one-off event.");
+        inv.Append(unitNote);
 
         var rem =
             $"If it recurs or sustains, it will cross the standard {noun} threshold and surface as a first-class finding " +
@@ -2156,7 +2250,7 @@ public static class FactAdvice
 
         return fallback with
         {
-            Headline = $"{noun} rate spiked to {ratio.Value:0.#}× its baseline for this time of week",
+            Headline = $"{counted} rate spiked to {ratio.Value:0.#}× its baseline for this time of week",
             Investigation = inv.ToString(),
             Remediation = rem
         };
@@ -2298,23 +2392,55 @@ public static class FactAdvice
         if (items.Count == 0)
             return fallback;
 
+        /* #7448: RCSI off is how a new SQL Server database starts, so when it is the ONLY item nothing has drifted:
+           the headline says what the fact found and the text does not claim a change. Another setting that really
+           moved keeps the drift wording. */
+        if (items.Count == 1 && f.Metadata.TryGetValue("rcsi_off_count", out var rcsiOff) && rcsiOff > 0)
+        {
+            return fallback with
+            {
+                Headline = $"RCSI is off on {Plural((long)rcsiOff, "database")} on this server",
+                Investigation = $"Across this server's databases: {items[0]}. Read committed snapshot isolation (RCSI) is off by default on every new SQL Server database, so this is the starting setting, not a change.",
+                Remediation =
+                    "Turn RCSI on only for a database where the blocking is readers waiting on writers: it makes readers " +
+                    "stop taking shared locks and read the last committed row version instead, at the cost of row-version " +
+                    "load in tempdb and a locking-behavior change the application should be tested against on a copy first. " +
+                    "A database with writer-versus-writer blocking or no blocking gains nothing from it."
+            };
+        }
+
         var inv = $"Across this server's databases: {string.Join("; ", items)}. These are per-database settings that have drifted from the safe defaults and quietly cost performance or stability.";
-        var rem =
-            "Bring each back to the safe default on the databases that matter: AUTO_SHRINK off (it fragments " +
-            "indexes and churns I/O re-growing what it shrank), AUTO_CLOSE off, page verify set to CHECKSUM so " +
-            "corruption is detected, auto-create and auto-update statistics on, and RCSI on where the blocking " +
-            "is readers-versus-writers. The Database Configuration view lists exactly which databases each applies to.";
+        /* #7448: name only the settings that fired. RCSI off is its own sentence, because it is a choice for
+           readers-versus-writers blocking and not a safe default to restore. */
+        bool Fired(string metaKey) => f.Metadata.TryGetValue(metaKey, out var n) && n > 0;
+        var fixes = new List<string>();
+        if (Fired("auto_shrink_on_count"))
+            fixes.Add("AUTO_SHRINK off (it fragments indexes and churns I/O re-growing what it shrank)");
+        if (Fired("auto_close_on_count"))
+            fixes.Add("AUTO_CLOSE off");
+        if (Fired("page_verify_not_checksum_count"))
+            fixes.Add("page verify set to CHECKSUM so corruption is detected");
+        if (Fired("auto_create_stats_off_count"))
+            fixes.Add("auto-create statistics on");
+        if (Fired("auto_update_stats_off_count"))
+            fixes.Add("auto-update statistics on");
+        var rem = new StringBuilder();
+        if (fixes.Count > 0)
+            rem.Append("Bring each back to the safe default on the databases that matter: ").Append(string.Join(", ", fixes)).Append(". ");
+        if (Fired("rcsi_off_count"))
+            rem.Append("Turn RCSI on only where the blocking is readers-versus-writers. ");
+        rem.Append("The Database Configuration view lists exactly which databases each applies to.");
         if (qsOff > 0)
-            rem +=
+            rem.Append(
                 " Where Query Store is off, enable it (ALTER DATABASE <db> SET QUERY_STORE = ON; then " +
                 "OPERATION_MODE = READ_WRITE) so query performance history is captured for troubleshooting " +
-                "and plan-regression detection.";
+                "and plan-regression detection.");
 
         return fallback with
         {
             Headline = "Database settings have drifted from the safe defaults on this server",
             Investigation = inv,
-            Remediation = rem
+            Remediation = rem.ToString()
         };
     }
 
@@ -2547,7 +2673,11 @@ public static class FactAdvice
 
         var totalFree = FactMeta(facts, "DISK_SPACE", "total_free_mb");
         var vols = FactMeta(facts, "DISK_SPACE", "volume_count");
-        var inv = new StringBuilder($"The tightest volume on this server is down to {mb.Value:N0} MB free");
+        /* #7179: the volume that scored, by name, so the MB figure and the score read the same volume. */
+        var mount = facts.TryGetValue("DISK_SPACE", out var diskFact) && !string.IsNullOrWhiteSpace(diskFact.ObjectName)
+            ? $" ({diskFact.ObjectName.Trim()})"
+            : "";
+        var inv = new StringBuilder($"The tightest volume on this server{mount} is down to {mb.Value:N0} MB free");
         if (vols is > 1 && totalFree is > 0)
             inv.Append($" (of {vols.Value:N0} volumes monitored, {totalFree.Value:N0} MB free in total)");
         inv.Append(". Low free space on a database volume risks autogrowth failures, and at zero a database can no longer accept writes.");
@@ -2725,7 +2855,7 @@ public static class FactAdvice
 
     /// <summary>
     /// CONFIG_MAX_MEMORY_MB composed with the server's physical RAM, so the card states a concrete
-    /// suggested cap (total − max(4 GB, 10%)) instead of a formula and an audit_config deferral. The
+    /// suggested cap (total − the OS reserve: the larger of 4 GB and 10%, never over half of RAM, #7400) instead of a formula and an audit_config deferral. The
     /// fact only fires when max server memory is at its ~2 PB default. Falls back to the static block
     /// when total RAM was not collected (nothing concrete to compute).
     /// </summary>
@@ -2736,8 +2866,8 @@ public static class FactAdvice
         if (total is not > 0)
             return fallback;
 
-        var osReserve = Math.Max(4096, (long)(total.Value * 0.10));
-        var suggested = total.Value - osReserve;
+        var osReserve = ConfigAuditGuidance.OsReserveMb(total.Value);
+        var suggested = ConfigAuditGuidance.SuggestedMaxMemoryMb(total.Value);
         return fallback with
         {
             Investigation =
@@ -2967,7 +3097,7 @@ public static class FactAdvice
             Headline:
                 "SQL Server signalled physical-memory pressure — the resource monitor logged RESOURCE_MEMPHYSICAL_LOW notifications in the window",
             Investigation:
-                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. The finding carries the count of pressure events and the peak process/system indicators for the window. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
+                "These come from the RING_BUFFER_RESOURCE_MONITOR ring buffer: when the OS or SQL Server itself flags low available physical memory, the resource monitor raises an indicator (0-1 normal, 2 medium, 3+ severe) and SQL responds by trimming caches — evicting buffer-pool pages and plan cache to free memory. `get_memory_pressure_events` lists each notification with its process and system indicators. That cache trimming shows up downstream as more physical reads (PAGEIOLATCH_SH) and more recompiles as evicted plans are rebuilt, so check the Memory tab and the Wait Stats tab around the event times for that fallout.",
             Remediation:
                 "Confirm whether the pressure is SQL's or the box's: check `max server memory` against physical RAM and what else runs on the host. If `max server memory` is unset or too high, SQL can starve the OS and other processes into signalling system-wide low memory — cap it leaving headroom for the OS (and for other instances/services on the box). If `max server memory` is already conservative and the system indicator is what fired, an external consumer (another instance, an app, a runaway agent) is taking the memory — find and constrain it. If the server is genuinely short of memory for its workload after those checks, add RAM.");
 
@@ -3066,9 +3196,9 @@ public static class FactAdvice
 
         t["IO_WRITE_LATENCY_MS"] = new AdviceBlock(
             Headline:
-                "Average write latency is above the storage-health threshold — disk writes are slow",
+                "Average log and tempdb write latency is above the storage-health threshold — disk writes are slow",
             Investigation:
-                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on data files is concerning, 2 ms on log is the OLTP target. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
+                "The per-database, per-file-type write-latency breakdown is attached, ranked. The transaction log is the usual suspect — every commit blocks on WRITELOG, so even modest log latency directly hurts throughput. Above 10 ms on tempdb data files is concerning, 2 ms on log is the OLTP target. Open File I/O → File I/O Latency for the write series over time. WRITELOG co-elevation confirms log is the bottleneck; PAGEIOLATCH_EX co-elevation means data file writes are slow under modification load.",
             Remediation:
                 "Move the transaction log to its own low-latency device (NVMe, log-tier SAN), and never share that device with non-database workloads. For data-file write pressure, look at the modification workload — bulk inserts and large updates are the usual drivers, and batching them so the buffer pool can flush between batches helps. A too-wide index set inflates write I/O: every INSERT and DELETE maintains all nonclustered indexes, and an UPDATE maintains every index that includes one of the changed columns — so dropping unused or redundant indexes directly cuts modification cost. The plans of the modification queries will surface specific opportunities.");
 
@@ -3221,7 +3351,7 @@ public static class FactAdvice
 
         t["CONFIG_MAXDOP"] = new AdviceBlock(
             Headline:
-                "MAXDOP is 0 — a single query can fan out across every scheduler (up to 64)",
+                "MAXDOP is 0 — a single query can fan out across every scheduler",
             Investigation:
                 "`max degree of parallelism` at 0 lets one query use all available schedulers, up to a hard limit of 64 processors. On a server with more cores than a single NUMA node, that lets one large query monopolize schedulers and drive up CXPACKET / SOS_SCHEDULER_YIELD; on a small box — a single NUMA node of 8 or fewer logical processors — MAXDOP 0 is within Microsoft's guidance and is far less likely to be the problem. Open Configuration → Server Configuration to see the value alongside the socket/core layout. Note this is the SERVER default: MAXDOP can be overridden per database with `ALTER DATABASE SCOPED CONFIGURATION SET MAXDOP = N`, which takes precedence for queries running in that database — so if the parallelism is concentrated in one database, set it there rather than changing the instance default. (The analysis engine scores only the server default today; per-database overrides live in the database scoped configuration.)",
             Remediation:
@@ -3363,9 +3493,9 @@ public static class FactAdvice
 
         t["ANOMALY_BLOCKING_SPIKE"] = new AdviceBlock(
             Headline:
-                "Blocking events are anomalously elevated compared to baseline — a ratio above 3x normal rate",
+                "Blocked process reports are anomalously elevated compared to baseline — a ratio above 3x normal rate",
             Investigation:
-                "Ratio-based scoring: 3x baseline = 0.5 score, 10x = 1.0, so this finding means the blocking rate is well above the workload's normal pattern for this hour-of-week bucket. When BLOCKING_EVENTS also surfaced data, the top chains are attached, including whether the head was sleeping (the abandoned-transaction signature). Open Blocking → Blocked Process Reports and zoom to the window to see whether the rate is climbing or a one-shot spike. A sudden ratio spike often points to a recent deploy, schema change, or new query pattern that introduced fresh contention.",
+                "Ratio-based scoring: 3x baseline = 0.5 score, 10x = 1.0, so this finding means the rate of blocked process reports is well above the workload's normal pattern for this hour-of-week bucket. It counts report rows, and the threshold fires again every interval a session keeps waiting, so a long wait adds several; BLOCKING_EVENTS counts each wait once, so the two figures differ for the same window. When BLOCKING_EVENTS also surfaced data, the top chains are attached, including whether the head was sleeping (the abandoned-transaction signature). Open Blocking → Blocked Process Reports and zoom to the window to see whether the rate is climbing or a one-shot spike. A sudden ratio spike often points to a recent deploy, schema change, or new query pattern that introduced fresh contention.",
             Remediation:
                 "First question: what changed? Recent deploy, schema migration, new query pattern, job running outside its normal window. If a sleeping head topped the chain, that is the abandoned-transaction signature — but this is a report on a window that has passed, so the chain has cleared and a KILL buys nothing; fix the code path that left a BEGIN TRAN open on its error/timeout path (SET XACT_ABORT ON) so it stops recurring. For systemic increases without an obvious change, the BLOCKING_EVENTS standard playbook applies: RCSI for reader/writer waits, shorter transactions for writer/writer, index tuning to reduce lock-hold duration on the slow operations everyone is queueing behind.");
 

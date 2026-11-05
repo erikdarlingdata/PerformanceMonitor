@@ -19,8 +19,9 @@
  * cannot drift). Neither holds a key or calls a model.
  *
  * Which findings are "incidents" follows the desktop: a finding that carries a structured_remediation is a
- * standing config fix and gets no Active Queries link; every other finding with a time_range does. The link
- * opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only.
+ * standing config fix and gets no Queries link, and neither does a standing state (a setting, a volume's free space: standing_state
+ * on the read, #7416). The link opens the server's Queries tab, which has no from/to deep link on the web, so it carries the server only
+ * and says "Open Queries tab", not a sub-tab it cannot reach.
  *
  * State: which groups the reader has opened or closed lives in module scope (`openState`, keyed by server then
  * by group key), because the server page rebuilds this tab on every 60 s poll and on every Range change.
@@ -44,9 +45,164 @@ function badgeClass(label) {
   return "badge " + bandClass(label === "Info" ? "Unknown" : label);
 }
 
-/** An incident finding: not a standing config fix (the read's is_config_fix, the desktop's rule; force-plan stays an incident), with a time window to point at. */
+/**
+ * A finding that running queries can explain (#7416): not a standing config fix (the read's is_config_fix, the desktop's rule;
+ * force-plan stays an incident), not a standing state (the read's standing_state: a setting or the free space of a volume, true at
+ * every hour whatever is running), and with a time window to point at.
+ */
 export function showsActiveQueriesLink(f) {
-  return !f.is_config_fix && !!(f.time_range && f.time_range.start && f.time_range.end);
+  return !f.is_config_fix && !f.standing_state && !!(f.time_range && f.time_range.start && f.time_range.end);
+}
+
+/** The root fact a finding hangs from: two chains that start at the same root are one cause seen two ways. */
+function rootKeyOf(f) {
+  return (f.root_fact && f.root_fact.key) || "";
+}
+
+/**
+ * One card per root fact in a group (#7416): the chain seen most recently speaks, with its own figures, and the other chains on the
+ * same root are named under it in `also`. The read keeps every chain; only the page folds them. A finding with no root key is never folded.
+ */
+function foldByRoot(items) {
+  const byRoot = new Map();
+  const out = [];
+  for (const f of items) {
+    const root = rootKeyOf(f);
+    if (!root) {
+      out.push({ ...f, also: [] });
+      continue;
+    }
+    const seen = byRoot.get(root);
+    if (!seen) {
+      const card = { ...f, also: [] };
+      byRoot.set(root, card);
+      out.push(card);
+      continue;
+    }
+    const newer = (Date.parse(f.last_seen) || 0) > (Date.parse(seen.last_seen) || 0);
+    if (newer) {
+      const { also, ...rest } = seen;
+      Object.assign(seen, f, { also: [...also, rest] });
+    } else {
+      seen.also.push(f);
+    }
+  }
+  return out;
+}
+
+/** A finite number, or null. A missing score is not 0: a row with none keeps showing none. */
+function finiteOrNull(v) {
+  const n = v == null || v === "" ? NaN : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function instantOf(v) {
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** The worst score a row ever reached: its newest occurrence's severity or its peak, whichever is higher. */
+function worstScore(f) {
+  const a = finiteOrNull(f.severity);
+  const b = finiteOrNull(f.peak_severity);
+  return a == null ? b : b == null ? a : Math.max(a, b);
+}
+
+/**
+ * A fact key: upper case with underscores, starting with a letter (LATCH_EX, PG_WAIT_LOCK, BAD_ACTOR_0x1A2B). A story path can also carry
+ * a segment that is not a fact: a same-statement pileup's path is "SAME_STATEMENT_PILEUP → <statement hash>" (#7582), and the hash starts
+ * with a digit (a surrogate identity starts with "text:"). The stored row has no typed keys (#3859), so the shape is the test.
+ */
+const FACT_KEY = /^[A-Z][A-Za-z0-9_]*$/;
+
+function pathSegments(f) {
+  return String(f.story_path || "").split("→").map((s) => s.trim()).filter(Boolean);
+}
+
+/** The path segments that name something other than a fact (a statement's hash), joined: "" for an ordinary chain. */
+function identityOf(f) {
+  return pathSegments(f).filter((s) => !FACT_KEY.test(s)).join("|");
+}
+
+/** A chain's facts in the order they happened, in words: "Latch ex, then Cxpacket". Never the raw arrows or the hash. */
+export function plainChain(f) {
+  const steps = pathSegments(f).filter((s) => FACT_KEY.test(s)).map((s) => readableStory(s)).filter(Boolean);
+  return steps.length ? steps.join(", then ") : readableStory(rootKeyOf(f)) || findingTitle(f);
+}
+
+/** One line for a chain of a merged row: its facts in words, its own severity and its own occurrences. */
+export function chainLine(c) {
+  const n = Number(c.occurrences) || 0;
+  return c.path + " · " + c.label + " · " + n + (n === 1 ? " occurrence" : " occurrences");
+}
+
+/**
+ * #7582: one row per sentence. The read keeps one entry per chain and incident, and chains that start at the same fact print the same
+ * headline, so the page showed one sentence on two or three rows with nothing to tell them apart. Rows with the same headline become
+ * one: the worst severity any of them reached (counting each row's peak, so a row whose newest occurrence is Info but whose peak was
+ * Warning reads Warning), the earliest first seen, the latest last seen and the occurrences added up. The newest row speaks for the
+ * rest (its advice, its incident, its figures). `chains` lists what the row covers, one entry per distinct chain, worst first, for the
+ * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
+ * One exception: a path that names a statement (a same-statement pileup's hash) keeps the statement in the merge key, so two pileups
+ * on different statements with the same headline stay two rows, each with its own advice and remediation. The same statement on two
+ * incidents still merges.
+ */
+export function mergeBySentence(findings) {
+  const order = [];
+  const buckets = new Map();
+  for (const f of findings || []) {
+    const title = findingTitle(f);
+    const key = title + "\u0000" + identityOf(f);
+    if (!buckets.has(key)) {
+      buckets.set(key, { title, rows: [] });
+      order.push(key);
+    }
+    buckets.get(key).rows.push(f);
+  }
+  return order.map((key) => {
+    const { title, rows } = buckets.get(key);
+    let newest = rows[0];
+    let first = null;
+    let last = null;
+    let start = null;
+    let end = null;
+    let worst = null;
+    let occurrences = 0;
+    const byPath = new Map();
+    for (const f of rows) {
+      if ((instantOf(f.last_seen) ?? -Infinity) > (instantOf(newest.last_seen) ?? -Infinity)) newest = f;
+      const fs = instantOf(f.first_seen);
+      const ls = instantOf(f.last_seen);
+      if (fs != null && (first == null || fs < instantOf(first))) first = f.first_seen;
+      if (ls != null && (last == null || ls > instantOf(last))) last = f.last_seen;
+      const range = f.time_range || {};
+      if (instantOf(range.start) != null && (start == null || instantOf(range.start) < instantOf(start))) start = range.start;
+      if (instantOf(range.end) != null && (end == null || instantOf(range.end) > instantOf(end))) end = range.end;
+      const score = worstScore(f);
+      if (score != null && (worst == null || score > worst)) worst = score;
+      const n = Number(f.occurrences) || 0;
+      occurrences += n;
+      const path = plainChain(f);
+      const chain = byPath.get(path) || { path, score: null, occurrences: 0 };
+      chain.occurrences += n;
+      if (score != null && (chain.score == null || score > chain.score)) chain.score = score;
+      byPath.set(path, chain);
+    }
+    const chains = [...byPath.values()]
+      .sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || b.occurrences - a.occurrences)
+      .map((c) => ({ path: c.path, severity: c.score, label: severityLabel(c.score), occurrences: c.occurrences }));
+    return {
+      ...newest,
+      finding_title: title,
+      severity: worst,
+      peak_severity: worst,
+      occurrences,
+      first_seen: first ?? newest.first_seen,
+      last_seen: last ?? newest.last_seen,
+      time_range: newest.time_range ? { ...newest.time_range, start: start ?? newest.time_range.start, end: end ?? newest.time_range.end } : newest.time_range,
+      chains,
+    };
+  });
 }
 
 /**
@@ -57,7 +213,7 @@ export function groupFindings(findings) {
   const order = [];
   const buckets = new Map();
   let solo = 0;
-  for (const f of findings || []) {
+  for (const f of mergeBySentence(findings)) {
     const key = f.incident_id ? "i:" + f.incident_id : "s:" + solo++;
     if (!buckets.has(key)) {
       buckets.set(key, []);
@@ -66,7 +222,7 @@ export function groupFindings(findings) {
     buckets.get(key).push(f);
   }
   const groups = order.map((key) => {
-    const items = buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0));
+    const items = foldByRoot(buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0)));
     const primary = items[0];
     return { key, items, primary, label: severityLabel(primary.severity) };
   });
@@ -88,7 +244,7 @@ export function readableStory(key) {
 
 /** The finding's own headline; a story key in words when it has none. Never the raw key. */
 export function findingTitle(f) {
-  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category || "Finding";
+  return (f.advice && f.advice.headline) || readableStory(f.story_path) || f.category_name || f.category || "Finding";
 }
 
 /* ─────────────────────────── state ─────────────────────────── */
@@ -268,6 +424,11 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
+/** One folded chain, named under the card that stands for its root: its facts in words (as the merged chains are, #7582), its band and when it was last seen. */
+function alsoText(f) {
+  return plainChain(f) + " (" + severityLabel(f.severity) + ", last seen " + localTime(f.last_seen) + ")";
+}
+
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -275,13 +436,19 @@ function card(server, f, showTitle) {
   const kids = [
     el("div", { class: "reco-head" }, [
       el("span", { class: badgeClass(label), text: label.toUpperCase() + severityText(f.severity) }),
-      f.category ? el("span", { class: "muted", text: " · " + f.category }) : null,
+      f.category ? el("span", { class: "muted", text: " · " + (f.category_name || f.category) }) : null,
     ]),
     showTitle ? el("h4", { text: findingTitle(f) }) : null,
     advice.investigation ? el("p", { class: "reco-advice", text: advice.investigation }) : null,
     advice.remediation ? el("p", { class: "reco-advice", text: advice.remediation }) : null,
     el("div", { class: "muted", text: "Seen " + f.occurrences + "× · last " + localTime(f.last_seen) + (f.recurring_at_this_hour ? " · recurs at this hour" : "") }),
   ];
+  if (f.chains && f.chains.length > 1) {
+    kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
+  }
+  if (f.also && f.also.length) {
+    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join(" · ") }));
+  }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));
   }
@@ -289,7 +456,7 @@ function card(server, f, showTitle) {
   if (f.remediation_command) actions.push(copyButton(f.remediation_command));
   actions.push(askAiButton(server, f));
   if (showsActiveQueriesLink(f)) {
-    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open in Active Queries" }));
+    actions.push(el("a", { class: "btn small", href: storeHash("#/server/") + encodeURIComponent(server) + "/queries", text: "Open Queries tab" }));
   }
   if (actions.length) kids.push(el("div", { class: "reco-actions" }, actions));
   return el("div", { class: "card reco-card" }, kids);

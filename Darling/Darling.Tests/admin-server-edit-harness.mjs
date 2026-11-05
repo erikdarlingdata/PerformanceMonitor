@@ -1250,11 +1250,14 @@ try {
     },
     /* #6936: the Routes tab on an editing seat. Edit on route 7 (a stored Critical only route), choose `severity` in the Severity box, Save:
        returns the write the page sent (method, url, body). The service answers 200 so the page repaints; the body is what is under test. */
-    routeEdit: async (severity) => {
+    routeEdit: async (param) => {
+      /* #6979: the param is `severity` or `severity,reportNotice`. The stored route is Critical only with the report notice at needs_person_or_change;
+         the result also says what the notice box showed before it was changed. */
+      const [severity, notice] = param.split(",");
       state.canEdit = true;
       const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
         enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
-        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical" };
+        agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "needs_person_or_change" };
       state.responder = (method, url) => {
         if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes: [route] } };
         if (method === "GET" && url === "/api/agent-setup/access") return { status: 200, body: { can_edit_routes: true, can_edit_profiles: true } };
@@ -1264,10 +1267,63 @@ try {
       await mountPage("routes");
       await fire(byAttr(main, "data-action", "edit-route")[0], "click");
       await settle(30);
+      const reportNoticeShown = field("reportNotice").value;
+      /* The hint under the notice box shows while the route has no agent level of its own and is gone (hidden and display none, because the
+         author .mute-label rule outranks [hidden]) once a level is chosen. The level goes back before Save so the write is unchanged. */
+      const hintNode = all(main, (n) => n.tag === "span" && (n.textContent || "").startsWith(" Applies once the Agent level"))[0];
+      const hintState = () => ({ hidden: hintNode.hidden, display: hintNode.style.display || "", disabled: field("reportNotice").disabled });
+      const noticeAtInherit = hintState();
+      await typeInto(field("level"), "1");
+      const noticeAtInvestigate = hintState();
+      await typeInto(field("level"), "0");
+      const noticeAtOff = hintState();
+      await typeInto(field("level"), "");
       await typeInto(field("severities"), severity);
+      if (notice) await typeInto(field("reportNotice"), notice);
       await fire(byAttr(main, "data-action", "save-route")[0], "click");
       await settle(30);
-      return { writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
+      return { reportNoticeShown, noticeAtInherit, noticeAtInvestigate, noticeAtOff, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ method: r.method, url: r.url, body: r.body })) };
+    },
+    /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
+       `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
+       showed before, what was sent, and what the page said after. A save under the bounds answers 200; the service's own refusal is
+       simulated by a 400 for a value the page let through. */
+    protectionAges: async (param) => {
+      const [seat, typed] = param.split("/");
+      state.canEdit = seat === "editor";
+      const settings = {
+        alerts_enabled: true,
+        backup_overdue: { enabled: false, threshold_hours: 168 },
+        log_backup_overdue: { enabled: false, threshold_minutes: 60 },
+        checkdb_overdue: { enabled: true, threshold_hours: 336 },
+      };
+      state.responder = (method, url, body) => {
+        if (method === "GET" && url === "/api/read/get_alert_settings") return { status: 200, body: settings };
+        if (method === "PUT" && url === "/api/alert-settings/database-protection") {
+          if (body.checkdb_overdue.threshold_hours === 8760) return { status: 400, body: { error: "The service refused 8760." } };
+          return { status: 200, body: { status: "updated" } };
+        }
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("settings");
+      const boxFor = (g) => field("database-protection-" + g);
+      const rowTexts = textsUnder(main).filter((t) => /overdue/i.test(t) && /\(hours\)|\(minutes\)|^(168|60|336)$/.test(t));
+      const before = boxFor("backup_overdue") ? ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].map((g) => boxFor(g).value) : null;
+      const labels = all(main, (n) => n.tag === "span" && (n.textContent || "").includes("when older than")).map((n) => n.textContent);
+      let after = null;
+      if (typed && before) {
+        const values = typed.split(",");
+        await typeInto(boxFor("backup_overdue"), values[0]);
+        await typeInto(boxFor("log_backup_overdue"), values[1]);
+        await typeInto(boxFor("checkdb_overdue"), values[2]);
+        await fire(byAttr(main, "data-action", "save-database-protection")[0], "click");
+        await settle(30);
+        after = {
+          status: all(main, (n) => n.attrs && n.attrs["data-field"] === "database-protection-status").map(text),
+          boxes: boxFor("backup_overdue") ? ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].map((g) => boxFor(g).value) : null,
+        };
+      }
+      return { rowTexts, form: before !== null, before, labels, after, writes: requests.filter((r) => r.method === "PUT").map((r) => ({ url: r.url, body: r.body })) };
     },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or
        {"calls": [{"fn": ..., "args": [...]}, ...]} for a table of calls in one process, printed as {"results": [...]}.

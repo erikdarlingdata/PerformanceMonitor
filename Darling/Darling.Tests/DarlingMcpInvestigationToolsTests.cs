@@ -238,6 +238,29 @@ public sealed class DarlingMcpInvestigationToolsTests
         Assert.StartsWith("action_proposals:", only, StringComparison.Ordinal);
     }
 
+    /// <summary>#7109: Darling's submit passes <c>serverActionTools</c>. An <c>action_proposals</c> report stays refused, and the message names the seven
+    /// action tools to call with <c>dry_run</c> false, where the proposal is stored.</summary>
+    [Theory]
+    [InlineData("[{\"kind\":\"kill_session\"}]")]
+    [InlineData("anything at all")]
+    public void ValidateReport_OnDarling_RefusesActionProposals_AndNamesTheActionTools(string proposals)
+    {
+        var problems = InvestigationToolCore.ValidateReport(
+            Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), "real", "cause",
+            "[{\"tool\":\"get_wait_stats\",\"arguments\":{},\"key_numbers\":\"LCK_M_X 82%\",\"basis\":\"verified\"}]", "summary", null, proposals,
+            out _, out _, out _, requireBasis: true, serverActionTools: true);
+
+        var only = Assert.Single(problems);
+        Assert.StartsWith("action_proposals: refused", only, StringComparison.Ordinal);
+        foreach (var tool in new[]
+        {
+            "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session", "recompile_module", "create_plan_guide", "drop_plan_guide",
+        })
+            Assert.Contains(tool, only, StringComparison.Ordinal);
+        Assert.Contains("dry_run false", only, StringComparison.Ordinal);
+        Assert.Contains("action_proposals", InvestigationToolCore.InvalidReportMessage(problems), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ValidateReport_ANoteOverItsCap_AndAWrongVerdict_AndEvidenceWithoutNumbers_AreEachNamed()
     {

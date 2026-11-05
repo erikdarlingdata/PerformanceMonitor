@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -104,27 +106,10 @@ public sealed class PgPlanCaptureLiveTests
             }
         }
 
-        var context = new CollectorContext
-        {
-            ServerId = 1,
-            ServerName = "live-rig-as-target",
-            CollectionTime = DateTime.UtcNow,
-            Deltas = new CollectorDeltaCalculator(),
-            Target = new CollectorTargetInfo
-            {
-                Engine = CollectorTargetEngine.PostgreSql,
-                PostgresMajorVersion = 18,
-                PostgresVersionNum = 180000,
-            },
-        };
-        var sql = PgPlanCaptureCollector.Instance.BuildQuery(context);
-
-        System.Collections.Generic.List<PgPlanCaptureCollector.Row> rows;
-        await using (var read = LiveTailQuery.Command(sql, connection))
-        await using (var reader = await read.ExecuteReaderAsync(ct))
-        {
-            rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
-        }
+        var rows = await ReadUntilAsync(
+            connection, binaryRoute: false,
+            rows => rows.Exists(r => r.TopNodeType == "Seq Scan" && r.PlanJson.Contains("plan_capture_live_4008", StringComparison.Ordinal)),
+            ct);
 
         Assert.Contains(rows, r => r.TopNodeType == "Seq Scan" && r.PlanJson.Contains("plan_capture_live_4008", StringComparison.Ordinal));
         Assert.DoesNotContain(rows, r => r.PlanJson.Contains("HUNTER2_LEAK", StringComparison.Ordinal));
@@ -216,32 +201,12 @@ public sealed class PgPlanCaptureLiveTests
             }
         }
 
-        async Task<System.Collections.Generic.List<PgPlanCaptureCollector.Row>> ReadRowsAsync(bool binaryRoute)
-        {
-            var context = new CollectorContext
-            {
-                ServerId = 1,
-                ServerName = "live-rig-as-target",
-                CollectionTime = DateTime.UtcNow,
-                Deltas = new CollectorDeltaCalculator(),
-                Target = new CollectorTargetInfo
-                {
-                    Engine = CollectorTargetEngine.PostgreSql,
-                    PostgresMajorVersion = 18,
-                    PostgresVersionNum = 180000,
-                },
-                PgReadBinaryFileGranted = binaryRoute,
-            };
-            var sql = PgPlanCaptureCollector.Instance.BuildQuery(context);
-
-            await using var read = LiveTailQuery.Command(sql, connection);
-            await using var reader = await read.ExecuteReaderAsync(ct);
-            return await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
-        }
-
         foreach (var binaryRoute in new[] { false, true })
         {
-            var rows = await ReadRowsAsync(binaryRoute);
+            var rows = await ReadUntilAsync(
+                connection, binaryRoute,
+                rows => rows.Exists(r => r.TopNodeType == "Seq Scan" && r.PlanJson.Contains("plan_capture_live_4058", StringComparison.Ordinal)),
+                ct);
 
             Assert.Contains(rows, r => r.TopNodeType == "Seq Scan" && r.PlanJson.Contains("plan_capture_live_4058", StringComparison.Ordinal));
             Assert.DoesNotContain(rows, r => r.PlanJson.Contains("OVERFLOW_QUERY_ID", StringComparison.Ordinal));
@@ -251,6 +216,58 @@ public sealed class PgPlanCaptureLiveTests
         await using (var cleanup = new NpgsqlCommand("DROP TABLE IF EXISTS plan_capture_live_4058;", connection))
         {
             await cleanup.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// One collector read of the self-hosted tail, on the text route or (with <paramref name="binaryRoute"/>) the
+    /// <c>pg_read_binary_file</c> route. Each call is a fresh context with no resume marker, so every read covers the
+    /// whole current file window and no read can start after another read's position.
+    /// </summary>
+    private static async Task<List<PgPlanCaptureCollector.Row>> ReadRowsAsync(
+        NpgsqlConnection connection, bool binaryRoute, CancellationToken ct)
+    {
+        var context = new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "live-rig-as-target",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = new CollectorDeltaCalculator(),
+            Target = new CollectorTargetInfo
+            {
+                Engine = CollectorTargetEngine.PostgreSql,
+                PostgresMajorVersion = 18,
+                PostgresVersionNum = 180000,
+            },
+            PgReadBinaryFileGranted = binaryRoute,
+        };
+        var sql = PgPlanCaptureCollector.Instance.BuildQuery(context);
+
+        await using var read = LiveTailQuery.Command(sql, connection);
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        return await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, ct);
+    }
+
+    /// <summary>
+    /// #7032: the server's logging collector (the syslogger process) writes the log file from a pipe, asynchronously
+    /// to the backend that logged the line, so a read issued the moment a statement returns can run before that
+    /// statement's auto_explain block is in the file. A failed run held the setup INSERT's plan and not the SELECT
+    /// that followed it. Repeats the same fresh read until <paramref name="ready"/> holds or 30 s pass, then returns
+    /// the last read. The caller's assertions stay exact, so a capture that never arrives still fails them.
+    /// </summary>
+    private static async Task<List<PgPlanCaptureCollector.Row>> ReadUntilAsync(
+        NpgsqlConnection connection, bool binaryRoute, Func<List<PgPlanCaptureCollector.Row>, bool> ready, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var rows = await ReadRowsAsync(connection, binaryRoute, ct);
+            if (ready(rows) || DateTime.UtcNow >= deadline)
+            {
+                return rows;
+            }
+
+            await Task.Delay(200, ct);
         }
     }
 }

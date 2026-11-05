@@ -21,6 +21,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runShots } from "./shots.mjs";
+import { runLayout } from "./layout.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const baseUrl = (process.env.UI_SMOKE_URL || "http://127.0.0.1:5153").replace(/\/+$/, "");
@@ -227,10 +228,93 @@ for (const spec of config.pages) {
   for (const p of r.panels) console.log(`       panel ${String(p.title).padEnd(36)} ${p.state.padEnd(8)}${p.rows != null ? " rows=" + p.rows : ""}`);
   for (const p of r.problems) console.log(`       PROBLEM ${p}`);
 }
-await browser.close();
 
-/* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), so nothing the screenshot stage does can lose it. */
+/* The walk's result lands first (report.json is { pages, screenshotProblems, screenshots }), before the layout pass and the screenshot stage, so a hang or a throw in either cannot lose it. */
 writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: [] }, null, 2));
+
+/* The layout pass (#7479): every page again at 600, 1280 and 2560 px wide, measured. UI_SMOKE_LAYOUT=off skips it. A failure fails the run. */
+let layout = { failures: [], rows: [], seconds: 0 };
+if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off") {
+  try {
+    layout = await runLayout({ config, baseUrl, outDir, only, settle, browser, sessionCookie: process.env.UI_SMOKE_SESSION_COOKIE });
+  } catch (e) {
+    layout.failures.push({ page: "-", width: 0, check: "layout-stage-threw", selector: "", detail: e && e.message ? e.message.split("\n")[0] : String(e) });
+  }
+  for (const f of layout.failures) console.log(`LAYOUT ${f.page} @${f.width} ${f.check} ${f.selector} : ${f.detail}`);
+  for (const f of layout.exempted || []) console.log(`LAYOUT-EXEMPT ${f.page} @${f.width} ${f.check}: ${f.detail} (exempt: ${f.reason})`);
+  console.log(`layout: ${layout.rows.length} page/width loads in ${layout.seconds}s, ${layout.failures.length} failures`);
+}
+/* Trend plot alignment (#7543): the two Blocking trend plots sit side by side and must start at the same y, as they are, when the
+   source label beside the window label wraps, and when the other heading wraps. The layout pass above has no such check, and a stand-in
+   page would not show it: this measures the real tab at 1280 and 2560 px. The long labels are set in the page (the seed cannot make a
+   source tag longer). It fails when the two tops differ by more than ALIGN_TOLERANCE px. UI_SMOKE_LAYOUT=off skips it with the pass. */
+const ALIGN_TOLERANCE = 1;
+const ALIGN_PAGE = "ui-sql-blocking";
+const ALIGN_TITLES = ["Blocked process report trend", "Deadlock trend"];
+const LONG_SOURCE = " Source: blocked-process-report collected from the extended events session and the DMV snapshot together";
+const LONG_OTHER = " compared with the same window a week earlier on every monitored server in the fleet";
+if ((process.env.UI_SMOKE_LAYOUT || "on").toLowerCase() !== "off" && (!only.length || only.includes(ALIGN_PAGE))) {
+  const spec = config.pages.find((p) => p.name === ALIGN_PAGE);
+  const alignFailures = [];
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  if (process.env.UI_SMOKE_SESSION_COOKIE) await context.addCookies([{ name: "darling_web_session", value: process.env.UI_SMOKE_SESSION_COOKIE, url: baseUrl }]);
+  const page = await context.newPage();
+  const frames = () => page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));
+  const tops = (titles) =>
+    page.evaluate((ts) => {
+      return ts.map((t) => {
+        const panel = [...document.querySelectorAll("#main [data-panel]")].find((p) => p.getAttribute("data-title") === t);
+        if (!panel) return null;
+        const plot = panel.querySelector(".chart-plot") || panel.querySelector(".chart svg");
+        const head = panel.querySelector("h3").getBoundingClientRect().height;
+        return plot ? { top: plot.getBoundingClientRect().top, head } : null;
+      });
+    }, titles);
+  try {
+    for (const width of [1280, 2560]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto(baseUrl + "/" + spec.hash, { waitUntil: "domcontentloaded" });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await settle(page);
+      await frames();
+      const variants = ["as drawn", "long source label", "long label on the other heading"];
+      for (const name of variants) {
+        if (name === "long source label") {
+          await page.evaluate((text) => {
+            const panel = document.querySelector('#main [data-title="Blocked process report trend"]');
+            let sp = panel.querySelector(".panel-source");
+            if (!sp) { sp = document.createElement("span"); sp.className = "panel-sub panel-source"; panel.querySelector("h3").appendChild(sp); }
+            sp.hidden = false;
+            sp.textContent = " Source: blocked-process-report" + text;
+          }, LONG_SOURCE);
+        } else if (name === "long label on the other heading") {
+          await page.evaluate((text) => {
+            const panel = document.querySelector('#main [data-title="Deadlock trend"]');
+            const sub = panel.querySelector(".panel-sub");
+            sub.textContent = sub.textContent + text;
+          }, LONG_OTHER);
+        }
+        await frames();
+        const t = await tops(ALIGN_TITLES);
+        if (t.some((x) => x === null)) {
+          alignFailures.push({ page: ALIGN_PAGE, width, check: "trend-plot-alignment", selector: "", detail: `${name}: a trend plot was not found (${JSON.stringify(t)})` });
+          continue;
+        }
+        const diff = Math.abs(t[0].top - t[1].top);
+        console.log(`align @${width} ${name}: plot tops ${t[0].top.toFixed(1)} vs ${t[1].top.toFixed(1)} (heading heights ${t[0].head.toFixed(1)} / ${t[1].head.toFixed(1)})`);
+        if (diff > ALIGN_TOLERANCE) {
+          alignFailures.push({ page: ALIGN_PAGE, width, check: "trend-plot-alignment", selector: "[data-title=Blocked process report trend] vs [data-title=Deadlock trend]", detail: `${name}: plot tops ${t[0].top.toFixed(1)} and ${t[1].top.toFixed(1)}, ${diff.toFixed(1)} px apart (allowed ${ALIGN_TOLERANCE})` });
+        }
+      }
+    }
+  } catch (e) {
+    alignFailures.push({ page: ALIGN_PAGE, width: 0, check: "trend-plot-alignment-threw", selector: "", detail: e && e.message ? e.message.split("\n")[0] : String(e) });
+  }
+  await context.close();
+  for (const f of alignFailures) console.log(`LAYOUT ${f.page} @${f.width} ${f.check} ${f.selector} : ${f.detail}`);
+  layout.failures.push(...alignFailures);
+}
+await browser.close();
 
 /* Screenshot baselines (#5744): the pages marked "screenshot" in pages.json, in Playwright's own pinned Chromium. A throw out of the
    stage (Chromium not installed, an unwritable folder) is a screenshot problem like any other: it fails the run, it does not crash it. */
@@ -248,11 +332,11 @@ if ((process.env.UI_SMOKE_SHOTS || "compare").toLowerCase() === "compare" && (sh
   console.log(`screenshots: ${shots.length - differ} matched, ${differ} differ (advisory), ${shotProblems.length} problems`);
 }
 
-writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems, screenshots: shots }, null, 2));
+writeFileSync(join(outDir, "report.json"), JSON.stringify({ pages: results, screenshotProblems: shotProblems, screenshots: shots, layout }, null, 2));
 const failed = results.filter((r) => r.problems.length);
 console.log(`\nui-smoke: ${results.length - failed.length}/${results.length} pages clean, ${results.filter((r) => r.flaked).length} flaked`);
 if (results.length === 0) {
   console.log("ui-smoke: no page ran.");
   process.exit(1);
 }
-process.exit(failed.length || shotProblems.length ? 1 : 0);
+process.exit(failed.length || shotProblems.length || layout.failures.length ? 1 : 0);

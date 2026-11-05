@@ -30,8 +30,9 @@ public sealed class AdminPageBehaviourTests
 
     [Theory]
     [InlineData("servers", "Alpha", "GET /api/admin/servers")]
-    // The routes tab also reads the webhook signing status (#5998), second, after its routes.
-    [InlineData("routes", "Blocking Detected", "GET /api/read/get_notification_routes", "GET /api/webhook-signing")]
+    // The routes tab also reads the webhook signing status (#5998), second, after its routes, and the routes where nobody can
+    // approve a proposal (#7109), third: the page draws a strip for each of those routes on purpose.
+    [InlineData("routes", "Blocking Detected", "GET /api/read/get_notification_routes", "GET /api/webhook-signing", "GET /api/notification-routes/nobody-can-approve")]
     [InlineData("settings", "CPU: threshold (%)", "GET /api/read/get_alert_settings")]
     public void EachTab_ReadsItsTool_AndDrawsTheRow(string tab, string expectedText, params string[] reads)
     {

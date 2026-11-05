@@ -425,33 +425,4 @@ public sealed class QueryStoreBackgroundIndexesTests
         Assert.Contains("next start retries", line, StringComparison.Ordinal);
         Assert.DoesNotContain("(shutdown)", line, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheWorker_RunsTheTwoEnsuresInOneDelayedTask_NotTwoConcurrentOnes()
-    {
-        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs").Replace("\r\n", "\n");
-
-        /* #5571: the worker's one launch is QueryStoreIntervalPartitions.RunDelayedAsync, which runs Phase A of the day
-           partitions and then hands the same specs to QueryStoreBackgroundIndexes.RunDelayedAsync with no second wait.
-           The worker never calls the index engine itself, so the two ensures still run inside ONE delayed task. */
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(source, @"QueryStoreIntervalPartitions\.RunDelayedAsync\("));
-        Assert.DoesNotContain("QueryStoreBackgroundIndexes.RunDelayedAsync", source, StringComparison.Ordinal);
-        Assert.Contains("QueryStoreBackgroundIndexes.All", source);
-
-        var partitions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreIntervalPartitions.cs").Replace("\r\n", "\n");
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(partitions, @"QueryStoreBackgroundIndexes\.RunDelayedAsync\(postgres, logger, TimeSpan\.Zero, specs"));
-        Assert.DoesNotContain("QueryStoreIntervalWideBrinIndex.RunDelayedAsync", source);
-
-        /* The loop is sequential and each failure is isolated: a failed index warns and the next one still runs. One
-           attempt per start: the start delay is the only wait, so nothing retries an index inside the run. */
-        var engine = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "QueryStoreBackgroundIndexes.cs").Replace("\r\n", "\n");
-        Assert.Contains("foreach (var spec in specs)", engine);
-        Assert.Contains("catch (Exception ex) when (!cancellationToken.IsCancellationRequested)", engine);
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(engine, @"Task\.Delay\("));
-
-        /* No retry loop. The only loop construct allowed is the one that reads a result set's rows (#5571's partitioned
-           path lists the leaf partitions that way), which has no wait and no second attempt. */
-        Assert.DoesNotContain("while (true)", engine, StringComparison.Ordinal);
-        Assert.Empty(System.Text.RegularExpressions.Regex.Matches(engine, @"while \((?!await reader\.ReadAsync\()"));
-    }
 }

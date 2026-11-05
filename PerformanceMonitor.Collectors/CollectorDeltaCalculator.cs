@@ -146,6 +146,30 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         => DateTime.SpecifyKind(DateTime.UtcNow - SeedLookback, DateTimeKind.Unspecified);
 
     /// <summary>
+    /// How far back a restart re-seed reads for a family that writes only the keys whose counters moved: the gap
+    /// policy, <see cref="DefaultMaxGapSeconds"/>, not <see cref="SeedLookback"/>. query_stats (#7156),
+    /// pg_statement_stats and pg_wait_stats (#7252) use it.
+    ///
+    /// <para>These families write a row only for a key that moved in the interval, so a key idle across the restart
+    /// has no row inside the fifteen-minute window and would be a first sighting afterwards: its first interval
+    /// stored as 0 although the gap policy would have credited it. Every row this reads can still produce a real
+    /// delta (the policy rejects older), so a wider window loses nothing. The read keeps its single
+    /// <c>collection_time &gt;= $1</c> bound, so on the hypertable it still excludes every chunk outside the window;
+    /// an hour is inside one store chunk, or two when it straddles a boundary.</para>
+    /// </summary>
+    public static readonly TimeSpan GapPolicySeedLookback = TimeSpan.FromSeconds(DefaultMaxGapSeconds);
+
+    /// <summary>The <c>collection_time &gt;= $1</c> bound for the gap-policy seed reads; see <see cref="GapPolicySeedLookback"/>.</summary>
+    public static DateTime GapPolicySeedCutoff()
+        => DateTime.SpecifyKind(DateTime.UtcNow - GapPolicySeedLookback, DateTimeKind.Unspecified);
+
+    /// <summary>The query_stats window (#7156): <see cref="GapPolicySeedLookback"/>.</summary>
+    public static readonly TimeSpan QueryStatsSeedLookback = GapPolicySeedLookback;
+
+    /// <summary>The <c>collection_time &gt;= $1</c> bound for the query_stats seed read; see <see cref="GapPolicySeedLookback"/>.</summary>
+    public static DateTime QueryStatsSeedCutoff() => GapPolicySeedCutoff();
+
+    /// <summary>
     /// Cache structure: serverId -> collectorName -> key -> (previousValue, timestamp)
     /// </summary>
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>> _cache = new();
@@ -164,6 +188,108 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     /// gap — quietly disabling the credit for every row but the first.</para>
     /// </summary>
     private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, (DateTime Current, DateTime? Previous)>> _passes = new();
+
+    /// <summary>
+    /// #7649: the sweep bookkeeping of each (server, delta group): serverId -> collectorName -> state. Kept apart
+    /// from <see cref="_passes"/> so that dictionary's tuple, which <see cref="BaselineSnapshot"/> copies and
+    /// <see cref="SeedPass"/> writes, stays as it is. Removed with the group's baselines by
+    /// <see cref="ClearServer"/> and <see cref="ClearGroups"/>.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, ConcurrentDictionary<string, SweepState>> _sweeps = new();
+
+    /// <summary>
+    /// #7649: what the sweep needs to know about one (server, delta group). One lock per group, held for a few
+    /// field reads and writes, never across the sweep itself and never shared by two servers.
+    /// </summary>
+    private sealed class SweepState
+    {
+        public readonly object Gate = new();
+
+        /// <summary>The longest gap any caller of this group has passed. A baseline older than it, measured from
+        /// a pass's collection time, can no longer yield a delta for any caller seen so far.</summary>
+        public int MaxGapSeconds;
+
+        /// <summary>True once any caller passed no limit (<c>maxGapSeconds &lt;= 0</c>): such a caller reads a
+        /// baseline of any age, so the group is never swept by age.</summary>
+        public bool Unlimited;
+
+        /// <summary>The collection time of the last pass that considered a sweep, so a pass is considered once.</summary>
+        public DateTime LastPass;
+
+        /// <summary>How many entries the group held when the last pass considered a sweep (after the sweep, when
+        /// one ran). A pass sweeps only when the group has grown past this.</summary>
+        public int CountAfterLastSweep;
+    }
+
+    /// <summary>
+    /// #7649: removes the baselines of <paramref name="collectorName"/> that no caller can use any more, at most once
+    /// per pass of the group and only when the group has grown since the last sweep.
+    ///
+    /// <para><b>Dead means:</b> the entry has a timestamp, and that timestamp is more than the group's longest gap
+    /// before this pass's collection time. The update branch of <see cref="Core"/> then discards it as too stale for
+    /// every call at or after this pass. A call with no series age that finds no entry takes the first-sighting
+    /// branch, which reports the same (0, 0). A call WITH a series age does not: when the series age is no older than
+    /// the gap since the previous pass and the counter has not gone down, the first-sighting branch reports
+    /// (current, pass gap), where the discarded entry would have given (0, 0). That is the only delta the sweep
+    /// changes, and it is intended. A statement-level recompile keeps the plan handle and restarts the counters, so
+    /// current is what ran since the compile, the same answer a brand new key gets. An entry with no timestamp is never
+    /// swept: the update branch skips its gap check, so a caller can still subtract from it
+    /// (<see cref="RebaseFamiliesToZero"/> and a seed without a time write them). A group that any caller has called
+    /// with no limit is never swept by age.</para>
+    ///
+    /// <para>Measured from the pass's collection time, not the wall clock, so a slow or replayed run sweeps what the
+    /// delta policy would have discarded. The removal compares the value it saw, so an entry a concurrent call just
+    /// updated is kept.</para>
+    /// </summary>
+    private void SweepIfDue(int serverId, string collectorName,
+        ConcurrentDictionary<string, (long Value, DateTime? Timestamp)> collectorCache,
+        DateTime? collectionTime, int maxGapSeconds)
+    {
+        var states = _sweeps.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, SweepState>());
+        var state = states.GetOrAdd(collectorName, _ => new SweepState());
+
+        int gap;
+        lock (state.Gate)
+        {
+            if (maxGapSeconds <= 0)
+            {
+                state.Unlimited = true;
+            }
+            else if (maxGapSeconds > state.MaxGapSeconds)
+            {
+                state.MaxGapSeconds = maxGapSeconds;
+            }
+
+            if (state.Unlimited || !collectionTime.HasValue || collectionTime.Value <= state.LastPass)
+            {
+                return;
+            }
+
+            state.LastPass = collectionTime.Value;
+            var count = collectorCache.Count;
+            if (count <= state.CountAfterLastSweep)
+            {
+                return;
+            }
+
+            state.CountAfterLastSweep = count;
+            gap = state.MaxGapSeconds;
+        }
+
+        var passTime = collectionTime.Value;
+        foreach (var entry in collectorCache)
+        {
+            if (entry.Value.Timestamp is { } stamp && (passTime - stamp).TotalSeconds > gap)
+            {
+                collectorCache.TryRemove(entry);
+            }
+        }
+
+        lock (state.Gate)
+        {
+            state.CountAfterLastSweep = collectorCache.Count;
+        }
+    }
 
     /// <summary>
     /// Rolls the (server, collector) pass window forward when <paramref name="collectionTime"/> is a new
@@ -226,6 +352,7 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
            server's first pass would measure a series age against a look from before it was removed and
            credit a full counter to an interval that never happened. */
         _passes.TryRemove(serverId, out _);
+        _sweeps.TryRemove(serverId, out _);
         NoteDiscontinuity(serverId, discontinuity);
     }
 
@@ -257,6 +384,14 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
             foreach (var group in groups)
             {
                 serverPasses.TryRemove(group, out _);
+            }
+        }
+
+        if (_sweeps.TryGetValue(serverId, out var serverSweeps))
+        {
+            foreach (var group in groups)
+            {
+                serverSweeps.TryRemove(group, out _);
             }
         }
 
@@ -307,6 +442,110 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     /// <summary>The queued, ready-to-log wait-stats-clear sentences — see <see cref="NoteWaitStatsClear"/>
     /// and <see cref="DrainWaitStatsClearWarnings"/>.</summary>
     private readonly ConcurrentDictionary<int, ConcurrentQueue<string>> _waitStatsClearWarnings = new();
+
+    /// <inheritdoc />
+    public IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime)
+        => new BaselineSnapshot(this, serverId, groups, keys, collectionTime);
+
+    /// <summary>#7419: see <see cref="IDeltaBaselineSnapshot"/>. Restores only what still carries the run's own collection
+    /// time, so a baseline cleared or replaced by anyone else after the capture is never overwritten.</summary>
+    private sealed class BaselineSnapshot : IDeltaBaselineSnapshot
+    {
+        private readonly CollectorDeltaCalculator _owner;
+        private readonly int _serverId;
+        private readonly DateTime _time;
+        private List<(string Group, string Key, bool Existed, long Value, DateTime? Timestamp)>? _entries = new();
+        private List<(string Group, bool Existed, DateTime Current, DateTime? Previous)>? _passes = new();
+
+        public BaselineSnapshot(CollectorDeltaCalculator owner, int serverId, IReadOnlyList<string> groups,
+            IReadOnlyCollection<string> keys, DateTime time)
+        {
+            _owner = owner;
+            _serverId = serverId;
+            _time = time;
+            owner._cache.TryGetValue(serverId, out var serverCache);
+            owner._passes.TryGetValue(serverId, out var serverPasses);
+            foreach (var group in groups)
+            {
+                ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>? groupCache = null;
+                serverCache?.TryGetValue(group, out groupCache);
+                foreach (var key in keys)
+                {
+                    if (groupCache is not null && groupCache.TryGetValue(key, out var existing))
+                    {
+                        _entries.Add((group, key, true, existing.Value, existing.Timestamp));
+                    }
+                    else
+                    {
+                        _entries.Add((group, key, false, 0L, null));
+                    }
+                }
+
+                if (serverPasses is not null && serverPasses.TryGetValue(group, out var pass))
+                {
+                    _passes.Add((group, true, pass.Current, pass.Previous));
+                }
+                else
+                {
+                    _passes.Add((group, false, default, null));
+                }
+            }
+        }
+
+        public void Restore()
+        {
+            var entries = _entries;
+            var passes = _passes;
+            _entries = null;
+            _passes = null;
+            if (entries is null || passes is null)
+            {
+                return;
+            }
+
+            if (_owner._cache.TryGetValue(_serverId, out var serverCache))
+            {
+                foreach (var (group, key, existed, value, timestamp) in entries)
+                {
+                    if (!serverCache.TryGetValue(group, out var groupCache)
+                        || !groupCache.TryGetValue(key, out var now)
+                        || now.Timestamp != _time)
+                    {
+                        continue; /* not written by this run, or cleared since */
+                    }
+
+                    if (existed)
+                    {
+                        groupCache[key] = (value, timestamp);
+                    }
+                    else
+                    {
+                        groupCache.TryRemove(key, out _);
+                    }
+                }
+            }
+
+            if (_owner._passes.TryGetValue(_serverId, out var serverPasses))
+            {
+                foreach (var (group, existed, current, previous) in passes)
+                {
+                    if (!serverPasses.TryGetValue(group, out var now) || now.Current != _time)
+                    {
+                        continue;
+                    }
+
+                    if (existed)
+                    {
+                        serverPasses[group] = (current, previous);
+                    }
+                    else
+                    {
+                        serverPasses.TryRemove(group, out _);
+                    }
+                }
+            }
+        }
+    }
 
     /// <inheritdoc />
     public IReadOnlyDictionary<string, long> PeekBaselines(int serverId, string collectorName)
@@ -511,6 +750,9 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
 
         var serverCache = _cache.GetOrAdd(serverId, _ => new ConcurrentDictionary<string, ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>>());
         var collectorCache = serverCache.GetOrAdd(collectorName, _ => new ConcurrentDictionary<string, (long Value, DateTime? Timestamp)>());
+
+        /* #7649: before this call's own key is written, drop the baselines the gap policy would discard anyway. */
+        SweepIfDue(serverId, collectorName, collectorCache, collectionTime, maxGapSeconds);
 
         long delta = 0;
         int interval = 0;

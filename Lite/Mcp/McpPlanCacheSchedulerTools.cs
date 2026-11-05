@@ -19,7 +19,7 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanCacheSchedulerTools
 {
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
-    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans per cache/object type, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads' or Forced Parameterization. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
+    [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans per cache/object type, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads' or Forced Parameterization. bloat_level is decided by the compiled_* figures, which leave out parse trees and extended procedures: single_use_percent counts every cache entry, so it can read high on a cache that is NORMAL. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
     public static async Task<string> GetPlanCacheBloat(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -40,15 +40,18 @@ public sealed class McpPlanCacheSchedulerTools
             /* The summary's stamp is null exactly when the window held no snapshot, which is the same state
                the (0 plans, no groups) test below names — one branch, so a stamped payload always has rows. */
             if (summary.CollectionTime is not DateTime capturedAt || (summary.TotalPlans == 0 && cacheTypes.Count == 0))
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_cache_stats", awsRdsKind: AwsRdsKind.None)
+                        ?? McpHelpers.Status("unavailable", "No plan cache statistics available in the requested time range."),
+                    dataService, QueryWindowRelation.PlanCacheStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "plan_cache_stats");
 
-            var bloat = LocalDataService.ClassifyPlanCacheBloat(summary.TotalPlans, summary.SingleUsePlans);
+            var bloat = LocalDataService.ClassifyPlanCacheBloat(summary);
             var singleUsePercent = summary.TotalPlans > 0
                 ? Math.Round(100.0 * summary.SingleUsePlans / summary.TotalPlans, 1)
                 : 0;
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 captured_at = capturedAt.ToString("o"),
@@ -58,6 +61,10 @@ public sealed class McpPlanCacheSchedulerTools
                     total_plans = summary.TotalPlans,
                     single_use_plans = summary.SingleUsePlans,
                     single_use_percent = singleUsePercent,
+                    compiled_plans = summary.CompiledPlans,
+                    compiled_single_use_plans = summary.CompiledSingleUsePlans,
+                    compiled_single_use_percent = summary.CompiledPlans > 0 ? Math.Round(100.0 * summary.CompiledSingleUsePlans / summary.CompiledPlans, 1) : 0,
+                    compiled_single_use_size_mb = summary.CompiledSingleUseSizeMb,
                     oldest_plan_create_time = summary.OldestPlanCreateTime?.ToString("o"),
                     bloat_level = bloat.Level,
                     bloat_recommendation = bloat.Recommendation
@@ -75,7 +82,8 @@ public sealed class McpPlanCacheSchedulerTools
                     avg_use_count = Math.Round(r.AvgUseCount, 2),
                     avg_size_kb = r.AvgSizeKb
                 })
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.PlanCacheStats, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "plan_cache_stats");
         }
         catch (Exception ex)
         {
@@ -111,8 +119,11 @@ public sealed class McpPlanCacheSchedulerTools
 
             var item = await dataService.GetCpuSchedulerSnapshotAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
             if (item == null)
-                return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back.");
+                /* #7005: the window notice, so an empty answer says whether the store holds the window. */
+                return await McpQueryTools.WithEmptyWindowNoticeAsync(
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "cpu_scheduler_stats", awsRdsKind: AwsRdsKind.None)
+                    ?? McpHelpers.Status("unavailable", "No CPU scheduler snapshot in the requested time range. The scheduler collector may not have run yet, or its newest snapshot is older than hours_back."),
+                    dataService, QueryWindowRelation.CpuScheduler, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "cpu_scheduler_stats");
 
             var workerUtilizationPercent = item.MaxWorkersCount > 0
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)
@@ -123,7 +134,7 @@ public sealed class McpPlanCacheSchedulerTools
                same tool name answered with a verdict on one SKU and without one on the other. */
             var pressure = CpuSchedulerMetrics.ClassifyCpuPressure(item);
 
-            return JsonSerializer.Serialize(new
+            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 captured_at = item.CollectionTime.ToString("o"),
@@ -151,7 +162,8 @@ public sealed class McpPlanCacheSchedulerTools
                     physical_memory_pressure = item.PhysicalMemoryPressureWarning,
                     offline_cpu = item.OfflineCpuWarning
                 }
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions),
+                dataService, QueryWindowRelation.CpuScheduler, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, "cpu_scheduler_stats");
         }
         catch (Exception ex)
         {

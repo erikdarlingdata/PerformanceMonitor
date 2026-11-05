@@ -148,13 +148,21 @@ public sealed class DarlingMcpTrendTools
                     return gated;
                 }
 
-                return await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId, cancellationToken)
+                var emptyNotice = await TrendNoticeAsync(postgres, "memory_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, cancellationToken);
+                /* #7167: one memory_stats row lands per cycle, so no rows means collection stopped, not quiet. A window the notice says was cut does not claim
+                   to be quiet, and a server that is offline answers unavailable, as the get_pg_* reads do. */
+                var memoryAnswer = await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
-                        $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No memory samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            coveredClaim: ". This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                        emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
+                        $"No memory stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.", emptyNotice.AsHints());
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, memoryAnswer, cancellationToken);
             }
 
             /* Joined from the memory-grant series (#3548), SUM(granted_memory_mb) across pools per snapshot — the
@@ -165,9 +173,13 @@ public sealed class DarlingMcpTrendTools
             var grants = await DarlingTrendReader.GetGrantBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes, cancellationToken);
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
-            return TrendPayloads.MemoryTrend(
-                resolved.DisplayName, hours_back, points, grants, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+            /* #7010: the window-floor notice, appended to the shared payload (Lite builds it too). */
+            var notice = await TrendNoticeAsync(postgres, "memory_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Attach(
+                TrendPayloads.MemoryTrend(
+                    resolved.DisplayName, hours_back, points, grants, bucketMinutes, bucket_minutes is not null,
+                    budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities)),
+                notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -226,6 +238,7 @@ public sealed class DarlingMcpTrendTools
                    doesn't read a bad counter name as "this metric looks fine" — Lite's get_perfmon_trend
                    miss vocabulary. */
                 var collected = await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, resolved.ServerId, start, now, cancellationToken);
+                var emptyNotice = await TrendNoticeAsync(postgres, "perfmon_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
 
                 /* Page Life Expectancy is the counter people reach for by habit; it is intentionally
                    not collected, so an empty trend would otherwise be misread as "PLE looks fine." */
@@ -242,7 +255,8 @@ public sealed class DarlingMcpTrendTools
                     return McpHelpers.Status(
                         "unavailable",
                         $"No trend data for counter '{counter_name}'. No perfmon counters have been collected for this server in the last {hours_back}h yet " +
-                        "(the collector may not have run, or delta counters need a second collection cycle).");
+                        "(the collector may not have run, or delta counters need a second collection cycle).",
+                        emptyNotice.AsHints());
 
                 /* Other counters exist but not this one: the name is almost certainly wrong. Hand back
                    the collected names so the caller can correct it. */
@@ -268,9 +282,13 @@ public sealed class DarlingMcpTrendTools
                payload (TrendPayloads.PerfmonTrend). */
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
-            return TrendPayloads.PerfmonTrend(
-                resolved.DisplayName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
+            /* #7010: the window-floor notice, appended to the shared payload (Lite builds it too). */
+            var notice = await TrendNoticeAsync(postgres, "perfmon_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Attach(
+                TrendPayloads.PerfmonTrend(
+                    resolved.DisplayName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                    budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside),
+                notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -343,6 +361,7 @@ public sealed class DarlingMcpTrendTools
                 }
 
                 var everCollected = await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId, cancellationToken);
+                var emptyNotice = await TrendNoticeAsync(postgres, "file_io_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
 
                 /* A scoped read that found nothing is first a question about the NAME: a misspelt database
                    and an idle one land here alike, and only the collected names tell them apart. With a list the
@@ -350,21 +369,28 @@ public sealed class DarlingMcpTrendTools
                    the set, and the quiet-window sentence below is about the whole server, which it never read. */
                 if (!databases.IsAll && everCollected)
                 {
-                    return McpHelpers.StatusForDatabase(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase(
                         "empty",
                         scope is not null
                             ? TrendPayloads.FileIoScopeEmptyMessage(resolved.DisplayName, scope, hours_back)
                             : FileIoChosenDatabasesEmptyMessage(resolved.DisplayName, hours_back),
-                        echo);
+                        echo,
+                        emptyNotice.AsHints()), cancellationToken);
                 }
 
-                return everCollected
+                /* #7167: as get_memory_trend: a cut window does not claim to be quiet, and an offline server answers unavailable. */
+                var fileIoAnswer = everCollected
                     ? McpHelpers.StatusForDatabase(
                         "empty",
-                        $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s). This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window.", echo)
+                        McpHelpers.QuietUnlessCut(
+                            emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
+                            factual: $"No file I/O samples recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
+                            coveredClaim: ". This server HAS collected file I/O stats before, so this window is genuinely quiet rather than broken — widen hours_back, or read it as no measurable read or write activity on any file in this window."),
+                        echo, emptyNotice.AsHints())
                     : McpHelpers.StatusForDatabase(
                         "unavailable",
-                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo);
+                        $"No file I/O stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — the file_io_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_file_io_stats will be equally empty until it does.", echo, emptyNotice.AsHints());
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, fileIoAnswer, cancellationToken);
             }
 
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, TrendPayloads.LinesFor(series.Count), budget, out var bucketMinutes);
@@ -374,9 +400,13 @@ public sealed class DarlingMcpTrendTools
                 postgres, resolved.ServerId, start, now, databases, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
-            return TrendPayloads.FileIoTrend(
-                resolved.DisplayName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo);
+            /* #7010: the window-floor notice, appended to the shared payload (Lite builds it too). */
+            var notice = await TrendNoticeAsync(postgres, "file_io_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Attach(
+                TrendPayloads.FileIoTrend(
+                    resolved.DisplayName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
+                    budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo),
+                notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -392,7 +422,7 @@ public sealed class DarlingMcpTrendTools
         $"No read or write activity was recorded for {DatabaseFilter.ManyDatabasesDescription} on {serverName} in the last {hoursBack} hour(s). "
         + "Each name must match a collected database exactly (get_file_io_stats lists them); omit database_name for every database.";
 
-    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time. One point per hour on the hourly tier, with executions, CPU and elapsed summed across handles. A raw point is one collection time, summed across the query's plans and handles. min_dop and max_dop are each plan's cached extremes across the plans that ran at that time (a time where nothing ran leaves both blank), plan_count says how many plans, and query_plan_hash is null when that is more than one or no hash was captured." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryTrend(
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu or get_query_store_top.")] string query_hash,
@@ -405,7 +435,7 @@ public sealed class DarlingMcpTrendTools
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
-        var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
+        var validation = DarlingReadWindow.Validate(hours_back, as_of, WebReadReach.MaxHoursFor("get_query_trend"), out var windowEnd);
         if (validation != null) return validation;
 
         try
@@ -436,13 +466,24 @@ public sealed class DarlingMcpTrendTools
                    last N hours" over a span the read never covered — for a query whose history had aged out of
                    the raw tier that is a false statement, not an incomplete one, and an agent acts on it by
                    concluding the query did not run. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken)
-                    ?? McpHelpers.Status(
+                var gatedQuery = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "query_stats", cancellationToken);
+                if (gatedQuery != null)
+                {
+                    return gatedQuery;
+                }
+
+                /* #7010: an empty answer over a window the store does not reach back to is not a true negative. Only the raw tier is probed:
+                   the hourly rollup's own reach decides a window it served. */
+                var emptyNotice = history.Source == "raw"
+                    ? await TrendNoticeAsync(postgres, "query_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: true, cancellationToken)
+                    : McpWindowNotice.Unavailable;
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status(
                         "empty",
                         $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
                         $"{history.Source} tier over the last {hours_back} hours. This means nothing was recorded " +
                         "for that query_hash in that window in the tier searched — confirm the hash and database " +
-                        "with get_top_queries_by_cpu before concluding the query did not run.");
+                        "with get_top_queries_by_cpu before concluding the query did not run.",
+                        emptyNotice.AsHints()), cancellationToken);
             }
 
             /* The hourly rollup keeps executions, CPU and elapsed and nothing else. Those columns arrive as
@@ -465,7 +506,8 @@ public sealed class DarlingMcpTrendTools
                 spills = aggregated ? (long?)null : r.DeltaSpills,
                 min_dop = aggregated ? (int?)null : r.MinDop,
                 max_dop = aggregated ? (int?)null : r.MaxDop,
-                query_plan_hash = aggregated ? null : r.QueryPlanHash
+                query_plan_hash = aggregated ? null : r.QueryPlanHash,
+                plan_count = aggregated ? (int?)null : r.PlanCount
             });
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
@@ -484,6 +526,9 @@ public sealed class DarlingMcpTrendTools
                    cut (limit bit); this is the tier's reach falling short of the requested start, and the two
                    want opposite remedies — see the class remarks and McpHelpers.WindowTruncatedDescription. */
                 window_truncated = history.Truncated,
+                /* #7416 item 21: true only when the requested start is older than the tier that answered keeps. */
+                start_older_than_tier = history.StartOlderThanTier,
+                tier_keeps_days = history.TierKeepsDays,
                 bucket = history.Source == "raw" ? "per-collection" : "1 hour",
                 /* #3897: the width beside the word, as every trend carrying `bucket` now publishes it — null on
                    the per-collection history, the rollup's hour otherwise. Lite's twin writes it through
@@ -491,8 +536,8 @@ public sealed class DarlingMcpTrendTools
                 bucket_minutes = history.Source == "raw" ? (int?)null : 60,
                 aggregate_note = aggregated
                     ? "Served from the hourly rollup because the requested window reaches past the raw tier's "
-                      + "4-day retention. Executions, CPU and elapsed time are summed per hour; logical_reads, "
-                      + "logical_writes, physical_reads, rows, spills, min_dop, max_dop and query_plan_hash are "
+                      + "4-day retention. Executions, CPU and elapsed time are summed per hour across every sql_handle of the query_hash, one point per hour; logical_reads, "
+                      + "logical_writes, physical_reads, rows, spills, min_dop, max_dop, query_plan_hash and plan_count are "
                       + "null because the rollup does not carry them - null means not measured, not zero."
                     : null,
                 data_points = rows.Count,
@@ -589,7 +634,7 @@ public sealed class DarlingMcpTrendTools
                    is not a server nothing was ever stored for. */
                 return await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "query", "query_stats",
+                    postgres, resolved.ServerId, resolved.DisplayName, resolved.ServerName, hours_back, startUtc, now, route, "query", "query_stats",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken);
             }
@@ -688,7 +733,7 @@ public sealed class DarlingMcpTrendTools
 
                 return WithProcedureEcho(await EmptyRoutedTrendAsync(
                     DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
-                    postgres, resolved.ServerId, resolved.DisplayName, hours_back, startUtc, now, route, "stored-procedure", "procedure_stats",
+                    postgres, resolved.ServerId, resolved.DisplayName, resolved.ServerName, hours_back, startUtc, now, route, "stored-procedure", "procedure_stats",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
                     new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), databases, cancellationToken), procedureName);
             }
@@ -798,6 +843,13 @@ public sealed class DarlingMcpTrendTools
 
             if (points.Count == 0)
             {
+                /* #7010: an empty answer judged its coverage from the rollup's floor, or from nothing on the raw route, so a window before the
+                   data read covered. The shared probe answers for the raw route (the rollup's own floor decides a window it served). */
+                if (!route.UseRollup)
+                {
+                    disclosure = await WithStoreCoverageAsync(disclosure, postgres, resolved.ServerName, "query_store_stats", startUtc, now, cancellationToken);
+                }
+
                 /*
                     The one empty answer here that is NOT about the collector: Query Store can be off on
                     every database on the instance. A server with no Query Store data is not a server with
@@ -817,10 +869,10 @@ public sealed class DarlingMcpTrendTools
                 */
                 if (route.UseRollup && route.RollupFloorUtc is DateTime floor && now < floor)
                 {
-                    return EmptyStatus(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
-                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. This read serves history from query_store_stats_corrected_hourly rather than ranking the raw Query Store slab (#2736), so windows before that floor come back empty even when rows were collected — run --backfill-rollups to materialize deeper history.",
-                        disclosure, databases);
+                        $"The requested window ends before {floor:o}, the oldest hour the corrected Query Store rollup has materialized. Query Store history older than that is not summarized yet, so this window is empty even though rows were collected. To fill it in, an operator runs PerformanceMonitor.Darling.Service.exe --backfill-rollups.",
+                        disclosure, databases), cancellationToken);
                 }
 
                 var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
@@ -851,13 +903,13 @@ public sealed class DarlingMcpTrendTools
                 */
                 if (route.UseRollup && route.RollupFloorUtc is DateTime head && head > startUtc)
                 {
-                    return EmptyStatus(
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus(
                         "empty",
                         $"No Query Store samples were recorded for {ScopedServer(resolved.DisplayName, databases)} between {head:o} — the oldest hour the corrected rollup has materialized — and the end of the window. This server HAS been sampled before, so that stretch is genuinely quiet; the part of the window before {head:o} is unserved rather than quiet (the rollup has not materialized it and this read no longer ranks the raw slab for it, #2736) — run --backfill-rollups to materialize it. Widening hours_back finds newer samples only; it cannot reach the unserved head.",
-                        disclosure, databases);
+                        disclosure, databases), cancellationToken);
                 }
 
-                return EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, EmptyStatus("empty", QuietWindowMessage(ScopedServer(resolved.DisplayName, databases), hours_back, "Query Store"), disclosure, databases), cancellationToken);
             }
 
             return SerializeTrend(resolved.DisplayName, hours_back, points, disclosure,
@@ -880,7 +932,8 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     private sealed record TrendDisclosure(
         string Source, DateTime EffectiveStartUtc, DateTime WindowEndUtc, bool Truncated, string Bucket,
-        string? AggregateNote, Dictionary<string, object>? Routing = null, int? BucketMinutes = null)
+        string? AggregateNote, Dictionary<string, object>? Routing = null, int? BucketMinutes = null,
+        bool StartOlderThanTier = false, int? TierKeepsDays = null)
     {
         /// <summary>The disclosure keys in the order they are written, so the data envelope and the empty
         /// envelope carry the same block in the same shape.</summary>
@@ -898,6 +951,11 @@ public sealed class DarlingMcpTrendTools
                key at the same position; McpPayloadContractCensusTests fails a bare `truncated` beside
                `effective_hours_back` on either SKU. The C# member stays `Truncated` — the wire key renamed. */
             envelope["window_truncated"] = Truncated;
+            /* #7416 item 21: the one reason a late head can be named. True only when the requested start is older than the
+               tier that answered keeps (tier_keeps_days); a late first point alone proves nothing aged out. Lite's
+               WriteDisclosure writes the same two keys at the same position. */
+            envelope["start_older_than_tier"] = StartOlderThanTier;
+            envelope["tier_keeps_days"] = TierKeepsDays;
             envelope["bucket"] = Bucket;
             /* #3897: the width in minutes beside its word, null on a series that is not time-bucketed (the Query
                Store trend's per-interval points). Lite's WriteDisclosure writes it at the same position. */
@@ -908,6 +966,46 @@ public sealed class DarlingMcpTrendTools
                 envelope["routing"] = Routing;
             }
         }
+    }
+
+    /// <summary>
+    /// The shared window-floor notice (#7010) for a trend read over a raw collector table: probed on the table's collector runs and rows
+    /// (<see cref="DarlingMcpWindowNotice.ReadAsync"/>), so a window that reaches back past the data the store holds says so, on a data
+    /// answer and on an empty one (<paramref name="emptyAnswer"/>). A failed probe leaves the answer as it was.
+    /// </summary>
+    private static Task<McpWindowNotice> TrendNoticeAsync(
+        NpgsqlDataSource postgres, string table, string serverName, DateTime startUtc, DateTime windowEndUtc, bool emptyAnswer,
+        CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, table, serverName, startUtc, windowEndUtc, cancellationToken),
+            startUtc, windowEndUtc, table, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// <paramref name="disclosure"/> of an EMPTY answer, made to agree with the shared window-floor probe (#7010): when the probe says the
+    /// store does not reach back to the window's start, the answer is <c>window_truncated</c> with an <c>effective_start</c> at where the
+    /// store's coverage begins (the window's end when the store held none of the window), never earlier than the start the answer already
+    /// named. A probe that finds the window covered, or fails, leaves it as it was.
+    /// </summary>
+    private static async Task<TrendDisclosure> WithStoreCoverageAsync(
+        TrendDisclosure disclosure, NpgsqlDataSource postgres, string serverName, string table, DateTime startUtc, DateTime windowEndUtc,
+        CancellationToken cancellationToken)
+    {
+        DateTime? floor = null;
+        var notice = await DarlingMcpWindowNotice.ReadAsync(
+            async () => floor = await DarlingMcpWindowNotice.Probe(postgres, table, serverName, startUtc, windowEndUtc, cancellationToken),
+            startUtc, windowEndUtc, table, emptyAnswer: true, cancellationToken: cancellationToken);
+        if (notice.IsUnavailable || !notice.WindowTruncated)
+        {
+            return disclosure;
+        }
+
+        var coverageStart = floor is DateTime f ? RawWindowFloor.EffectiveStart(f, startUtc) : windowEndUtc;
+        if (coverageStart > windowEndUtc)
+        {
+            coverageStart = windowEndUtc;
+        }
+
+        return disclosure with { Truncated = true, EffectiveStartUtc = coverageStart > disclosure.EffectiveStartUtc ? coverageStart : disclosure.EffectiveStartUtc };
     }
 
     /// <summary>The raw tier's retention in whole days, for the sentences that name it.</summary>
@@ -946,7 +1044,9 @@ public sealed class DarlingMcpTrendTools
             result.Truncated,
             TrendBuckets.Word(bucket.Minutes),
             RoutedAggregateNote(result.Route, bucket),
-            BucketMinutes: bucket.Minutes);
+            BucketMinutes: bucket.Minutes,
+            StartOlderThanTier: result.StartOlderThanTier,
+            TierKeepsDays: result.TierKeepsDays);
 
     /// <summary>
     /// The routed trio's disclosure for an EMPTY answer: the tier is described from its floor rather than from
@@ -962,12 +1062,15 @@ public sealed class DarlingMcpTrendTools
     {
         var reach = route.Tier == RetentionTier.Raw ? route.Coverage.RawOldestUtc : route.Coverage.HourlyFloorUtc;
         var (effectiveStart, truncated) = DescribeEmptyCoverage(reach, startUtc, windowEndUtc);
+        var tierFloor = DurationTrendRouting.TierFloorUtc(route.Tier, route.RawRetentionApplies, route.ResolvedAtUtc);
 
         return new TrendDisclosure(
             route.Source, effectiveStart, windowEndUtc, truncated,
             TrendBuckets.Word(bucket.Minutes),
             RoutedAggregateNote(route, bucket),
-            BucketMinutes: bucket.Minutes);
+            BucketMinutes: bucket.Minutes,
+            StartOlderThanTier: truncated && tierFloor is DateTime floor && startUtc < floor,
+            TierKeepsDays: DurationTrendRouting.TierKeepsDays(route.Tier, route.RawRetentionApplies));
     }
 
     /// <summary>
@@ -1168,11 +1271,28 @@ public sealed class DarlingMcpTrendTools
     /// covers the start; a measured raw oldest at or before the start).</para>
     /// </summary>
     private static async Task<string> EmptyRoutedTrendAsync(
-        Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
+        Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, string probeServerName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default)
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken = default) =>
+        /* #7167: an empty answer from a server the store has had no collection from answers unavailable, as the get_pg_* reads do. */
+        await DarlingServerOfflineNote.EmptyAsync(
+            postgres, serverId, serverName, windowEndUtc,
+            await EmptyRoutedTrendCoreAsync(rawProbe, postgres, serverId, serverName, probeServerName, hours_back, startUtc, windowEndUtc, route, what, collectorName, checkThis, bucket, databases, cancellationToken),
+            cancellationToken);
+
+    private static async Task<string> EmptyRoutedTrendCoreAsync(
+        Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, string probeServerName, int hours_back,
+        DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
+        string what, string collectorName, string checkThis, BucketChoice bucket, DatabaseFilter databases, CancellationToken cancellationToken)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
+        /* #7010: the raw route's empty answer judged its own coverage from the table's oldest row, and an empty table has none, so it said
+           covered over a window before the data. The shared probe (the collector's runs, the server's first collection) answers for it. */
+        if (route.Tier == RetentionTier.Raw)
+        {
+            disclosure = await WithStoreCoverageAsync(disclosure, postgres, probeServerName, route.RawTable, startUtc, windowEndUtc, cancellationToken);
+        }
+
         var scoped = ScopedServer(serverName, databases);
 
         if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))

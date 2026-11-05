@@ -170,8 +170,10 @@ SELECT
 SELECT
     SUM(delta_stall_read_ms) AS total_stall_read_ms,
     SUM(delta_reads) AS total_reads,
-    SUM(delta_stall_write_ms) AS total_stall_write_ms,
-    SUM(delta_writes) AS total_writes
+    SUM(delta_stall_write_ms) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE file_type = 'LOG' OR lower(database_name) = 'tempdb') AS total_writes,
+    SUM(delta_stall_write_ms) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_stall_write_ms,
+    SUM(delta_writes) FILTER (WHERE NOT (file_type = 'LOG' OR lower(database_name) = 'tempdb')) AS data_file_writes
 FROM v_file_io_stats
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -200,8 +202,12 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             var totalReads = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
             var totalStallWriteMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalWrites = reader.IsDBNull(3) ? 0L : ToInt64(reader.GetValue(3));
+            var dataFileStallWriteMs = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
+            var dataFileWrites = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
 
-            if (totalReads > 0)
+            /* #7417: a read average over a handful of I/Os is not a storage problem. The count is SUM(delta_reads) over
+               this query's own window, the rows the average was computed from (IoVolumeFloor). */
+            if (IoVolumeFloor.ReadsClearFloor(totalReads))
             {
                 var avgReadLatency = (double)totalStallReadMs / totalReads;
                 facts.Add(new Fact
@@ -219,21 +225,32 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
                 });
             }
 
-            if (totalWrites > 0)
+            /* #7417: totalWrites is the log and tempdb writes the scored latency covers, so user data file writes cannot lend volume. */
+            if (IoVolumeFloor.WritesClearFloor(totalWrites))
             {
+                /* #6959: the scored value is the log files and tempdb data files only (a session waits on a log flush
+                   and on a tempdb spill write). User data files are checkpoint and lazy-writer targets that no session
+                   waits on, so their write latency rides along as unscored metadata, and FactAdvice.ComposeIoLatency shows it as its
+                   own sentence on the card. */
                 var avgWriteLatency = (double)totalStallWriteMs / totalWrites;
+                var writeMetadata = new Dictionary<string, double>
+                {
+                    ["avg_write_latency_ms"] = avgWriteLatency,
+                    ["total_stall_write_ms"] = totalStallWriteMs,
+                    ["total_writes"] = totalWrites
+                };
+                if (dataFileWrites > 0)
+                {
+                    writeMetadata["data_file_write_latency_ms"] = (double)dataFileStallWriteMs / dataFileWrites;
+                    writeMetadata["data_file_writes"] = dataFileWrites;
+                }
                 facts.Add(new Fact
                 {
                     Source = "io",
                     Key = "IO_WRITE_LATENCY_MS",
                     Value = avgWriteLatency,
                     ServerId = context.ServerId,
-                    Metadata = new Dictionary<string, double>
-                    {
-                        ["avg_write_latency_ms"] = avgWriteLatency,
-                        ["total_stall_write_ms"] = totalStallWriteMs,
-                        ["total_writes"] = totalWrites
-                    }
+                    Metadata = writeMetadata
                 });
             }
         }
@@ -416,13 +433,22 @@ WITH latest AS (
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   volume_total_mb > 0
+),
+tightest AS (
+    /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the
+       volume with the fewest MB. Ties on percent break on the mount point. */
+    SELECT volume_mount_point, volume_free_mb
+    FROM latest WHERE rn = 1
+    ORDER BY volume_free_mb * 1.0 / volume_total_mb, volume_mount_point
+    LIMIT 1
 )
 SELECT
     MIN(volume_free_mb * 1.0 / volume_total_mb) AS min_free_pct,
-    MIN(volume_free_mb) AS min_free_mb,
+    (SELECT volume_free_mb FROM tightest) AS min_free_mb,
     COUNT(DISTINCT volume_mount_point) AS volume_count,
     SUM(volume_total_mb) AS total_volume_mb,
-    SUM(volume_free_mb) AS total_free_mb
+    SUM(volume_free_mb) AS total_free_mb,
+    (SELECT volume_mount_point FROM tightest) AS tightest_mount_point
 FROM latest WHERE rn = 1";
 
     /// <summary>
@@ -448,6 +474,7 @@ FROM latest WHERE rn = 1";
             var volumeCount = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
             var totalVolumeMb = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
             var totalFreeMb = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            var tightestMount = reader.IsDBNull(5) ? null : reader.GetString(5);
 
             if (volumeCount == 0) return;
 
@@ -457,6 +484,7 @@ FROM latest WHERE rn = 1";
                 Key = "DISK_SPACE",
                 Value = minFreePct,
                 ServerId = context.ServerId,
+                ObjectName = string.IsNullOrWhiteSpace(tightestMount) ? null : tightestMount,
                 Metadata = new Dictionary<string, double>
                 {
                     ["min_free_pct"] = minFreePct,

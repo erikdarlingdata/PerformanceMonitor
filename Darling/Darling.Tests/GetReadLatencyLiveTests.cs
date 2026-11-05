@@ -373,7 +373,7 @@ public sealed class GetReadLatencyLiveTests
         var ct = TestContext.Current.CancellationToken;
         var bodySucceeded = false;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var ownerBuilder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString);
         var ownerAdminConnectionString = scratch.ConnectionString;
 

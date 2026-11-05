@@ -143,8 +143,8 @@ public class ComposeStatementTimeoutStoreTests
 
         Assert.Contains($"SET statement_timeout = '{expected}'", sql, StringComparison.Ordinal);
 
-        /* Both compose roles, not just one: the mcp role gets viewer's read surface and must get its ceiling. */
-        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"SET statement_timeout = '").Count);
+        /* All three compose roles (viewer, web, mcp): the web and mcp roles get the read surface and must get its ceiling. */
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(sql, @"SET statement_timeout = '").Count);
     }
 
     /// <summary>

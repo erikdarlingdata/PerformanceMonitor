@@ -101,7 +101,10 @@ public sealed class DarlingMcpCustomViewTools
         "overlay), never silently dropped. A notebook cell is FLAT (carries the panel's own keys directly); only " +
         "run_custom_view_panel's spec nests under 'panel'. <<GUIDE>> Dry-run: validates a custom-view definition " +
         "against the measure catalog and the composer rules WITHOUT persisting anything. Returns {valid:true} or " +
-        "{valid:false, error:\"...\"} naming the first problem. This is the exact authority create_custom_view / " +
+        "{valid:false, error:\"...\"} naming the first problem. A valid definition that will not draw what it " +
+        "means carries a 'warnings' list (it still saves and runs): a panel that charts perfmon_value on a counter " +
+        "ending in /sec draws SQL Server's running total, which only climbs; use the ratio perfmon_value_per_second, which is an ERROR unless each series pins one counter_name, one instance_name and one server (eq filter or groupBy). " +
+        "This is the exact authority create_custom_view / " +
         "update_custom_view run before saving, so use it to iterate on a generated definition until it is valid. " +
         "The definition is a dashboard {\"panels\":[...]} or a notebook {\"kind\":\"notebook\",\"cells\":[...]}; " +
         "a composed panel names a catalog 'source' + 'measure'|'ratio', an 'aggregate', an optional 'timeBucket' " +
@@ -122,8 +125,10 @@ public sealed class DarlingMcpCustomViewTools
         try
         {
             var validation = DarlingWebEndpoints.ValidateDefinition(definition);
-            return Task.FromResult(JsonSerializer.Serialize(
-                new { valid = validation.IsValid, error = validation.Error }, McpHelpers.JsonOptions));
+            /* #7565: warnings ride only a valid definition and only when there are some, so a clean reply keeps its old shape. */
+            return Task.FromResult(validation.Warnings is { Count: > 0 } warnings
+                ? JsonSerializer.Serialize(new { valid = validation.IsValid, error = validation.Error, warnings }, McpHelpers.JsonOptions)
+                : JsonSerializer.Serialize(new { valid = validation.IsValid, error = validation.Error }, McpHelpers.JsonOptions));
         }
         catch (Exception ex)
         {
@@ -134,7 +139,7 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "create_custom_view"), Description(
         "Creates a new saved custom view. The definition is VALIDATED first (same as validate_custom_view); an " +
         "invalid definition returns {status:\"invalid\", ...} and saves nothing. On success returns the stored view " +
-        "(id, version 1, and the definition) plus previous:null and undo (the delete_custom_view call for the new id). A name collision returns {status:\"conflict\", ...}, and the message " +
+        "(id, version 1, and the definition) plus previous:null and undo (the delete_custom_view call for the new id), plus 'warnings' when the validator has any. A name collision returns {status:\"conflict\", ...}, and the message " +
         "says which folder it collided in. Pass 'folder' to put the view in a shared folder; omit it for the top " +
         "level. A view made here is always shared, never personal: MCP has no person identity. The view is " +
         "stamped as MCP-authored.")]
@@ -158,7 +163,7 @@ public sealed class DarlingMcpCustomViewTools
                 name, description, definition, updatedBy: DarlingWebEndpoints.McpEditorPrincipal, folder: folder, personal: false);
             return result switch
             {
-                CustomViewResult.Ok ok => CreateAnswer(ok.View!),
+                CustomViewResult.Ok ok => CreateAnswer(ok.View!, validation),
                 CustomViewResult.Conflict conflict => Outcome("conflict", conflict.Message),
                 CustomViewResult.Invalid invalid => Outcome("invalid", invalid.Message),
                 _ => Outcome("error", "Could not create the view."),
@@ -182,7 +187,7 @@ public sealed class DarlingMcpCustomViewTools
         "'folder' follows the same vocabulary as description: OMITTED keeps the view's current folder, an EMPTY string " +
         "moves it to the top level, any other text moves it to that folder. A PERSONAL view cannot be updated over MCP " +
         "(MCP has no person identity; only the owner can change it in the web dashboard): it returns " +
-        "{status:\"refused\", ...}. On success returns the stored view with its bumped version, plus previous (the values before) and undo (the update_custom_view call, at the new version, that restores them).")]
+        "{status:\"refused\", ...}. On success returns the stored view with its bumped version, plus 'warnings' when the validator has any, previous (the values before) and undo (the update_custom_view call, at the new version, that restores them).")]
     public static async Task<string> UpdateCustomView(
         NpgsqlDataSource postgres,
         [Description("The id of the view to update (from list_custom_views).")] long view_id,
@@ -227,7 +232,7 @@ public sealed class DarlingMcpCustomViewTools
                 folder: DarlingMcpCustomAlertTools.ResolveOptionalText(folder, currentOk.View.Folder), personal: false, actorKey: null);
             return result switch
             {
-                CustomViewResult.Ok ok => UpdateAnswer(currentOk.View, ok.View!),
+                CustomViewResult.Ok ok => UpdateAnswer(currentOk.View, ok.View!, validation),
                 CustomViewResult.NotFound => Outcome("not_found", $"No custom view with id {view_id}."),
                 CustomViewResult.Forbidden => Outcome("refused", PersonalViewRefusal),
                 CustomViewResult.Conflict conflict => Outcome("conflict", conflict.Message),
@@ -273,9 +278,10 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     /// <summary>The answer to a create (#6403): the stored view, no previous value, and the delete that undoes it.</summary>
-    private static string CreateAnswer(CustomView view)
+    internal static string CreateAnswer(CustomView view, CustomViewValidation.DefinitionValidation validation)
     {
-        var node = DarlingWebEndpoints.BuildFullViewNode(view);
+        /* #7565: the validator's warnings ride the saved view's reply, the same list validate_custom_view returns (none, no key). */
+        var node = DarlingWebEndpoints.WithValidationWarnings(DarlingWebEndpoints.BuildFullViewNode(view), validation);
         node["previous"] = null;
         node["undo"] = DarlingMcpUndoShape.Call("delete_custom_view", new JsonObject { ["view_id"] = view.Id });
         return node.ToJsonString(McpHelpers.JsonOptions);
@@ -283,9 +289,9 @@ public sealed class DarlingMcpCustomViewTools
 
     /// <summary>The answer to an update (#6403): the stored view, the values it had before, and the update that restores them at the new
     /// version. An empty string restores a description or folder that was empty (the tool's own clear vocabulary).</summary>
-    private static string UpdateAnswer(CustomView before, CustomView after)
+    internal static string UpdateAnswer(CustomView before, CustomView after, CustomViewValidation.DefinitionValidation validation)
     {
-        var node = DarlingWebEndpoints.BuildFullViewNode(after);
+        var node = DarlingWebEndpoints.WithValidationWarnings(DarlingWebEndpoints.BuildFullViewNode(after), validation);
         node["previous"] = new JsonObject
         {
             ["name"] = before.Name,

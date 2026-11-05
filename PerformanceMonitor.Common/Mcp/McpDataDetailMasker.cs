@@ -388,7 +388,20 @@ public sealed class McpDataDetailMasker
     /// Identifiers are kept: bracketed and double-quoted names, and digits inside a name (<c>t1</c>, <c>@p1</c>,
     /// <c>$1</c>, <c>#tmp2</c>). The SAME instance comes back when there is nothing to replace.
     /// </summary>
-    public static string MaskLiterals(string text)
+    public static string MaskLiterals(string text) => MaskCore(text, prose: false);
+
+    /// <summary>
+    /// #7106: <see cref="MaskLiterals"/> for text an agent or a person wrote in sentences, such as a report notice's root
+    /// cause. An apostrophe right after a letter or digit (<c>session's</c>, <c>doesn't</c>, <c>O'Brien</c>, <c>sessions' locks</c>)
+    /// is part of a word, not the start of a quoted string, so the rest of the sentence stays readable. A string prefix
+    /// keeps its literal: <c>N'abc'</c>, <c>'abc'</c>, <c>name='abc'</c> and <c>'it''s'</c> are still masked. <c>--</c> and
+    /// <c>/*</c> are not comments in prose (an agent writes " -- " as a dash), though a quoted value after them is still
+    /// masked. Everything else is as <see cref="MaskLiterals"/>.
+    /// SQL text keeps using <see cref="MaskLiterals"/>, where an apostrophe is always a quote.
+    /// </summary>
+    public static string MaskProse(string text) => MaskCore(text, prose: true);
+
+    private static string MaskCore(string text, bool prose)
     {
         if (string.IsNullOrEmpty(text)) return text;
 
@@ -402,7 +415,12 @@ public sealed class McpDataDetailMasker
             char c = text[i];
             int end;
             string? replacement;
-            if (c == '\'')
+            if (c == '\'' && prose && IsWordApostrophe(text, i))
+            {
+                i++;
+                continue;
+            }
+            else if (c == '\'')
             {
                 end = SkipQuoted(text, i, '\'');
                 replacement = "'?'";
@@ -418,13 +436,13 @@ public sealed class McpDataDetailMasker
                 i = close < 0 ? text.Length : close + 1;
                 continue;
             }
-            else if (c == '-' && i + 1 < text.Length && text[i + 1] == '-')
+            else if (!prose && c == '-' && i + 1 < text.Length && text[i + 1] == '-')
             {
                 int eol = text.IndexOfAny(['\r', '\n'], i);
                 end = eol < 0 ? text.Length : eol;
                 replacement = "--";
             }
-            else if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
+            else if (!prose && c == '/' && i + 1 < text.Length && text[i + 1] == '*')
             {
                 int close = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
                 end = close < 0 ? text.Length : close + 2;
@@ -518,6 +536,19 @@ public sealed class McpDataDetailMasker
         }
 
         return text.Length;
+    }
+
+    /// <summary>True when the apostrophe at <paramref name="index"/> follows a letter or digit, so it is part of a word
+    /// (#7106): <c>session's</c>, <c>doesn't</c>, <c>O'Brien</c> and the possessive plural <c>sessions' locks</c>. A single
+    /// string-prefix letter that starts a token (<c>N'abc'</c>, <c>E'abc'</c>, <c>B'101'</c>, <c>X'1F'</c>) is not a word, so
+    /// that apostrophe still opens a literal. An apostrophe at the start or after a space, <c>=</c>, <c>(</c>, <c>,</c> or
+    /// other punctuation opens one too.</summary>
+    private static bool IsWordApostrophe(string text, int index)
+    {
+        if (index == 0 || !char.IsLetterOrDigit(text[index - 1])) return false;
+        bool prefixLetter = "NnEeBbXx".Contains(text[index - 1])
+            && (index == 1 || !(char.IsLetterOrDigit(text[index - 2]) || text[index - 2] == '_'));
+        return !prefixLetter;
     }
 
     /// <summary>True when the character before <paramref name="index"/> continues a name, so a digit there is part of

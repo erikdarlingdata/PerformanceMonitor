@@ -913,7 +913,7 @@ public sealed class RetentionCollectionYieldTests
             var candidate = Path.Combine(dir.FullName, relative);
             if (File.Exists(candidate))
             {
-                return File.ReadAllText(candidate);
+                return RepoFile.ReadRepoFile(candidate);
             }
         }
 

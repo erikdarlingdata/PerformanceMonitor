@@ -71,11 +71,11 @@ public sealed class ViewerBlockingSourceLabelTests
     [Fact]
     public void TheCharts_PutTheLabelOnTheAxisOnlyWhenTheyDrawRows()
     {
-        var trend = Between(Tab, "private void RenderBlockingTrendChart(", "private void RenderDeadlockTrendChart(");
-        var duration = Between(Tab, "private void RenderBlockingDurationChart(", "private void RenderBlockingTotalDurationChart(");
+        var trend = Between(Tab, "void RenderBlockingTrendChart(", "void RenderDeadlockTrendChart(");
+        var duration = Between(Tab, "void RenderBlockingDurationChart(", "private void RenderBlockingTotalDurationChart(");
         var total = Between(Tab, "private void RenderBlockingTotalDurationChart(", "private void RenderDeadlockWaitChart(");
 
-        Assert.Single(Occurrences(trend, "BlockingSourceLabel.For(\"Blocking Incidents\", data.Select(d => d.Source))"));
+        Assert.Single(Occurrences(trend, "BlockingTrendLabels.LegendFor(sources)"));
         Assert.Single(Occurrences(duration, "BlockingSourceLabel.For(\"Block Duration (ms)\", data.Select(d => d.Source))"));
         Assert.Single(Occurrences(total, "BlockingSourceLabel.For(\"Total Block Duration (ms)\", data.Select(d => d.Source))"));
         /* The zero-row branch returns before it: nothing answered, so nothing is named. */

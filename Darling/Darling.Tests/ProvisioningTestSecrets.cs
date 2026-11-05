@@ -33,6 +33,12 @@ internal static class ProvisioningTestSecrets
 
     public static readonly string Mcp = Verifier(McpPassword);
 
+    public static readonly string WebPassword = DarlingManagedPostgres.GeneratePassword();
+
+    /// <summary>A fixed web login verifier, for a test that builds the batch twice and compares the texts: the
+    /// batch makes a random one when the caller passes none.</summary>
+    public static readonly string Web = Verifier(WebPassword);
+
     private static string Verifier(string password) =>
         ScramSha256Verifier.Compute(
             password,

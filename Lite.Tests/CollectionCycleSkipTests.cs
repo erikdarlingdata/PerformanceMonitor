@@ -440,7 +440,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
     [Fact]
     public void NoFileUnderLite_CopiesTheCollectorNameAsASingleQuotedSqlLiteral()
     {
-        /* The nine reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
+        /* The twelve reader predicates interpolate CollectionCycleSkip.CollectorName; a rename must move writer and readers
            together. The census has no exceptions: doc comments write the name in <c> tags, never in single quotes. */
         var literal = "'" + CollectionCycleSkip.CollectorName + "'";
         var lite = Path.GetFullPath(Path.Combine(RepoRootFromThisFile(), "Lite"));
@@ -458,14 +458,14 @@ public sealed class CollectionCycleSkipTests : IDisposable
     }
 
     [Fact]
-    public void TheNinePredicates_InterpolateTheCollectorName()
+    public void TheTwelvePredicates_InterpolateTheCollectorName()
     {
         var services = Path.Combine(RepoRootFromThisFile(), "Lite", "Services");
         var count = Directory.EnumerateFiles(services, "LocalDataService.*.cs")
             .Sum(f => System.Text.RegularExpressions.Regex.Matches(File.ReadAllText(f),
                 @"collector_name <> '\{CollectionCycleSkip\.CollectorName\}'").Count);
 
-        Assert.Equal(9, count);
+        Assert.Equal(12, count);
     }
 
     [Fact]
@@ -550,7 +550,7 @@ public sealed class CollectionCycleSkipTests : IDisposable
         }
 
         Assert.Empty(bare);
-        Assert.True(holes >= 8, "expected the nine predicates to sit in at least eight literals, saw " + holes);
+        Assert.True(holes >= 8, "expected the ten predicates to sit in at least eight literals, saw " + holes);
     }
 
     private static string RepoRootFromThisFile([CallerFilePath] string thisFile = "")

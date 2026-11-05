@@ -46,6 +46,7 @@ public sealed class DarlingStoreLoginsTests
 {
     private const string Owner = "Host=store;Port=5432;Username=darling;Password=OwnerSecret1;Database=darling";
     private const string ViewerLogin = "Host=store;Port=5432;Username=viewer;Password=ViewerSecret2;Database=darling";
+    private const string WebLogin = "Host=store;Port=5432;Username=web;Password=WebSecret3;Database=darling";
     private const string McpLogin = "Host=store;Port=5432;Username=mcp;Password=McpSecret3;Database=darling";
 
     /* ─────────────────────────── the decision ─────────────────────────── */
@@ -53,9 +54,9 @@ public sealed class DarlingStoreLoginsTests
     [Fact]
     public void AConfiguredLogin_Wins_InOrOutOfAContainer()
     {
-        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, verdict: null);
+        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, verdict: null);
         Assert.Equal(DarlingStoreLogins.LoginSource.Configured, outside.Source);
-        Assert.Equal(ViewerLogin, outside.ConnectionString);
+        Assert.Equal(WebLogin, outside.ConnectionString);
         Assert.Null(outside.Warning);
 
         /* Even over a provisioned compose store: the operator's explicit login is the operator's call. */
@@ -72,7 +73,7 @@ public sealed class DarlingStoreLoginsTests
 
         var web = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict);
         Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, web.Source);
-        Assert.Equal(ViewerLogin, web.ConnectionString);
+        Assert.Equal(WebLogin, web.ConnectionString);
         Assert.Null(web.Warning);
 
         var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict);
@@ -114,11 +115,11 @@ public sealed class DarlingStoreLoginsTests
     /// the same derived one a provisioned start builds, and the warning says it is an earlier start's.
     /// </summary>
     [Theory]
-    [InlineData("refusal", "Web", "viewer")]
+    [InlineData("refusal", "Web", "web")]
     [InlineData("refusal", "Mcp", "mcp")]
-    [InlineData("failure", "Web", "viewer")]
+    [InlineData("failure", "Web", "web")]
     [InlineData("failure", "Mcp", "mcp")]
-    [InlineData("stand-down", "Web", "viewer")]
+    [InlineData("stand-down", "Web", "web")]
     [InlineData("stand-down", "Mcp", "mcp")]
     public void ANotProvisionedStart_WithATrustedEarlierCredential_KeepsTheSurfaceOnItsRole(string outcome, string surfaceName, string role)
     {
@@ -149,7 +150,7 @@ public sealed class DarlingStoreLoginsTests
     public void ANotProvisionedStart_WithNoTrustedEarlierCredential_FallsBackToTheOwner_WithBothReasons(string outcome)
     {
         var verdict = NotProvisioned(outcome);
-        const string missing = "/var/lib/darling/credentials/pg-viewer-credential is not trusted (its mode 0644 gives other users access)";
+        const string missing = "/var/lib/darling/credentials/pg-web-credential is not trusted (its mode 0644 gives other users access)";
 
         var login = DarlingStoreLogins.Resolve(
             DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict, EarlierComposeCredential.None(missing));
@@ -158,7 +159,86 @@ public sealed class DarlingStoreLoginsTests
         Assert.Equal(Owner, login.ConnectionString);
         Assert.StartsWith(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Web, null), login.Warning, StringComparison.Ordinal);
         Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
-        Assert.EndsWith($" No viewer credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
+        Assert.EndsWith($" No web credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A role named <c>web</c> that Darling did not create, and no viewer login saved either: the web host falls back to the
+    /// owner, and the log says in operator terms that the role is not Darling's, that the host is on the owner login until it is
+    /// renamed or dropped, and what to run. A foreign role that is not <c>web</c> adds no such line.
+    /// </summary>
+    [Fact]
+    public void AForeignWebRole_WithNoViewerLoginSaved_LogsOneLineNamingTheRoleAndTheFix()
+    {
+        var facts = new ComposeStoreFacts(
+            "darling", "darling", BootstrapSuperuser: true,
+            new Dictionary<string, string?> { ["web"] = null }, Array.Empty<string>());
+        var verdict = DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(DarlingManagedRoles.RefuseComposeStore(facts)!);
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.None("no viewer credential file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, login.Source);
+
+        var log = new CapturingTestLogger();
+        DarlingStoreLogins.LogLoginWarnings(DarlingStoreLogins.Surface.Web, login, verdict, log);
+
+        Assert.Equal(2, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+        Assert.Contains(log.Lines, line => line.Contains(DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal));
+        Assert.Contains("was not created by Darling", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+        Assert.Contains("until that role is renamed or dropped", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+        Assert.Contains("DROP ROLE web", DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal);
+
+        // A foreign role that is not web: the owner warning only.
+        var otherFacts = facts with { ExistingRoleMarkers = new Dictionary<string, string?> { ["viewer"] = null } };
+        var otherVerdict = DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(DarlingManagedRoles.RefuseComposeStore(otherFacts)!);
+        var otherLogin = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, otherVerdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.None("no viewer credential file"));
+        var otherLog = new CapturingTestLogger();
+        DarlingStoreLogins.LogLoginWarnings(DarlingStoreLogins.Surface.Web, otherLogin, otherVerdict, otherLog);
+        Assert.DoesNotContain(otherLog.Lines, line => line.Contains(DarlingStoreLogins.ForeignWebRoleWarning, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A compose store whose role batch was refused (an operator's own role named <c>web</c>) or failed, with no
+    /// <c>web</c> credential from an earlier start: the web host takes the earlier <c>viewer</c> login (reads work, the
+    /// store refuses writes) before the owner, as dev did. The owner is only for a store with neither credential.
+    /// </summary>
+    [Theory]
+    [InlineData("refusal")]
+    [InlineData("failure")]
+    [InlineData("stand-down")]
+    public void ANotProvisionedStart_WithNoWebCredential_ResolvesTheWebHostToTheViewerLogin_NotTheOwner(string outcome)
+    {
+        var verdict = NotProvisioned(outcome);
+
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreViewerFromEarlierStart, login.Source);
+        Assert.Equal(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(Owner, "viewer", "EarlierViewer1"), login.ConnectionString);
+        Assert.Equal("viewer", new NpgsqlConnectionStringBuilder(login.ConnectionString).Username);
+        Assert.DoesNotContain("OwnerSecret1", login.ConnectionString, StringComparison.Ordinal);
+        Assert.Equal(DarlingStoreLogins.EarlierViewerWarning(verdict.NotProvisionedReason), login.Warning);
+        Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
+
+        // A web credential from an earlier start still wins over the viewer one, and the MCP server never takes the viewer login.
+        var withWeb = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.Trusted("EarlierWeb1"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal("web", new NpgsqlConnectionStringBuilder(withWeb.ConnectionString).Username);
+        var mcp = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no mcp credential file"), EarlierComposeCredential.Trusted("EarlierViewer1"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, mcp.Source);
+
+        // Neither credential: the owner, with both reasons in the warning.
+        var neither = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict,
+            EarlierComposeCredential.None("no web file"), EarlierComposeCredential.None("no viewer file"));
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, neither.Source);
+        Assert.EndsWith(" No viewer credential from an earlier start can stand in either: no viewer file.", neither.Warning, StringComparison.Ordinal);
     }
 
     /// <summary>An earlier start's credential is the fallback of a start that did not provision, and nothing more: a
@@ -175,7 +255,7 @@ public sealed class DarlingStoreLoginsTests
 
         var provisioned = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, Provisioned(), earlier);
         Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, provisioned.Source);
-        Assert.Equal(ViewerLogin, provisioned.ConnectionString);
+        Assert.Equal(WebLogin, provisioned.ConnectionString);
 
         var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: false, NotProvisioned("refusal"), earlier);
         Assert.Equal(DarlingStoreLogins.LoginSource.Owner, outside.Source);
@@ -187,7 +267,7 @@ public sealed class DarlingStoreLoginsTests
     /// warning from the surface; the worker says it provisioned), an earlier start's credential, and the owner.
     /// </summary>
     [Theory]
-    [InlineData("Web", "The web dashboard", "viewer")]
+    [InlineData("Web", "The web dashboard", "web")]
     [InlineData("Mcp", "The MCP server", "mcp")]
     public void TheThreeCases_ReadDifferently(string surfaceName, string what, string role)
     {
@@ -214,7 +294,7 @@ public sealed class DarlingStoreLoginsTests
 
     /// <summary>The ruling's warning: the surface, why, and the three things the owner login gives up.</summary>
     [Theory]
-    [InlineData("Web", "The web dashboard", "postgres.webConnectionString", "viewer")]
+    [InlineData("Web", "The web dashboard", "postgres.webConnectionString", "web")]
     [InlineData("Mcp", "The MCP server", "postgres.mcpConnectionString", "mcp")]
     public void TheOwnerFallbackWarning_NamesWhatTheOwnerLoginGivesUp(
         string surface, string what, string setting, string role)
@@ -248,12 +328,37 @@ public sealed class DarlingStoreLoginsTests
         var onCompose = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, Provisioned());
         Assert.NotNull(onCompose.Warning);
         Assert.Contains("names the 'viewer' role, which the service provisions on this compose store and re-keys", onCompose.Warning, StringComparison.Ordinal);
-        Assert.Contains("and the web dashboard connects as the viewer role the service provisions.", onCompose.Warning, StringComparison.Ordinal);
+        Assert.Contains("and the web dashboard connects as the web role the service provisions.", onCompose.Warning, StringComparison.Ordinal);
 
         /* On any other store the same login is exactly what the operator should configure. */
-        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, Provisioned()).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, Provisioned()).Warning);
         Assert.Null(DarlingStoreLogins.Resolve(
-            DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no")).Warning);
+            DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no")).Warning);
+    }
+
+    /// <summary>
+    /// The web dashboard's writes belong to the web login, and viewer is the read-only seat login. A webConnectionString that
+    /// names viewer (what the script's example and the docs gave before the web role existed) says so at startup, with what to
+    /// change. The same login on the MCP setting, and the web login on the web setting, say nothing.
+    /// </summary>
+    [Fact]
+    public void AWebConnectionString_ThatNamesViewer_IsWarnedAbout_AndNothingElseIs()
+    {
+        var web = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, verdict: null);
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, web.Source);
+        Assert.Equal(ViewerLogin, web.ConnectionString);
+        Assert.NotNull(web.Warning);
+        Assert.Contains("postgres.webConnectionString logs in as 'viewer', the read-only login meant for remote and locked-down Viewer seats.", web.Warning, StringComparison.Ordinal);
+        Assert.Contains("Set a password for the web role in tools/provision-roles.sql, run the script again, and point postgres.webConnectionString at the web login.", web.Warning, StringComparison.Ordinal);
+
+        /* The user name is read from the string, so a spelling that differs only in the other keys is still viewer. */
+        Assert.NotNull(DarlingStoreLogins.ConfiguredLoginWarning(
+            DarlingStoreLogins.Surface.Web, "Host=db;Username=viewer;Password=x;Database=darling;Application Name=web", Owner, verdict: null));
+
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, WebLogin, inContainer: false, verdict: null).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, McpLogin, inContainer: false, verdict: null).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, ViewerLogin, inContainer: false, verdict: null).Warning);
     }
 
     [Fact]
@@ -732,10 +837,12 @@ public sealed class DarlingStoreLoginsTests
     public void TheManagedBatch_KeepsItsNamesMarkerAndPublicRevoke_AndIsTheDefaultTarget()
     {
         var byDefault = DarlingManagedRoles.BuildProvisioningSql(
-            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            webVerifier: ProvisioningTestSecrets.Web);
         var explicitManaged = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-            McpCommandDeadlines.ComposedQueryFallbackSeconds, PasswordReassert.All, ProvisioningTarget.Managed);
+            McpCommandDeadlines.ComposedQueryFallbackSeconds, PasswordReassert.All, ProvisioningTarget.Managed,
+            ProvisioningTestSecrets.Web);
 
         Assert.Equal(byDefault, explicitManaged);
         Assert.Contains("REVOKE ALL ON DATABASE darling FROM PUBLIC;", byDefault, StringComparison.Ordinal);
@@ -753,7 +860,7 @@ public sealed class DarlingStoreLoginsTests
 
         Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE \"darling\" IN SCHEMA collect", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("FOR ROLE darling ", sql, StringComparison.Ordinal);
-        Assert.Contains("GRANT CONNECT ON DATABASE \"darling\" TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE \"darling\" TO admin, viewer, web;", sql, StringComparison.Ordinal);
         Assert.Contains("COMMENT ON ROLE viewer IS 'darling-compose';", sql, StringComparison.Ordinal);
         Assert.Contains("IS DISTINCT FROM 'darling-compose'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("'darling-managed'", sql, StringComparison.Ordinal);
@@ -847,14 +954,14 @@ public sealed class DarlingStoreLoginsTests
     }
 
     [Fact]
-    public async Task CustomAlertViewer_WithAProvisionedVerdict_IsItsViewerLogin()
+    public async Task CustomAlertViewer_WithAProvisionedVerdict_IsTheWebLogin()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
         try
         {
             DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
 
-            Assert.Equal(ViewerLogin, await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+            Assert.Equal(WebLogin, await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
                 Owner, NullLogger.Instance, CancellationToken.None));
         }
         finally
@@ -1006,7 +1113,7 @@ public sealed class DarlingStoreLoginsTests
 
         Assert.Matches(
             @"if \(OperatingSystem\.IsWindows\(\) && config\.Postgres\.Managed\)\s*\{\s*"
-            + @"customAlertViewerConnString = DarlingManagedPostgres\.TryBuildViewerConnectionStringFromStoredCredential\(config\.Postgres\);\s*\}",
+            + @"customAlertViewerConnString = DarlingManagedPostgres\.TryBuildWebConnectionStringFromStoredCredential\(config\.Postgres\);\s*\}",
             gate);
 
         Assert.Matches(
@@ -1027,7 +1134,7 @@ public sealed class DarlingStoreLoginsTests
     }
 
     private static DarlingStoreLogins.ComposeStoreVerdict Provisioned() =>
-        DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15);
+        DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15, WebLogin);
 
     /// <summary>A not-provisioned verdict worded as each outcome's really is.</summary>
     private static DarlingStoreLogins.ComposeStoreVerdict NotProvisioned(string outcome) => outcome switch

@@ -37,7 +37,7 @@ public sealed class ViewerPerfmonSqlTests
         Assert.Contains("WHERE server_id = $1", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY lower(counter_name), counter_name", ViewerDataService.DistinctPerfmonCountersSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public sealed class ViewerPerfmonSqlTests
 
 /// <summary>
 /// Pins the Running Jobs tab's two ported reads (no live Postgres): the latest-snapshot grid read
-/// (copied from Lite's GetRunningJobsAsync, run on <c>v_running_jobs</c>) and the msdb-warning
+/// (copied from Lite's ReadRunningJobsAsync, run on <c>v_running_jobs</c>) and the msdb-warning
 /// derivation read that stands in for Lite's live <c>_hasMsdbAccess</c> probe — the running_jobs
 /// collector's most recent collection_log status.
 /// </summary>

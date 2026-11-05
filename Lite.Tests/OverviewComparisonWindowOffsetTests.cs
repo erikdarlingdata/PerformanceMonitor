@@ -273,7 +273,7 @@ public sealed class OverviewComparisonWindowOffsetTests
         Assert.Contains("var refFromUtc = comparisonRange.Value.FromUtc;", lanes, StringComparison.Ordinal);
         Assert.Contains("var refToUtc = comparisonRange.Value.ToUtc;", lanes, StringComparison.Ordinal);
         Assert.Contains("_dataService.GetCpuUtilizationAsync(_serverId, 0, refFromUtc, refToUtc, frame: CpuTimeFrame.Utc)", lanes, StringComparison.Ordinal);
-        foreach (var read in new[] { "GetTotalWaitTrendAsync", "GetBlockingTrendAsync", "GetMemoryTrendAsync", "GetFileIoLatencyTrendAsync" })
+        foreach (var read in new[] { "GetTotalWaitTrendAsync", "GetBlockingTrendAsync", "GetMemoryTrendAsync", "GetFileIoOverviewLatencyTrendAsync" })
         {
             Assert.Contains($"_dataService.{read}(_serverId, 0, refFromUtc, refToUtc)", lanes, StringComparison.Ordinal);
         }

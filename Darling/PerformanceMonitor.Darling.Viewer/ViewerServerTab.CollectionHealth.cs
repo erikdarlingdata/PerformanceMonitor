@@ -16,6 +16,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 using PerformanceMonitor.Darling.Storage;
 
@@ -91,8 +92,31 @@ public partial class ViewerServerTab
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
 
+        ShowServerConnectionState();
         await ShowSkippedCyclesAsync();
         await ShowSweepPressureAsync();
+    }
+
+    /// <summary>The web's tooltip for "Run all collectors now" while the server is unreachable (collector-run.js OFFLINE_TIP).</summary>
+    internal const string OfflineRunTip = "This server is offline: the service has no connection to it, so a collector run would be skipped. Collection resumes on its own when the server is reachable again.";
+
+    /// <summary>The "Run all collectors now" button's tooltip while the server is reachable.</summary>
+    private const string RunAllReadyTip = "Runs every enabled collector for this server once, now. Disabled collectors are skipped. Schedules do not change.";
+
+    /// <summary>
+    /// #7590: while the service's connect to this server has failed, the Collection Health tab says collection is waiting on the connection
+    /// (since when, the last error, the next retry) and "Run all collectors now" is off with the offline tip, since a run would be skipped.
+    /// The collector rows are not relabelled. A reachable server shows neither.
+    /// </summary>
+    internal void ShowServerConnectionState()
+    {
+        var down = _server.ConnectDownSince.HasValue;
+        ServerConnectionLine.Text = down
+            ? ServerHealthClassifier.WaitingOnConnectionText(_server.ConnectDownSince!.Value, _server.LastConnectError, _server.NextConnectAttemptUtc, DateTime.UtcNow)
+            : string.Empty;
+        ServerConnectionLine.Visibility = down ? Visibility.Visible : Visibility.Collapsed;
+        RunAllCollectorsButton.IsEnabled = !down && !_collectorRunActive;
+        RunAllCollectorsButton.ToolTip = down ? OfflineRunTip : RunAllReadyTip;
     }
 
     /// <summary>
@@ -524,6 +548,12 @@ public partial class ViewerServerTab
             return;
         }
 
+        if (_server.ConnectDownSince.HasValue)
+        {
+            ShowCollectorRunStatus(OfflineRunTip);
+            return;
+        }
+
         _collectorRunActive = true;
         RunAllCollectorsButton.IsEnabled = false;
         ShowCollectorRunStatus(ViewerCollectorRun.RunningText(collectors));
@@ -548,7 +578,7 @@ public partial class ViewerServerTab
         finally
         {
             _collectorRunActive = false;
-            RunAllCollectorsButton.IsEnabled = true;
+            RunAllCollectorsButton.IsEnabled = !_server.ConnectDownSince.HasValue;
         }
     }
 
@@ -573,7 +603,7 @@ public partial class ViewerServerTab
             }
         }
 
-        if (CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
+        if (!DataGridRowHit.IsOnRow(e.OriginalSource) || CollectionHealthGrid.SelectedItem is not CollectorHealthRow item) return;
 
         var window = new CollectionLogWindow(_dataService, _server.ServerId, item.CollectorName)
         {
@@ -614,7 +644,7 @@ public partial class ViewerServerTab
         if (data.Count == 0)
         {
             CollectorDurationChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
-            CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+            CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
             ReapplyAxisColors(CollectorDurationChart);
             CollectorDurationChart.Refresh();
             return;
@@ -627,7 +657,7 @@ public partial class ViewerServerTab
         ReapplyAxisColors(CollectorDurationChart);
         CollectorDurationChart.Plot.YLabel("Slowest run per bucket (ms)");
         CollectorDurationChart.Plot.Axes.AutoScaleY();
-        CollectorDurationChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
+        CollectorDurationChart.Plot.Axes.SetLimitsX(ChartXStart(CollectorDurationChart.Plot, rangeStart, rangeEnd), rangeEnd);
         ShowChartLegend(CollectorDurationChart);
         CollectorDurationChart.Refresh();
     }

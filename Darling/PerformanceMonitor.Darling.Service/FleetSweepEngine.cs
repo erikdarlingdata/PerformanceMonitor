@@ -33,8 +33,16 @@ public sealed record FleetSweepServerReading(
     long PeakBlockWaitMs,
     string? ReadFault,
     DateTime? LastCollectionUtc = null,
-    DateTime? RegisteredUtc = null)
+    DateTime? RegisteredUtc = null,
+    FleetIdentityCapacity? IdentityCapacity = null)
 {
+    /// <summary>
+    /// #7669: a column at its identity limit is a state that stays true until someone acts, so no count of events in the span carries it.
+    /// It reads through the Fleet Overview card's own test (<see cref="FleetServerCard.IsIdentityCritical"/>), so the sweep is never
+    /// better than the card for it.
+    /// </summary>
+    public bool IdentityCapacityCritical => ReadFault is null && FleetServerCard.IsIdentityCritical(IdentityCapacity);
+
     /// <summary>
     /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
     /// started. Its silence is older than the restart, so the post-restart settle window does not explain it. A server last collected a
@@ -245,6 +253,17 @@ public static class FleetSweepEngine
             else
             {
                 var classified = DailyHealthBandCalculator.Classify(reading.Signals, banding);
+                /* #7669: a state that stays true until someone acts sets a floor on the sweep's band (Fleet Overview's
+                   OverallMetricSeverity does the same), so the sweep is never better than the card for it. */
+                var eventsBand = classified;
+                var floored = eventsBand != DailyHealthBand.NoData && reading.IdentityCapacityCritical;
+                if (floored)
+                {
+                    /* A server with no data in the span stays No Data, as Fleet Overview bands it Offline: the identity read looks
+                       back 168 hours, so it can name a column for a server that collected nothing in this span. */
+                    classified = DailyHealthBand.Critical;
+                }
+
                 band = DailyHealthBandCalculator.Label(classified);
                 reason = classified switch
                 {
@@ -261,6 +280,13 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
                 };
+                if (floored && reading.IdentityCapacity is { } identity)
+                {
+                    var identityReason = ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns);
+                    /* The events alone band it Healthy: BuildReasons would say "No issues detected.", which the clause contradicts,
+                       so the clause stands alone. With event reasons, they stay and the clause follows. */
+                    reason = eventsBand == DailyHealthBand.Healthy ? identityReason : reason + "; " + identityReason;
+                }
             }
 
             verdicts.Add(new FleetSweepServerVerdict(
@@ -787,21 +813,22 @@ public static class FleetSweepEngine
         /* The SIGNALS' peak, not the reading's: Classify sees only the signals, and the two must agree.
            The production read fills both from one MAX. */
         var peakBlockSeconds = signals.PeakBlockWaitMs / 1000.0;
-        /* #5644: the band's count is the span's blocked-process REPORT rows (DailyHealthSignals.BlockingReports), the
-           unit its rate tiers were measured in; BlockingEvents counts WAITS and is what the evidence shows as the
-           count. Classify reads the same pair, so the ledger still cannot page on a count the verdict did not band. */
-        var bandedBlocking = signals.BlockingReports ?? signals.BlockingEvents;
-        if (ServerHealthClassifier.BlockingSeverity(bandedBlocking, peakBlockSeconds, signals.Window, thresholds.BlockingBands)
+        /* #7028: the band's count is the span's blocking WAITS (DailyHealthSignals.BlockingEvents), the unit the alerts
+           count, plus the snapshot arm's value. Classify reads the same fields, so the ledger still cannot page on a
+           count the verdict did not band. */
+        var peakSnapshotSeconds = signals.PeakSnapshotWaitMs.HasValue ? signals.PeakSnapshotWaitMs.Value / 1000.0 : (double?)null;
+        if (ServerHealthClassifier.BlockingSeverity(
+                signals.BlockingEvents, peakBlockSeconds, signals.Window, thresholds.BlockingBands, peakSnapshotSeconds)
             == HealthSeverity.Critical)
         {
-            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, bandedBlocking, signals.BlockingReports.HasValue, signals.Window, peakBlockSeconds, thresholds.BlockingBands));
+            yield return (FamilyBlocking, BlockingEvidence(signals.BlockingEvents, signals.Window, peakBlockSeconds, peakSnapshotSeconds, thresholds.BlockingBands));
         }
     }
 
     /// <summary>The blocking family's evidence (#3539 A3): the arm that banded is the one named. A 60 s
     /// block is the wait arm's Critical whatever the rate; otherwise the RATE is the value, with the raw
     /// count as its own member for the operator reconciling against the blocking grid.</summary>
-    private static string BlockingEvidence(long count, long bandedCount, bool bandedOnReports, TimeSpan window, double peakBlockSeconds, BlockingBandThresholds tiers)
+    private static string BlockingEvidence(long count, TimeSpan window, double peakBlockSeconds, double? peakSnapshotSeconds, BlockingBandThresholds tiers)
     {
         if (peakBlockSeconds >= tiers.CriticalWaitSeconds)
         {
@@ -815,15 +842,26 @@ public static class FleetSweepEngine
             });
         }
 
-        /* Critical without the wait arm implies a rateable window at or past the Critical tier, so the
+        /* #7028: the snapshot arm, the Blocking Wait Time alert's measure, banded Critical next. */
+        if (peakSnapshotSeconds.HasValue && tiers.CriticalSnapshotWaitSeconds > 0 && peakSnapshotSeconds.Value >= tiers.CriticalSnapshotWaitSeconds)
+        {
+            return JsonSerializer.Serialize(new
+            {
+                derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
+                trigger = "largest total blocked wait of one DMV snapshot in the sweep span (after the Blocking Wait Time persistence gate), seconds",
+                value = peakSnapshotSeconds.Value,
+                threshold = tiers.CriticalSnapshotWaitSeconds,
+                blocking_count = count,
+            });
+        }
+
+        /* Critical without the wait arms implies a rateable window at or past the Critical tier, so the
            rate is present by construction. */
-        var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(bandedCount, window)!.Value;
+        var ratePerHour = ServerHealthClassifier.BlockingRatePerHour(count, window)!.Value;
         return JsonSerializer.Serialize(new
         {
             derivation = "summary-scoring critical trigger under alerts_enabled: false — not an alert-engine replay",
-            trigger = bandedOnReports
-                ? "blocked-process reports per hour over the sweep span"
-                : "blocking events per hour over the sweep span",
+            trigger = "blocking waits per hour over the sweep span",
             value = ratePerHour,
             threshold = tiers.CriticalPerHour,
             blocking_count = count,
@@ -935,6 +973,9 @@ public static class FleetSweepEngine
             var nowUtc = DateTime.UtcNow;
             var spanStartUtc = ComputeSpanStart(nowUtc, interval, previousRun);
 
+            /* #7669: the state Fleet Overview shows, read once through the card's own reader. An engine-seam read like the two above. */
+            var identityCapacity = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, nowUtc, cancellationToken, logger).ConfigureAwait(false);
+
             /* Sequential, deliberately: 100+ aggregate reads against the loopback store are cheap one
                at a time and a herd all at once — and the sweep is a background errand racing nothing. */
             var readings = new List<FleetSweepServerReading>(servers.Count);
@@ -943,8 +984,9 @@ public static class FleetSweepEngine
                 cancellationToken.ThrowIfCancellationRequested();
                 IReadOnlyList<string>? separate = null;
                 separatelyMonitored?.TryGetValue(serverId, out separate);
-                readings.Add(await ReadServerSignalsAsync(
-                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false));
+                var reading = await ReadServerSignalsAsync(
+                    postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false);
+                readings.Add(identityCapacity.TryGetValue(serverId, out var identity) ? reading with { IdentityCapacity = identity } : reading);
             }
 
             var composition = Compose(
@@ -1021,11 +1063,12 @@ public static class FleetSweepEngine
                 CollectionRuns = rows.Sum(r => r.CollectionRuns),
                 HighCpuEvents = rows.Sum(r => r.HighCpuEvents),
                 BlockingEvents = rows.Sum(r => r.BlockingEvents),
-                /* #5644: the report rows the band's count tiers were measured in; a hand-built row without them bands its events. */
-                BlockingReports = rows.Sum(r => r.BlockingReports ?? r.BlockingEvents),
                 /* #3539 A2: the longest block across the span's day buckets — a MAX, not a sum, because it
                    is a magnitude; the blocking band's wait arm reads it. */
                 PeakBlockWaitMs = peakBlock,
+                /* #7028: the largest snapshot value of the span's day buckets, a MAX like the peak block. Null when no
+                   day row carries one, so the arm stays off for a hand-built row. */
+                PeakSnapshotWaitMs = rows.Any(r => r.PeakSnapshotWaitMs.HasValue) ? rows.Max(r => r.PeakSnapshotWaitMs ?? 0L) : (long?)null,
                 MemoryPressureEvents = rows.Sum(r => r.MemoryPressureEvents),
                 MemoryCriticalEvents = rows.Sum(r => r.MemoryCriticalEvents),
                 AlertCount = rows.Sum(r => r.AlertCount),

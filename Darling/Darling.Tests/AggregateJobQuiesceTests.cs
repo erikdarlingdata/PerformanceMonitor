@@ -286,7 +286,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         await PlantDropProbeAsync(connection, Retired, ct);
@@ -321,7 +321,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         var jobIds = await JobIdsAsync(connection, Retired, ct);
@@ -437,7 +437,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         var jobIds = await JobIdsAsync(connection, Retired, ct);
@@ -508,7 +508,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         var jobIds = await JobIdsAsync(connection, Retired, ct);
@@ -556,7 +556,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
 
@@ -576,7 +576,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await CreateRetiredAggregateAsync(connection, Retired, ct);
         var jobIds = await JobIdsAsync(connection, Retired, ct);
@@ -608,7 +608,7 @@ public sealed class AggregateJobQuiesceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #5551 quiesce tests.");
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
 
         /* The OLD query_store_stats_hourly shape (it still has a query_id column) with a daily tier on top. */
@@ -689,7 +689,7 @@ SELECT query_id, time_bucket('1 day', bucket) AS bucket, sum(s) AS s FROM collec
         }
 
         /* The extension, but the relation is a plain view (the fallback branch) or absent. */
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await ExecuteAsync(connection, "CREATE OR REPLACE VIEW collect.file_io_baseline AS SELECT 1 AS bucket", ct);
         var viewHold = await TimescaleSupport.QuiesceContinuousAggregateJobsAsync(connection, "file_io_baseline", null, FastCap, ct);

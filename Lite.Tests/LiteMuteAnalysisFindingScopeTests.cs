@@ -320,7 +320,7 @@ public sealed class LiteMuteAnalysisFindingScopeTests
         Assert.Null(answer["candidates"]);
 
         var message = (string)answer["message"]!;
-        Assert.StartsWith("Could not resolve server. Available servers:\n", message, StringComparison.Ordinal);
+        Assert.StartsWith("Could not resolve server. No monitored server matches 'no-such-server'. Available servers:\n", message, StringComparison.Ordinal);
         Assert.Contains("Orders Primary (orders-primary)", message, StringComparison.Ordinal);
         Assert.Contains("pg-west", message, StringComparison.Ordinal);
     }

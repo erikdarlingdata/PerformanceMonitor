@@ -62,6 +62,7 @@
             <!-- DarkGrid has no BasedOn, so it must re-declare the implicit DataGrid style's behaviors or grids using it silently lose them (sort-descending-first, header-copy, middle-click panning). -->
             <Setter Property="ui:DataGridClipboardBehavior.FixHeaderCopy" Value="True"/>
             <Setter Property="ui:DataGridSortBehavior.SortDescendingFirst" Value="True"/>
+            <Setter Property="ui:DataGridFillColumn.Enabled" Value="True"/>
             <Setter Property="ui:ScrollPanBehavior.EnableMiddleClickPanning" Value="True"/>
             <Setter Property="AutoGenerateColumns" Value="False"/>
             <Setter Property="IsReadOnly" Value="True"/>
@@ -747,7 +748,9 @@
                              "what is it now". One line per top-5 database by current PVS size, 7 days,
                              legend labels carry each database's latest %-of-database. Collapsed until the
                              loader has points, so an ADR-less server shows no dead chart. -->
-                        <scottplot:WpfPlot Grid.Row="2" x:Name="FinOpsPvsTrendChart" Height="220" Margin="10,0,10,8" Visibility="Collapsed"/>
+                        <ui:ChartGridPanel Grid.Row="2" MaxColumns="1" HeightFill="0.4" MinChartHeight="220" Margin="10,0,10,8">
+                            <scottplot:WpfPlot x:Name="FinOpsPvsTrendChart" Visibility="Collapsed"/>
+                        </ui:ChartGridPanel>
                         <Grid Grid.Row="3" Margin="10,0,10,10">
                             <DataGrid x:Name="FinOpsPvsStatsDataGrid" Style="{StaticResource DarkGrid}" RowStyle="{StaticResource FinOpsRowStyle}" HorizontalScrollBarVisibility="Auto">
                                 <DataGrid.Columns>
@@ -925,7 +928,7 @@
                                 <DataGridTextColumn Binding="{Binding TotalReads, StringFormat=N0}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalReads" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reads" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding ReadsShare, StringFormat=N1}" Width="70" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ReadsShare" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Reads %" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                                 <DataGridTextColumn Binding="{Binding TotalWrites, StringFormat=N0}" Width="90" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalWrites" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Writes" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
-                                <DataGridTextColumn Binding="{Binding TotalMemoryMb, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="TotalMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Memory (MB)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
+                                <DataGridTextColumn Binding="{Binding PeakMemoryMb, StringFormat=N1}" Width="100" ElementStyle="{StaticResource NumericCell}"><DataGridTextColumn.Header><StackPanel Orientation="Horizontal"><Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="PeakMemoryMb" Click="FilterButton_Click" Margin="0,0,4,0"/><TextBlock Text="Peak grant (MB)" FontWeight="Bold" VerticalAlignment="Center"/></StackPanel></DataGridTextColumn.Header></DataGridTextColumn>
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>

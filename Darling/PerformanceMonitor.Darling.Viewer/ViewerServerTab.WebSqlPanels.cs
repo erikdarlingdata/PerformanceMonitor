@@ -33,6 +33,9 @@ public sealed record ResourceSemaphorePressureGridRow(
     DateTime PeakGrantedAt, double MinAvailableMb, long TimeoutsInWindow, long ForcedGrantsInWindow, DateTime FirstSnapshotAt,
     DateTime LastSnapshotAt)
 {
+    /// <summary>The pool as the web names it (#7416): the internal and default pools by name, any other as "Pool N".</summary>
+    public string PoolName => ResourceGovernorPools.Name(PoolId);
+
     /// <summary>Null on a peak of 0: the shared read's DISTINCT ON picks the newest snapshot when nothing waited, an arbitrary row
     /// and not an event, so the web nulls it too (<c>peak_waiters_at</c>, <c>peak_granted_at</c>). The grid shows a dash.</summary>
     /// <summary>The semaphore's name, not its id (#7676): 0 is the regular semaphore, 1 the small-query semaphore
@@ -60,6 +63,9 @@ public sealed record ResourceSemaphorePressureGridRow(
 public sealed record ResourceSemaphoreSnapshotGridRow(ResourceSemaphoreRow Row)
 {
     public int PoolId => Row.PoolId;
+
+    /// <summary>The pool as the web names it (#7416): the internal and default pools by name, any other as "Pool N".</summary>
+    public string PoolName => ResourceGovernorPools.Name(PoolId);
 
     public short ResourceSemaphoreId => Row.ResourceSemaphoreId;
 

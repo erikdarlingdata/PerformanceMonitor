@@ -141,10 +141,11 @@ public partial class WaitDrillDownWindow : Window
             return;
         }
 
-        /* #4239: allSnapshots is now capped to the newest 1,000 of the window (see LoadCorrelatedDataAsync) —
+        /* #7573: includeMonitor, so a chain headed by a monitor session still walks to its head.
+           #4239: allSnapshots is now capped to the newest 1,000 of the window (see LoadCorrelatedDataAsync) —
            the chain walk below only sees those rows, so a head blocker whose own snapshot falls outside the
            newest 1,000 is missed. truncationNote surfaces that instead of silently absorbing it. */
-        var (allTotalCount, allSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc);
+        var (allTotalCount, allSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc, includeMonitor: true);
         var truncationNote = allSnapshots.Count < allTotalCount ? $" | showing newest 1,000 of {allTotalCount:N0} snapshots" : "";
 
         var headBlockerInfos = WalkBlockingChains(waiters.Select(ToSnapshotInfo), allSnapshots.Select(ToSnapshotInfo));
@@ -372,7 +373,7 @@ public partial class WaitDrillDownWindow : Window
             /* #4239: FetchSnapshotPlanAsync is a Postgres round-trip inside an async void handler — an
                unguarded await here would let a store error (connection drop, timeout) reach the dispatcher
                as an unhandled exception. Same fetch-failure idiom as ViewerServerTab.Plans.cs. */
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -458,7 +459,7 @@ public partial class WaitDrillDownWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this query from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
         var argsJson = ViewerDataService.BuildActualPlanArgsForSnapshot(row.CollectionTime, row.SessionId, row.DatabaseName);

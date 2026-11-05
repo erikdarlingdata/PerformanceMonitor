@@ -91,11 +91,7 @@ public sealed class QueryStoreHintsCollector : CollectorDefinitionBase<QueryStor
 
     /// <summary>The view is SQL Server 2022 (v16) and later; Azure SQL DB and Managed Instance are not version-gated; unknown (0) is assumed newest.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) =>
-        target is null
-        || target.SqlMajorVersion == 0
-        || target.SqlMajorVersion >= FirstMajorVersion
-        || target.IsAzureSqlDb
-        || target.IsAzureManagedInstance;
+        target is null || target.MeetsMinimumVersion(FirstMajorVersion, unknownIsNewest: true);
 
     /// <summary>Azure SQL DB rejects three-part names, so the host connects per database there instead.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => target is not null && target.IsAzureSqlDb;
@@ -133,7 +129,7 @@ IF NOT EXISTS
 (
     SELECT
         1
-    FROM sys.database_query_store_options
+    FROM sys.database_query_store_options AS PerformanceMonitorLite
     WHERE actual_state IN (1, 2, 4)
     AND   readonly_reason & 8 = 0
 )
@@ -159,14 +155,14 @@ SELECT
 FROM
 (
     SELECT TOP ({MaxRowsPerDatabase})
-        qh.query_hint_id,
-        qh.query_id,
-        qh.query_hint_text,
-        qh.last_query_hint_failure_reason_desc,
-        qh.query_hint_failure_count,
-        qh.source_desc
-    FROM sys.query_store_query_hints AS qh
-    ORDER BY qh.query_id, qh.query_hint_id
+        PerformanceMonitorLite.query_hint_id,
+        PerformanceMonitorLite.query_id,
+        PerformanceMonitorLite.query_hint_text,
+        PerformanceMonitorLite.last_query_hint_failure_reason_desc,
+        PerformanceMonitorLite.query_hint_failure_count,
+        PerformanceMonitorLite.source_desc
+    FROM sys.query_store_query_hints AS PerformanceMonitorLite
+    ORDER BY PerformanceMonitorLite.query_id, PerformanceMonitorLite.query_hint_id
 ) AS h
 ORDER BY
     query_id,

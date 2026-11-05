@@ -137,7 +137,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(DbC, one.GetProperty("database_name").GetString());
             Assert.Equal(2, one.GetProperty("tasks_returned").GetInt32());
             Assert.False(one.GetProperty("truncated").GetBoolean());
-            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, null, null, ct)).RootElement;
+            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, logger: null, cancellationToken: ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, plain.GetProperty("database_name").ValueKind);
             Assert.Equal(5, plain.GetProperty("tasks_returned").GetInt32());
 
@@ -156,7 +156,8 @@ public sealed class WaitsDatabaseFilterLiveTests
             /* A window with no waiting_tasks rows at all, filtered or not, keeps the unfiltered sentence: the store holds nothing to filter. */
             var farBack = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(
                 postgres, ServerName, 1, 30, DatabaseFilter.All, seed.End.AddDays(-30).ToString("o"), null, ct)).RootElement;
-            Assert.Equal("No waiting tasks captured in the specified time range.", farBack.GetProperty("message").GetString());
+            /* #7573: the unfiltered sentence now also says the monitor's own statements are left out. */
+            Assert.Equal("No waiting tasks captured in the specified time range. The monitor's own statements are left out. Pass include_monitor=true to include them.", farBack.GetProperty("message").GetString());
 
             bodySucceeded = true;
         }
@@ -337,7 +338,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(DbC, one.GetProperty("database_name").GetString());
             Assert.Equal(1, one.GetProperty("blocking_duration").GetArrayLength());
 
-            var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, 1, asOf, null, null, ct)).RootElement;
+            var plain = JsonDocument.Parse(await DarlingMcpDataTools.GetBlockingStats(postgres, ServerName, 1, asOf, null, logger: null, cancellationToken: ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, plain.GetProperty("database_name").ValueKind);
             Assert.Equal(2, plain.GetProperty("blocking_duration").GetArrayLength());
 
@@ -414,9 +415,9 @@ public sealed class WaitsDatabaseFilterLiveTests
 
             /* N1: get_blocking_trend's own JSON, by exact tag for both filters, so a trend tool that hard-codes one source fails here
                even though the readers above are right. */
-            var trendJsonA = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA]), ct)).RootElement;
+            var trendJsonA = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA]), cancellationToken: ct)).RootElement;
             Assert.Equal("DMV snapshot", trendJsonA.GetProperty("source").GetString());
-            var trendJsonAb = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA, DbB]), ct)).RootElement;
+            var trendJsonAb = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockingTrend(postgres, MixedServerName, 1, seed.End.ToString("o"), DatabaseFilter.Of([DbA, DbB]), cancellationToken: ct)).RootElement;
             Assert.Equal("blocked-process-report", trendJsonAb.GetProperty("source").GetString());
 
             var b = await AskAsync(DatabaseFilter.One(DbB));

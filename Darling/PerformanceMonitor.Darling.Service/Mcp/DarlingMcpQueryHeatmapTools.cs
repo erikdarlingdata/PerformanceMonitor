@@ -146,7 +146,11 @@ public sealed class DarlingMcpQueryHeatmapTools
                 start, end, "query_stats", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken);
+                /* #7167: an offline server's empty grid answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, end,
+                    await EmptyAsync(postgres, resolved.DisplayName, resolved.ServerId, start, end, hours_back, notice, databaseFilter, cancellationToken: cancellationToken),
+                    cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -203,6 +207,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 time_bin_count = cells.Select(c => c.TimeBucket).Distinct().Count(),
                 cell_count = cells.Count,
                 /* Which slice of [window_start, window_end] actually came back. When truncated is true the
@@ -277,10 +282,11 @@ public sealed class DarlingMcpQueryHeatmapTools
 
         if (!hasInWindow)
         {
-            return McpHelpers.Status(
-                "empty",
+            /* #7459: this answer says unavailable now, which the caller's EmptyAsync leaves as it is, so the offline check is asked here. */
+            return await DarlingServerOfflineNote.UnavailableOrEmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status(
+                "unavailable",
                 $"{serverName} has query stats from outside this window but nothing collected IN the last {hours_back} hour(s), so the grid has no columns rather than no hot cells. Widen hours_back, or check get_collection_health — a collector that stopped looks exactly like this.",
-                notice.AsHints());
+                notice.AsHints()), cancellationToken);
         }
 
         return McpHelpers.Status(

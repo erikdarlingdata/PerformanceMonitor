@@ -9,8 +9,19 @@ Critical at 4.0x; both are settable — see [Adjusting the thresholds](#adjustin
 ## What the alert is telling you
 
 Raw data is rolled up into continuous aggregates, and retention may only drop raw history once a rollup has
-actually materialized it. If a rollup has not caught up, dropping raw would destroy the only copy — so the
-coverage gate (#1680/#1877) pauses the retention policy instead.
+actually materialized it. If a rollup has not caught up, dropping raw destroys history that rollup does
+not hold. So the coverage gate (#1680/#1877) pauses the retention policy instead.
+
+A rollup that has its own armed retention is checked only as far back as it keeps (#7114). Say the
+rollup keeps 10 days and its retention is armed. Then it counts as caught up when its oldest bucket is no
+later than 10 days ago plus one bucket. That holds even when the tier it reads holds 27 days. The rollup
+drops the older days on its own, so dropping them from its source loses nothing it keeps. This applies
+only while the rollup's own gate passes in the same check. If a rollup it feeds is short of it, its own
+retention is about to be paused, and the older days may still be needed to backfill that rollup. Then it
+must reach the source's oldest row. So must a
+rollup with no retention, or whose own retention is paused. When
+this rule decides it, the `ARMED` line says so, for example `checked within
+query_store_stats_interval_daily's 10-day retention`.
 
 The gate is working when this alert fires. What the alert adds is that the hold has lasted long enough to
 cost real disk. "Monitor Store" in the alert is the Darling store itself, not one of your monitored servers
@@ -19,8 +30,9 @@ same thing.
 
 ## Do not arm the policy by hand
 
-The history a held policy is keeping exists nowhere else. Arming it drops the only copy, which is exactly
-what the gate prevents. The release is a backfill.
+Arming a held policy drops history that the short consumer named in the `HELD PAUSED` line has not
+materialized, which is exactly what the gate prevents. The gate checks only the consumers it names, so
+another tier may still hold some of those days, but the named one does not. The release is a backfill.
 
 ## The sequence
 
@@ -91,10 +103,9 @@ check, at :30 past the minute), so the hold clears by itself within about an hou
 completing. A restart still runs the same gate on the start path; it is the hurry-up option, not the
 remedy.
 
-Do not let it wait a day, though: the hourly rollups carry their own retention policy, already armed,
-which trims the coverage the backfill just built when it next fires (roughly daily). The hourly
-re-evaluation is well inside that; if the trim ever wins the race nothing is lost — raw is still held —
-and re-running the verb rebuilds it.
+A rollup's own retention can trim the backfill's older days before the re-evaluation runs. That does not
+undo the backfill. Those days are older than the rollup keeps. The gate checks a rollup with armed
+retention only as far back as it keeps (#7114), so the trim cannot put the hold back.
 
 ## How you know it worked
 

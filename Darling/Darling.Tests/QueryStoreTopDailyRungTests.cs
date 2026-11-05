@@ -299,7 +299,7 @@ public sealed class QueryStoreTopDailyRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;
@@ -362,7 +362,7 @@ public sealed class QueryStoreTopDailyRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         /* Roles are cluster-wide, so each run mints its own pair. */
@@ -423,7 +423,7 @@ public sealed class QueryStoreTopDailyRungTests
         Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = await MigratedAsync(scratch, ct);
 
         var bodySucceeded = false;

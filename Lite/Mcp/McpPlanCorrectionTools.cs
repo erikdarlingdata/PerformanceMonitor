@@ -71,7 +71,7 @@ public sealed class McpPlanCorrectionTools
             if (tuning.Count == 0 && rows.Count == 0)
             {
                 return McpHelpers.WithDatabase(await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "plan_correction", awsRdsKind: AwsRdsKind.None), database)
-                    ?? McpHelpers.StatusForDatabase("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.StatusForDatabase("empty",
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null
                             ? $"No plan correction data found{McpBlockingTools.ForChosenDatabase(database)}."
@@ -81,7 +81,7 @@ public sealed class McpPlanCorrectionTools
                         database, /* #5244 review L2: the echo rides on an empty answer too */
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints());
+                            windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints()));
             }
 
             /* #4966: where this server's plan_correction data starts for the window. The rows are re-captures stamped with the

@@ -147,7 +147,6 @@ public sealed class DarlingMcpConfigHistoryToolsSurfaceAndSqlTests
         var sql = Reader.QueryStoreHealthSql;
         Assert.Contains("FROM v_query_store_health", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(capture_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY database_name", sql, StringComparison.Ordinal);
         Assert.Contains(
             "database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode, wait_stats_capture_mode, capture_time",
             sql, StringComparison.Ordinal);

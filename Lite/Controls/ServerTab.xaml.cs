@@ -43,6 +43,12 @@ public partial class ServerTab : UserControl
     private readonly int _serverId;
     public int ServerId => _serverId;
     public ServerConnection Server => _server;
+
+    /// <summary>The server name line at the top of the tab (#7212). Only the text: the tab keeps its server record and its store key.</summary>
+    public void ShowServerName(ServerConnection server)
+    {
+        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+    }
     private readonly CredentialResolver _credentialResolver;
     private readonly DispatcherTimer _refreshTimer;
     private bool _refreshPendingWhileHidden;
@@ -138,7 +144,8 @@ public partial class ServerTab : UserControl
     private DataGridFilterManager<ServerConfigChangeRow>? _serverConfigChangesFilterMgr;
     private DataGridFilterManager<DatabaseConfigChangeRow>? _databaseConfigChangesFilterMgr;
     private DataGridFilterManager<TraceFlagChangeRow>? _traceFlagChangesFilterMgr;
-    private CancellationTokenSource? _actualPlanCts;
+    /* #7181: owns the Get Actual Plan token so closing the tab stops a re-run that has no command timeout. */
+    private readonly ActualPlanRunScope _actualPlanRun = new();
     private bool _actualPlanRequestOpen;
 
     /// <summary>
@@ -177,6 +184,16 @@ public partial class ServerTab : UserControl
     public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None)
     {
         InitializeComponent();
+        // #7385: the chart groups scroll below their floor; the wheel over a chart stays that chart's zoom.
+        ChartLayout.KeepWheelOnPlot(
+            QueryDurationTrendChart, ProcDurationTrendChart, QueryStoreDurationTrendChart, ExecutionCountTrendChart,
+            MemoryGrantSizingChart, MemoryGrantActivityChart, FileIoReadChart, FileIoWriteChart,
+            FileIoReadThroughputChart, FileIoWriteThroughputChart, TempDbChart, TempDbSizeChart, TempDbFileIoChart,
+            LockWaitTrendChart, BlockingTrendChart, DeadlockTrendChart,
+            BlockingDurationChart, BlockingTotalDurationChart, DeadlockWaitChart, DeadlockTotalWaitChart,
+            CurrentWaitsDurationChart, CurrentWaitsBlockedChart, LatchStatsChart, SpinlockStatsChart,
+            BadPagesChart, DumpRequestsChart, AccessViolationsChart, WriteAccessViolationsChart,
+            NonYieldingTasksChart, LatchWarningsChart, SickSpinlocksChart, CpuComparisonChart);
         QueryTagFilterCombo.ItemsSource = new[] { PerformanceMonitorLite.Helpers.QueryTagGrid.AllChoice };
         QueryTagFilterCombo.SelectedIndex = 0;
         SetupBarCellMaxes();
@@ -198,7 +215,7 @@ public partial class ServerTab : UserControl
         _engineEdition = sqlEngineEdition;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
-        ServerNameText.Text = server.ReadOnlyIntent ? $"{server.DisplayName} (Read-Only)" : server.DisplayName;
+        ShowServerName(server);
         ConnectionStatusText.Text = "Connecting...";
 
         /* Apply default time range from settings */
@@ -327,7 +344,7 @@ public partial class ServerTab : UserControl
         _queryStoreDurationTrendHover = new ChartHoverHelper(QueryStoreDurationTrendChart, "ms/sec", displayZone: GetPickerZone);
         _executionCountTrendHover = new ChartHoverHelper(ExecutionCountTrendChart, "/sec", displayZone: GetPickerZone);
         _lockWaitTrendHover = new ChartHoverHelper(LockWaitTrendChart, "ms/sec", displayZone: GetPickerZone);
-        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, "incidents", displayZone: GetPickerZone);
+        _blockingTrendHover = new ChartHoverHelper(BlockingTrendChart, PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit, displayZone: GetPickerZone);
         _deadlockTrendHover = new ChartHoverHelper(DeadlockTrendChart, "deadlocks", displayZone: GetPickerZone);
         _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: GetPickerZone);
         _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: GetPickerZone);
@@ -570,7 +587,7 @@ public partial class ServerTab : UserControl
             command.CommandTimeout = 30;
 
             using var reader = await command.ExecuteReaderAsync();
-            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow);
+            var results = await ReadLiveSnapshotRowsAsync(reader, DateTime.UtcNow, ActiveQueriesIncludeMonitor);
 
             _querySnapshotsFilterMgr!.UpdateData(results);
             /* #4953: the grid now holds the live rows, not the range the "Showing since" banner described, so the banner
@@ -597,15 +614,24 @@ public partial class ServerTab : UserControl
     /// The whole live snapshot read, on a thread-pool thread (#5554). This read is the button's own, not the collector's,
     /// so the statement text and both plans are judged here (#4348), one session (one shared budget) for the whole read;
     /// the judge parses every plan and can spend up to the session budget, so the loop never runs on the dispatcher.
+    /// <paramref name="includeMonitor"/> false (#7573) leaves out the monitor's own sessions.
     /// </summary>
-    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime)
+    internal static Task<List<QuerySnapshotRow>> ReadLiveSnapshotRowsAsync(DbDataReader reader, DateTime snapshotTime, bool includeMonitor = false)
         => Task.Run(async () =>
         {
             var results = new List<QuerySnapshotRow>();
             var scrub = new SensitiveStatements.Session();
             while (await reader.ReadAsync().ConfigureAwait(false))
             {
-                results.Add(ReadLiveSnapshotRow(reader, snapshotTime, scrub));
+                var row = ReadLiveSnapshotRow(reader, snapshotTime, scrub);
+                /* #7573: the collector's query no longer drops the monitor's other sessions, so the live bar follows the Active Queries
+                   page's Monitor statements switch (left out by default, by the same program-name prefix rule). */
+                if (!includeMonitor && PerformanceMonitor.Common.MonitorApplicationNames.MatchesSqlProgramNamePattern(row.ProgramName))
+                {
+                    continue;
+                }
+
+                results.Add(row);
             }
 
             return results;
@@ -683,6 +709,9 @@ public partial class ServerTab : UserControl
     public void StopRefresh()
     {
         _refreshTimer.Stop();
+        /* #7181: a Get Actual Plan re-run runs with no command timeout; closing the tab (or removing the
+           server) is the last chance to stop it on the monitored server. */
+        _actualPlanRun.CancelForClose();
     }
 
     public void DisposeChartHelpers()

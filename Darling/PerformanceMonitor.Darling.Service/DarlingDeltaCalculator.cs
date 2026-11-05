@@ -57,8 +57,8 @@ public sealed class DarlingDeltaCalculator : CollectorDeltaCalculator
          collection_time >= $1 on its only table read: there is no inner aggregate to bind a second
          time. On the hypertable that bound is what keeps the read to the window's chunk(s) through
          the (server_id, collection_time) index — the same chunk exclusion the #1772 pin proves for
-         the row-value shape — and the window's rows are the whole working set: one sort over fifteen
-         minutes of one family, which on the dogfood fleet's largest family is tens of thousands of
+         the row-value shape — and the window's rows are the whole working set: one sort over the window
+         (fifteen minutes, or the gap policy's hour for query_stats and the two PostgreSQL families, #7156 and #7252) of one family, which on the dogfood fleet's largest family is tens of thousands of
          rows, not a hypertable. A key seeded from an older row inside the window carries that row's
          timestamp, so its first delta spans a longer interval than the in-memory cache would have
          measured; the value is exact (the counter was idle in between, which is why no newer row
@@ -244,7 +244,8 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
-            /* One cutoff for all reads, so they describe the same instant. */
+            /* One cutoff for the fifteen-minute reads, so they describe the same instant. query_stats and the two PostgreSQL
+               families read the gap policy's hour instead (#7156, #7252): they write only keys that moved. */
             var cutoff = SeedCutoff();
 
             await SeedFamilyAsync("wait_stats", () => SeedWaitStatsAsync(connection, cutoff, logger, cancellationToken), logger);
@@ -254,13 +255,13 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
             await SeedFamilyAsync("latch_stats", () => SeedLatchStatsAsync(connection, cutoff, logger, cancellationToken), logger);
             await SeedFamilyAsync("spinlock_stats", () => SeedSpinlockStatsAsync(connection, cutoff, logger, cancellationToken), logger);
             await SeedFamilyAsync("procedure_stats", () => SeedProcedureStatsAsync(connection, cutoff, logger, cancellationToken), logger);
-            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, cutoff, logger, cancellationToken), logger);
-            await SeedFamilyAsync("pg_wait_stats", () => SeedPgWaitStatsAsync(connection, cutoff, logger, cancellationToken), logger);
-            await SeedFamilyAsync("pg_statement_stats", () => SeedPgStatementStatsAsync(connection, cutoff, logger, cancellationToken), logger);
+            await SeedFamilyAsync("query_stats", () => SeedQueryStatsAsync(connection, QueryStatsSeedCutoff(), logger, cancellationToken), logger);
+            await SeedFamilyAsync("pg_wait_stats", () => SeedPgWaitStatsAsync(connection, GapPolicySeedCutoff(), logger, cancellationToken), logger);
+            await SeedFamilyAsync("pg_statement_stats", () => SeedPgStatementStatsAsync(connection, GapPolicySeedCutoff(), logger, cancellationToken), logger);
 
             logger?.LogInformation(
-                "Delta calculator seeded from Postgres store (baselines from the last {Minutes} minutes)",
-                (int)SeedLookback.TotalMinutes);
+                "Delta calculator seeded from Postgres store (baselines from the last {Minutes} minutes, {GapPolicyMinutes} minutes for query_stats, pg_wait_stats and pg_statement_stats)",
+                (int)SeedLookback.TotalMinutes, (int)GapPolicySeedLookback.TotalMinutes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

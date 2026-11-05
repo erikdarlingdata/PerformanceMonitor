@@ -103,6 +103,25 @@ public sealed class DarlingUnknownNetworkKeyTests
     }
 
     [Fact]
+    public void AMisspelledKeyInAnMcpTokensEntry_IsNamedWithItsIndex_AndNeverItsValue()
+    {
+        /* #7023: data_detail for dataDetail binds to nothing, so the entry would be served the service's level (wider than meant). */
+        var warning = Assert.Single(WarningsFor("""
+            { "mcp": { "tokens": [
+                { "name": "dba", "token": "t1", "role": "operator" },
+                { "name": "dev-a", "token": "t2", "role": "reader", "data_detail": "maskLiterals-7023" } ] } }
+            """));
+        Assert.Contains("'mcp.tokens[1].data_detail'", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("maskLiterals-7023", warning, StringComparison.Ordinal);
+
+        /* Every real key of an entry, in another case, is known; a tokens value that is not a list is not walked. */
+        Assert.Empty(WarningsFor("""
+            { "mcp": { "tokens": [ { "NAME": "dev-a", "Token": "t", "encryptedToken": "e", "ROLE": "reader", "DataDetail": "maskLiterals" } ] } }
+            """));
+        Assert.Empty(DarlingUnknownKeys.Find("""{ "mcp": { "tokens": { "data_detail": "x" } } }"""));
+    }
+
+    [Fact]
     public void TheWarningsAndADiagnosticsBundleBuiltFromThatConfig_NeverCarryTheKeysValue()
     {
         var config = DarlingConfig.Parse("""

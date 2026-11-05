@@ -83,7 +83,7 @@ public sealed class DarlingMcpPgBlockingTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum chains to return, worst-first by victim count. Default 50.")] int limit = 50,
+        [Description("Maximum chains to return, worst-first by victim count. Default 50. Also caps cycles. Read truncated and cycles_truncated to know whether the window held more than were returned.")] int limit = 50,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
@@ -102,8 +102,12 @@ public sealed class DarlingMcpPgBlockingTools
             var now = windowEnd;
             var startUtc = now.AddHours(-hours_back);
 
-            var chains = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
-                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
+            /* #7455 (the #3653 dialect): limit + 1 as the fetch for chains and for cycles, so the reply says
+               whether the window held more of either than the page. The chain page is the worst chains by
+               victim count, and a reader of 50 chains could not tell a quiet window from a cut one. */
+            var fetchedChains = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
+                postgres, resolved.ServerId, startUtc, now, limit + 1, cancellationToken);
+            var (chains, chainsTruncated) = McpHelpers.BoundPage(fetchedChains, limit);
 
             /* The denominator comes first because it is what makes an empty answer honest. */
             var captures = await DarlingPgBlockingReader.GetPgBlockingCaptureCountsAsync(
@@ -112,8 +116,9 @@ public sealed class DarlingMcpPgBlockingTools
             /* Cycles are read separately and MUST be, because the chain query structurally cannot see them:
                it finds a root by absence, and in a cycle every participant is blocked. Without this the
                tool would report "no blocking" from a capture that recorded a deadlock. */
-            var cycles = await DarlingPgBlockingReader.GetPgBlockingCyclesAsync(
-                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
+            var fetchedCycles = await DarlingPgBlockingReader.GetPgBlockingCyclesAsync(
+                postgres, resolved.ServerId, startUtc, now, limit + 1, cancellationToken);
+            var (cycles, cyclesTruncated) = McpHelpers.BoundPage(fetchedCycles, limit);
 
             var cycleEntries = BuildCycleEntries(cycles);
 
@@ -130,6 +135,7 @@ public sealed class DarlingMcpPgBlockingTools
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
                     status = "cycles_only",
+                    cycles_truncated = cyclesTruncated,
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = captures.CapturesWithBlocking,
                     finding =
@@ -190,6 +196,12 @@ public sealed class DarlingMcpPgBlockingTools
                     hints = emptyNotice.AsHints(),
                     captures_total = captures.CapturesTotal,
                     captures_with_blocking = 0,
+                    /* #7409: captures and none of them blocked proves these three are zero, so they are sent as 0 and the
+                       page draws 0 rather than a dash. The unavailable reply above (no captures at all) proves nothing and
+                       keeps them out. */
+                    pct_of_captures_with_blocking = 0,
+                    worst_chain_victims = 0,
+                    cycles_sampled = 0,
                     first_capture_at = captures.FirstCaptureAt,
                     last_capture_at = captures.LastCaptureAt,
                     finding = $"No blocking was present in any of the {captures.CapturesTotal} captures in this "
@@ -202,7 +214,8 @@ public sealed class DarlingMcpPgBlockingTools
             var chainsNotice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_blocking", resolved.ServerName, startUtc, now, emptyAnswer: false, logger, cancellationToken);
             return BuildBlockingChainsJson(
-                resolved.DisplayName, hours_back, chains, cycleEntries, captures, chainsNotice);
+                resolved.DisplayName, hours_back, chains, cycleEntries, captures, chainsNotice,
+                chainsTruncated, cyclesTruncated);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -252,7 +265,9 @@ public sealed class DarlingMcpPgBlockingTools
         IReadOnlyList<DarlingPgBlockingReader.PgBlockingChainRow> chains,
         List<object> cycleEntries,
         DarlingPgBlockingReader.PgBlockingCaptureCounts captures,
-        McpWindowNotice? windowNotice = null)
+        McpWindowNotice? windowNotice = null,
+        bool truncated = false,
+        bool cyclesTruncated = false)
     {
         var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var entries = chains.Select(c => new
@@ -328,9 +343,12 @@ public sealed class DarlingMcpPgBlockingTools
                 "These are periodic samples of pg_stat_activity, not an event log. PostgreSQL records "
                 + "no blocking on its own, so any episode shorter than the collection interval is "
                 + "invisible here and the counts below are a floor, not a total.",
+            /* #7455: the chain page was cut at limit, so the worst chains are here and others are not. */
+            truncated,
             chains = entries,
             /* Always present, even when empty, so its absence is never mistaken for "not checked". */
             cycles_sampled = cycleEntries.Count,
+            cycles_truncated = cyclesTruncated,
             cycles = cycleEntries,
         }, McpHelpers.JsonOptions), notice);
     }

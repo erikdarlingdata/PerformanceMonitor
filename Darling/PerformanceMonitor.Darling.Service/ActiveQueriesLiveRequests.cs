@@ -122,7 +122,7 @@ internal static class ActiveQueriesLiveRequests
             /* The function is missing (a store provisioned before this release) or the login may not execute it. */
             return new SnapshotRequestOutcome(
                 false, StoreRefusedCode,
-                "This dashboard's store login cannot queue a live read. Re-run Darling/tools/provision-roles.sql on the store "
+                "This dashboard's store login cannot queue a live read. Re-run " + DarlingManagedRoles.ProvisionRolesScriptPath + " on the store "
                 + "(it adds config.request_active_queries_live), or use the Viewer's Current Active Queries.",
                 null, null);
         }

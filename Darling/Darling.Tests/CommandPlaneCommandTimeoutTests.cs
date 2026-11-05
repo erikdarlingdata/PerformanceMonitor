@@ -152,7 +152,7 @@ public sealed class CommandPlaneCommandTimeoutTests
         foreach (var (file, member, constant) in s_sites)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile(path);
             var body = MemberBody(text, member, path);
 
             /* The construction scan runs over STRIPPED text so a mention in prose cannot become a phantom
@@ -222,7 +222,7 @@ public sealed class CommandPlaneCommandTimeoutTests
         foreach (var (file, member, _) in s_sites)
         {
             var path = SourcePath(file);
-            var body = MemberBody(File.ReadAllText(path), member, path);
+            var body = MemberBody(RepoFile.ReadRepoFile(path), member, path);
 
             /* The scanner's contract is already-STRIPPED source, which is the standard this pin's own
                fixture argued for before the extraction existed. */
@@ -563,7 +563,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     /// <summary>Seconds of a <c>TimeSpan</c> field in a named source file, failing loudly on a miss.</summary>
     private static int SecondsOfTimeSpanFile(string path, string field)
     {
-        var text = File.ReadAllText(path);
+        var text = RepoFile.ReadRepoFile(path);
         var seconds = SecondsOfTimeSpanIn(CSharpSourceWalker.StripCommentsAndStrings(text), field);
 
         Assert.True(

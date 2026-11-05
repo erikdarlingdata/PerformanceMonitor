@@ -4,11 +4,11 @@ Audience: operators.
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
-Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code and Cursor.
+Every edition includes an embedded [Model Context Protocol](https://modelcontextprotocol.io) server that exposes monitoring data to LLM clients like Claude Code, Cursor and [GitHub Copilot in VS Code](#github-copilot-in-vs-code).
 
 The tools answer from the monitor's own collected store, and that is the boundary worth stating up front: **no MCP tool runs SQL an AI client wrote against your monitored servers.** The write-capable tools (Darling's view authoring, alert tuning, collector control and server onboarding) change the monitor's own configuration. Five tools reach a monitored server live, each with the product's own fixed queries. They run under the same least-privilege monitoring login the collectors use: the analysis plan fetch, the onboarding connection probe (`add_servers`), the connection test `edit_server` runs before it saves a changed connection, `test_connection` and `run_collectors_now`, which runs that server's collectors once, now. All but the plan fetch are write tools, served only with `mcp.allowWrites` and a token (`add_servers` and `edit_server` also need `mcp.allowServerAdmin`).
 
-Only six Darling tools act on a monitored server: `force_query_store_plan` (with `unforce_query_store_plan`), `evict_cached_plan`, `recompile_module`, `create_plan_guide`, `drop_plan_guide` and `kill_session`. They run fixed statements under a separate remediation login. Each runs only after a person turns on that server's switch for it. All switches start off, and [Agent dispatch](darling-agent-dispatch.md) explains them.
+Only six Darling tools act on a monitored server: `force_query_store_plan` (with `unforce_query_store_plan`), `evict_cached_plan`, `recompile_module`, `create_plan_guide`, `drop_plan_guide` and `kill_session`. They run fixed statements under a separate remediation login. Each runs only after a person turns on that server's switch for it. All switches start off, and [Agent dispatch](darling-agent-dispatch.md) explains them. On an alert route that needs approval, a call with `dry_run` false stores a proposal, answers `proposed` and changes nothing until a person approves it. See [Action approval](darling/security.md#action-approval).
 
 ### Setup
 
@@ -83,6 +83,63 @@ Two details save a round of guessing:
 - The endpoint is the root path (`http://localhost:5152/`), not `/mcp` and not `/sse`.
 - The transport is stateless Streamable HTTP. Each request is self-contained, so a client that does not echo an `Mcp-Session-Id` still works.
 
+#### GitHub Copilot in VS Code
+
+GitHub Copilot in VS Code can use Lite or Darling as an MCP server. The steps are the same for both editions. Only the URL and the token differ.
+
+1. Open the `mcp.json` file that holds the entry. VS Code reads two places. A workspace file is `.vscode/mcp.json` in the folder you opened. A user file applies to every workspace: run **MCP: Open User Configuration** from the Command Palette to open it. You can also run **MCP: Add Server**, choose **HTTP**, and let VS Code write the entry. Pick the user file for a setup you keep to yourself, because a workspace file is usually committed.
+2. Add the server with the token as a prompted input, so the token is not in the file. For Darling:
+
+```json
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "darling-token",
+      "description": "Darling MCP token",
+      "password": true
+    }
+  ],
+  "servers": {
+    "darling": {
+      "type": "http",
+      "url": "http://localhost:5152/core",
+      "headers": {
+        "Authorization": "Bearer ${input:darling-token}"
+      }
+    }
+  }
+}
+```
+
+   VS Code asks for the token the first time it starts the server, hides what you type, and keeps it in its own secure storage. The file holds only the name `darling-token`. The top-level key is `servers`, not `mcpServers`. That is the VS Code shape, so an entry copied from a `.mcp.json` written for another client needs the key changed.
+3. Start the server. VS Code starts an MCP server only when chat needs it. If chat says the tools are not available, run **MCP: List Servers**, choose `darling` and start it. The same list can stop or restart the server. It can also show the server's output, which is where a `401` or a refused connection shows up.
+4. Check that the tools loaded. Open the tools picker in Copilot Chat. The `darling` server is listed with its tools, such as `list_servers`, `get_wait_stats` and `get_blocking`. Use a Local chat session in Agent mode. A Copilot CLI (background) session does not read `.vscode/mcp.json`. It cannot see the server. Ask mode does not call tools. Then ask `#list_servers which SQL Servers is Darling monitoring?` and expand the tool call to see that it came from `darling`. The `#` names the tool. A vague question such as "what servers are being monitored?" can make Copilot describe the `mcp.json` file instead of asking the server.
+
+##### Why Darling uses /core
+
+VS Code allows at most 128 tools in one chat request. Over that, the chat fails with "Cannot have more than 128 tools per request." Darling's root URL (`http://localhost:5152/`) serves 190 tools even with the write tools off, which is too many.
+
+The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the diagnostic reads an assistant needs to investigate a server. A tool outside that set fails on `/core` as an unknown tool, the same as a tool that is switched off.
+
+Tools from every other MCP server enabled in the same chat count toward the 128 as well. A chat that also uses other servers has less room. Turn tools off in the picker if you reach the cap.
+
+##### A reader token for Copilot
+
+A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.
+
+Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for example `{ "name": "copilot-dba1", "token": "file:/run/secrets/darling/mcp-copilot-dba1", "role": "reader" }`. That user pastes the token when VS Code prompts. The entry can also set `dataDetail` to `maskLiterals` or `metadataOnly` to narrow what the answers carry. See `tokens` on the [Darling MCP configuration page](darling/configuration-mcp.md#mcp).
+
+##### Lite with Copilot
+
+Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
+
+Lite does not need `/core`. Its code defines 113 tools in all. The default list leaves out the twelve write tools and the four investigation tools, so it is well under 128. Even all 113 are under the cap. The cap still counts every other MCP server in the same chat.
+
+These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
+
+A Copilot Business or Enterprise user needs their admin to allow the "MCP servers in Copilot" policy. GitHub describes it in [Configure MCP server access for your organization or enterprise](https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-mcp-usage/configure-mcp-server-access).
+
 #### Ask a question
 
 Open a new Claude Code session and ask questions like:
@@ -94,7 +151,7 @@ Open a new Claude Code session and ask questions like:
 
 ### Available Tools
 
-**Lite** exposes more than 100 tools. **Darling** exposes more than 200. The deprecated **Dashboard** exposes more than 60 (see [deprecated/Dashboard/README.md](../deprecated/Dashboard/README.md)). Most of Lite's tool names are also in Darling. Darling has many more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
+**Lite** exposes more than 100 tools. **Darling** exposes more than 200. The deprecated **Dashboard** exposes more than 60 (see the README inside the [frozen source zip](../deprecated/README.md)). Most of Lite's tool names are also in Darling. Darling has many more. They are the PostgreSQL reads, Custom Views, custom alert rules, query tags, collector control, agent actions, investigation reads and fleet-wide reads.
 
 Of Darling's tools, `mcp.allowWrites` with a token serves the write tools. `mcp.allowServerAdmin` adds the server administration tools (`add_servers`, `edit_server`, `remove_server` and `set_server_action`). `mcp.allowInvestigations` with a token adds the investigation tools, and only while `mcp.allowWrites` is off. A service started before an upgrade reports the older, smaller tool list until you restart it.
 
@@ -132,6 +189,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
+| Daily Health Report (Darling) | `get_daily_health_report` (one day's report on every server: bands, alerts, failed Agent jobs, backup and CHECKDB gaps, low disk and collection problems, read from the store and sent nowhere) and, with writes on, `send_daily_health_report_now` (sends the report now through the alert routes) |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
 | Queries | `get_top_queries_by_cpu`, `get_top_procedures_by_cpu`, `get_cpu_by_database`, `get_load_by_caller`, `get_query_pileups`, `get_query_store_top`, `get_query_store_aborts`, `get_query_store_query_history`, `get_forced_plans`, `get_query_store_hints`, `get_query_duration_trend`, `get_query_trend`, `get_resource_use_by_tag` |
 | Identity capacity (Darling) | `get_identity_capacity` (how full each identity column is, as percent used, inserts left and the days until it runs out. A warning band starts at 70 percent and a critical band at 90. A scanned database with nothing above 10 percent reads as clean. A database that was not scanned is not listed) |
@@ -164,6 +222,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Server management (Darling) | `add_servers`, `edit_server`, `remove_server`, and the server tag tools such as `create_server_tag` and `assign_server_tag` (`update_server_tag` also reorders a tag among its siblings with `{"move":"up"}` or `{"move":"down"}`), and the query tag tools such as `create_query_tag` and `assign_query_tag`, with the reads `list_query_tags`, `list_query_tag_rules` and `test_query_tag_rule` |
 | Investigations (Darling) | `wait_for_investigation_requests` (waits up to 25 seconds for a request), `get_investigation_evidence` (the evidence frozen at the open), and the four tools Lite also has. Served with `mcp.allowInvestigations` and a token, while `mcp.allowWrites` is off |
 | Agent actions (Darling) | `force_query_store_plan`, `unforce_query_store_plan`, `evict_cached_plan`, `recompile_module`, `create_plan_guide`, `drop_plan_guide`, `kill_session`, `merge_deadlock_signatures` (counts two deadlock signatures as one) and `undo_plan_change` (puts a plan forced or unforced by an agent back), and the reads `get_plan_force_precheck`, `get_compiles_after_evict`, `get_agent_changes` and `get_server_actions`. A person can undo a plan force, an unforce or a plan guide create (the undo drops the guide). An eviction or a session kill cannot be undone. `set_server_action` (with `mcp.allowServerAdmin`) turns a server's switch on or off. `set_agent_actions_enabled` turns the service-wide agent switch off only: `enabled: true` is refused, because an MCP client must not give agents back the actions a person took away, and a person turns it on in the Viewer (Agent changes) or the web dashboard. `undo_agent_change` undoes one agent change that is not a plan force or unforce (a mute rule, a custom alert rule, a threshold override or a deadlock signature merge) by its `called_id` from `get_agent_changes` |
+| People (Darling) | `get_people` lists the people an administrator named. Each person shows their identities and their grants. Each identity shows its kind, web or Slack, and never the sign-in key or the Slack ids. A grant is a capability for one server, one tag or the fleet. It is a read only. No MCP tool changes a person, an identity or a grant. An administrator does that in the Viewer or on a signed-in admin web seat. Only the `approve` grant is read today: it decides who can approve an action that an agent proposes. |
 | Collector control (Darling) | `get_collector_schedules`, `get_collector_cost`, `enable_collector`, `disable_collector`, `set_collector_frequency`, `set_collector_retention`, `set_collector_run_at`, `set_collector_databases`, `reset_collector_schedules`, `run_collectors_now`, `update_service_flags` |
 | Collection state (Darling) | `get_collection_state`, `get_server_settings`, `pause_collection`, `resume_collection`, `disable_server`, `enable_server`, `set_server_excluded_databases`, `test_connection`, `analyze_now`, and `purge_now` (needs `confirm`) |
 | Quiet windows (Darling) | `set_quiet_window` and `clear_quiet_window` set and end a time-boxed mute for one server or the whole fleet |
@@ -251,11 +310,11 @@ If the block itself is bad, the service is loud, and it fails closed. A missing 
 
 ```
 MCP network exposure requested (mcp.network.listen is non-loopback) but no bearer token is set — refusing to expose; binding loopback-only. Set mcp.network.encryptedToken (via --encrypt-password) or mcp.network.token.
-MCP network token could not be decrypted (...); MCP server not started.
+MCP network token (mcp.network.encryptedToken) could not be decrypted (...). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.
 MCP network token (mcp.network.token / mcp.network.encryptedToken) is shorter than 16 characters, and at least 16 are required for an exposed surface (...) — refusing to expose; binding loopback-only.
 MCP bearer token (mcp.network.token / mcp.network.encryptedToken) is shorter than 16 characters, and at least 16 are required for an exposed surface (...) — the MCP write tools stay off.
 MCP network exposure requested but mcp.network.allowFrom '...' is not a valid CIDR list or an entry's address family does not match mcp.network.listen — refusing to expose; binding loopback-only. Use one CIDR (e.g. 192.168.1.0/24) or several, separated by commas (e.g. 10.8.0.0/16,192.168.1.5/32): every entry in CIDR form (/32 for one address), with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index, and of the same family as listen (a :: listen takes IPv6 entries only). Host bits are masked (192.168.1.5/24 means 192.168.1.0/24).
-mcp.network.* is set but postgres.managed = false — MCP network exposure is managed-mode (or container) only and is ignored ...
+mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store (postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.
 ```
 
 The MCP token must have at least 16 characters. In network mode, a shorter token keeps MCP loopback-only, with the "shorter than 16 characters" line above that ends in "refusing to expose". With `mcp.allowWrites` on, a shorter token leaves the write tools off, with the "shorter than 16 characters" line that ends in "the MCP write tools stay off".

@@ -19,7 +19,7 @@
 
 import { VIZ } from "../../panels.js";
 import { databaseBox, newBoxChoice } from "./database-box.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, fmtInt, fmtNum } from "../../util.js";
 import { plainText } from "../../plain-text.js";
 import { gatedEmptyStrip } from "./gate.js";
 
@@ -29,7 +29,7 @@ const LIMIT = 500;
 const DERIVED_KEYS = ["reads_breakdown", "index_size_gb_text", "captured_at"];
 
 const ROLLUP_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "tables_analyzed", label: "Tables", format: "int" },
   { key: "index_count", label: "Indexes", format: "int" },
   { key: "total_size_gb", label: "Size GB", format: "num2" },
@@ -56,7 +56,7 @@ const RECOMMENDATION_COLUMNS = [
   { key: "action", label: "Action" },
   { key: "result_kind", label: "Result Kind" },
   { key: "consolidation_rule", label: "Rule" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
@@ -159,7 +159,8 @@ export const tab = {
         /* #6653: the notes lead with the uptime caveat only when dedupe-only is not in effect (the tool leaves it out beside the dedupe notice). */
         const lead = (data.uptime_warning && !data.dedupe_only_applied ? 1 : 0) + (data.dedupe_only_applied ? 1 : 0);
         const notes = data.notes || [];
-        const parts = [noticeStrip(noticeText(data, recs.length, choice.db))];
+        // A plain count stays quiet. A cut list, a cut database list or the overall-workload reason is a caveat and stays yellow.
+        const parts = [captionStrip(noticeText(data, recs.length, choice.db), (recs.length > 0 && data.truncated === true) || data.databases_truncated === true || !!data.overall_workload_reason)];
         notes.slice(0, lead).forEach((t) => parts.push(noticeStrip(t)));
         const more = notes.slice(lead);
         if (more.length) {

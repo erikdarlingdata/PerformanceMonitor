@@ -13,7 +13,7 @@
 
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
-import { el, mount, loadingStrip, emptyStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
+import { el, mount, loadingStrip, emptyStrip, captionStrip, noticeStrip, readErrorStrip, errorStrip, readTool, applyFormat } from "../../util.js";
 import { gatedEmptyStrip, gatedSections } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -28,7 +28,7 @@ const chosenHours = new Map();
 const LIMIT = 20;
 
 const IDLE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "total_size_mb", label: "Total size (MB)", format: "num2" },
   { key: "file_count", label: "Files", format: "int" },
   { key: "last_execution_server_local", label: "Last execution (server time)" },
@@ -52,7 +52,7 @@ const WAIT_COLUMNS = [
 ];
 
 const QUERY_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "query_preview", label: "Query preview", valueList: false },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms_per_exec", label: "Avg CPU/exec (ms)", format: "num2" },
@@ -87,6 +87,13 @@ function windowNotice(s) {
   return "last " + (s.window_hours ?? HOURS) + " hours";
 }
 
+// True when the service cut the section to the window query text is kept for, so the window shown is shorter than the one asked.
+function queryWindowShortened(s) {
+  const hours = s.window_hours ?? HOURS;
+  const start = s.effective_start ? Date.parse(s.effective_start) : NaN;
+  return Number.isFinite(start) && start > Date.now() - hours * 3600000 + 60000;
+}
+
 function queryNotice(s) {
   const hours = s.window_hours ?? HOURS;
   const start = s.effective_start ? Date.parse(s.effective_start) : NaN;
@@ -101,19 +108,26 @@ function queryNotice(s) {
   return text + ".";
 }
 
-function costLine(data) {
+/** #7402: the tool's cost_reason is a lower-case clause ("monthly cost not set"); on a line of its own it starts with a capital. */
+export function capitalize(text) {
+  const t = String(text);
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+export function costLine(data) {
   const hours = data.hours_back ?? HOURS;
   return data.monthly_cost_usd != null
     ? "Est. cost shares split the server's $" + applyFormat("num2", data.monthly_cost_usd) + " monthly cost pro-rated to this window (" + hours + " hours); they are an attribution, not a measured cost."
-    : (data.cost_reason ?? "monthly cost not set") + ", so Est. cost share is blank.";
+    : capitalize(data.cost_reason ?? "monthly cost not set") + ", so Est. cost share is blank.";
 }
 
 // One section: a heading, then the table, the empty strip or the notice, by the section's own status.
-function sectionView(title, s, columns, emptyText, notice) {
+function sectionView(title, s, columns, emptyText, notice, isCaveat) {
   const section = s || {};
   let content;
   if (section.status === "ok") {
-    content = [noticeStrip(notice(section)), VIZ.table(section, { rowsKey: "rows", columns, emptyText })];
+    // #7402: a count or a window is a quiet caption. A cut list or a shortened window is a caveat and stays yellow.
+    content = [captionStrip(notice(section), section.truncated === true || (isCaveat ? isCaveat(section) : false)), VIZ.table(section, { rowsKey: "rows", columns, emptyText })];
   } else if (section.status === "empty") {
     content = [emptyStrip(emptyText)];
   } else {
@@ -144,7 +158,7 @@ export const tab = {
           sectionView("Idle Databases", data.idle_databases, IDLE_COLUMNS, "No idle databases detected", idleNotice),
           sectionView("tempdb Pressure", data.tempdb_pressure, TEMPDB_COLUMNS, "No tempdb data available", windowNotice),
           sectionView("Wait Stats Summary", data.wait_categories, WAIT_COLUMNS, "No wait stats data available", windowNotice),
-          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice),
+          sectionView("Expensive Queries (Top " + LIMIT + " by CPU)", data.expensive_queries, [...QUERY_COLUMNS, planColumn(server)], "No expensive queries found", queryNotice, queryWindowShortened),
           sectionView("Memory Grant Efficiency", data.memory_grant_efficiency, GRANT_COLUMNS, "No memory grant data available", windowNotice),
         ]);
       } catch (e) {

@@ -72,8 +72,8 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(WithErrorDetail(scratch.ConnectionString));
         await connection.OpenAsync(ct);
 
         var bodySucceeded = false;
@@ -81,7 +81,7 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
         {
             /* Climb to the top first (as every rung test does) — the CAGGs and their rollups need the rest
                of the schema (servers, config) present. */
-            await PgMigrations.MigrateAsync(connection, ct);
+            await MigrateRetryingDeadlockAsync(connection, ct);
 
             var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
             Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the V152 upgrade-equivalence pin");
@@ -129,7 +129,7 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
 
             /* The upgrade: apply every rung above V151 — V152 plus whichever later rungs this build
                also carries (V153 (#4608) as of this build's top). */
-            var applied = await PgMigrations.MigrateAsync(connection, ct);
+            var applied = await MigrateRetryingDeadlockAsync(connection, ct);
             Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= RungVersion), applied);
 
             /* Capture every reader's rows AFTER. */
@@ -197,14 +197,14 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(WithErrorDetail(scratch.ConnectionString));
         await connection.OpenAsync(ct);
 
         var bodySucceeded = false;
         try
         {
-            await PgMigrations.MigrateAsync(connection, ct);
+            await MigrateRetryingDeadlockAsync(connection, ct);
 
             var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
             Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the V152 lock-wait pin");
@@ -233,7 +233,7 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
 
             var (matSchema, matTable) = await MaterializationOfAsync(connection, TimescaleSupport.QueryStoreStatsHourlyView, ct);
 
-            await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+            await using var lockConnection = new NpgsqlConnection(WithErrorDetail(scratch.ConnectionString));
             await lockConnection.OpenAsync(ct);
             await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
             await using (var lockCommand = new NpgsqlCommand(
@@ -247,9 +247,9 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
             var started = DateTime.UtcNow;
             var migrateTask = Task.Run(async () =>
             {
-                await using var migrateConnection = new NpgsqlConnection(scratch.ConnectionString);
+                await using var migrateConnection = new NpgsqlConnection(WithErrorDetail(scratch.ConnectionString));
                 await migrateConnection.OpenAsync(ct);
-                return await PgMigrations.MigrateAsync(migrateConnection, ct);
+                return await MigrateRetryingDeadlockAsync(migrateConnection, ct);
             }, ct);
 
             await releaseAfter;
@@ -474,6 +474,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
 WHERE n.nspname = $1 AND c.relname = $2
+-- #7609 (V246): the named (query_hash, bucket DESC) index is built on purpose, not a group index V152 left behind.
+AND NOT EXISTS (SELECT 1 FROM pg_class ic WHERE ic.oid = i.indexrelid AND ic.relname = 'ix_qs_corrected_hourly_hash_bucket')
 GROUP BY i.indexrelid", connection);
         command.Parameters.AddWithValue(schema);
         command.Parameters.AddWithValue(table);
@@ -542,6 +544,48 @@ ORDER BY c.range_start", connection);
                 await Task.Delay(TimeSpan.FromSeconds(1), ct);
             }
         }
+    }
+
+    /// <summary>
+    /// The scratch connection string with <c>Include Error Detail</c> on, so a deadlock names the other
+    /// session in the failure message instead of leaving it unknown (#7489).
+    /// </summary>
+    private static string WithErrorDetail(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString) { IncludeErrorDetail = true }.ConnectionString;
+
+    /// <summary>
+    /// Runs <see cref="PgMigrations.MigrateAsync"/> and, on one <c>40P01</c> deadlock, runs it again, the
+    /// way the service's startup loop does (<c>StartupFailureTriage.IsRetryable</c> lists <c>40P01</c> as
+    /// retryable, and the failed rung rolls back so the next attempt applies it). Returns the rungs applied
+    /// across both calls: a call that throws returns no count, so the rungs it committed before the
+    /// deadlock are read back from the version stamps and added to the second call's count. A second
+    /// deadlock, or any other failure, propagates (#7489).
+    /// </summary>
+    private static async Task<int> MigrateRetryingDeadlockAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var stampsBefore = await CountStampsAsync(connection, ct);
+        try
+        {
+            return await PgMigrations.MigrateAsync(connection, ct);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected)
+        {
+            var committedByFailedAttempt = await CountStampsAsync(connection, ct) - stampsBefore;
+            return committedByFailedAttempt + await PgMigrations.MigrateAsync(connection, ct);
+        }
+    }
+
+    private static async Task<int> CountStampsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        /* The stamp table does not exist yet on an empty store (the first climb). */
+        await using var probe = new NpgsqlCommand("SELECT to_regclass('darling_schema_version') IS NOT NULL", connection);
+        if (!(bool)(await probe.ExecuteScalarAsync(ct))!)
+        {
+            return 0;
+        }
+
+        await using var command = new NpgsqlCommand("SELECT COUNT(*) FROM darling_schema_version", connection);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, CancellationToken ct, string sql)

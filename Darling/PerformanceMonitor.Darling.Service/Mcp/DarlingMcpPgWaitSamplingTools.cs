@@ -63,13 +63,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgWaitSamplingTools
 {
-    [McpServerTool(Name = "get_pg_wait_sampling"), Description("Gets sampled PostgreSQL wait events by query shape, PostgreSQL's counterpart to get_pg_wait_stats (Aurora only). One of three instruments feeds each target: instrument says extension_sampled (10ms profile) or service_sampled (a FLOOR that undercounts sub-second waits). Results are SAMPLE COUNTS, not measured durations: estimated_wait_ms = samples x period. event_type CPU means running, not waiting. THE PAGE IS BOUNDED BY limit: waits_returned/truncated. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples divides by total_samples, not the page sum. <<GUIDE>> Gets sampled PostgreSQL wait events attributed to query shapes, for any non-Aurora PostgreSQL target. This is the stock-PostgreSQL counterpart of get_pg_wait_stats, which reads an Aurora-only source. PostgreSQL wait history comes from one of THREE instruments, chosen once per target when the service connects (Aurora native > pg_wait_sampling extension > service sampler), and the answer's instrument field says which one fed these rows: extension_sampled means the pg_wait_sampling extension's in-engine 10 ms profiler; service_sampled means this service polled pg_stat_activity once a second for a 30-second window every five minutes because the extension is not installed - a FLOOR, not parity, that under-counts waits shorter than a second and cannot see between windows (instrument_note spells out the limit and the one-step upgrade). Either way a sampler periodically records what each backend is doing, so results are sample COUNTS, and estimated_wait_ms is samples multiplied by that instrument's own period rather than a measured duration - treat a rare event's estimate as approximate. Rows with event_type CPU mean the backend was running, not waiting, so the profile answers 'waiting or working' as well as 'waiting on what'. queryid joins get_pg_top_queries; queryid 0 is work belonging to no statement, such as a background worker. A null queryid means the server does not report one (the service's own sampler on PostgreSQL below 14), which is not the 0 of no statement. The profile is cluster-wide and carries no database attribution by design. THE PAGE IS BOUNDED BY limit: waits_returned is how many rows you got, truncated says the window held more, and the rows are the most-sampled so the ones past the cap are rarer. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples' denominator is total_samples, the WHOLE window's differenced sample count across every (event type, event, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_samples (what the page adds up to) and total_samples is the activity the cap left out; returned_pct_of_total is that ratio stated once.")]
+    [McpServerTool(Name = "get_pg_wait_sampling"), Description("Gets sampled PostgreSQL wait events by query shape, PostgreSQL's counterpart to get_pg_wait_stats (Aurora only). One of three instruments feeds each target: instrument says extension_sampled (10ms profile) or service_sampled (a FLOOR that undercounts sub-second waits). Results are SAMPLE COUNTS, not measured durations: estimated_wait_ms = samples x period. event_type CPU means running, not waiting. THE PAGE IS BOUNDED BY limit: waits_returned/truncated. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples divides by total_samples, not the page sum. <<GUIDE>> Gets sampled PostgreSQL wait events attributed to query shapes, for any non-Aurora PostgreSQL target. This is the stock-PostgreSQL counterpart of get_pg_wait_stats, which reads an Aurora-only source. PostgreSQL wait history comes from one of THREE instruments, chosen once per target when the service connects (Aurora native > pg_wait_sampling extension > service sampler), and the answer's instrument field says which one fed these rows: extension_sampled means the pg_wait_sampling extension's in-engine 10 ms profiler; service_sampled means this service polled pg_stat_activity once a second for a 30-second window every five minutes because the extension is not installed - a FLOOR, not parity, that under-counts waits shorter than a second and cannot see between windows (instrument_note spells out the limit and the one-step upgrade). Either way a sampler periodically records what each backend is doing, so results are sample COUNTS, and estimated_wait_ms is samples multiplied by that instrument's own period rather than a measured duration - treat a rare event's estimate as approximate. Rows with event_type CPU mean the backend was running, not waiting, so the profile answers 'waiting or working' as well as 'waiting on what'. queryid joins get_pg_top_queries; queryid 0 is work belonging to no statement, such as a background worker. query_text is the statement behind each queryid (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until the hourly capture reaches that queryid and always null for queryid 0 and a null queryid. A null queryid means the server does not report one (the service's own sampler on PostgreSQL below 14), which is not the 0 of no statement. backends counts the distinct backends behind a row: on the pg_wait_sampling extension it is every backend the profile has recorded for that wait since the profile last started, a running total that only rises until a reset and is not how many waited at once, and on the service's own sampler it is the backends seen in the last window. The profile is cluster-wide and carries no database attribution by design. THE PAGE IS BOUNDED BY limit: waits_returned is how many rows you got, truncated says the window held more, and the rows are the most-sampled so the ones past the cap are rarer. SHARES ARE OF THE WINDOW, NOT OF THE PAGE: pct_of_samples' denominator is total_samples, the WHOLE window's differenced sample count across every (event type, event, query) series, computed in the same statement as the rows - so a three-row page does not sum to 100%, and the gap between returned_samples (what the page adds up to) and total_samples is the activity the cap left out; returned_pct_of_total is that ratio stated once.")]
     public static async Task<string> GetPgWaitSampling(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, most samples first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -137,7 +138,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
             var windowStart = windowEnd.AddHours(-hours_back);
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_wait_sampling", resolved.ServerName, windowStart, windowEnd, emptyAnswer: false, logger, cancellationToken);
-            return BuildWaitSamplingJson(resolved.DisplayName, hours_back, page, limit, instrument, notice);
+            return BuildWaitSamplingJson(resolved.DisplayName, hours_back, page, limit, instrument, notice, full_text);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -188,7 +189,8 @@ public sealed class DarlingMcpPgWaitSamplingTools
         DarlingPgWaitSamplingReader.PgWaitSamplingPage page,
         int limit,
         DarlingPgWaitSamplingReader.WaitInstrumentState? instrument = null,
-        McpWindowNotice? notice = null)
+        McpWindowNotice? notice = null,
+        bool fullText = false)
     {
         /* #3604: an unrecognised token is not echoed as an instrument - a future arm this build does not know
            reads as unknown, which is the honest word, rather than as a grain the caller might act on. */
@@ -196,6 +198,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
             ? instrument.Instrument
             : "unknown";
         var serviceTier = string.Equals(instrumentToken, PgWaitInstrument.ServiceSampled, StringComparison.Ordinal);
+        var extensionTier = string.Equals(instrumentToken, PgWaitInstrument.ExtensionSampled, StringComparison.Ordinal);
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
 
@@ -212,6 +215,10 @@ public sealed class DarlingMcpPgWaitSamplingTools
                that joins to nothing. NULL (#6836) is a target that does not report a query id (PostgreSQL 10 to
                13 on the service sampler): "not reported", which must not read as the 0 of "no statement". */
             queryid = r.QueryId?.ToString(CultureInfo.InvariantCulture),
+            /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+               that id (the same rules as get_pg_top_queries), and always null for queryid 0 and a null queryid. */
+            query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, DarlingMcpPgStatementTools.QueryTextPreviewLength),
+            query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > DarlingMcpPgStatementTools.QueryTextPreviewLength,
             samples = r.SampleCount,
             estimated_wait_ms = r.EstimatedWaitMs,
             backends = r.BackendCount,
@@ -269,8 +276,11 @@ public sealed class DarlingMcpPgWaitSamplingTools
                  + "returned_samples is what the rows returned add up to. "
                  + "queryid 0 is work belonging to no statement. A null queryid means the server does not "
                  + "report one (the service's own sampler on PostgreSQL below 14), which is not the 0 of no statement."
+                 + (extensionTier
+                     ? " " + PgWaitInstrument.ExtensionBackendsMeaning
+                     : string.Empty)
                  + (serviceTier
-                     ? " backend_count on this tier is the distinct backends seen in the LAST window, not "
+                     ? " backends on this tier is the distinct backends seen in the LAST window, not "
                        + "since the profile started. The tally behind these counts is kept in the monitoring "
                        + "store's own collector_state and reloaded every cycle, so it SURVIVES a service restart; "
                        + "a series starts over only when the tally's 500-key cap evicted it as least-sampled and "

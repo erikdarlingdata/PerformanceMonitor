@@ -83,7 +83,7 @@ public sealed class QueryStoreTopWebDefaultTests
 
         Assert.True(File.Exists(path), $"#4198 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(relative);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

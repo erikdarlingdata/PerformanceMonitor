@@ -123,6 +123,8 @@ Both settings need a **server restart** (`max_worker_processes` is restart-only 
 
 **One store per cluster is the assumption.** `timescaledb.max_background_workers` is a **cluster-wide** pool shared by every database, while the derivation above is **per-store**. Managed mode puts one store on one cluster so the two coincide, but if you run **N Darling stores on one PostgreSQL cluster** — or share the cluster with any other TimescaleDB database — multiply both numbers by N. Each database with the extension loaded also permanently holds a scheduler slot out of that same pool, so the sharing starts before any policy fires.
 
+The service pins its own connections to UTC and, in managed mode, sets the cluster to UTC. It changes no setting on a store you bring. There, TimescaleDB's own jobs (compression, retention and refresh) follow the time zone of the server or database. A window measured in days can start or end earlier or later than UTC midnight, by up to the zone's offset. No data is wrong, only the boundaries move. To keep them on UTC, set `timezone = 'UTC'` on the server or run `ALTER DATABASE <store> SET timezone = 'UTC'`.
+
 **What under-provisioning looks like.** The postmaster log (`pg.log`, or wherever your cluster logs) is where it shows up, in one of two shapes:
 
 ```
@@ -147,7 +149,7 @@ A purge runs on the first sweep after startup and then daily, and it does not dr
 | 7 days | `query_snapshots`, `waiting_tasks`, `running_jobs`, `agent_status` |
 | 14 days | `pg_plan_capture` |
 | 30 days | Most collector tables (wait/query/procedure/Query Store stats, CPU, memory, file I/O, tempdb, perfmon, deadlocks, blocking, sessions, config snapshots), and `pg_log_events` — an event log sized by the target's `log_*` settings rather than by anything rare, so it gets the common horizon rather than `pg_deadlocks`' 90 (#3601) |
-| 90 days | `database_size_stats`, `index_object_stats`, `pvs_stats`, and the PostgreSQL bloat/vacuum/replication families (`pg_table_bloat_stats`, `pg_index_bloat`, `pg_index_usage_stats`, `pg_autovacuum_stats`, `pg_replication_slots`, `pg_wraparound_stats`, `pg_deadlocks`) |
+| 90 days | `database_size_stats`, `index_object_stats`, `database_protection`, `identity_capacity`, `pvs_stats`, and the PostgreSQL bloat/vacuum/replication families (`pg_table_bloat_stats`, `pg_index_bloat`, `pg_index_usage_stats`, `pg_autovacuum_stats`, `pg_replication_slots`, `pg_wraparound_stats`, `pg_deadlocks`) |
 | 365 days | `server_properties`, `job_history`, `pg_server_config`, `pg_column_stats`, `pg_extension_availability`, `pg_plan_capture_readiness`, and `pg_database_size_stats` — a size series is asked "since last year" (#3691) |
 
 `CollectorScheduleDefaults.cs` is the authority for that half; the rows above are its distinct horizon values, not a hand-maintained copy of every entry.
@@ -218,7 +220,7 @@ The service is built to restart cleanly, any time:
 - **Alert no-re-fire** — edge-trigger watermarks and the failed-job watermark persist in `config_edge_trigger_watermarks`, and per-alert cooldowns re-seed from `config_alert_log`, so a restart does not replay alerts you already received.
 - **Idempotent store setup** — migrations are versioned and skip what is already applied; TimescaleDB conversion and compression policies re-converge as no-ops.
 - **Per-connect snapshots** — the on-connect config snapshot collectors run once per (re)connect, mirroring Lite's server-open behavior.
-- Mute rules (`config_mute_rules`) load once at service startup — restart the service after adding rows.
+- Mute rules (`config_mute_rules`) reload on their own. A change to the table bumps the store's config version, and the service checks that version every 15 seconds, so a new or changed rule takes effect within about 15 seconds with no restart.
 
 A monitored server that is down is retried every 60 seconds forever; a collector that errors is logged and retried at its next scheduled time; a mid-cycle connection-level failure forces a clean reconnect and re-probe. The loop never dies for one bad cycle.
 

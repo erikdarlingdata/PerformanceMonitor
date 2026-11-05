@@ -43,7 +43,7 @@ public sealed class WebFileIoAndPvsWindowPageTests
         Assert.Contains("valueKey: \"avg_write_latency_ms\"", panel);
         Assert.Contains("\"file-io-latency\"", panel);
         Assert.Contains("\"file-io-write-latency\"", panel);
-        Assert.Contains("discontinuityNotes(res.data)", panel);
+        Assert.Contains("discontinuityStrip(res.data)", panel);
         Assert.Contains("chartZoomScope(ctx.hours)", panel);
     }
 

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -19,11 +20,13 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
@@ -108,7 +111,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             await File.AppendAllTextAsync(Path.Combine(Data, "postgresql.conf"),
-                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
+                $"\nport = {Port}\nlisten_addresses = '127.0.0.1'\nssl = on\nmax_connections = 40\nfsync = off\nfull_page_writes = off\ntimezone = 'UTC'\nlog_timezone = 'UTC'\n");
             await File.WriteAllTextAsync(Path.Combine(Data, "pg_hba.conf"),
                 "hostssl all /^pmk_md5_ 127.0.0.1/32 md5\nhost all all 127.0.0.1/32 scram-sha-256\n");
             /* Not through RunToolAsync: the server inherits a redirected output pipe, which then never closes. Its output goes to the log. */
@@ -165,7 +168,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
     }
 
     /// <summary>The collector's own expression for <c>backend_id</c> (PgBlockingCollector, PgSessionStatesCollector), run on the server for one pid.</summary>
-    private const string CollectorBackendIdSql =
+    internal const string CollectorBackendIdSql =
         "SELECT (extract(epoch FROM coalesce(a.backend_start, pg_postmaster_start_time()))::bigint::text || to_char(a.pid, 'FM0000000'))::bigint::text FROM pg_stat_activity AS a WHERE a.pid = $1";
 
     private enum Grants { SignalAndStats, StatsOnly, Nothing }
@@ -185,13 +188,41 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         public string EnvName => "PM_PGK_" + _tag;
     }
 
-    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct)
+    /// <summary>#6963: runs superuser cleanup on an open connection. The shared admin connection may be the thing the failure broke, and a cleanup on
+    /// it throws "Connection is not open" over the body's own exception, so a closed one is replaced by a fresh one. As in
+    /// <see cref="LiveStoreCleanup.RunOwnedAsync"/>, a cleanup failure after a failed body is dropped and one after a passing body fails the test.</summary>
+    private static Task AdminCleanupAsync(NpgsqlConnection admin, ScramTlsCluster target, bool bodySucceeded, Func<NpgsqlConnection, Task> cleanup) =>
+        LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+        {
+            if (admin.State == ConnectionState.Open)
+            {
+                await cleanup(admin);
+                return;
+            }
+
+            await using var fresh = new NpgsqlConnection(target.SuperuserConnectionString);
+            await fresh.OpenAsync(CancellationToken.None);
+            await cleanup(fresh);
+        });
+
+    private sealed record Ctx(NpgsqlDataSource Source, NpgsqlConnection Store, NpgsqlConnection Admin, ScramTlsCluster Target, Roles Roles, string Arg, CancellationToken Ct, string StoreConnectionString)
     {
+        public Task CleanupAsync(bool bodySucceeded, Func<NpgsqlConnection, Task> cleanup) => AdminCleanupAsync(Admin, Target, bodySucceeded, cleanup);
+
         /// <summary>The kill as an agent calls it: backend_id and, unless <paramref name="omitPid"/>, the pid (by default the one inside backend_id).</summary>
         public Task<string> Kill(string? backendId, bool dryRun, int? session = null, bool omitPid = false) =>
             DarlingMcpPlanForceTools.RunKillAsync(Source, Source, null, "pg-7",
                 omitPid ? null : session ?? (PostgresBackendId.TryUnpack(backendId, out var pid, out _) ? pid : null),
                 null, backendId, Arg, dryRun, Ct);
+
+        /// <summary>The permit the gate issues for a kill of <paramref name="pid"/> on server 7, as the tool gets it before the prepare step (#7108).</summary>
+        public async Task<ServerActionPermit> PermitAsync(int pid)
+        {
+            var store = new InvestigationRequestStore(Source, 30, agentActionSource: Source);
+            var decision = await ServerActionGate.AuthorizeAsync(store, Source, NullLogger.Instance, DarlingMcpPlanForceTools.KillToolName, ServerActionNames.KillSession,
+                Arg, new AgentActionTarget(7, "pg-7", pid.ToString(CultureInfo.InvariantCulture), null), Ct);
+            return decision.Permit!;
+        }
 
         public async Task<(NpgsqlConnection Connection, int Pid, string BackendId)> OpenVictimAsync(string? role = null, string? password = null, string? application = null)
         {
@@ -204,9 +235,14 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             return (connection, pid, (string)(await read.ExecuteScalarAsync(Ct))!);
         }
 
-        public async Task<bool> AliveAsync(int pid)
+        /// <summary>
+        /// Waits up to <paramref name="polls"/> x 100 ms for the backend to leave pg_stat_activity: false the moment it
+        /// does, true when it is still there at the end. A caller that expects a kill gives it the full 10 s
+        /// (<see cref="AliveAsync"/>); a caller that expects no kill uses <see cref="StillAliveAsync"/>.
+        /// </summary>
+        public async Task<bool> AliveAsync(int pid, int polls = 100)
         {
-            for (var i = 0; i < 100; i++)
+            for (var i = 0; i < polls; i++)
             {
                 if (await Scalar(Admin, $"SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}") is 0L)
                     return false;
@@ -215,6 +251,13 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
 
             return true;
         }
+
+        /// <summary>
+        /// "The backend was not terminated" after a refused or dry-run kill (#6972). pg_terminate_backend takes effect in
+        /// milliseconds on an idle backend, so a wrongly sent kill shows within 1 s (10 polls of 100 ms) and the 10 s
+        /// that <see cref="AliveAsync"/> keeps for the expected kill only added 9 s to each of these checks.
+        /// </summary>
+        public Task<bool> StillAliveAsync(int pid) => AliveAsync(pid, polls: 10);
 
         public async Task<long> JournalAsync(string eventName) =>
             Convert.ToInt64(await Scalar(Store, $"SELECT count(*) FROM config.investigation_journal WHERE event = '{eventName}'"), CultureInfo.InvariantCulture);
@@ -234,12 +277,12 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
 
     private const string VictimPassword = "Victim-1x";
 
-    private async Task RunAsync(Grants grants, Without without, Func<Ctx, Task> body)
+    private async Task RunAsync(Grants grants, Without without, Func<Ctx, Task> body, string approval = "off")
     {
         Assert.SkipWhen(target.SkipReason is not null, target.SkipReason ?? "");
         var ct = TestContext.Current.CancellationToken;
         var roles = new Roles();
-        await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(Cluster!, ct, emptyStore: true);
         var bodySucceeded = false;
         await using var admin = new NpgsqlConnection(target.SuperuserConnectionString);
         await admin.OpenAsync(ct);
@@ -262,7 +305,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             await ExecAsync(store, "INSERT INTO collect.servers (server_id, server_name, display_name, is_enabled, sql_major_version, engine_kind, created_date, modified_date) "
                 + "VALUES (7, 'pg-7', 'pg-7', TRUE, NULL, 'postgres', now(), now())", ct);
             await ExecAsync(store, "INSERT INTO config.config_service (id) VALUES (1) ON CONFLICT DO NOTHING", ct);
-            await ExecAsync(store, "INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', 3)", ct);
+            await ExecAsync(store, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', 3, '{approval}')", ct);
             if (without != Without.KillSwitch)
                 await ExecAsync(store, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'kill_session', true, 'test')", ct);
 
@@ -274,22 +317,25 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var opened = await requests.OpenOrJoinAsync(alert, ct);
             var claim = await requests.ClaimAsync(opened.RequestId!.Value, "agent-a", ct);
             var arg = AgentActionArgumentTests.Arg(opened.RequestId.Value.ToString(), claim.ClaimId!.Value.ToString(), reason: "the blocker holds a transaction open");
-            await body(new Ctx(source, store, admin, target, roles, arg, ct));
+            await body(new Ctx(source, store, admin, target, roles, arg, ct, builder.ConnectionString));
             bodySucceeded = true;
         }
         finally
         {
             Environment.SetEnvironmentVariable(roles.EnvName, null);
-            try
+            await AdminCleanupAsync(admin, target, bodySucceeded, async cleanup =>
             {
-                await ExecAsync(admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{roles.Victim}', '{roles.Remediation}')", CancellationToken.None);
-                await ExecAsync(admin, $"DROP ROLE IF EXISTS \"{roles.Victim}\"", CancellationToken.None);
-                await ExecAsync(admin, $"DROP ROLE IF EXISTS \"{roles.Remediation}\"", CancellationToken.None);
-            }
-            catch (PostgresException)
-            {
-                /* A role that cannot be dropped is named for this test alone; the assertions already reported what went wrong. */
-            }
+                try
+                {
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('{roles.Victim}', '{roles.Remediation}')", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{roles.Victim}\"", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{roles.Remediation}\"", CancellationToken.None);
+                }
+                catch (PostgresException)
+                {
+                    /* A role that cannot be dropped is named for this test alone; the assertions already reported what went wrong. */
+                }
+            });
 
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
@@ -309,11 +355,277 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(id, (string?)json["session"]!["backend_id"]);
             Assert.Equal(c.Roles.Victim, (string?)json["session"]!["login_name"]);
             Assert.Equal("client backend", (string?)json["session"]!["backend_type"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
             var parameter = typeof(DarlingMcpPlanForceTools).GetMethod(nameof(DarlingMcpPlanForceTools.KillSession))!.GetParameters().Single(p => p.Name == "dry_run");
             Assert.True((bool)parameter.DefaultValue!);
         });
+    }
+
+    [Fact]
+    public async Task ThePrepareStep_ReturnsTheBindingFacts_KillsNothing_AndTheWriteStepEndsTheBackend()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await using (var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection))
+                await open.ExecuteNonQueryAsync(c.Ct);
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            await using var read = new NpgsqlCommand("SELECT xact_start, state_change, state FROM pg_stat_activity WHERE pid = $1", c.Admin);
+            read.Parameters.Add(new NpgsqlParameter { Value = pid, NpgsqlDbType = NpgsqlDbType.Integer });
+            await using var reader = await read.ExecuteReaderAsync(c.Ct);
+            Assert.True(await reader.ReadAsync(c.Ct));
+            var xactStart = reader.GetDateTime(0);
+            var stateChange = reader.GetDateTime(1);
+            var state = reader.GetString(2);
+            await reader.CloseAsync();
+
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.True(prepared.Proceed);
+            var binding = prepared.Binding!;
+            Assert.Equal(pid, binding.Pid);
+            Assert.Equal(id, binding.BackendId);
+            Assert.Equal(epoch, binding.BackendStartEpoch);
+            Assert.Equal(xactStart.Ticks, binding.XactStartUtc!.Value.Ticks);
+            Assert.Equal(stateChange.Ticks, binding.StateChangeUtc!.Value.Ticks);
+            Assert.Equal(state, binding.State);
+            Assert.Equal("idle in transaction", binding.State);
+            Assert.True(await c.StillAliveAsync(pid));
+
+            var written = await DarlingMcpPlanForceTools.WriteKillBackendAsync(prepared.Executor!, permit, binding, c.Ct);
+            Assert.Equal(RemediationOutcome.Done, written.Outcome);
+            Assert.True(written.Wrote);
+            Assert.False(await c.AliveAsync(pid));
+        });
+    }
+
+    /// <summary>
+    /// #7109: the write checks <c>xact_start</c> and <c>state_change</c> from the binding, in the statement that ends the backend. A backend that
+    /// committed and opened another transaction after the dry run is refused as session_changed and stays alive. So is a backend that held no
+    /// transaction (NULL <c>xact_start</c>) and opened one: a NULL equals only a NULL. The unchanged case ends the backend in the test above.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheWriteStep_RefusesABackendWhoseTransactionChangedSinceThePrepare_AndEndsNothing(bool hadTransaction)
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            if (hadTransaction)
+            {
+                await using var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection);
+                await open.ExecuteNonQueryAsync(c.Ct);
+            }
+
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.True(prepared.Proceed);
+            Assert.Equal(hadTransaction, prepared.Binding!.XactStartUtc is not null);
+
+            /* The session commits, runs a new batch, and opens a new transaction. */
+            await Task.Delay(50, c.Ct);
+            await using (var again = new NpgsqlCommand(hadTransaction ? "COMMIT; BEGIN; CREATE TEMP TABLE kill_probe2 (a int);" : "BEGIN; CREATE TEMP TABLE kill_probe2 (a int);", connection))
+                await again.ExecuteNonQueryAsync(c.Ct);
+
+            var written = await DarlingMcpPlanForceTools.WriteKillBackendAsync(prepared.Executor!, permit, prepared.Binding, c.Ct);
+            Assert.Equal(RemediationOutcome.Refused, written.Outcome);
+            Assert.Equal(RemediationResult.Reasons.SessionChanged, written.Reason);
+            Assert.False(written.Wrote);
+            Assert.Contains("run something new since the dry run", written.Message, StringComparison.Ordinal);
+            Assert.True(await c.StillAliveAsync(pid));
+        });
+    }
+
+    [Fact]
+    public async Task ThePrepareStep_OfASessionThatIsGone_StopsWithTheReasonToRecord_AndNoBinding()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            await connection.DisposeAsync();
+            Assert.False(await c.AliveAsync(pid));
+
+            var permit = await c.PermitAsync(pid);
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillBackendAsync(c.Source, NullLogger.Instance, permit, 7, "pg-7", pid, epoch, c.Ct);
+            Assert.False(prepared.Proceed);
+            Assert.Null(prepared.Binding);
+            Assert.Equal(RemediationResult.Reasons.SessionGone, prepared.RecordReason);
+            Assert.NotNull(prepared.NotDone);
+        });
+    }
+
+    /// <summary>
+    /// #7109: a route set to <c>required</c> turns a real kill into a proposal. The tool answers <c>proposed</c>, the backend stays alive, no
+    /// <c>action_called</c> row is written, and the proposal row holds the binding the prepare step read. A retry for the same request and target gets the
+    /// same proposal id and adds no row. <c>nobody_can_approve</c> is true until a mapped person holds <c>approve</c> for the kind on the server,
+    /// and the retry then answers without the sentence.
+    /// </summary>
+    [Fact]
+    public async Task ARouteThatRequiresApproval_AnswersProposed_EndsNothing_StoresTheBinding_AndARetryGetsTheSameProposal()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await using (var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection))
+                await open.ExecuteNonQueryAsync(c.Ct);
+
+            var first = Parse(await c.Kill(id, dryRun: false));
+            Assert.Equal("proposed", (string?)first["status"]);
+            Assert.Equal("kill_session", (string?)first["kind"]);
+            Assert.Equal("pg-7", (string?)first["server"]);
+            Assert.False((bool)first["dry_run"]!);
+            Assert.Equal(id, (string?)first["session"]!["backend_id"]);
+            Assert.True(Guid.TryParse((string?)first["proposal_id"], out var proposalId));
+            Assert.True((bool)first["nobody_can_approve"]!);
+            Assert.EndsWith("Nobody can approve this. Map a person, or turn on single-person approval.", (string?)first["message"], StringComparison.Ordinal);
+
+            Assert.True(await c.StillAliveAsync(pid));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
+            Assert.Equal(0, await c.JournalAsync("action_done"));
+
+            Assert.True(PostgresBackendId.TryUnpack(id, out _, out var epoch));
+            await using (var read = new NpgsqlCommand(
+                "SELECT state, tool, server_id, target->>'pid', binding->>'pid', binding->>'backend_id', binding->>'backend_start_epoch', binding->>'state', "
+                + "(binding->>'xact_start') IS NOT NULL, (binding->>'state_change') IS NOT NULL, reason FROM config.agent_action_proposals WHERE proposal_id = $1", c.Store))
+            {
+                read.Parameters.Add(new NpgsqlParameter { Value = proposalId, NpgsqlDbType = NpgsqlDbType.Uuid });
+                await using var reader = await read.ExecuteReaderAsync(c.Ct);
+                Assert.True(await reader.ReadAsync(c.Ct));
+                Assert.Equal("pending", reader.GetString(0));
+                Assert.Equal("kill_session", reader.GetString(1));
+                Assert.Equal(7, reader.GetInt32(2));
+                Assert.Equal(pid.ToString(CultureInfo.InvariantCulture), reader.GetString(3));
+                Assert.Equal(pid.ToString(CultureInfo.InvariantCulture), reader.GetString(4));
+                Assert.Equal(id, reader.GetString(5));
+                Assert.Equal(epoch.ToString(CultureInfo.InvariantCulture), reader.GetString(6));
+                Assert.Equal("idle in transaction", reader.GetString(7));
+                Assert.True(reader.GetBoolean(8));
+                Assert.True(reader.GetBoolean(9));
+                Assert.Equal("the blocker holds a transaction open", reader.GetString(10));
+            }
+
+            /* A person who can approve it appears; the retry is the same proposal, and the sentence is gone. */
+            var actor = "person:alice";
+            var ann = (await PersonDirectory.AddPersonAsync(c.Source, "Ann", actor, ServerActionSurfaces.Viewer, c.Ct)).PersonId!.Value;
+            var key = DarlingWebSeat.ComputeOwnerKey("https://issuer.example.test", "sub-ann")!;
+            Assert.True((await PersonDirectory.AddIdentityAsync(c.Source, ann, "web", key, actor, ServerActionSurfaces.Web, c.Ct)).Succeeded);
+            Assert.True((await PersonDirectory.AddGrantAsync(c.Source, ann, 7, null, "approve", [ServerActionNames.KillSession], actor, ServerActionSurfaces.Viewer, c.Ct)).Succeeded);
+
+            var retry = Parse(await c.Kill(id, dryRun: false));
+            Assert.Equal("proposed", (string?)retry["status"]);
+            Assert.Equal(proposalId.ToString(), (string?)retry["proposal_id"]);
+            Assert.False((bool)retry["nobody_can_approve"]!);
+            Assert.DoesNotContain("Nobody can approve", (string?)retry["message"], StringComparison.Ordinal);
+            Assert.Contains("already waiting", (string?)retry["message"], StringComparison.Ordinal);
+            Assert.Equal(1L, await new NpgsqlCommand("SELECT count(*) FROM config.agent_action_proposals", c.Store).ExecuteScalarAsync(c.Ct));
+            Assert.True(await c.StillAliveAsync(pid));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
+        }, approval: "required");
+    }
+
+    /// <summary>
+    /// #7109, "the agent cannot approve", on a live MCP host with an agent token: a real kill on a route that requires approval answers
+    /// <c>proposed</c>, the same call again answers the same proposal id, and the proposal stays <c>pending</c> with no first press and no
+    /// approval in the journal. The backend lives. It fails if any path from the agent's call decides the proposal.
+    /// </summary>
+    [Fact]
+    public async Task AnAgentTokenOnTheHost_AsksTwice_GetsTheSameProposal_AndNothingIsPressedApprovedOrKilled()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            await using (var open = new NpgsqlCommand("BEGIN; CREATE TEMP TABLE kill_probe (a int);", connection))
+                await open.ExecuteNonQueryAsync(c.Ct);
+
+            const string agentBearer = "agent-token-value-proposal-7109-aaaa-1";
+            var mcp = new McpConfig
+            {
+                Tokens = new List<McpTokenEntry> { new() { Name = "agent-a", Token = agentBearer, Role = "agent" } },
+            };
+            var legacy = DarlingMcpWritePolicy.ResolveForStart(mcp, "", out _);
+            var tokens = DarlingMcpTokenSet.Resolve(mcp, "", legacy, null);
+            var owner = new StoreOwnerSource();
+            owner.Publish(c.Source);
+            using var server = await DarlingMcpWritePolicyTests.BuildServer(mcp, "", c.StoreConnectionString, tokens, owner: owner);
+
+            var arguments = new JsonObject
+            {
+                ["server_name"] = "pg-7",
+                ["backend_id"] = id,
+                ["session_id"] = pid,
+                ["agent_action"] = c.Arg,
+                ["dry_run"] = false,
+            }.ToJsonString();
+
+            async Task<JsonObject> AskAsync()
+            {
+                var (status, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(server, DarlingMcpPlanForceTools.KillToolName, arguments, agentBearer);
+                Assert.Equal(200, status);
+                var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+                using var document = System.Text.Json.JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+                var text = document.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+                return Parse(text);
+            }
+
+            var first = await AskAsync();
+            Assert.Equal("proposed", (string?)first["status"]);
+            Assert.True(Guid.TryParse((string?)first["proposal_id"], out var proposalId));
+            var second = await AskAsync();
+            Assert.Equal("proposed", (string?)second["status"]);
+            Assert.Equal(proposalId.ToString(), (string?)second["proposal_id"]);
+
+            Assert.Equal(1L, await new NpgsqlCommand("SELECT count(*) FROM config.agent_action_proposals", c.Store).ExecuteScalarAsync(c.Ct));
+            await using (var read = new NpgsqlCommand("SELECT state FROM config.agent_action_proposals WHERE proposal_id = $1", c.Store))
+            {
+                read.Parameters.Add(new NpgsqlParameter { Value = proposalId, NpgsqlDbType = NpgsqlDbType.Uuid });
+                Assert.Equal("pending", (string?)await read.ExecuteScalarAsync(c.Ct));
+            }
+
+            Assert.Equal(1, await c.JournalAsync("proposal_created"));
+            Assert.Equal(0, await c.JournalAsync("proposal_first_press"));
+            Assert.Equal(0, await c.JournalAsync("proposal_approved"));
+            Assert.Equal(0, await c.JournalAsync("action_called"));
+            Assert.True(await c.StillAliveAsync(pid));
+        }, approval: "required");
+    }
+
+    [Fact]
+    public async Task ARouteThatRequiresApproval_StillAnswersADryRunAsADryRun_AndStoresNoProposal()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            var json = Parse(await c.Kill(id, dryRun: true));
+            Assert.Equal("dry_run", (string?)json["status"]);
+            Assert.True(await c.StillAliveAsync(pid));
+            Assert.Equal(0L, await new NpgsqlCommand("SELECT count(*) FROM config.agent_action_proposals", c.Store).ExecuteScalarAsync(c.Ct));
+        }, approval: "required");
+    }
+
+    /// <summary>#7109: with single-person approval on, a person can approve alone, so the proposal does not say nobody can approve.</summary>
+    [Fact]
+    public async Task ARouteWithSinglePersonApproval_ProposesWithoutTheNobodyCanApproveSentence()
+    {
+        await RunAsync(Grants.SignalAndStats, Without.Nothing, async c =>
+        {
+            await ExecAsync(c.Store, "UPDATE config.config_notification_routes SET approval_single_person = TRUE", c.Ct);
+            var (connection, pid, id) = await c.OpenVictimAsync();
+            await using var victimConnection = connection;
+            var json = Parse(await c.Kill(id, dryRun: false));
+            Assert.Equal("proposed", (string?)json["status"]);
+            Assert.False((bool)json["nobody_can_approve"]!);
+            Assert.DoesNotContain("Nobody can approve", (string?)json["message"], StringComparison.Ordinal);
+            Assert.True(await c.StillAliveAsync(pid));
+        }, approval: "required");
     }
 
     [Fact]
@@ -360,7 +672,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var json = Parse(await c.Kill(id, dryRun: false));
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("server_action_off", (string?)json["reason"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -385,7 +697,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 Assert.DoesNotContain(id, answer, StringComparison.Ordinal);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -419,7 +731,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 Assert.Contains("pg_signal_backend", (string?)json["message"], StringComparison.Ordinal);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -435,7 +747,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("not_permitted", (string?)json["reason"]);
             Assert.Contains("pg_read_all_stats", (string?)json["message"], StringComparison.Ordinal);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -450,7 +762,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal("not_permitted", (string?)json["reason"]);
             Assert.Contains("superuser", (string?)json["message"], StringComparison.Ordinal);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 
@@ -479,7 +791,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.Equal("refused", (string?)json["status"]);
                     Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
                     Assert.Null(json["session"]);
-                    Assert.True(await c.AliveAsync(pid));
+                    Assert.True(await c.StillAliveAsync(pid));
                 }
             }
 
@@ -498,7 +810,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             await using var victimConnection = connection;
             var dry = Parse(await c.Kill(id, dryRun: true));
             Assert.Equal("dry_run", (string?)dry["status"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             var json = Parse(await c.Kill(id, dryRun: false));
             Assert.Equal("done", (string?)json["status"]);
             Assert.False(await c.AliveAsync(pid));
@@ -538,7 +850,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal("refused", (string?)json["status"]);
             Assert.Equal(RemediationResult.Reasons.ToolLoginSession, (string?)json["reason"]);
             Assert.Null(json["session"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_done"));
         });
     }
@@ -559,7 +871,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             /* backend_id one off (what a conversion through a double can do): the pid passed with it no longer agrees. */
             var nudged = (long.Parse(id, CultureInfo.InvariantCulture) + 1).ToString(CultureInfo.InvariantCulture);
             Assert.Equal("bad_backend_id", (string?)Parse(await c.Kill(nudged, dryRun: false, session: pid))["reason"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
         });
     }
@@ -595,7 +907,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             Assert.Equal(1, await c.JournalAsync("action_called"));
             Assert.Equal(0, await c.JournalAsync("action_failed"));
             Assert.Equal(0, await c.JournalAsync("action_done"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Unknown, change.Result);
         });
     }
@@ -698,7 +1010,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             Assert.Equal("failed", (string?)Parse(answer)["status"]);
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(1, await c.JournalAsync("action_failed"));
         });
     }
@@ -714,6 +1026,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                the server's start time. */
             var monitor = "pmk_mon_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"CREATE ROLE \"{monitor}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
+            var monitorDone = false;
             try
             {
                 string collected;
@@ -735,13 +1048,17 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.DoesNotContain("reused", (string?)json["message"], StringComparison.Ordinal);
                 }
 
-                Assert.True(await c.AliveAsync(pid));
+                Assert.True(await c.StillAliveAsync(pid));
                 Assert.Equal(0, await c.JournalAsync("action_called"));
+                monitorDone = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{monitor}'", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{monitor}\"", CancellationToken.None);
+                await c.CleanupAsync(monitorDone, async cleanup =>
+                {
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{monitor}'", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{monitor}\"", CancellationToken.None);
+                });
             }
         });
     }
@@ -811,6 +1128,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
             await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+            var ownerDone = false;
             try
             {
                 /* A database owner who is not a superuser can do all of this. */
@@ -844,16 +1162,20 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 var json = Parse(await c.Kill(id, dryRun: false));
                 Assert.Equal("done", (string?)json["status"]);
                 Assert.False(await c.AliveAsync(pid));
-                Assert.True(await c.AliveAsync(bystanderPid));
+                Assert.True(await c.StillAliveAsync(bystanderPid));
                 Assert.Equal(0, await CallsAsync(c));
+                ownerDone = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
-                await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
-                await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
-                await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+                await c.CleanupAsync(ownerDone, async cleanup =>
+                {
+                    await ExecAsync(cleanup, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+                    await ExecAsync(cleanup, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+                    await ExecAsync(cleanup, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+                    await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+                    await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+                });
             }
         });
     }
@@ -882,6 +1204,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
         var owner = "pmk_own_" + Guid.NewGuid().ToString("N")[..12];
         await ExecAsync(c.Admin, $"CREATE ROLE \"{owner}\" LOGIN PASSWORD '{VictimPassword}'", c.Ct);
         await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{owner}\"", c.Ct);
+        var bodySucceeded = false;
         try
         {
             await using (var asOwner = new NpgsqlConnection(c.Target.ConnectionString(owner, VictimPassword)))
@@ -893,14 +1216,18 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             }
 
             await body();
+            bodySucceeded = true;
         }
         finally
         {
-            await ExecAsync(c.Admin, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
-            await ExecAsync(c.Admin, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
-            await ExecAsync(c.Admin, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
-            await ExecAsync(c.Admin, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
-            await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+            await c.CleanupAsync(bodySucceeded, async cleanup =>
+            {
+                await ExecAsync(cleanup, "ALTER DATABASE postgres RESET search_path", CancellationToken.None);
+                await ExecAsync(cleanup, "DROP SCHEMA IF EXISTS planted CASCADE", CancellationToken.None);
+                await ExecAsync(cleanup, $"ALTER DATABASE postgres OWNER TO \"{ScramTlsCluster.Superuser}\"", CancellationToken.None);
+                await ExecAsync(cleanup, $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '{owner}'", CancellationToken.None);
+                await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{owner}\"", CancellationToken.None);
+            });
         }
     }
 
@@ -973,7 +1300,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     PostgresRemediationExecutor.ConnectionStringSeam.Value = null;
                 }
 
-                Assert.True(await c.AliveAsync(pid));
+                Assert.True(await c.StillAliveAsync(pid));
                 Assert.Equal(0, await CallsAsync(c));
                 Assert.Equal(0, await c.JournalAsync("action_called"));
 
@@ -995,6 +1322,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var md5 = "pmk_md5_" + Guid.NewGuid().ToString("N")[..12];
             await ExecAsync(c.Admin, $"SET password_encryption = 'md5'; CREATE ROLE \"{md5}\" LOGIN PASSWORD '{c.Roles.Secret}'; RESET password_encryption;", c.Ct);
             await ExecAsync(c.Admin, $"GRANT pg_signal_backend, pg_read_all_stats TO \"{md5}\"", c.Ct);
+            var md5Done = false;
             try
             {
                 /* A TLS mode that requires TLS: under Optional, Npgsql tries again without TLS after a failed sign-in, and the server then
@@ -1008,11 +1336,13 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                     Assert.Contains("\"MD5\" authentication method is not allowed", (string?)json["message"], StringComparison.Ordinal);
                     Assert.Contains("password_encryption = 'scram-sha-256'", (string?)json["message"], StringComparison.Ordinal);
                 }
+
+                md5Done = true;
             }
             finally
             {
                 await ExecAsync(c.Store, $"UPDATE config.config_monitored_servers SET remediation_username = '{c.Roles.Remediation}', encrypt_mode = 'Optional' WHERE server_id = 7", CancellationToken.None);
-                await ExecAsync(c.Admin, $"DROP ROLE IF EXISTS \"{md5}\"", CancellationToken.None);
+                await c.CleanupAsync(md5Done, async cleanup => await ExecAsync(cleanup, $"DROP ROLE IF EXISTS \"{md5}\"", CancellationToken.None));
             }
 
             /* No TLS: SCRAM is offered, but channel binding needs TLS. */
@@ -1032,7 +1362,7 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
                 await c.Target.SetSslAsync(on: true, CancellationToken.None);
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
             Assert.Equal(0, await c.JournalAsync("action_called"));
 
             /* With TLS back, the same call goes through. */
@@ -1048,19 +1378,21 @@ public sealed class PostgresKillLiveTests(PostgresKillLiveTests.ScramTlsCluster 
             var (connection, pid, id) = await c.OpenVictimAsync();
             await using var victimConnection = connection;
             await ExecAsync(c.Admin, "REVOKE CONNECT ON DATABASE postgres FROM PUBLIC", c.Ct);
+            var refused = false;
             try
             {
                 var json = Parse(await c.Kill(id, dryRun: false));
                 Assert.Equal("refused", (string?)json["status"]);
                 Assert.Equal(RemediationResult.Reasons.SignInFailed, (string?)json["reason"]);
                 Assert.Contains("GRANT CONNECT ON DATABASE postgres", (string?)json["message"], StringComparison.Ordinal);
+                refused = true;
             }
             finally
             {
-                await ExecAsync(c.Admin, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None);
+                await c.CleanupAsync(refused, async cleanup => await ExecAsync(cleanup, "GRANT CONNECT ON DATABASE postgres TO PUBLIC", CancellationToken.None));
             }
 
-            Assert.True(await c.AliveAsync(pid));
+            Assert.True(await c.StillAliveAsync(pid));
         });
     }
 

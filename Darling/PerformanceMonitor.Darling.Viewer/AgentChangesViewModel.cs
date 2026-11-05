@@ -23,7 +23,7 @@ public sealed partial class ViewerDataService
 {
     /// <summary>Reads the agent calls, the refusals and the switch.</summary>
     public Task<AgentChangesRead> ReadAgentChangesAsync(CancellationToken cancellationToken = default) =>
-        new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).ReadAsync(200, cancellationToken);
+        new AgentChangeUndo(_dataSource, ViewerCommandDeadlines.CurrentInteractiveReadSeconds).ReadAsync(200, cancellationToken: cancellationToken);
 
     /// <summary>Undoes one agent change as <paramref name="login"/>; a refusal comes back as the result, a read-only role throws.</summary>
     public async Task<AgentUndoResult> UndoAgentChangeAsync(long calledId, string login, CancellationToken cancellationToken = default)
@@ -118,7 +118,7 @@ public sealed class AgentChangeViewRow
     /// <summary>The call time, the sort key of the When column.</summary>
     public DateTime CalledAtUtc => Row.CalledAtUtc;
 
-    public string WhenDisplay => Row.CalledAtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.CalledAtUtc, "yyyy-MM-dd HH:mm");
 
     public string Server => Row.ServerLabel;
 
@@ -180,7 +180,7 @@ public sealed class AgentRefusalViewRow
     /// <summary>The refusal time, the sort key of the Refused at column.</summary>
     public DateTime AtUtc => Row.AtUtc;
 
-    public string WhenDisplay => Row.AtUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+    public string WhenDisplay => ViewerTimeHelper.FormatFleetWide(Row.AtUtc, "yyyy-MM-dd HH:mm");
 
     public string Server => Row.ServerLabel;
 

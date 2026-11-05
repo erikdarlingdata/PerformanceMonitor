@@ -106,10 +106,10 @@ public sealed partial class DarlingMcpFinOpsTools
             .ThenBy(r => r.DatabaseName, StringComparer.Ordinal)
             .ToList();
 
-    private static decimal Gb(decimal value) => Math.Round(value, 3, MidpointRounding.AwayFromZero);
+    private static decimal Gb(decimal value) => FinOpsWireFigures.Clean(Math.Round(value, 3, MidpointRounding.AwayFromZero));
 
     private static decimal AvgWait(long waitInMs, long waitCount) =>
-        Math.Round(IndexCleanupRollupFigures.AverageWaitMs(waitInMs, waitCount), 2, MidpointRounding.AwayFromZero);
+        FinOpsWireFigures.Clean(Math.Round(IndexCleanupRollupFigures.AverageWaitMs(waitInMs, waitCount), 2, MidpointRounding.AwayFromZero));
 
     /// <summary>One roll-up row; the workload counters are included only for a per-database row.</summary>
     internal static object IndexAnalysisRollupRow(IndexCleanupRollup r, bool withWorkload, DateTime? capturedAt = null)

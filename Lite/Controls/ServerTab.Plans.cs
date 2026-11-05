@@ -66,13 +66,12 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"QueryPlan_{row.QueryHash}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"QueryPlan_{row.QueryHash}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -121,13 +120,12 @@ public partial class ServerTab : UserControl
                 return;
             }
 
-            SavePlanFile(plan, $"ProcPlan_{row.FullName}");
-            btn.Content = $"Saved ({source})";
+            if (SavePlanFile(plan, $"ProcPlan_{row.FullName}")) btn.Content = $"Saved ({source})";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to retrieve plan: {DuckDbMemoryLimitSetting.Describe(ex)}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show($"Could not get the plan for server {_server.DisplayName} from the collected data or the live plan cache: {DuckDbMemoryLimitSetting.Describe(ex)}. A plan that has left the plan cache can no longer be fetched.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -328,7 +326,7 @@ public partial class ServerTab : UserControl
 
     private void CancelPlanButton_Click(object sender, RoutedEventArgs e)
     {
-        _actualPlanCts?.Cancel();
+        _actualPlanRun.Cancel();
     }
 
     private async void ViewEstimatedPlan_Click(object sender, RoutedEventArgs e)
@@ -541,8 +539,7 @@ public partial class ServerTab : UserControl
 
             ShowPlanLoading(label);
 
-            _actualPlanCts?.Dispose();
-            _actualPlanCts = new CancellationTokenSource();
+            var actualPlanToken = _actualPlanRun.Begin();
 
             try
             {
@@ -557,8 +554,11 @@ public partial class ServerTab : UserControl
                     isolationLevel,
                     isAzureSqlDb: false,
                     timeoutSeconds: 0,
-                    _actualPlanCts.Token,
+                    actualPlanToken,
                     productName: "SQL Server Performance Monitor Lite"));
+
+                /* #7181: the tab closed while the query ran; there is no tab left to show a result or a message. */
+                if (_actualPlanRun.IsClosed) return;
 
                 if (!string.IsNullOrEmpty(actualPlanXml))
                 {
@@ -573,12 +573,14 @@ public partial class ServerTab : UserControl
             }
             catch (OperationCanceledException)
             {
+                if (_actualPlanRun.IsClosed) return;
                 MessageBox.Show("The query was cancelled or timed out.",
                     "Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to get actual plan:\n\n{ex.Message}",
+                if (_actualPlanRun.IsClosed) return;
+                MessageBox.Show($"Could not get the actual plan from server {_server.DisplayName}:\n\n{ex.Message}\n\nCheck that the query still runs on that server, then try Get Actual Plan again.",
                     "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally

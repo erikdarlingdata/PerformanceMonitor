@@ -49,7 +49,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPgPlanTools
 {
-    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Redacted at collection: no statement text or literals. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored — node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Join query_id to get_pg_top_queries for the statement's normalized text, its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
+    [McpServerTool(Name = "get_pg_plans"), Description("Gets PostgreSQL execution plans captured by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference. Plan redacted at collection (no statement text or literals). query_text is the statement behind queryid. queryid is a STRING: a 64-bit id a JSON number silently rounds. Window ends at as_of. Empty separates three causes: capture not configured, no statement crossed the duration threshold, or plans aged out of retention - read get_pg_plan_capture_readiness first. PostgreSQL-only; get_plan_xml covers SQL Server. <<GUIDE>> Gets execution plans captured from PostgreSQL by auto_explain, grouped by plan shape and ranked by total time. Returns the plan JSON ITSELF, not a reference to it. The plan is REDACTED at collection and that is not a limitation to work around: auto_explain emits the statement text and its filter literals verbatim, so the query text is dropped entirely and every literal inside the plan tree is replaced with a placeholder before the plan is ever stored — node types, relation names, costs, row estimates and the tree shape all survive intact, which is what a plan is read for. Each row carries query_text, the statement's normalized text from the hourly statement capture (a 400-character preview, query_text_truncated says it was cut, full_text: true returns it whole), null until that capture reaches the queryid and always null for queryid 0; join query_id to get_pg_top_queries for its call count and its timing. queryid is returned as a STRING because it is a signed 64-bit value spread over the whole int8 range: most ids exceed what a JSON number survives and a numeric wire form is silently rounded by any parser decoding numbers as IEEE-754 doubles, after which it matches nothing. When there are no plans this tool distinguishes three genuinely different causes rather than reporting one vague absence: capture is not configured on the server (with the specific missing precondition), capture is configured but this window's statements never crossed the duration threshold, or plans existed and aged out of retention. This is PostgreSQL-only and separate from get_plan_xml, which covers SQL Server. This is what bounds the page - read truncated to know whether the window held more shapes than were returned; it is observed by fetching one row past this cap, never inferred from a full page. The filter is applied in the store over EVERY capture in the window, not over the top-duration page, so a statement ranked far below the busiest shapes is still found - and an empty answer with this set genuinely means no plan for it was captured in the window.")]
     public static async Task<string> GetPgPlans(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -57,6 +57,7 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Maximum plan shapes to return. Default 10. See the tool's reading guide.")] int limit = 10,
         [Description("Only return plans for this queryid, as a string. Optional. See the tool's reading guide.")] string? query_id = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
@@ -109,7 +110,7 @@ public sealed class DarlingMcpPgPlanTools
 
             var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", resolved.ServerName, start, now, emptyAnswer: false, logger, cancellationToken);
-            return BuildPlansJson(resolved.DisplayName, hours_back, rows, limit, notice);
+            return BuildPlansJson(resolved.DisplayName, hours_back, rows, limit, notice, full_text);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -124,11 +125,12 @@ public sealed class DarlingMcpPgPlanTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_plan_capture_readiness"), Description("Gets whether a PostgreSQL target can capture execution plans at all, facet by facet: is_satisfied, the observed value, and the operator remedy (detail), in CAUSAL order - fix them in that order. Runs HOURLY; a window under an hour can legitimately find nothing. An EMPTY answer here is NOT the healthy case: the collector writes one row per facet on every run, so empty means nothing was collected, not that every facet passed. Read this before trusting an empty get_pg_plans or any target log read. Never claims a plan was captured; get_pg_plans is that read. PostgreSQL-only. <<GUIDE>> Gets whether a PostgreSQL target can capture execution plans at all, facet by facet, with the specific remedy for every step that is not in place. Read this FIRST when get_pg_plans is empty, and read it before concluding anything from an empty target-side log read: the facets are the preconditions, not a summary of them, and each one carries the operator-facing consequence and fix for its own state rather than a shared 'plans unavailable'. Every facet is reported whether or not it is satisfied, because the state somebody needs is the whole picture and a list of only the failures cannot show that capture is configured and working. The facets are returned in CAUSAL order - could this server run auto_explain, is it loaded, is it capturing, in what format, and can what it captures be attributed to a statement - so they read as the sequence they have to be fixed in rather than alphabetically. Two states are the ones people misread and each is its own facet with its own remedy: auto_explain loaded with log_min_duration = -1 is loaded and capturing NOTHING, which is indistinguishable from not loaded from the outside; and a log_line_prefix with no %Q means auto_explain captured the plan but nothing can join it to the statement it came from, because auto_explain puts no query id in the plan itself. On Aurora and RDS the remedy text says which changes need a custom cluster parameter group and a writer reboot rather than a SET, which is the misconception worth heading off. Two facets reach beyond plan capture: message_locale reports whether the target writes its log messages in English, which every target-side log read matches, and log_line_prefix_readable reports whether the log line prefix can be parsed, which the stderr deadlock and log-event reads need. Both matter to get_pg_deadlocks, where zero rows is the healthy state, so an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything. This is PostgreSQL-only. It reports readiness and never claims a plan was captured; get_pg_plans is the read for the plans themselves. This is what bounds the page - read truncated to know whether a facet sat past it, in which case unsatisfied_facets is withheld; it is observed by fetching one row past this cap, so asking for exactly the number of facets the collector emits reads as complete.")]
+    [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
+    [McpServerTool(Name = "get_pg_plan_capture_readiness"), Description("Gets whether a PostgreSQL target can capture execution plans at all, facet by facet: is_satisfied, the observed value, and the operator remedy (detail), in CAUSAL order - fix them in that order. Runs HOURLY; a window under an hour can legitimately find nothing. An EMPTY answer here is NOT the healthy case: the collector writes one row per facet on every run, so empty means nothing was collected, not that every facet passed. Read this before trusting an empty get_pg_plans or any target log read. Never claims a plan was captured; get_pg_plans is that read. PostgreSQL-only. <<GUIDE>> LATEST IS A TIME: captured_at is the newest facet reading in the search span and age_seconds is how old it is at the window end; hours_back is only the span searched, not a window of readings (#7010). Gets whether a PostgreSQL target can capture execution plans at all, facet by facet, with the specific remedy for every step that is not in place. Read this FIRST when get_pg_plans is empty, and read it before concluding anything from an empty target-side log read: the facets are the preconditions, not a summary of them, and each one carries the operator-facing consequence and fix for its own state rather than a shared 'plans unavailable'. Every facet is reported whether or not it is satisfied, because the state somebody needs is the whole picture and a list of only the failures cannot show that capture is configured and working. The facets are returned in CAUSAL order - could this server run auto_explain, is it loaded, is it capturing, in what format, and can what it captures be attributed to a statement - so they read as the sequence they have to be fixed in rather than alphabetically. Two states are the ones people misread and each is its own facet with its own remedy: auto_explain loaded with log_min_duration = -1 is loaded and capturing NOTHING, which is indistinguishable from not loaded from the outside; and a log_line_prefix without %Q directly after [%p] stores no plan on a stderr target, because auto_explain puts no query id in the plan itself (on csvlog before PostgreSQL 14 plans are stored without a query id, and on jsonlog only no plan is stored). On Aurora and RDS the remedy text says which changes need a custom cluster parameter group and a writer reboot rather than a SET, which is the misconception worth heading off. Two facets reach beyond plan capture: message_locale reports whether the target writes its log messages in English, which every target-side log read matches, and log_line_prefix_readable reports whether the log line prefix can be parsed, which the stderr deadlock and log-event reads need. A target whose log_destination lists csvlog is not judged by log_line_prefix, with or without stderr, because the plan and deadlock readers take the csv route whenever csvlog is listed and read the fields from the log's own columns: log_line_prefix_readable reads as met there, and plan_attribution reads as met on PostgreSQL 14 or later (the id comes from the csv query_id column) and unmet on PostgreSQL 13, whose csv record has no query_id column, where the detail says to take csvlog out of log_destination (so the server logs to stderr, with %Q directly after [%p] in log_line_prefix) or move to PostgreSQL 14 or later. The plan and deadlock readers read stderr or csvlog and never jsonlog, so with jsonlog and no csvlog or stderr plan_attribution stays unmet and the detail says to add csvlog or stderr. A target with stderr and no csvlog keeps the log_line_prefix rule. Both matter to get_pg_deadlocks, where zero rows is the healthy state, so an unmet facet of either kind is the difference between a quiet server and a read that cannot see anything. This is PostgreSQL-only. It reports readiness and never claims a plan was captured; get_pg_plans is the read for the plans themselves. This is what bounds the page - read truncated to know whether a facet sat past it, in which case unsatisfied_facets is withheld; it is observed by fetching one row past this cap, so asking for exactly the number of facets the collector emits reads as complete.")]
     public static async Task<string> GetPgPlanCaptureReadiness(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of history to search for each facet's most recent reading. Default 24 - this collector runs hourly, so a window under an hour can legitimately find nothing.")] int hours_back = 24,
+        [Description("Hours of history to search for the latest snapshot of each facet (its most recent reading). Default 24 - this collector runs hourly, so a window under an hour can legitimately find nothing.")] int hours_back = 24,
         [Description("Maximum facet rows to return. Default 25 - the collector emits one row per facet, so the default is well clear of the whole set. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default)
@@ -160,7 +162,15 @@ public sealed class DarlingMcpPgPlanTools
                 return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, cancellationToken);
             }
 
-            return BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit);
+            /* #7010: the answer is the newest reading per facet, so it says WHEN the newest was taken and how old that is; the window is only
+               the span searched, and a coverage notice would describe a window the tool never reads. */
+            var newestReading = rows.Max(r => r.CaptureTime);
+            var stamp = new
+            {
+                captured_at = newestReading.ToString("o"),
+                age_seconds = LatestSnapshotStamp.AgeSeconds(newestReading, windowEnd),
+            };
+            return BuildReadinessJson(resolved.DisplayName, hours_back, rows, limit, stamp.captured_at, stamp.age_seconds);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -214,6 +224,8 @@ public sealed class DarlingMcpPgPlanTools
     /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the same reason
     /// <see cref="BuildPlansJson"/> is separate.
     /// </summary>
+    /// <param name="capturedAt">The newest reading's stamp, published beside <c>hours_back</c> (#7010); null for a caller that has none.</param>
+    /// <param name="ageSeconds">How old that reading is at the window end.</param>
     /// <param name="fetched">The rows the reader returned for a request of <paramref name="limit"/><c> + 1</c>:
     /// up to one more than the caller asked for, the extra one being the truncation signal. The page this
     /// emits is the first <paramref name="limit"/> of them.</param>
@@ -221,7 +233,9 @@ public sealed class DarlingMcpPgPlanTools
         string serverName,
         int hoursBack,
         IReadOnlyList<DarlingPgPlanCaptureReadinessReader.PgPlanCaptureReadinessRow> fetched,
-        int limit)
+        int limit,
+        string? capturedAt = null,
+        long? ageSeconds = null)
     {
         /* #2629's lesson, applied to a read whose row count is small enough to make it look unnecessary: a
            summary taken over a CAPPED result describes the page and reads as a fact about the server. The
@@ -252,10 +266,13 @@ public sealed class DarlingMcpPgPlanTools
         {
             server = serverName,
             hours_back = hoursBack,
+            captured_at = capturedAt,
+            age_seconds = ageSeconds,
             facet_count = rows.Count,
             truncated,
             /* Deliberately NOT a single ready/not-ready verdict. The facets do not reduce to one: an unmet
-               plan_attribution still captures plans and merely orphans them, while message_locale and
+               plan_attribution means no plan is stored (stderr with %Q misplaced, or jsonlog only) or plans are stored
+               without a query id (csvlog before PostgreSQL 14), while message_locale and
                log_line_prefix_readable are about the target-side log reads (the stderr deadlock and log-event
                reads among them) rather than about capture. A boolean would have to pick one meaning
                and would be wrong under the other, which is the exact collapse the collector splits its rows
@@ -306,20 +323,31 @@ public sealed class DarlingMcpPgPlanTools
 
         if (unmet.Count > 0)
         {
-            return McpHelpers.Status(
-                "precondition",
-                "This server cannot capture execution plans yet, so an empty result here says nothing about "
-                + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
-                + string.Join(" | ", unmet)
-                + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
-                + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
-                + "satisfied or not, in the order they have to be fixed in.");
+            return PlanCaptureNotReadyStatus(unmet);
         }
 
         /* #4966: only the empty answer carries the window floor; not_collected and precondition above stay bare. */
         var notice = await DarlingMcpWindowNotice.ReadForToolAsync(
                 postgres, "get_pg_plans", serverName, start, end, emptyAnswer: true, logger, cancellationToken);
         return await DarlingServerOfflineNote.EmptyAsync(postgres, serverId, serverName, end, McpHelpers.Status("empty", NoPlanCapturedMessage(wantedQueryId, hoursBack), notice.AsHints()), cancellationToken);
+    }
+
+    /// <summary>
+    /// The <c>precondition</c> answer for a server whose plan capture is not ready: the message names every unmet facet, and <c>hints</c> carries
+    /// <c>reason</c> and <c>unsatisfied_count</c>, which the web page builds its one plain sentence from (#7410).
+    /// </summary>
+    internal static string PlanCaptureNotReadyStatus(IReadOnlyList<string> unmet)
+    {
+        return McpHelpers.Status(
+            "precondition",
+            "This server cannot capture execution plans yet, so an empty result here says nothing about "
+            + "the query. Unsatisfied precondition(s), from pg_plan_capture_readiness: "
+            + string.Join(" | ", unmet)
+            + " — the pg_plan_capture_readiness collector stores the full detail and the remedy "
+            + "beside each observation, and get_pg_plan_capture_readiness returns them: every facet, "
+            + "satisfied or not, in the order they have to be fixed in.",
+            /* #7410: the page's plain sentence is built from the count, not from the message. */
+            new { reason = "plan_capture_not_ready", unsatisfied_count = unmet.Count });
     }
 
     /// <summary>
@@ -409,7 +437,8 @@ public sealed class DarlingMcpPgPlanTools
         int hoursBack,
         IReadOnlyList<DarlingPgPlanCaptureReader.PgPlanCaptureRow> fetched,
         int limit,
-        McpWindowNotice? windowNotice = null)
+        McpWindowNotice? windowNotice = null,
+        bool fullText = false)
     {
         var notice = windowNotice ?? McpWindowNotice.Unavailable;
         var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
@@ -420,6 +449,10 @@ public sealed class DarlingMcpPgPlanTools
                are past 2^53 and any parser decoding JSON numbers as doubles rounds one — and queryid is an
                equality join key, which rounding loses outright rather than approximates. */
             queryid = r.QueryId.ToString(CultureInfo.InvariantCulture),
+            /* #7428: the statement behind the id, a preview unless full_text, null until the hourly capture reaches
+               that id (the same rules as get_pg_top_queries), and always null for queryid 0. */
+            query_text = fullText ? r.QueryText : McpHelpers.TruncateStatement(r.QueryText, DarlingMcpPgStatementTools.QueryTextPreviewLength),
+            query_text_truncated = !fullText && r.QueryText != null && r.QueryText.Length > DarlingMcpPgStatementTools.QueryTextPreviewLength,
             plan_hash = r.PlanHash,
             top_node_type = r.TopNodeType,
             node_count = r.NodeCount,
@@ -450,8 +483,9 @@ public sealed class DarlingMcpPgPlanTools
             truncated,
             note = "Plans are REDACTED at collection: statement text is dropped and literals inside the "
                  + "plan are replaced with placeholders. Node types, relation names, costs, row estimates "
-                 + "and tree shape are intact. Join queryid to get_pg_top_queries for the statement text "
-                 + "and its call counts."
+                 + "and tree shape are intact. query_text is the statement behind each queryid, from the "
+                 + "hourly statement capture (null until it reaches that id). Join queryid to get_pg_top_queries "
+                 + "for its call counts."
                  + (truncated
                      ? $" TRUNCATED at the row limit of {limit}: the window holds more plan shapes than this, "
                        + "ranked below these by total duration. Raise limit, or pass query_id to pin one "

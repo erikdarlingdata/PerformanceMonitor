@@ -29,7 +29,7 @@ import { VIZ } from "../panels.js";
 import { READ_FIELDS } from "../read-fields.js";
 import { getSession } from "../views-api.js";
 import { canCloseState, closeRequest, writeAccess, SIGN_IN_SENTENCE, CLOSE_REASON_MAX_LENGTH } from "../investigation-writes.js";
-import { el, mount, onPageLeave, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, localTime, makeActivatable, rowsUnder } from "../util.js";
+import { el, mount, onPageLeave, loadingStrip, emptyStrip, noticeStrip, errorStrip, readErrorStrip, readTool, apiGet, localTime, makeActivatable, rowsUnder } from "../util.js";
 
 /** The states the list read takes; an empty value is every state. */
 export const STATES = [
@@ -180,7 +180,7 @@ function reportBlock(rep) {
 }
 
 /* The pane under the list for one request, from its get_investigation_reports answer. */
-function detailPane(row, data, access) {
+function detailPane(row, data, access, single) {
   const reports = reportRows(data, row.request_id);
   const journal = journalRows(data, row.request_id);
   const claimed = claimedAt(journal, row.request_id);
@@ -193,8 +193,8 @@ function detailPane(row, data, access) {
   const parts = [
     el("div", { class: "jh-detail-head" }, [
       el("strong", { text: "Request on " + (row.server_name || "?") + " (" + (row.family || "?") + ")" }),
-      el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
-    ]),
+      single ? null : el("button", { type: "button", class: "jh-detail-close", text: "Close", onClick: () => { choices.requestId = null; mount(slot, []); } }),
+    ].filter(Boolean)),
     el("div", { class: "muted", text: facts }),
   ];
 
@@ -240,7 +240,80 @@ async function loadDetail(row) {
   }
 }
 
-export function renderInvestigations(main) {
+/** #6979: the request id in the query of #/investigations?request=<id>, trimmed, or "" when there is none (the page is then the list). */
+export function requestIdFromQuery(query) {
+  const id = new URLSearchParams(query || "").get("request");
+  return id ? id.trim() : "";
+}
+
+/** The agent changes columns of the one-request page. */
+export const REQUEST_CHANGE_COLUMNS = [
+  { key: "called_at_utc", label: "Called" },
+  { key: "tool", label: "Tool" },
+  { key: "kind", label: "Kind" },
+  { key: "result", label: "Result" },
+  { key: "undone_by", label: "Undone by" },
+];
+
+/* The rows are GET /api/agent-changes?request=<id>: the service filters by request_id and lists up to 200 of that request's changes, newest first (AgentChangesLimit), and one request makes far fewer (#6979). */
+function changesSection(res) {
+  const link = el("a", { href: "#/admin/agent-changes", text: "Open the Agent changes tab" });
+  if (res.kind === "error") return section("Agent changes", [errorStrip("Could not read the agent changes: " + res.message), link]);
+  if (res.kind !== "data") return section("Agent changes", [emptyStrip(res.message || "The agent changes are not available."), link]);
+  const changes = res.data && Array.isArray(res.data.changes) ? res.data.changes : [];
+  if (!changes.length) return section("Agent changes", [emptyStrip("No agent change on this request."), link]);
+  return section("Agent changes (" + changes.length + ")", [
+    VIZ.table({ changes }, { id: "request-agent-changes", rowsKey: "changes", columns: REQUEST_CHANGE_COLUMNS, emptyText: "No agent changes." }),
+    el("div", { class: "muted", text: "Undo is a person's action, on the Agent changes tab." }),
+    link,
+  ]);
+}
+
+/* #6979: #/investigations?request=<id>, the link a report notice carries. One request on its own: its report, brief, journal and
+   its agent changes, or one plain line when the id is not a request. It reads only; a change happens after a click on a button. */
+function renderOneRequest(main, requestId) {
+  if (pageAbort) pageAbort.abort();
+  const signal = (pageAbort = new AbortController()).signal;
+  ++pageSeq;
+  slot = el("div", { class: "jh-detail" });
+  mount(main, [
+    el("div", { class: "page-head" }, [
+      el("h2", { text: "Investigations" }),
+      el("div", { class: "spacer" }),
+      el("a", { href: "#/investigations", text: "All requests" }),
+    ]),
+    slot,
+  ]);
+
+  async function load() {
+    const mine = ++pageSeq;
+    mount(slot, [loadingStrip("Loading this request…")]);
+    const [res, session, changes] = await Promise.all([
+      readTool("get_investigation_reports", { request_id: requestId }, signal),
+      getSession(),
+      apiGet("/api/agent-changes?request=" + encodeURIComponent(requestId), signal),
+    ]);
+    if (mine !== pageSeq || res.kind === "aborted" || res.kind === "auth") return;
+    if (res.kind === "error") return mount(slot, [readErrorStrip(res.message)]);
+    /* An id that is not a request: the read answers not_found with a sentence, which is shown as it is. */
+    if (res.kind === "empty") return mount(slot, [emptyStrip(res.message || "No investigation request has this id.")]);
+    const data = res.data || {};
+    const row = rowsUnder(data, "requests").find((r) => r && String(r.request_id).toLowerCase() === requestId.toLowerCase());
+    if (!row) return mount(slot, [emptyStrip("No investigation request has the id " + requestId + ".")]);
+    if (changes.kind === "aborted" || changes.kind === "auth") return;
+    try {
+      mount(slot, [...detailPane(row, data, writeAccess(session), true), changesSection(changes)]);
+    } catch (e) {
+      mount(slot, [errorStrip("Could not draw this request: " + (e && e.message ? e.message : String(e)))]);
+    }
+  }
+
+  reloadList = load;
+  load();
+}
+
+export function renderInvestigations(main, requestId) {
+  if (requestId) return renderOneRequest(main, requestId);
   if (pageAbort) pageAbort.abort();
   const signal = (pageAbort = new AbortController()).signal;
   ++pageSeq;

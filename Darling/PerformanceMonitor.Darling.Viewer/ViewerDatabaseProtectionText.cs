@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -36,16 +37,20 @@ public static class ViewerDatabaseProtectionText
 
     private const string Dash = "-";
 
-    /// <summary>The status line: the summary sentence and when the newest capture was taken.</summary>
-    public static string StatusLine(ViewerDatabaseProtectionRead read)
+    /// <summary>
+    /// The status line: the summary sentence and when the newest capture was taken. The capture time is stored naive UTC and belongs to
+    /// the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343).
+    /// </summary>
+    public static string StatusLine(ViewerDatabaseProtectionRead read, ServerClock clock)
     {
         ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(clock);
         if (read.Summary is null || read.CapturedAt is not { } captured)
         {
             return read.Message ?? NoCapture;
         }
 
-        var local = DateTime.SpecifyKind(captured, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+        var local = ViewerTimeHelper.FormatForDisplay(captured, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g");
         return $"{read.Summary.Text}   Captured: {local}";
     }
 
@@ -85,6 +90,16 @@ public static class ViewerDatabaseProtectionText
                 d.Band.ExcludedReason ?? "",
                 d.Band.AnyOverdue))
             .ToList();
+    }
+
+    /// <summary>
+    /// Whether the Platform column has anything to show (#7416): a boxed server reads "native" on every row, which draws as nothing, so the grid drops the
+    /// column when no row names a platform, as the web page does.
+    /// </summary>
+    public static bool ShowsPlatformColumn(IEnumerable<ViewerDatabaseProtectionRow> rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        return rows.Any(r => !string.IsNullOrEmpty(r.Platform));
     }
 
     /// <summary>The platform as the reader gives it, read with spaces: a plain SQL Server (native) shows nothing.</summary>

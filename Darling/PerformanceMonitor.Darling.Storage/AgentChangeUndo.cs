@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -104,6 +105,7 @@ public sealed record MutedAlertRow(DateTime AlertTimeUtc, int ServerId, string S
 public sealed record AgentUndoResult(bool Undone, string? Code, string Words)
 {
     internal static AgentUndoResult Ok(string kind) => new(true, null, "Undone: the " + kind + " is back to what it was before the agent's change.");
+    internal static AgentUndoResult Ok(string kind, string note) => new(true, null, Ok(kind).Words + " " + note);
     internal static AgentUndoResult Refused(string code, string message) => new(false, code, message);
 }
 
@@ -159,18 +161,32 @@ SELECT c.journal_id, c.event_time, c.request_id, c.server_id, c.actor, c.reason,
 FROM config.investigation_journal AS c
 LEFT JOIN collect.servers AS sv ON sv.server_id = c.server_id
 LEFT JOIN LATERAL (
-    SELECT x.event, x.detail FROM config.investigation_journal AS x
-    WHERE x.request_id = c.request_id
-      AND x.event IN ('action_done', 'action_failed')
-      AND x.detail->>'called_id' = c.journal_id::text
-    ORDER BY x.journal_id DESC LIMIT 1) AS r ON true
+    SELECT y.event, y.detail FROM (
+        SELECT x.journal_id, x.event, x.detail FROM config.investigation_journal AS x
+        WHERE c.request_id IS NOT NULL AND x.request_id = c.request_id
+          AND x.event IN ('action_done', 'action_failed')
+          AND x.detail->>'called_id' = c.journal_id::text
+        UNION ALL
+        /* #7185: a change with no request (a writes-arm tool's, or a person's unknown undo) keeps its result rows with no request too. */
+        SELECT x.journal_id, x.event, x.detail FROM config.investigation_journal AS x
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
+          AND x.event IN ('action_done', 'action_failed')
+          AND x.detail->>'called_id' = c.journal_id::text) AS y
+    ORDER BY y.journal_id DESC LIMIT 1) AS r ON true
 LEFT JOIN LATERAL (
-    SELECT x.event_time, x.actor FROM config.investigation_journal AS x
-    WHERE x.request_id = c.request_id
-      AND x.event = 'action_undone'
-      AND x.detail->>'called_id' = c.journal_id::text
-    ORDER BY x.journal_id DESC LIMIT 1) AS u ON true
+    SELECT y.event_time, y.actor FROM (
+        SELECT x.journal_id, x.event_time, x.actor FROM config.investigation_journal AS x
+        WHERE c.request_id IS NOT NULL AND x.request_id = c.request_id
+          AND x.event = 'action_undone'
+          AND x.detail->>'called_id' = c.journal_id::text
+        UNION ALL
+        SELECT x.journal_id, x.event_time, x.actor FROM config.investigation_journal AS x
+        WHERE c.request_id IS NULL AND x.request_id IS NULL
+          AND x.event = 'action_undone'
+          AND x.detail->>'called_id' = c.journal_id::text) AS y
+    ORDER BY y.journal_id DESC LIMIT 1) AS u ON true
 WHERE c.event = 'action_called' AND c.event_time >= $1 AND ($3::bigint IS NULL OR c.journal_id = $3)
+  AND ($4::uuid IS NULL OR c.request_id = $4)
 ORDER BY c.event_time DESC, c.journal_id DESC
 LIMIT $2";
 
@@ -181,6 +197,7 @@ SELECT j.journal_id, j.event_time, j.request_id, j.server_id, j.actor, j.reason,
 FROM config.investigation_journal AS j
 LEFT JOIN collect.servers AS sv ON sv.server_id = j.server_id
 WHERE j.event = 'refused' AND j.actor LIKE 'agent:%' AND j.detail->>'tool' IS NOT NULL AND j.event_time >= $1
+  AND ($3::uuid IS NULL OR j.request_id = $3)
 ORDER BY j.event_time DESC, j.journal_id DESC
 LIMIT $2";
 
@@ -252,14 +269,17 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         return new ForceReviewMark((int)reader.GetInt64(1), (int)reader.GetInt64(2), running);
     }
 
-    /// <summary>The list: the calls and the refusals newest first, with the switch's state.</summary>
-    public async Task<AgentChangesRead> ReadAsync(int limit = 200, CancellationToken cancellationToken = default)
+    /// <summary>The list: the calls and the refusals newest first, with the switch's state. With <paramref name="requestId"/> (#6979)
+    /// only that request's calls and refusals, read by <c>request_id</c> in SQL (<c>ix_investigation_journal_request</c>) rather than
+    /// out of the newest <paramref name="limit"/>, and with no window: one request's own rows are few, and the undo's window is
+    /// <see cref="AgentChangeRow.CanTryUndo"/>'s call.</summary>
+    public async Task<AgentChangesRead> ReadAsync(int limit = 200, Guid? requestId = null, CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 1000);
-        var since = Now() - Window;
+        var since = requestId is null ? Now() - Window : DateTime.UnixEpoch;
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         var enabled = await ReadEnabledAsync(connection, null, cancellationToken);
-        var changes = await ReadChangesAsync(connection, since, limit, null, cancellationToken);
+        var changes = await ReadChangesAsync(connection, since, limit, null, requestId, cancellationToken);
 
         for (var i = 0; i < changes.Count; i++)
         {
@@ -270,7 +290,8 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         }
 
         var refusals = new List<AgentRefusalRow>();
-        await using (var command = Command(connection, null, RefusalsSql, P(since), P(limit)))
+        await using (var command = Command(connection, null, RefusalsSql, P(since), P(limit),
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid }))
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
@@ -285,11 +306,12 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
         return new AgentChangesRead(enabled, changes, refusals);
     }
 
-    private async Task<List<AgentChangeRow>> ReadChangesAsync(NpgsqlConnection connection, DateTime since, int limit, long? calledId, CancellationToken cancellationToken)
+    private async Task<List<AgentChangeRow>> ReadChangesAsync(NpgsqlConnection connection, DateTime since, int limit, long? calledId, Guid? requestId, CancellationToken cancellationToken)
     {
         var changes = new List<AgentChangeRow>();
         await using var command = Command(connection, null, ListSql, P(since), P(limit),
-            new NpgsqlParameter<long?> { TypedValue = calledId, NpgsqlDbType = NpgsqlDbType.Bigint });
+            new NpgsqlParameter<long?> { TypedValue = calledId, NpgsqlDbType = NpgsqlDbType.Bigint },
+            new NpgsqlParameter<Guid?> { TypedValue = requestId, NpgsqlDbType = NpgsqlDbType.Uuid });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -357,7 +379,16 @@ WHERE c.journal_id = $1 AND c.event = 'action_called'";
     }
 
     private async Task<AgentChangeRow?> ReadAsync(NpgsqlConnection connection, long calledId, CancellationToken cancellationToken) =>
-        (await ReadChangesAsync(connection, DateTime.UnixEpoch, 1, calledId, cancellationToken)).SingleOrDefault();
+        (await ReadChangesAsync(connection, DateTime.UnixEpoch, 1, calledId, null, cancellationToken)).SingleOrDefault();
+
+    /// <summary>#6979: the calls of one request, oldest first, in the list's own row shape and by the list's own SQL (<see cref="ListSql"/>). Writes nothing.</summary>
+    public async Task<IReadOnlyList<AgentChangeRow>> ChangesOfRequestAsync(Guid requestId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        var rows = await ReadChangesAsync(connection, DateTime.UnixEpoch, 1000, null, requestId, cancellationToken);
+        rows.Reverse();
+        return rows;
+    }
 
     /// <summary>True when this store login may undo and switch (it can write the journal and the service row: the admin role). The viewer
     /// role on a managed or compose store cannot, so the web lists only.</summary>
@@ -522,7 +553,16 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
         var current = await ReadCurrentAsync(connection, transaction, spec, key, cancellationToken);
         var label = kind switch { AgentChangeKinds.Mute => "mute rule", AgentChangeKinds.CustomRule => "custom alert rule", AgentChangeKinds.SignatureMerge => "deadlock signature merge", _ => "threshold override" };
-        if (!Equal(spec, current, after))
+        /* #7414: a mute or digest rule the agent changed to expire soon is removed by the expired-rule purge once it passes, and the row being
+           gone is then no one's change but the expiry the agent set. The after image says when it expired, so a rule that is gone and was
+           due to be gone is not "changed since": the before image goes back. A row that is gone with an unexpired after image was deleted
+           by someone else and still refuses. */
+        var purgedAfterExpiry = current is null && before is not null && kind == AgentChangeKinds.Mute && after is not null && ExpiredAtOrBefore(after, Now());
+        /* The purge and a delete look the same from the table. A delete the journal records (an agent's) is named and refuses; a person's
+           delete of a mute rule is recorded nowhere, so for that case the reply below says the rule was missing and may have been deleted on purpose. */
+        if (purgedAfterExpiry && await RecordedDeleteAsync(connection, transaction, targetId!, calledId, cancellationToken) is { } deletedBy)
+            return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} was deleted after the agent's change ({deletedBy}), so it is not put back. Make it again by hand if you still want it.");
+        if (!purgedAfterExpiry && !Equal(spec, current, after))
             return AgentUndoResult.Refused("changed_since", $"Not undone: the {label} changed since the agent's change, so its current settings are kept. Review it and change it by hand if you still want it back.");
 
         if (after is not null && before is null && kind == AgentChangeKinds.SignatureMerge)
@@ -563,7 +603,26 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 ["replaced"] = after?.DeepClone(),
             }.ToJsonString(), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return AgentUndoResult.Ok(label);
+        return purgedAfterExpiry
+            ? AgentUndoResult.Ok(label, $"The {label} was missing from the store and has been put back. The agent had set it to expire, so the expired rule purge most likely removed it, but nothing records who deleted it and a person may have deleted it on purpose. If so, delete it again.")
+            : AgentUndoResult.Ok(label);
+    }
+
+    /// <summary>
+    /// A later, completed <c>delete_mute_rule</c> the journal holds for this rule (any actor), as text naming who and when, or null when none. A person's
+    /// delete through the web page, the Viewer or an operator token journals nothing, so null does not prove the expired rule purge removed the row.
+    /// </summary>
+    private async Task<string?> RecordedDeleteAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string ruleId, long calledId, CancellationToken cancellationToken)
+    {
+        await using var command = Command(connection, transaction, @"
+SELECT c.actor, c.event_time FROM config.investigation_journal c
+JOIN config.investigation_journal d ON d.event = 'action_done' AND d.detail->>'called_id' = c.journal_id::text
+WHERE c.event = 'action_called' AND c.detail->>'tool' = 'delete_mute_rule' AND c.detail->'target'->>'id' = $1 AND c.journal_id > $2
+ORDER BY c.journal_id DESC LIMIT 1", PText(ruleId), P(calledId));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? $"by {reader.GetString(0)} at {Utc(reader.GetDateTime(1)).ToString("u", CultureInfo.InvariantCulture)}"
+            : null;
     }
 
     // ---- the per-kind row access ----
@@ -573,7 +632,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
     /// rule tool answers the rule itself, the override tool journals its image as is, and a delete answers <c>{status: "deleted"}</c>
     /// (null: nothing is left).
     /// </summary>
-    private static JsonNode? AfterImageNode(string kind, JsonNode? answer)
+    internal static JsonNode? AfterImageNode(string kind, JsonNode? answer)
     {
         if (answer is JsonObject o && o["status"] is JsonValue s && s.TryGetValue(out string? word) && word == "deleted")
             return null;
@@ -626,7 +685,7 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
 
     private async Task<JsonObject?> ReadCurrentAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, Spec spec, RowKey key, CancellationToken cancellationToken)
     {
-        var columns = string.Join(", ", spec.Fields.Select(f => f.Type == ImageColumnType.Json ? $"{f.Name}::text" : f.Name));
+        var columns = string.Join(", ", spec.Fields.Select(f => f.Type switch { ImageColumnType.Json or ImageColumnType.TimeOfDay => $"{f.Name}::text", ImageColumnType.DayMask => $"{f.Name}::int", _ => f.Name }));
         await using var command = Command(connection, transaction, $"SELECT {columns} FROM {spec.Table} WHERE {Where(key)} FOR UPDATE", KeyParams(key));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -642,12 +701,20 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 ImageColumnType.Real => JsonValue.Create(reader.GetDouble(i)),
                 ImageColumnType.Time => JsonValue.Create(Utc(reader.GetDateTime(i)).ToString("o", CultureInfo.InvariantCulture)),
                 ImageColumnType.Json => JsonNode.Parse(reader.GetString(i)),
+                ImageColumnType.DayMask => new JsonArray(MuteRecurrence.DayNames(reader.GetInt32(i)).Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
+                ImageColumnType.TimeOfDay => JsonValue.Create(TimeText(reader.GetString(i))),
                 _ => JsonValue.Create(reader.GetString(i)),
             };
         }
 
         return row;
     }
+
+    /// <summary>True when the mute rule image carries an <c>expires_at_utc</c> that is at or before <paramref name="nowUtc"/>.</summary>
+    private static bool ExpiredAtOrBefore(JsonObject image, DateTime nowUtc) =>
+        image["expires_at_utc"] is JsonNode e
+        && DateTime.TryParse(e.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
+        && at <= nowUtc;
 
     /// <summary>Equality on the spec's fields only. Null and absent are equal; numbers by value; times by instant; JSON by structure.</summary>
     private static bool Equal(Spec spec, JsonObject? current, JsonObject? after)
@@ -684,6 +751,10 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                     && Math.Abs((x - y).Ticks) < TimeSpan.TicksPerMillisecond / 1000;
             case ImageColumnType.Json:
                 return JsonNode.DeepEquals(Structured(a), Structured(b));
+            case ImageColumnType.DayMask:
+                return DayMaskOf(a) == DayMaskOf(b);
+            case ImageColumnType.TimeOfDay:
+                return TimeText(a.ToString()) == TimeText(b.ToString());
             case ImageColumnType.Bool:
                 return a.GetValue<bool>() == b.GetValue<bool>();
             case ImageColumnType.Whole:
@@ -692,6 +763,17 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
                 return string.Equals(a.GetValue<string>(), b.GetValue<string>(), StringComparison.Ordinal);
         }
     }
+
+    /// <summary>A journaled day list (<c>["Mon","Fri"]</c>) as the column's bit mask (#7040).</summary>
+    private static int DayMaskOf(JsonNode node)
+    {
+        var names = node is JsonArray array ? array.Select(n => n?.ToString()).ToList() : [];
+        return MuteRecurrence.TryParseDays(names, out var mask, out _) ? mask ?? 0 : 0;
+    }
+
+    /// <summary>A time of day as <c>HH:mm</c> (seconds only when set), whichever of the stored or journaled spellings it arrives in.</summary>
+    private static string TimeText(string text) =>
+        MuteRecurrence.TryParseTime(text, out var time) ? MuteRecurrence.FormatTime(time) : text;
 
     private static JsonNode? Structured(JsonNode node) =>
         node is JsonValue v && v.TryGetValue(out string? s) && s is not null && (s.TrimStart().StartsWith('{') || s.TrimStart().StartsWith('['))
@@ -720,6 +802,12 @@ WHERE journal_id = $1 AND event = 'action_called'", P(calledId)))
             TypedValue = value is null ? null : DateTime.SpecifyKind(DateTime.Parse(value.ToString(), CultureInfo.InvariantCulture,
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal), DateTimeKind.Unspecified),
             NpgsqlDbType = NpgsqlDbType.Timestamp,
+        },
+        ImageColumnType.DayMask => new NpgsqlParameter<short?> { TypedValue = value is null ? null : (short?)DayMaskOf(value), NpgsqlDbType = NpgsqlDbType.Smallint },
+        ImageColumnType.TimeOfDay => new NpgsqlParameter<TimeOnly?>
+        {
+            TypedValue = value is not null && MuteRecurrence.TryParseTime(value.ToString(), out var tod) ? tod : null,
+            NpgsqlDbType = NpgsqlDbType.Time,
         },
         ImageColumnType.Json => new NpgsqlParameter<string?> { TypedValue = value is null ? null : (Structured(value) ?? value).ToJsonString(), NpgsqlDbType = NpgsqlDbType.Jsonb },
         _ => PText(value?.GetValue<string>()),

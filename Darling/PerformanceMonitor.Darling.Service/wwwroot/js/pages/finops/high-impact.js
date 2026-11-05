@@ -12,7 +12,7 @@
 
 import { VIZ } from "../../panels.js";
 import { planColumn } from "../plan-viewer.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -27,9 +27,9 @@ const LIMIT = 10;
 const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
   { key: "impact_band", label: "Band" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "query_hash", label: "Query hash", mono: true },
-  { key: "sample_query_text", label: "Query preview", wrap: true, valueList: false },
+  { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },
   { key: "total_executions", label: "Executions", format: "int" },
   { key: "total_cpu_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num1" },
@@ -39,7 +39,7 @@ const COLUMNS = [
   { key: "reads_share_pct", label: "Reads %", format: "num1" },
   { key: "total_writes", label: "Writes", format: "int" },
   { key: "writes_share_pct", label: "Writes %", format: "num1" },
-  { key: "total_memory_mb", label: "Memory MB", format: "num1" },
+  { key: "peak_memory_mb", label: "Peak grant MB", format: "num1" },
   { key: "memory_share_pct", label: "Memory %", format: "num1" },
   { key: "executions_share_pct", label: "Executions %", format: "num1" },
   { key: "has_plan", label: "Plan", format: "bool" },
@@ -70,7 +70,7 @@ export const tab = {
         if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
-          noticeStrip(noticeText(data)),
+          captionStrip(noticeText(data)),
           VIZ.table(data, { rowsKey: "rows", columns: [...COLUMNS, planColumn(server)], emptyText: "No queries were ranked for this server." }),
         ]);
       } catch (e) {

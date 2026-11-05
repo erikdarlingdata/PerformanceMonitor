@@ -121,7 +121,7 @@ public sealed partial class PlanForceToolLiveTests
             }
 
             Assert.Equal(PlanUndoAnswer.OutcomeUnknown, (string?)lost.Body["status"]);
-            var attempt = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes, x => x.CalledId != calledId);
+            var attempt = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes, x => x.CalledId != calledId);
             Assert.Equal("person:alice", attempt.Actor);
             Assert.Equal(AgentChangeKinds.PlanUndo, attempt.Kind);
             Assert.Equal(AgentChangeResult.Unknown, attempt.Result);

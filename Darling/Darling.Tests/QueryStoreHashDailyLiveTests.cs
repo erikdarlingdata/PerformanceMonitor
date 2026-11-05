@@ -306,7 +306,7 @@ FROM generate_series(0, {days * 24 - 1}) AS g CROSS JOIN generate_series(1, 2) A
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -362,7 +362,7 @@ FROM generate_series(0, {days * 24 - 1}) AS g CROSS JOIN generate_series(1, 2) A
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -408,7 +408,7 @@ FROM generate_series(0, {days * 24 - 1}) AS g CROSS JOIN generate_series(1, 2) A
     {
         Assert.SkipWhen(string.IsNullOrEmpty(ComposeStampLiveSupport.BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(ComposeStampLiveSupport.BaseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

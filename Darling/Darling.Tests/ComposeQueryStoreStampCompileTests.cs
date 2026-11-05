@@ -303,6 +303,36 @@ public sealed class ComposeQueryStoreStampCompileTests
         Assert.Equal(Compile(TopQueriesOverTime(), served with { QueryStoreStampThrough = null }).Sql, fallback.Sql);
     }
 
+    /// <summary>#7285: the runner's fleet gate (<c>ReadsFleetRollup</c>) answers what the compile does, so the size guard counts the fleet
+    /// table only for a panel whose text reads it. A server scope, a filter, a raw-route server, a group the fleet table lacks and a store
+    /// below V239 all keep the stamp estimate.</summary>
+    [Fact]
+    public void TheReadsFleetRollupGate_AgreesWithTheCompiledText_AndRefusesEveryPanelTheFleetTableCannotServe()
+    {
+        var hashPanel = TopQueriesOverTime();
+        var plan = QueryStoreRankedHarness.Parse(hashPanel);
+        var fleet = Context(Day, Day.AddDays(1), Day.AddHours(20)) with { QueryStoreFleetReady = true };
+        Assert.True(ComposeCompiler.ReadsFleetRollup(plan, fleet));
+        Assert.Contains("query_store_compose_fleet", Compile(hashPanel, fleet).Sql, StringComparison.Ordinal);
+
+        var filtered = Panel("qs_total_cpu_us", null, ",\"timeBucket\":\"minute\",\"topN\":10,\"groupBy\":[\"query_hash\"],\"viz\":\"line\","
+            + "\"filters\":[{\"dimension\":\"database_name\",\"op\":\"like\",\"value\":\"%\"}]");
+        var byModule = Panel("qs_total_cpu_us", null, ",\"topN\":10,\"groupBy\":[\"module_name\"],\"viz\":\"bar\"");
+        var cases = new (string Json, ComposeRunContext Context)[]
+        {
+            (hashPanel, fleet with { Servers = new[] { "srv1" } }),
+            (hashPanel, fleet with { QueryStoreRawServerIds = new[] { 3 } }),
+            (hashPanel, fleet with { QueryStoreFleetReady = false }),
+            (filtered, fleet),
+            (byModule, fleet),
+        };
+        foreach (var (json, context) in cases)
+        {
+            Assert.False(ComposeCompiler.ReadsFleetRollup(QueryStoreRankedHarness.Parse(json), context), json);
+            Assert.DoesNotContain("query_store_compose_fleet", Compile(json, context).Sql, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void EveryPartialTheCompilerCanAsk_ForAQueryStoreMeasure_HasARollupColumn()
     {
@@ -339,7 +369,7 @@ public sealed class ComposeQueryStoreStampCompileTests
                 WHERE f.collection_time >= $1
                   AND f.collection_time <= $2
                 GROUP BY f.query_hash
-                ORDER BY value DESC NULLS LAST
+                ORDER BY value DESC NULLS LAST, query_hash
                 LIMIT $4
             )
             SELECT * FROM (

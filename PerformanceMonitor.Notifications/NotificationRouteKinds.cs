@@ -68,6 +68,36 @@ public static class NotificationRouteKinds
             _ => SeveritiesBoth,
         };
 
+    /// <summary><c>report_notice</c> value (#6979): the route posts no chat notice when an agent files a report. The default, and what every route did before the setting existed.</summary>
+    public const string ReportNoticeOff = "off";
+
+    /// <summary><c>report_notice</c> value (#6979): the route posts a notice for a report with the needs_person verdict, or whose request made at least one agent change.</summary>
+    public const string ReportNoticeNeedsPersonOrChange = "needs_person_or_change";
+
+    /// <summary><c>report_notice</c> value (#6979): the route posts a notice for every report.</summary>
+    public const string ReportNoticeAll = "all";
+
+    /// <summary>The stored word for a route's report notice setting: <c>off</c>, <c>needs_person_or_change</c> or <c>all</c>. Blank, null or
+    /// anything unknown reads as <c>off</c>, so a value this build does not know never starts a notice.</summary>
+    public static string NormalizeReportNotice(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            ReportNoticeNeedsPersonOrChange => ReportNoticeNeedsPersonOrChange,
+            ReportNoticeAll => ReportNoticeAll,
+            _ => ReportNoticeOff,
+        };
+
+    /// <summary><c>action_approval</c> value (#7109): a Level 3 action on this route waits for a person to approve it. The column default.</summary>
+    public const string ActionApprovalRequired = "required";
+
+    /// <summary><c>action_approval</c> value (#7109): a Level 3 action on this route runs without a person's approval.</summary>
+    public const string ActionApprovalOff = "off";
+
+    /// <summary>The stored word for a route's action approval setting: <c>required</c> or <c>off</c>. Blank, null or anything unknown reads
+    /// as <c>required</c>, so a value this build does not know never lets an action run without approval.</summary>
+    public static string NormalizeActionApproval(string? value) =>
+        string.Equals(value?.Trim(), ActionApprovalOff, StringComparison.OrdinalIgnoreCase) ? ActionApprovalOff : ActionApprovalRequired;
+
     /// <summary>Whether a route with severity filter <paramref name="severities"/> takes an alert of <paramref name="severity"/>.
     /// A null severity (a caller that does not know the alert's tier) is taken by every route.</summary>
     public static bool SeveritiesAccept(string? severities, AlertSeverityLevel? severity) =>

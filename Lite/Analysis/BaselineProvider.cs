@@ -105,6 +105,7 @@ public class BaselineProvider
         [MetricNames.IoWriteLatency] = "file_io_stats",
         [MetricNames.Blocking] = "blocked_process_report",
         [MetricNames.BlockingPerMinute] = "blocked_process_report",
+        [MetricNames.BlockingSnapshot] = "dmv_blocking_snapshot",
         [MetricNames.Deadlock] = "deadlocks",
         [MetricNames.Memory] = "memory_stats",
     };
@@ -235,7 +236,7 @@ public class BaselineProvider
     /// products flag the same anomalies off the same cache grain. See that method's remarks for why these four and
     /// not the other seven RobustTierScaffold arms.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The cache key's time AND the compute's window end (#3941, restated for #4248): the day for a
     /// raw-table arm (<see cref="IsDailyCacheMetric"/>), the hour for every other one — the one seam both read so
@@ -305,7 +306,7 @@ public class BaselineProvider
 
     /// <summary>
     /// The newest <c>server_properties</c> row that carries an offset, for the clock the buckets key on (#3653 Q6) —
-    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c>'s read with <c>time_zone_id</c> (v42) riding along, and
+    /// <c>LocalDataService.GetServerClockAsync</c>'s read (<c>time_zone_id</c>, v42, rides along), and
     /// its reason for skipping NULL offsets: the column is nullable and a store migrated from earlier holds snapshots
     /// that predate it. One row, on the compute's own connection, once per metric per cache period. A server with no
     /// row reads (NULL, NULL), which <see cref="BaselineLocalClock.Resolve"/> turns into UTC keying — exactly what
@@ -714,13 +715,14 @@ WITH clean AS (
 
             /* #6696: the write-latency twin of the arm above (Darling's PgBaselineProvider has the long note), for the
                ANOMALY_WRITE_LATENCY gate, which used to be scored against the read series. WHERE delta_writes > 0
-               keeps v non-null, so sample_count counts write-bearing file rows. */
+               keeps v non-null, so sample_count counts write-bearing file rows. #6959: the write side reads log files and tempdb data files only. User data files take background checkpoint and lazy-writer writes that no session waits on, so a multi-file database's data rows (a small high group) were the window peak against a baseline median they sat far above. */
             MetricNames.IoWriteLatency => @"
 WITH clean AS (
     SELECT collection_time, delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0) AS v
     FROM v_file_io_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
     AND   delta_writes > 0
+    AND   (file_type = 'LOG' OR lower(database_name) = 'tempdb')
 )," + RobustTierScaffold,
 
             // #6645: the baseline counts the same reports the current window does (BlockingWaits.NotSelfWaitSql), so the 3x ratio
@@ -729,6 +731,12 @@ WITH clean AS (
             // No restart exclusion needed (event counts, not cumulative). See EventBaselineSql (#4731).
             MetricNames.Blocking => OnEventTime(EventBaselineSql("blocked_process_report", "v_collection_log",
                 StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql) + " AS ev", "COUNT(*)"), "event_time"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts v_dmv_blocking_snapshots rows (same self-wait
+               filter), so its history is those rows, covered by the snapshot collector's own runs. A snapshot's event_time IS its
+               collection_time, so the events keep the helper's collection_time key and need no OnEventTime. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "v_collection_log",
+                "(SELECT * FROM v_dmv_blocking_snapshots WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + ") AS snap", "COUNT(*)"),
 
             // Event-based — same approach as blocking
             MetricNames.Deadlock => OnEventTime(EventBaselineSql("deadlocks", "v_collection_log",
@@ -782,7 +790,7 @@ clean AS (
     FROM with_rate
 )," + RobustTierScaffold,
 
-            // Blocking events per minute (chart shows event bars bucketed by minute)
+            // Blocked-process reports per minute (the chart shows report bars bucketed by minute)
             MetricNames.BlockingPerMinute => @"
 WITH per_minute AS (
     SELECT DATE_TRUNC('minute', event_time) AS minute_bucket,

@@ -48,6 +48,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         ["AlertNotebookEndpoint.cs"] = 1, // /api/alert-notebook (round 1, M3)
         ["DarlingFleetSweepEndpoints.cs"] = 4, // /api/sweeps, /latest, /{id} and /watch-items (round 1, M3)
         ["DarlingServerDatabasesEndpoint.cs"] = 1, // the database picker (round 1, M3)
+        ["DarlingServerDataStartEndpoint.cs"] = 1, // the charts' data start (#7386)
         ["McpToolLatencyFilter.cs"] = 1, // every MCP tool call but run_custom_view_panel
     };
 
@@ -68,7 +69,7 @@ public sealed class ReadAdmissionCoverageCensusTests
                     continue;
                 }
 
-                var name = Path.GetFileName(file);
+                var name = IsWebEndpointsPartial(file) ? "DarlingWebEndpoints.cs" : Path.GetFileName(file);
                 found[name] = found.GetValueOrDefault(name) + 1;
 
                 /* The admission call comes after the scope and the band, within the next few statements, or (#5506 part 3)
@@ -95,7 +96,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     [InlineData("DarlingWebEndpoints.cs", "private static async Task<ComposeRunOutcome> RunComposedPanelAdmittedAsync(", "token => RunComposedPanelAdmittedAsync(")]
     public void CacheMissPath_RunsTheMethodThatAdmits(string file, string method, string joinCall)
     {
-        var source = File.ReadAllText(Path.Combine(ServiceDir, file));
+        var source = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, file));
         var at = source.IndexOf(method, StringComparison.Ordinal);
         Assert.True(at >= 0, $"{file} no longer declares {method}");
         var body = source.Substring(at, Math.Min(4_000, source.Length - at));
@@ -140,7 +141,7 @@ public sealed class ReadAdmissionCoverageCensusTests
            McpToolLatencyRecordingTests.TheInvestigationWait_IsNeitherTimedNorAdmitted_WhileAnotherRead_IsBoth calls them. */
         Assert.Equal("run_custom_view_panel", McpToolLatencyFilter.SkippedToolName);
 
-        var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
+        var web = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         var runner = web.IndexOf("internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(", StringComparison.Ordinal);
         var core = web.IndexOf("RunComposedPanelCoreAsync(ComposeHost, postgres, body,", runner, StringComparison.Ordinal);
         Assert.True(runner >= 0 && core > runner);
@@ -154,7 +155,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     [Fact]
     public void TheDedicatedWebReadRoutes_Admit()
     {
-        var web = File.ReadAllText(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
+        var web = RepoFile.ReadRepoFile(Path.Combine(ServiceDir, "DarlingWebEndpoints.cs"));
         Assert.Contains("AdmitWebRouteAsync(readAdmission, \"get_fleet_overview\"", web, StringComparison.Ordinal);
         Assert.Contains("AdmitWebRouteAsync(readAdmission, \"test_custom_alert_rule\"", web, StringComparison.Ordinal);
         var triage = File.ReadAllText(Path.Combine(ServiceDir, "DarlingTriageEndpoint.cs"));
@@ -164,6 +165,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         Assert.Equal("get_sweep_reports", DarlingFleetSweepEndpoints.SweepReportsRoute);
         Assert.Equal("alert_notebook", AlertNotebookEndpoint.NotebookRoute);
         Assert.Equal("server_databases", DarlingServerDatabasesEndpoint.AdmissionRoute);
+        Assert.Equal("server_data_start", DarlingServerDataStartEndpoint.AdmissionRoute);
     }
 
     /// <summary>
@@ -192,6 +194,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [SweepsFile + "GET \"/api/sweeps/{id:long}\""] = null,
         [SweepsFile + "GET \"/api/sweeps/watch-items\""] = null,
         ["DarlingServerDatabasesEndpoint.cs: GET Route"] = null, // the database picker, /api/server-databases
+        ["DarlingServerDataStartEndpoint.cs: GET Route"] = null, // the charts' data start, /api/server-data-start (#7386)
         ["DarlingKnownPatternRoutes.cs: POST \"/api/known-patterns\""] = "write (#6334)",
         ["DarlingKnownPatternRoutes.cs: PUT \"/api/known-patterns/{id:long}\""] = "write (#6334)",
         ["DarlingKnownPatternRoutes.cs: DELETE \"/api/known-patterns/{id:long}\""] = "write (#6334)",
@@ -234,6 +237,13 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "PUT \"/api/agent-changes/switch\""] = "write",
         [WebFile + "GET \"/api/server-actions\""] = "definition read: every server with its three action switches (one registry join, small; #6269)",
         [WebFile + "PUT \"/api/servers/{id:int}/actions/{action}\""] = "write",
+        [WebFile + "GET \"/api/people\""] = "definition read: the people with their sign-ins and grants, three small config tables (#7107)",
+        [WebFile + "PUT \"/api/people/{command}\""] = "write",
+        [WebFile + "GET \"/api/proposals\""] = "definition read: the action proposals, one small config table capped at 200 rows, plus the request's server names (#7109)",
+        [WebFile + "GET \"/api/proposals/{id:guid}\""] = "definition read: one action proposal row (#7109)",
+        [WebFile + "POST \"/api/proposals/{id:guid}/first-press\""] = "write",
+        [WebFile + "POST \"/api/proposals/{id:guid}/confirm\""] = "write",
+        [WebFile + "GET \"/api/notification-routes/nobody-can-approve\""] = "definition read: one query over the routes and the people tables, all small config tables (#7109)",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/approve\""] = "write",
         [WebFile + "PUT \"/api/investigation-notes/{id:long}/reject\""] = "write",
         [WebFile + "PUT \"/api/investigation-requests/{requestId}/close\""] = "write",
@@ -247,6 +257,8 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "POST \"/api/notification-routes\""] = "write",
         [WebFile + "PUT \"/api/notification-routes/{id:int}\""] = "write",
         [WebFile + "DELETE \"/api/notification-routes/{id:int}\""] = "write",
+        [WebFile + "PUT \"/api/alert-settings/daily-report\""] = "write",
+        [WebFile + "PUT \"/api/alert-settings/database-protection\""] = "write",
         [WebFile + "POST \"/api/collectors/run\""] = "write",
         [WebFile + "GET \"/api/collectors/run/{commandId:long}\""] = "definition read: one command row's status and result (a single indexed row, #5941)",
         [WebFile + "GET \"/api/active-queries/live/available\""] = "definition read: whether this seat and store login can queue a live read (one catalog lookup, #6386)",
@@ -277,8 +289,15 @@ public sealed class ReadAdmissionCoverageCensusTests
     private static IEnumerable<(string File, string Source)> ServiceSources() =>
         Directory.EnumerateFiles(ServiceDir, "*.cs", SearchOption.AllDirectories)
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                        && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Select(f => (Path.GetRelativePath(ServiceDir, f).Replace(Path.DirectorySeparatorChar, '/'), File.ReadAllText(f)));
+                        && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                        && !IsWebEndpointsPartial(f))
+            .Select(f => (Path.GetRelativePath(ServiceDir, f).Replace(Path.DirectorySeparatorChar, '/'), RepoFile.ReadRepoFile(f)));
+
+    /// <summary>#7026: <c>DarlingWebEndpoints.&lt;Area&gt;.cs</c> is part of <c>DarlingWebEndpoints.cs</c>, so the roster counts
+    /// and reads the pieces as the one file they were.</summary>
+    private static bool IsWebEndpointsPartial(string path) =>
+        Path.GetFileName(path).StartsWith("DarlingWebEndpoints.", StringComparison.Ordinal)
+        && !string.Equals(Path.GetFileName(path), "DarlingWebEndpoints.cs", StringComparison.Ordinal);
 
     [Fact]
     public void EveryMappedRoute_IsAdmittedOrExemptWithAReason()

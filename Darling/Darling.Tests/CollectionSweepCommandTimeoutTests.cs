@@ -170,10 +170,11 @@ public sealed class CollectionSweepCommandTimeoutTests
        registrations holding it; both carry the sweep deadline like the upsert. */
     private const int ExpectedSweepCommandSites = 15;
 
-    /// <summary>The five COPY writers, counted for the same reason. Five since #3601: RdsLogEventIngestor is
-    /// RdsDeadlockIngestor's write over the log-event definition, and it was looked at by a person — the same
-    /// shared start deadline, the same sweep constant on the importer, the same phase stamp.</summary>
-    private const int ExpectedCopyWriterSites = 5;
+    /// <summary>The two COPY writers, counted for the same reason: the collector runner's, and RdsCopyWriter's.
+    /// Five from #3601 until #7222, when the four RDS ingestors' character-identical copies became the one
+    /// RdsCopyWriter.WriteAsync. It was looked at by a person — the same shared start deadline, the same sweep
+    /// constant on the importer, the same phase stamp — and the per-site checks below still run on it.</summary>
+    private const int ExpectedCopyWriterSites = 2;
 
     /// <summary>
     /// Every command shape the landed pins know about, with the type name allowed to carry its namespace:
@@ -275,7 +276,7 @@ public sealed class CollectionSweepCommandTimeoutTests
         foreach (var (file, member) in s_sweepMembers)
         {
             var path = SourcePath(file);
-            var text = File.ReadAllText(path);
+            var text = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file);
             var body = MemberBody(text, member, path);
 
             /* ONE stripped body, for the shape scan AND the value scan. Matching the construction over
@@ -345,7 +346,7 @@ public sealed class CollectionSweepCommandTimeoutTests
         foreach (var (file, member) in s_sweepMembers)
         {
             var path = SourcePath(file);
-            var body = MemberBody(File.ReadAllText(path), member, path);
+            var body = MemberBody(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", file), member, path);
             var code = CSharpSourceWalker.StripCommentsAndStrings(body);
 
             foreach (Match ctor in s_commandCtor.Matches(code))

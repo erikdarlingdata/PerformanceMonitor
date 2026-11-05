@@ -10,7 +10,7 @@
    (view database_resources) over a window picked on the shared time range picker (#5562: a rolling length of at least an hour, within the read's reach), with each database's share of the server's CPU and I/O. */
 
 import { VIZ } from "../../panels.js";
-import { el, mount, loadingStrip, noticeStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
+import { el, mount, loadingStrip, captionStrip, readErrorStrip, errorStrip, readTool } from "../../util.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { finopsWindowControl } from "./window.js";
 
@@ -18,7 +18,7 @@ import { finopsWindowControl } from "./window.js";
 const HOURS = 24;
 
 const COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_time_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num2" },
   { key: "logical_reads", label: "Logical reads", format: "int" },
@@ -56,7 +56,7 @@ export const tab = {
         if (res.kind === "empty") return mount(body, gatedEmptyStrip(res, ctx));
         const data = res.data || {};
         mount(body, [
-          noticeStrip(noticeText(data)),
+          captionStrip(noticeText(data), data.truncated === true),
           VIZ.table(data, { rowsKey: "rows", columns: COLUMNS, emptyText: "No database resource usage was recorded for this server." }),
         ]);
       } catch (e) {

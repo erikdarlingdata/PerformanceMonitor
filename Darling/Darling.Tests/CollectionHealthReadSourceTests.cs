@@ -87,6 +87,25 @@ public sealed class CollectionHealthReadSourceTests
         Assert.Equal("a note; read source: " + Replica, new CollectionLogRow { ErrorMessage = "a note", ReadSource = Replica }.MessageFormatted);
         Assert.Equal("read source: " + Replica, new CollectionLogRow { ReadSource = Replica }.MessageFormatted);
     }
+
+    /// <summary>#7416: the store keeps one message column. On a SUCCESS run it is a note ("shred gated: 1"), so the Error cell is blank and the Note cell carries it, with the read source. A failed run keeps its error.</summary>
+    [Fact]
+    public void ASuccessRunsMessage_IsANote_NotAnError_InTheGridCells_AndTheToolSplit()
+    {
+        var ok = new CollectionLogRow { Status = "SUCCESS", ErrorMessage = "shred gated: 1", ReadSource = Replica };
+        Assert.Equal("", ok.ErrorFormatted);
+        Assert.Equal("shred gated: 1; read source: " + Replica, ok.NoteFormatted);
+
+        var failed = new CollectionLogRow { Status = "ERROR", ErrorMessage = "login failed", ReadSource = Replica };
+        Assert.Equal("login failed", failed.ErrorFormatted);
+        Assert.Equal("read source: " + Replica, failed.NoteFormatted);
+
+        Assert.Null(CollectorHealthClassifier.RunError("success", "plans rendered: 0"));
+        Assert.Equal("plans rendered: 0", CollectorHealthClassifier.RunNote("success", "plans rendered: 0"));
+        Assert.Equal("boom", CollectorHealthClassifier.RunError("PERMISSIONS", "boom"));
+        Assert.Null(CollectorHealthClassifier.RunNote("PERMISSIONS", "boom"));
+        Assert.Null(CollectorHealthClassifier.RunNote("SUCCESS", ""));
+    }
 }
 
 /// <summary>The same, end to end against a store: the tool reads the newest Query Store run's <c>read_source</c>.</summary>

@@ -84,16 +84,36 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #7551: the suppression rule as one boolean expression, spliced into PgTableBloatSql and PgTableBloatTotalsSql (both in
+           the parse-checked population). Not a statement, and verified where it is spliced. */
+        "DarlingPgTableBloatReader.UnpublishableConditionSql",
+        /* #7575: the window's two sets, their join and the rule fragments that PgIndexUsageSql and PgIndexUsageTotalsSql both splice in.
+           WindowCtesSql is a WITH clause that ends before its SELECT, so it is not a statement alone, and it holds the word SELECT, so
+           QueryFields leaves out anything listed here. Both whole queries ARE in the parse-checked population, so every fragment is
+           verified where it is spliced. */
+        "DarlingPgIndexUsageReader.WindowCtesSql",
+        "DarlingPgIndexUsageReader.WindowJoinSql",
+        "DarlingPgIndexUsageReader.StatsResetConditionSql",
+        "DarlingPgIndexUsageReader.UnscannedConditionSql",
+        "DarlingPgIndexUsageReader.InvalidConditionSql",
         /* #6836: the window's WAL aggregate, one CASE expression spliced into PgTopQueriesSql (in the parse-checked
            population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
            where it is spliced. */
         "DarlingPgStatementReader.WalBytesWindowSql",
+        "DarlingPgStatementReader.IsServiceStatementSql",
         /* #3278's twin of the line above, and the same reasoning: an IN-list fragment built from
            EnumeratedCollectorDriver.FreshnessSuccessStatuses, so it is 'SUCCESS', 'SKIPPED' and not a
            statement. The query it is spliced into - CoverageEvidenceSql - IS in the parse-checked
            population, so the fragment is verified where it is used rather than left unverified. */
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
+        /* #7455: the two words a buffer row without a name shows. Display text, not a statement. */
+        "DarlingPgBufferUsageReader.NotResolvedLabel",
+        "DarlingPgBufferUsageReader.SharedOrDroppedLabel",
+        /* #7409: two expression fragments spliced into CurrentConfigSql (in the parse-checked population): the default
+           shown in the base of the value, and the "differs from the default" predicate. Verified where spliced. */
+        "DarlingPgServerConfigReader.DefaultAsSettingSql",
+        "DarlingPgServerConfigReader.DiffersFromDefaultSql",
         /* #3539: the PostgreSQL Long-Running Query read's switchable dump/restore opt-out - one AND
            predicate spliced into CurrentLongRunningSessionsSqlTemplate by BuildCurrentLongRunningSessionsSql.
            Not a statement; both renderings of the template it is spliced into
@@ -165,6 +185,7 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static IEnumerable<FieldInfo> QueryFields(Type reader) =>
         reader.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
             .Where(f => f.FieldType == typeof(string) && (f.IsLiteral || f.IsInitOnly))
+            .Where(f => !NotQueryFields.Contains(reader.Name + "." + f.Name))
             .Where(f => FieldText(f).Contains("SELECT", StringComparison.OrdinalIgnoreCase));
 
     /// <summary><c>GetRawConstantValue</c> for a <c>const</c>, <c>GetValue</c> for a <c>static readonly</c>

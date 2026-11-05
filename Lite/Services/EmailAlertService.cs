@@ -357,6 +357,41 @@ public class EmailAlertService : IFindingAlertSender
     }
 
     /// <summary>
+    /// #7086: records an engine fire the evaluator held back from paging (<see cref="AlertHold"/>) as Lite's one combined
+    /// <c>config_alert_log</c> row with <see cref="AlertDelivery.RoutedToDigest"/>, the hold's reason on the context's
+    /// routing record, and nothing attempted: no send core, no investigation request. The same row shape as
+    /// <see cref="TrySendAlertEmailAsync"/> writes. A failed write is logged and answers <c>null</c>.
+    /// </summary>
+    public async Task<AlertDelivery?> RecordHeldAlertAsync(
+        string metricName, string serverName, string currentValue, string thresholdValue, int serverId,
+        AlertContext? context, double? numericCurrentValue, double? numericThresholdValue, string? detailText,
+        AlertHold hold, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            context ??= new AlertContext();
+            context.Routing = hold.ToRouting();
+            var delivery = AlertDelivery.RoutedToDigest();
+            await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                serverId.ToString(), serverName, metricName,
+                currentValue, thresholdValue,
+                numericCurrentValue, numericThresholdValue,
+                delivery,
+                false, detailText, AlertContextSerializer.Serialize(context))
+            {
+                AlertTimeUtc = AlertHistoryEscalationSeed.TruncateToMicroseconds(DateTime.UtcNow),
+            });
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"RecordHeldAlertAsync error: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// The digest arm of <see cref="SendFindingAlertAsync"/> (#3712): Lite's one combined
     /// <c>config_alert_log</c> row, written with <see cref="AlertDelivery.RoutedToDigest"/> and nothing
     /// attempted. Mirrors the row <see cref="TrySendAlertEmailAsync"/> writes column for column — the same

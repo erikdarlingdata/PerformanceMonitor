@@ -111,6 +111,9 @@ jobs:
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 85"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "fsync = off"
+          # synchronous_commit stays on (#7012): a commit that returns before its WAL is flushed leaves the committed hint bits unset, so VACUUM cannot mark pages all-visible and an index scan cannot mark dead entries. With fsync off the flush never waits on disk.
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "full_page_writes = off"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timezone = 'UTC'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "log_timezone = 'UTC'"
           & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
@@ -134,6 +137,25 @@ jobs:
           $update = @{ }
           if ($env:UPDATE_BASELINES -eq 'true') { $update.UpdateBaselines = $true }
           ./tools/ui-smoke/run-ui-smoke.ps1 -PgBin "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin" -PgPort 5541 -WorkDir "$env:RUNNER_TEMP\ui-smoke" -NoBuild -Channel chrome @update
+
+      # #7479: the layout pass (tools/ui-smoke/layout.mjs) fails the job; this lists each failure (page, width, check, selector, numbers) in
+      # the job summary. The full-page PNG of every page at 600, 1280 and 2560 px is in the darling-ui-smoke artifact, ui-smoke/out/layout.
+      - name: Layout pass summary
+        if: always()
+        shell: pwsh
+        run: |
+          $report = "$env:RUNNER_TEMP\ui-smoke\out\report.json"
+          if (-not (Test-Path $report)) { return }
+          $layout = (Get-Content $report -Raw | ConvertFrom-Json).layout
+          if (-not $layout) { return }
+          $failures = @($layout.failures)
+          $lines = @("### Layout pass: $($failures.Count) failures in $($layout.seconds) s over $(@($layout.rows).Count) page and width loads", '')
+          if ($failures.Count -gt 0) {
+            $lines += '| Page | Width | Check | Selector | Numbers |'
+            $lines += '| --- | ---: | --- | --- | --- |'
+            foreach ($f in $failures) { $lines += "| $($f.page) | $($f.width) | $($f.check) | ``$($f.selector)`` | $($f.detail -replace '\|', '/') |" }
+          }
+          $lines -join "`n" | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       # #5931: the per-page screenshot pixel counts, from the report.json that smoke.mjs writes (nothing is parsed from the log).
       # Nothing to show for an update_baselines dispatch (nothing is compared) or when the run died before the shots.

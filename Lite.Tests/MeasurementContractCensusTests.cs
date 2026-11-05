@@ -14,6 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using Darling.Tests;
+using Lite.Tests;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -1377,7 +1378,13 @@ public sealed class MeasurementContractCensusTests
             {
                 files++;
                 var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
-                yield return (relative, File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal));
+                /* #7024: DarlingWorker.cs is read joined with its DarlingWorker.<Area>.cs partials, which are not swept on their own. */
+                if (Path.GetFileName(path).StartsWith("DarlingWorker.", StringComparison.Ordinal) && Path.GetFileName(path) != "DarlingWorker.cs")
+                {
+                    continue;
+                }
+
+                yield return (relative, (Path.GetFileName(path) == "DarlingWorker.cs" ? SplitRepoFile.ReadAllText(path) : File.ReadAllText(path)).Replace("\r\n", "\n", StringComparison.Ordinal));
             }
         }
 
@@ -1449,7 +1456,7 @@ public sealed class MeasurementContractCensusTests
         string.Concat(snake.Split('_').Select(p => char.ToUpperInvariant(p[0]) + p[1..]));
 
     private static string ReadRepoFile(string relative) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relative.Replace('/', Path.DirectorySeparatorChar))).Replace("\r\n", "\n", StringComparison.Ordinal);
+        SplitRepoFile.ReadAllText(Path.Combine(RepoRoot(), relative.Replace('/', Path.DirectorySeparatorChar))).Replace("\r\n", "\n", StringComparison.Ordinal);
 
     /// <summary>The tracked solution file marks the root — a marker that survives a git worktree, whose
     /// <c>.git</c> is a file (the RepoFile idiom).</summary>

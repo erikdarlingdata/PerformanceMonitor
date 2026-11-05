@@ -739,8 +739,8 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.True(resolved.Refuse);
         Assert.Equal("", resolved.Token);
-        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
-            && l.Contains("refusing to serve", StringComparison.Ordinal));
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.OrdinalIgnoreCase)
+            && l.Contains("web dashboard is not started", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 
@@ -802,8 +802,8 @@ public sealed class DarlingWebHostGateLiveTests
 
         Assert.False(started, "a configured token that cannot be used must stop the start in network mode");
         Assert.False(answered, "nothing may answer on the loopback port");
-        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.Ordinal)
-            && l.Contains("web dashboard not started", StringComparison.Ordinal));
+        Assert.Contains(log.Lines, l => l.Contains("Web dashboard token", StringComparison.OrdinalIgnoreCase)
+            && l.Contains("web dashboard is not started", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(log.Lines, l => l.Contains("not-a-protected-blob", StringComparison.Ordinal));
     }
 

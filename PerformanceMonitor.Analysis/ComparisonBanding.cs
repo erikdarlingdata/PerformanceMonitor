@@ -114,10 +114,14 @@ public static class ComparisonBanding
     public const string StatusWorse = "worse";
     public const string StatusBetter = "better";
     public const string StatusStable = "stable";
+    /// <summary>#7458: a row from a comparison where one side was never collected. It keeps its values and says
+    /// nothing about direction, because no verdict can rest on a window nobody observed.</summary>
+    public const string StatusNotCompared = "not_compared";
 
     public const string BandSourceBaseline = "baseline";
     public const string BandSourceAbsolute = "absolute";
     public const string BandSourcePresence = "presence";
+    public const string BandSourceNotCompared = "not_compared";
 
     public const string PresenceBoth = "both";
     public const string PresenceComparisonOnly = "comparison_only";
@@ -353,7 +357,8 @@ public static class ComparisonBanding
         IReadOnlyList<Fact> baselineFacts,
         IReadOnlyList<Fact> comparisonFacts,
         IReadOnlyDictionary<string, BaselineBucket> dispersionByMetric,
-        bool coverageCaveat)
+        bool coverageCaveat,
+        bool notCompared = false)
     {
         var baselineByKey = baselineFacts.ToFactLookup();
         var comparisonByKey = comparisonFacts.ToFactLookup();
@@ -364,6 +369,7 @@ public static class ComparisonBanding
         var rows = new List<ComparisonRow>(allKeys.Count);
         var appeared = new List<ChurnEntry>();
         var disappeared = new List<ChurnEntry>();
+        var churnSuppressed = 0;
 
         foreach (var key in allKeys)
         {
@@ -403,6 +409,21 @@ public static class ComparisonBanding
            magnitude alone would have made the improvement its worst member and dropped the family from
            families_worse. The old payload ordered by |severity_delta|, which put a saturated ladder's
            doubling last and a trace's formula slope first. */
+        /* #7458: a side the collector never observed has nothing to compare against, so every key present on only
+           one side is "new" or "resolved" purely because the other window is empty, and a key present on both
+           (a setting carried with no samples) is banded against a baseline that holds no measurement. No row
+           keeps a direction. The values stay, because a setting's current value is still true. Plan-cache churn
+           is the same artifact, so it reports nothing. */
+        if (notCompared)
+        {
+            rows = rows.Select(r => r.AsNotCompared()).ToList();
+            /* The churn is not reported, but it WAS collected: the reply must not become "no facts in either
+               window" because the only facts were plan-cache identities (ComparisonResult.IsEmpty). */
+            churnSuppressed = appeared.Count + disappeared.Count;
+            appeared.Clear();
+            disappeared.Clear();
+        }
+
         rows = rows
             .OrderBy(r => StatusRank(r.Status))
             .ThenByDescending(r => r.RelativeMove ?? 0)
@@ -423,7 +444,8 @@ public static class ComparisonBanding
                     members.Count(m => m.Status == StatusWorse),
                     members.Count(m => m.Status == StatusBetter),
                     members.Count(m => m.Status == StatusStable),
-                    coverageCaveat);
+                    coverageCaveat,
+                    members.Count(m => m.Status == StatusNotCompared));
             })
             .OrderBy(f => StatusRank(f.Status))
             .ThenByDescending(f => rows.First(r => r.Key == f.WorstKey).RelativeMove ?? 0)
@@ -436,7 +458,9 @@ public static class ComparisonBanding
             rows,
             families,
             new PlanCacheChurn(appeared, disappeared, presentInBoth, IsPostgresTargetFactSet(baselineFacts, comparisonFacts)),
-            coverageCaveat);
+            coverageCaveat,
+            notCompared,
+            churnSuppressed);
     }
 
     /// <summary>
@@ -648,6 +672,29 @@ public sealed class ComparisonRow
     public bool? BeyondAnomalyCutoff { get; init; }
     public bool CoverageCaveat { get; init; }
 
+    /// <summary>
+    /// #7458: this row with no verdict. Values, severities and presence stay; everything a band decided
+    /// (status, move size, sigma and the baseline's reading) goes, because the band compared against a window
+    /// nobody collected.
+    /// </summary>
+    public ComparisonRow AsNotCompared() => new()
+    {
+        Key = Key,
+        Source = Source,
+        Family = Family,
+        Presence = Presence,
+        BaselineValue = BaselineValue,
+        ComparisonValue = ComparisonValue,
+        BaselineSeverity = BaselineSeverity,
+        ComparisonSeverity = ComparisonSeverity,
+        SeverityDelta = SeverityDelta,
+        ValueDelta = ValueDelta,
+        LadderPosition = LadderPosition,
+        Status = ComparisonBanding.StatusNotCompared,
+        BandSource = ComparisonBanding.BandSourceNotCompared,
+        CoverageCaveat = CoverageCaveat
+    };
+
     public object ToPayload() => new
     {
         key = Key,
@@ -684,7 +731,8 @@ public sealed record ComparisonFamily(
     int Worse,
     int Better,
     int Stable,
-    bool CoverageCaveat)
+    bool CoverageCaveat,
+    int NotCompared = 0)
 {
     public object ToPayload() => new
     {
@@ -695,6 +743,7 @@ public sealed record ComparisonFamily(
         worse = Worse,
         better = Better,
         stable = Stable,
+        not_compared = NotCompared,
         coverage_caveat = CoverageCaveat
     };
 }
@@ -733,25 +782,37 @@ public sealed record ComparisonResult(
     IReadOnlyList<ComparisonRow> Rows,
     IReadOnlyList<ComparisonFamily> Families,
     PlanCacheChurn Churn,
-    bool CoverageCaveat)
+    bool CoverageCaveat,
+    bool NotCompared = false,
+    int ChurnSuppressed = 0)
 {
     public int Worse => Rows.Count(r => r.Status == ComparisonBanding.StatusWorse);
     public int Better => Rows.Count(r => r.Status == ComparisonBanding.StatusBetter);
     public int Stable => Rows.Count(r => r.Status == ComparisonBanding.StatusStable);
     public int NewIssues => Rows.Count(r => r.Presence == ComparisonBanding.PresenceComparisonOnly && r.Status == ComparisonBanding.StatusWorse);
     public int ResolvedIssues => Rows.Count(r => r.Presence == ComparisonBanding.PresenceBaselineOnly && r.Status == ComparisonBanding.StatusBetter);
+    public int NotComparedRows => Rows.Count(r => r.Status == ComparisonBanding.StatusNotCompared);
     public int FamiliesWorse => Families.Count(f => f.Status == ComparisonBanding.StatusWorse);
     public int FamiliesBetter => Families.Count(f => f.Status == ComparisonBanding.StatusBetter);
     public int FamiliesStable => Families.Count(f => f.Status == ComparisonBanding.StatusStable);
 
-    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.</summary>
-    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0;
+    /// <summary>True when the union of both windows' keys (churn included) was empty — nothing to compare.
+    /// Churn that a not-compared reply withheld (#7458) still counts: those facts were collected.</summary>
+    public bool IsEmpty => Rows.Count == 0 && Churn.Appeared.Count == 0 && Churn.Disappeared.Count == 0 && ChurnSuppressed == 0;
+
+    /// <summary>The parenthesis of the tools' <c>size_note</c> naming what a cut-short fact list left off. Rows are
+    /// ranked worse, better, stable, so the stable tail goes first; a not-compared reply ranks every row 2 with
+    /// no move, so rows are in key order and the tail is alphabetical (#7458).</summary>
+    public string LeftOffNote => NotCompared
+        ? "no row has a direction in this reply, so rows are in key order and the last keys come off first"
+        : "the lowest-ranked: stable rows come last";
 
     public object SummaryPayload() => new
     {
         worse = Worse,
         better = Better,
         stable = Stable,
+        not_compared = NotComparedRows,
         new_issues = NewIssues,
         resolved_issues = ResolvedIssues,
         families_worse = FamiliesWorse,

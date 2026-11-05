@@ -87,7 +87,7 @@ public sealed class ReadLatencyCapacityRungTests
             "Set DARLING_TEST_PG to a Postgres connection string to run the V182 migration pin.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -138,7 +138,7 @@ SELECT count(*) || '|' || count(*) FILTER (WHERE in_flight IS NULL AND wait_ms I
 
         var ct = TestContext.Current.CancellationToken;
         ReadConnectionWait.Register();
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = true, MaxPoolSize = 1, Timeout = 30 };
         await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
 
@@ -178,7 +178,7 @@ SELECT count(*) || '|' || count(*) FILTER (WHERE in_flight IS NULL AND wait_ms I
 
         var ct = TestContext.Current.CancellationToken;
         ReadConnectionWait.Register();
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         var builder = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Pooling = true, MinPoolSize = 0, MaxPoolSize = 4, Timeout = 30 };
         await using var dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
 

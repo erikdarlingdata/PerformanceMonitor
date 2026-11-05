@@ -171,8 +171,10 @@ public class AlertIncidentRenderTests
         Assert.Equal(
             new[]
             {
-                "AgReplicaIdentity", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
-                "EscalationBypassesCooldown", "External", "Incidents", "NewestSample", "Route", "Routing", "SeverityOverride", "WaitType"
+                /* #7041: EmailHtmlBody and EmailSubject belong to the Daily Health Report, which carries no incidents, so no delivery filter or split copy touches it.
+                   The copies deliberately leave them out. */
+                "AgReplicaIdentity", "AttachedTo", "AttachmentFileName", "AttachmentXml", "CollectorName", "Details",
+                "EmailHtmlBody", "EmailSubject", "EscalationBypassesCooldown", "External", "FileGrowthFiles", "Incidents", "NewestSample", "PolicyJobStep", "Route", "Routing", "SeverityOverride", "WaitType"
             },
             census);
 

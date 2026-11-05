@@ -55,7 +55,7 @@ public sealed class AgentChangeUndoLiveTests
             await JournalChangeAsync(connection, "mute", "m2", 99, Mute("old"), Mute("agent says"), ct: ct);
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event_time, server_id, event, actor, detail) VALUES (now(), 7, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb), (now(), 99, 'refused', 'agent:a', '{\"tool\":\"force_plan\"}'::jsonb)", ct);
 
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             Assert.Equal("SQL2019", read.Changes.Single(c => c.ServerId == 7).ServerLabel);
             Assert.Equal("Server 99 (removed)", read.Changes.Single(c => c.ServerId == 99).ServerLabel);
             Assert.Equal("SQL2019", read.Refusals.Single(r => r.ServerId == 7).ServerLabel);
@@ -108,6 +108,139 @@ public sealed class AgentChangeUndoLiveTests
         });
     }
 
+    private static string TimedRule(string reason, string? expiresAtUtc, string action) =>
+        new JsonObject
+        {
+            ["enabled"] = true, ["reason"] = reason, ["metric_name"] = "Blocking", ["server_id"] = 7, ["expires_at_utc"] = expiresAtUtc,
+            ["action"] = action,
+        }.ToJsonString();
+
+    /// <summary>#7414: an agent shortens an operator's permanent rule (mute or digest) to expire in seconds and the expired-rule purge removes it.
+    /// The row being gone is the agent's expiry at work, not a change by someone else, so undo puts the before image back. A rule that is gone
+    /// while the agent's expiry has not come (someone deleted it) still refuses changed_since, and so does a rule someone edited.</summary>
+    [Theory]
+    [InlineData("mute")]
+    [InlineData("digest")]
+    public async Task ARuleThePurgeRemovedAfterTheAgentsExpiry_ComesBack_ButOneDeletedBeforeItsExpiryDoesNot(string action)
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var expired = DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture);
+            var calledExpired = await JournalChangeAsync(connection, "mute", "e1", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", expired, action), ct: ct);
+
+            var result = await undo.UndoAsync(calledExpired, Login, ct);
+            Assert.True(result.Undone, result.Code + " " + result.Words);
+            Assert.Equal($"operator's permanent rule|{action}|", await ScalarAsync(connection,
+                "SELECT reason || '|' || action || '|' || coalesce(expires_at_utc::text, '') FROM config.config_mute_rules WHERE id = 'e1'", ct));
+
+            var later = DateTime.UtcNow.AddHours(3).ToString("o", CultureInfo.InvariantCulture);
+            var calledLater = await JournalChangeAsync(connection, "mute", "e2", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", later, action), ct: ct);
+            var refused = await undo.UndoAsync(calledLater, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'e2'", ct));
+
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, expires_at_utc, action) VALUES ('e3', true, now() at time zone 'utc', 'a person edited this', 'Blocking', 7, now() at time zone 'utc' - interval '5 minutes', '" + action + "')", ct);
+            var calledEdited = await JournalChangeAsync(connection, "mute", "e3", 7,
+                TimedRule("operator's permanent rule", null, action), TimedRule("agent shortened it", expired, action), ct: ct);
+            Assert.Equal("changed_since", (await undo.UndoAsync(calledEdited, Login, ct)).Code);
+        });
+    }
+
+    /// <summary>#7414: the purge and a delete look the same from the table, so undo of a rule that is gone and past the agent's expiry says so.
+    /// A delete the journal records (here an agent's) refuses and names who and when, and the rule stays gone. When nothing records a delete
+    /// the rule is put back and the reply says it was missing and may have been deleted on purpose, so the admin can delete it again.</summary>
+    [Fact]
+    public async Task ARuleThatIsGoneAfterItsExpiry_IsPutBackWithAWarning_UnlessTheJournalRecordsItsDelete()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var expired = DateTime.UtcNow.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture);
+            var purged = await JournalChangeAsync(connection, "mute", "g1", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("agent shortened it", expired, "mute"), ct: ct);
+            var back = await undo.UndoAsync(purged, Login, ct);
+            Assert.True(back.Undone, back.Code + " " + back.Words);
+            Assert.Contains("missing from the store", back.Words, StringComparison.Ordinal);
+            Assert.Contains("deleted it on purpose", back.Words, StringComparison.Ordinal);
+            Assert.Contains("delete it again", back.Words, StringComparison.Ordinal);
+            Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'g1'", ct));
+
+            /* An undo of a row that is there and unchanged says nothing of the kind. */
+            var later = DateTime.UtcNow.AddHours(3).ToString("o", CultureInfo.InvariantCulture);
+            await ExecAsync(connection, $"UPDATE config.config_mute_rules SET expires_at_utc = '{later}' WHERE id = 'g1'", ct);
+            var present = await JournalChangeAsync(connection, "mute", "g1", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("operator's permanent rule", later, "mute"), ct: ct);
+            var plain = await undo.UndoAsync(present, Login, ct);
+            Assert.True(plain.Undone, plain.Code + " " + plain.Words);
+            Assert.DoesNotContain("missing", plain.Words, StringComparison.Ordinal);
+
+            /* The agent changed the rule, then deleted it: the journal records the delete, so the expiry did not remove it. */
+            var changed = await JournalChangeAsync(connection, "mute", "g2", 7,
+                TimedRule("operator's permanent rule", null, "mute"), TimedRule("agent shortened it", expired, "mute"), ct: ct);
+            await JournalChangeAsync(connection, "mute", "g2", 7, TimedRule("agent shortened it", expired, "mute"), null, ct: ct, ageHours: 0, tool: "delete_mute_rule");
+            var refused = await undo.UndoAsync(changed, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Contains("was deleted", refused.Words, StringComparison.Ordinal);
+            Assert.Contains("agent:a", refused.Words, StringComparison.Ordinal);
+            Assert.Equal("0", await ScalarAsync(connection, "SELECT count(*) FROM config.config_mute_rules WHERE id = 'g2'", ct));
+        });
+    }
+
+    /// <summary>The mute image with the four repeating-schedule fields (#7040): days as names, times as HH:mm, the IANA zone.</summary>
+    private static string ScheduledMute(string reason, string[]? days, string? start, string? end, string? zone) =>
+        new JsonObject
+        {
+            ["enabled"] = true, ["reason"] = reason, ["metric_name"] = "Blocking", ["server_id"] = 7, ["expires_at_utc"] = null,
+            ["recur_days"] = days is null ? null : new JsonArray(days.Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
+            ["recur_start_time"] = start, ["recur_end_time"] = end, ["recur_time_zone"] = zone,
+        }.ToJsonString();
+
+    /// <summary>#7040: a person's repeating schedule survives an agent delete then undo. The undo writes the mask, the two times and the
+    /// zone back, which needs the smallint and time columns to take the image's day names and HH:mm text.</summary>
+    [Fact]
+    public async Task ADeletedRepeatingMute_ComesBackWithItsSchedule()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            var called = await JournalChangeAsync(connection, "mute", "s1", 7,
+                ScheduledMute("nightly", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), null, ct: ct);
+
+            var result = await undo.UndoAsync(called, Login, ct);
+            Assert.True(result.Undone, result.Words);
+            Assert.Equal("34|22:00:00|02:00:00|America/New_York", await ScalarAsync(connection,
+                "SELECT recur_days::int || '|' || recur_start_time::text || '|' || recur_end_time::text || '|' || recur_time_zone FROM config.config_mute_rules WHERE id = 's1'", ct));
+        });
+    }
+
+    /// <summary>#7040: an update that added a schedule is undone to the rule without one while the row still reads as the agent left
+    /// it (the mask compares as an integer, the times as text), and refused once a person changed the days.</summary>
+    [Fact]
+    public async Task AnUpdatedRepeatingMute_IsRestoredWhenUnchanged_AndRefusedWhenTheDaysChanged()
+    {
+        await RunAsync(async (undo, connection, ct) =>
+        {
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, recur_days, recur_start_time, recur_end_time, recur_time_zone) VALUES ('s2', true, now() at time zone 'utc', 'agent says', 'Blocking', 7, 34, '22:00', '02:00', 'America/New_York')", ct);
+            var called = await JournalChangeAsync(connection, "mute", "s2", 7,
+                ScheduledMute("old", null, null, null, null), ScheduledMute("agent says", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), ct: ct);
+
+            var result = await undo.UndoAsync(called, Login, ct);
+            Assert.True(result.Undone, result.Words);
+            Assert.Equal("old|null|null|null|null", await ScalarAsync(connection,
+                "SELECT reason || '|' || coalesce(recur_days::text, 'null') || '|' || coalesce(recur_start_time::text, 'null') || '|' || coalesce(recur_end_time::text, 'null') || '|' || coalesce(recur_time_zone, 'null') FROM config.config_mute_rules WHERE id = 's2'", ct));
+
+            await ExecAsync(connection, "INSERT INTO config.config_mute_rules (id, enabled, created_at_utc, reason, metric_name, server_id, recur_days, recur_start_time, recur_end_time, recur_time_zone) VALUES ('s3', true, now() at time zone 'utc', 'agent says', 'Blocking', 7, 2, '22:00', '02:00', 'America/New_York')", ct);
+            var changedSince = await JournalChangeAsync(connection, "mute", "s3", 7,
+                ScheduledMute("old", null, null, null, null), ScheduledMute("agent says", ["Mon", "Fri"], "22:00", "02:00", "America/New_York"), ct: ct);
+            var refused = await undo.UndoAsync(changedSince, Login, ct);
+            Assert.False(refused.Undone);
+            Assert.Equal("changed_since", refused.Code);
+            Assert.Equal("2", await ScalarAsync(connection, "SELECT recur_days::text FROM config.config_mute_rules WHERE id = 's3'", ct));
+        });
+    }
+
     [Fact]
     public async Task MuteTheAgentCreated_IsDeleted_AndAnUpdatedAtDifferenceIsNotAChange()
     {
@@ -133,7 +266,7 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
        (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Deadlocks', 9, 5, true),
        (now() at time zone 'utc' - interval '9 hours', 7, 'srv-7', 'Blocking', 9, 5, true)", ct);
 
-            var row = (await undo.ReadAsync(50, ct)).Changes.Single(c => c.CalledId == called);
+            var row = (await undo.ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == called);
             Assert.Equal(1, row.MutedAlerts);
             Assert.Single(await undo.ReadMutedAlertsAsync(called, 50, ct));
         });
@@ -150,7 +283,7 @@ VALUES (now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9,
             await ExecAsync(connection, @"INSERT INTO config.config_alert_log (alert_time, server_id, server_name, metric_name, current_value, threshold_value, muted)
 SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 5, true FROM generate_series(1, 1005)", ct);
 
-            var row = (await undo.ReadAsync(50, ct)).Changes.Single(c => c.CalledId == called);
+            var row = (await undo.ReadAsync(50, cancellationToken: ct)).Changes.Single(c => c.CalledId == called);
             Assert.Equal(1005, row.MutedAlerts);
             /* The alerts route still pages, and says how many it returned. */
             Assert.Equal(2, (await undo.ReadMutedAlertsAsync(called, 2, ct)).Count);
@@ -234,7 +367,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             var unknown = await JournalChangeAsync(connection, "mute", "m5", 7, null, Mute("agent says"), result: "none", ct: ct);
             var failed = await JournalChangeAsync(connection, "mute", "m5", 7, null, Mute("agent says"), result: "failed", ct: ct);
 
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             Assert.Equal(AgentChangeResult.Unknown, read.Changes.Single(c => c.CalledId == unknown).Result);
             Assert.Equal(AgentChangeResult.Failed, read.Changes.Single(c => c.CalledId == failed).Result);
             Assert.All(read.Changes, c => Assert.False(c.CanTryUndo(DateTime.UtcNow)));
@@ -277,7 +410,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             var writes = 0;
             var hooks = new AgentActionHooks
             {
-                LoadLevels = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, int?>>((_, _, _) => 2),
+                LoadRoutes = (_, _, _) => Task.FromResult<Func<string, int, PerformanceMonitor.Notifications.AlertSeverityLevel?, PerformanceMonitor.Notifications.NotificationRoute?>>((_, _, _) => TestRouteHooks.AtLevel(2)),
                 ReadBefore = (_, _, _) => Task.FromResult<string?>(null),
                 Write = (_, _, _) => { writes++; return Task.FromResult<string?>("{}"); },
             };
@@ -302,7 +435,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'actions_off', '{\"tool\":\"create_mute_rule\"}')", ct);
             /* A Level 1 request refusal (InvestigationRequestStore.RecordRefusalAsync: claim and submit) is an agent refusal with no tool; it refused no change (#5917). */
             await ExecAsync(connection, "INSERT INTO config.investigation_journal (event, actor, reason, detail) VALUES ('refused', 'agent:a', 'claim:not_open', NULL), ('refused', 'agent:a', 'submit:stale', '{\"note\":\"x\"}')", ct);
-            var read = await undo.ReadAsync(50, ct);
+            var read = await undo.ReadAsync(50, cancellationToken: ct);
             var refusal = Assert.Single(read.Refusals);
             Assert.Equal("actions_off", refusal.Code);
             Assert.Equal("create_mute_rule", refusal.Tool);
@@ -313,7 +446,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
 
     /// <summary>Writes the journal's called row, and its result row when asked: <c>done</c> (default), <c>failed</c> or <c>none</c>.</summary>
     private static async Task<long> JournalChangeAsync(NpgsqlConnection connection, string kind, string targetId, int serverId,
-        string? before, string? after, string result = "done", string? database = null, CancellationToken ct = default, int ageHours = 1)
+        string? before, string? after, string result = "done", string? database = null, CancellationToken ct = default, int ageHours = 1, string? tool = null)
     {
         var request = Guid.NewGuid();
         /* The journal carries what the tools write (#5917): the shared kind names, and on the done row the tool's answer, which for a
@@ -328,7 +461,7 @@ SELECT now() at time zone 'utc' - interval '1 hour', 7, 'srv-7', 'Blocking', 9, 
         kind = journaledKind;
         var detail = new JsonObject
         {
-            ["tool"] = kind + "_tool", ["kind"] = kind, ["claim_no"] = 1,
+            ["tool"] = tool ?? kind + "_tool", ["kind"] = kind, ["claim_no"] = 1,
             ["target"] = new JsonObject { ["id"] = targetId, ["server_id"] = serverId, ["database"] = database },
             ["evidence"] = new JsonArray(), ["before"] = before is null ? null : JsonNode.Parse(before),
         }.ToJsonString();

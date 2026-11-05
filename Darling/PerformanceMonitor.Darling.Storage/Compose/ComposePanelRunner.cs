@@ -464,13 +464,18 @@ internal static class ComposePanelRunner
                 stampThrough = wideResolution.StampThrough;
             }
 
+            /* #7285: a panel the compile sends to the fleet rollup (V239) has its stamped hours counted from the fleet table's size. The
+               conditions are the compile's own, asked of the same context fields. */
+            var readsFleetRollup = stampThrough is not null
+                && ComposeCompiler.ReadsFleetRollup(plan!, new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, true, wideResolution.WideStart, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady));
+
             /* #6115: the guard's wide estimate leaves out the servers read raw (the interval table never reads them), and ADDS the raw half's
                rows, counted from the collection log over the window's own start (the raw half is not clamped to the wide start) at 1.0 each,
                against the same limit. One statement reads both halves under one timeout, so the sum is what must fit. The wide figure is
                exactly what the guard counted before #6115 for those servers, so a split panel is never let through that today's code would
                refuse for the same wide rows; the raw rows can only refuse more. A panel whose every server passes adds nothing and is
                unchanged. A log that cannot answer adds nothing: the guard fails open, as it always has. */
-            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start) is { } tooBig)
+            if (await QueryStoreWideReadGuard.CheckAsync(postgres, serverScope, countedStart, end, logger, StorageCommandDeadlines.ComposedReadSeconds, cancellationToken, limit, stampThrough, rawServerIds, start, readsFleetRollup) is { } tooBig)
             {
                 return ComposeRunOutcome.BadRequest(tooBig);
             }
@@ -525,7 +530,7 @@ internal static class ComposePanelRunner
 
         await using var snapshot = hourlyEdgesSnapshot;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart, HourlyEdges: snapshot?.Verdict, ModuleMapThrough: snapshot?.ModuleMapThrough ?? moduleMap.Through, UnregisteredServers: unregisteredServers, QueryStoreGroupMembers: wideResolution.GroupMembers, QueryStoreStampThrough: stampThrough, ModuleMapMissing: moduleMap.Missing, QueryStoreRawServerIds: rawServerIds, QueryStoreFleetReady: wideResolution.FleetReady);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -689,7 +694,7 @@ internal static class ComposePanelRunner
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough, IReadOnlyList<int>? RawServerIds)> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer, long? GroupMembers, DateTime? StampThrough, IReadOnlyList<int>? RawServerIds, bool FleetReady)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
         DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken, PanelPlan? groupMembersFor = null)
     {
@@ -817,7 +822,7 @@ internal static class ComposePanelRunner
             var stampThrough = await ResolveQueryStoreStampThroughAsync(
                 connection, (rawServerIds is null ? scopedServerIds : scopedServerIds.Except(rawServerIds).ToList()).ToArray(), wideStart, end, schemaVersion, cancellationToken);
 
-            return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds);
+            return (true, wideStart, bound, settingServer, groupMembers, stampThrough, rawServerIds, schemaVersion >= QueryStoreComposeStamp.FleetRungVersion);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

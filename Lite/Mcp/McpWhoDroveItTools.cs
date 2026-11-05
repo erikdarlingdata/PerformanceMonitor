@@ -73,10 +73,10 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_stats", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No statement CPU for {resolved.DisplayName} in the last {hours_back} hour(s): the plan cache collector wrote no interval with executions in the window. "
                         + "Procedure stats are not a substitute, because they count the same work.",
-                        notice.AsHints());
+                        notice.AsHints()));
             }
 
             var serverCpuUs = page[0].ServerCpuUs;
@@ -118,6 +118,7 @@ public sealed class McpWhoDroveItTools
                 cpu_source = "query_stats",
                 procedure_cpu_source = "procedure_stats",
                 overlap_note = "cpu_ms counts every statement the plan cache sampled, including the statements inside procedures. procedure_cpu_ms is the procedures' own total for the same work: read it beside cpu_ms, never added to it.",
+                coverage_note = QueryStatsCoverage.StoredRowsNote,
                 share_note = "share is a database's cpu_ms over server_cpu_ms, the CPU of every database in the window, so it does not change with top.",
                 databases_returned = databases.Count,
                 truncated = cut,
@@ -186,9 +187,9 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No active-query snapshots for {resolved.DisplayName} in the last {hours_back} hour(s): nothing was running at a capture, or the collector did not run in the window.",
-                        notice.AsHints());
+                        notice.AsHints()));
             }
 
             static double? Share(double part, double whole) => whole > 0 ? Math.Round(part / whole, 4) : null;
@@ -287,10 +288,10 @@ public sealed class McpWhoDroveItTools
             if (page.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "query_snapshots", awsRdsKind: AwsRdsKind.None)
-                    ?? McpHelpers.Status("empty",
+                    ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty",
                         $"No capture in the last {hours_back} hour(s) on {resolved.DisplayName} had {min_sessions} or more sessions running the same query_hash. "
                         + "A pile-up between two captures is not seen; a lower min_sessions or a longer window may find one.",
-                        notice.AsHints());
+                        notice.AsHints()));
             }
 
             /* The head blocker of each pile-up, from the DMV blocking snapshot nearest its time. */

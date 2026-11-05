@@ -60,10 +60,10 @@ internal static class ViewerSeatIndicator
     /// </summary>
     public static string Text(ViewerSeatState state) => state switch
     {
-        ViewerSeatState.ReadOnly => "Seat: read-only",
-        ViewerSeatState.ReadWrite => "Seat: read-write",
-        ViewerSeatState.Unreachable => "Seat: not connected",
-        _ => "Seat: --",
+        ViewerSeatState.ReadOnly => "Access: read-only",
+        ViewerSeatState.ReadWrite => "Access: read-write",
+        ViewerSeatState.Unreachable => "Access: not connected",
+        _ => "Access: --",
     };
 
     /// <summary>
@@ -84,19 +84,19 @@ internal static class ViewerSeatIndicator
     };
 
     internal const string LocalDefaultSentence =
-        "A seat on the service host connects as postgres.connectAs, which defaults to \"admin\" — read-write.";
+        "A viewer on the service host, on the bundled store, connects as postgres.connectAs. It defaults to \"admin\", which is read-write.";
 
     internal const string NetworkDefaultSentence =
-        "A seat reached over the LAN connects as postgres.network.role, which defaults to \"viewer\" — read-only.";
+        "A viewer reached over the LAN connects as postgres.network.role, which defaults to \"viewer\" — read-only.";
 
     /* Said in full on the read-only tooltip because it is the actual #2400 question. The refusals say it
        per-dialog already; a reader who has not tripped one yet has no way to know a "write" here is a row
        in the MONITORING store rather than something aimed at their SQL Server. */
     internal const string NothingIsWrittenSentence =
-        "Nothing is ever written to a monitored SQL Server. The actions a read-only seat cannot take "
+        "Nothing is ever written to a monitored SQL Server. The actions a read-only viewer cannot take "
         + "(Refresh on Current Active Queries, Get Actual Plan, Purge Now, Generate now, dismissing an "
         + "alert, editing mute rules, adding a server) work by enqueueing a request for the service in the "
-        + "MONITORING store, and that row is the write a read-only seat cannot make.";
+        + "MONITORING store, and that row is the write a read-only viewer cannot make.";
 
     private static string ReadOnlyToolTip(bool storeIsOnThisMachine)
     {
@@ -113,14 +113,12 @@ internal static class ViewerSeatIndicator
         return "This viewer is connected with a read-only role, so write affordances are hidden or disabled."
             + Environment.NewLine + Environment.NewLine
             + where + " " + defaults
-            + " The two defaults are deliberately opposite — the local seat is the operator's, the remote "
-            + "seat is a laptop — so a remote seat being read-only is the expected default, not a fault."
+            + " The two defaults are deliberately opposite — the local viewer is the operator's, the remote "
+            + "viewer is a laptop — so a remote viewer being read-only is the expected default, not a fault."
             + Environment.NewLine + Environment.NewLine
             + NothingIsWrittenSentence
             + Environment.NewLine + Environment.NewLine
-            + "To change it: set postgres.network.role to \"admin\" on the SERVICE host and restart the "
-            + "service (then re-run --export-viewer-config) for a LAN seat, or set postgres.connectAs to "
-            + "\"admin\" and restart the viewer for a seat on the service host.";
+            + "To change it: " + ViewerReadOnlyException.HowToConnectAsAdmin;
     }
 
     /* static readonly rather than const so the paragraph breaks come from Environment.NewLine, exactly as
@@ -139,10 +137,10 @@ internal static class ViewerSeatIndicator
     /* Deliberately says nothing about the seat. The probe never ran, so there is no verdict to report,
        and the full-window message already carries the diagnosis and the connection details. */
     internal const string UnreachableToolTip =
-        "The Darling store could not be reached, so this viewer has not probed which seat it has. This is "
-        + "NOT a read-only seat — it is no connection at all. See the message on the main panel for the "
+        "The Darling store could not be reached, so this viewer has not probed what access it has. This is "
+        + "NOT read-only access — it is no connection at all. See the message on the main panel for the "
         + "store address it tried and why it failed.";
 
     internal const string UnknownToolTip =
-        "This viewer has not probed which seat it has yet.";
+        "This viewer has not probed what access it has yet.";
 }

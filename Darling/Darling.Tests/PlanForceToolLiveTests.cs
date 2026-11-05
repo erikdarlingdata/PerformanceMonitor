@@ -189,8 +189,9 @@ public sealed partial class PlanForceToolLiveTests
             DarlingMcpPlanForceTools.RunAsync(Source, Source, Log, force, server, Sql.Database, queryId, planId, Arg, dryRun, Ct);
     }
 
+    /// <param name="approval">The routes' <c>action_approval</c>: off by default, so an action runs; a test of the approval path passes <c>required</c> (#7109).</param>
     /// <param name="storeOnly">A test whose tool refuses before it reaches the monitored server needs only the store: no SQL Server database is made, and the server row's host is a closed local port.</param>
-    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false)
+    private static async Task RunAsync(Without without, Func<Ctx, Task> body, bool storeOnly = false, string approval = "off")
     {
         Assert.SkipWhen(string.IsNullOrEmpty(StoreConnectionString), "Set DARLING_TEST_PG to run the plan force tool live tests.");
         Assert.SkipWhen(!storeOnly && string.IsNullOrEmpty(SqlHost), "Set DARLING_TEST_SQL (and DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the plan force tool live tests.");
@@ -219,7 +220,7 @@ public sealed partial class PlanForceToolLiveTests
             if (without == Without.ActionsEnabled)
                 await PgExecAsync(connection, "UPDATE config.config_service SET agent_actions_enabled = false", ct);
             var level = without == Without.Level ? 2 : 3;
-            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level) VALUES ('Blocking', {level})", ct);
+            await PgExecAsync(connection, $"INSERT INTO config.config_notification_routes (metric_match, agent_level, action_approval) VALUES ('Blocking', {level}, '{approval}')", ct);
             if (without != Without.Switch)
                 await PgExecAsync(connection, "INSERT INTO config.config_server_actions (server_id, action, enabled, set_by) VALUES (7, 'force_plan', true, 'test')", ct);
             if (without is not (Without.Switch or Without.KillSwitch))
@@ -287,7 +288,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal(planA, (long)done["after"]!["state"]!["forced_plan"]!["plan_id"]!);
             Assert.Equal((long)json["journal_id"]!, long.Parse(await PgScalarAsync(c.Connection, "SELECT journal_id FROM config.investigation_journal WHERE event = 'action_called'", c.Ct) ?? "0", CultureInfo.InvariantCulture));
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(ForceKind, change.Kind);
             Assert.Equal(AgentChangeResult.Done, change.Result);
@@ -317,7 +318,7 @@ public sealed partial class PlanForceToolLiveTests
             var called = Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Equal(UnforceKind, (string?)called["kind"]);
             Assert.Equal(planA, (long)called["before"]!["forced_plan"]!["plan_id"]!);
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             Assert.Equal(UnforceKind, Assert.Single(list.Changes).Kind);
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });

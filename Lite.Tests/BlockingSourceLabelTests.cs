@@ -48,6 +48,24 @@ public sealed class BlockingSourceLabelTests
         Assert.Equal("Blocking Incidents (DMV snapshot)", label);
     }
 
+    /// <summary>#7219: the trend counts blocked-process report rows, so the label the chart wears (and the get_blocking_trend tool text) says reports,
+    /// never blocked sessions, incidents or events.</summary>
+    [Fact]
+    public void TrendChart_LabelSaysReportsPerMinute_AndSoDoesTheToolText()
+    {
+        var axis = BlockingSourceLabel.For(BlockingTrendLabels.PerMinute, Trend("blocked-process-report").Select(d => d.Source));
+        Assert.Equal("Blocked-process reports per minute (blocked-process-report)", axis);
+        Assert.Equal("Blocked-process reports per minute", BlockingSourceLabel.For(BlockingTrendLabels.PerMinute, new List<TrendPoint>().Select(d => d.Source)));
+        Assert.Equal("Blocked-process reports", BlockingTrendLabels.Reports);
+
+        var description = typeof(PerformanceMonitorLite.Mcp.McpBlockingTools)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance)
+            .Single(m => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>(m)?.Name == "get_blocking_trend")
+            .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).Cast<System.ComponentModel.DescriptionAttribute>().Single().Description;
+        Assert.Contains("blocked-process report counts per minute", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("blocking event counts", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TrendChart_Empty_KeepsThePlainLabel()
     {
@@ -76,12 +94,12 @@ public sealed class BlockingSourceLabelTests
     public void BlockingTrendChart_PutsTheLabelOnTheAxisOnlyWhenItDrawsRows()
     {
         var src = Read("ServerTab.Charts.cs");
-        var chart = Between(src, "private void UpdateBlockingTrendChart(", "private void UpdateDeadlockTrendChart(");
+        var chart = Between(src, "void UpdateBlockingTrendChart(", "void UpdateDeadlockTrendChart(");
 
-        Assert.Single(Occurrences(chart, "BlockingSourceLabel.For(\"Blocking Incidents\", data.Select(d => d.Source))"));
+        Assert.Single(Occurrences(chart, "BlockingTrendLabels.LegendFor(sources)"));
         /* The zero-row branch returns early with the plain label: nothing answered, so nothing is named. */
         var empty = chart[..chart.IndexOf("return;", StringComparison.Ordinal)];
-        Assert.Contains("YLabel(\"Blocking Incidents\")", empty, StringComparison.Ordinal);
+        Assert.Contains("YLabel(PerformanceMonitor.Ui.BlockingTrendLabels.AxisShort)", empty, StringComparison.Ordinal);
         Assert.DoesNotContain("BlockingSourceLabel", empty, StringComparison.Ordinal);
     }
 
@@ -89,7 +107,7 @@ public sealed class BlockingSourceLabelTests
     public void BlockingStatsCharts_PutTheLabelOnTheAxisOnlyWhenTheyDrawRows()
     {
         var src = Read("ServerTab.BlockingStats.cs");
-        var duration = Between(src, "private void UpdateBlockingDurationChart(", "private void UpdateBlockingTotalDurationChart(");
+        var duration = Between(src, "void UpdateBlockingDurationChart(", "private void UpdateBlockingTotalDurationChart(");
         var total = Between(src, "private void UpdateBlockingTotalDurationChart(", "private void UpdateDeadlockWaitChart(");
 
         Assert.Single(Occurrences(duration, "BlockingSourceLabel.For(\"Block Duration (ms)\", data.Select(d => d.Source))"));

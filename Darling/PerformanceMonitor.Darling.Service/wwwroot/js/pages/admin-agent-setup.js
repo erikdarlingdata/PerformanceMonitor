@@ -31,6 +31,13 @@ export const AGENT_LEVEL_CHOICES = [
   { value: "3", label: "Act on servers (Level 3)" },
 ];
 
+/** #6979: the report notice setting of a route, in the order the editor offers it. */
+export const REPORT_NOTICE_CHOICES = [
+  { value: "off", label: "Off" },
+  { value: "needs_person_or_change", label: "Needs a person or made a change" },
+  { value: "all", label: "All reports" },
+];
+
 export const AGENT_LIMIT_DEFAULTS = { perHour: "20", perDay: "100", lease: "15", expiry: "240" };
 
 export const routesListOnly = (managed, adminWritesOff) => listOnlyNote(managed, "routes are listed only", "To add, edit or delete a route", adminWritesOff);
@@ -53,12 +60,20 @@ export function routeUseText(r) {
   return `${r.agent_requests_last_hour} of ${r.agent_max_per_hour} this hour, ${r.agent_requests_last_day} of ${r.agent_max_per_day} today`;
 }
 
+/** #7109: one strip for each route where nobody can approve a proposal (GET /api/notification-routes/nobody-can-approve answers
+    {route_ids, message}). A failed read shows nothing: the routes below are the page. */
+export function nobodyCanApproveNodes(res) {
+  if (!res || res.kind !== "data" || !res.data || !Array.isArray(res.data.route_ids)) return [];
+  return res.data.route_ids.map((id) => noticeStrip("Route " + id + ": " + res.data.message));
+}
+
 /** The editor's entries for a route, from a routes read row (or the defaults for a new one). */
 export function entriesFromRoute(r) {
   if (!r) {
     return {
       id: null, match: "", scope: "", enabled: true, level: "", perHour: AGENT_LIMIT_DEFAULTS.perHour, perDay: AGENT_LIMIT_DEFAULTS.perDay,
-      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both",
+      lease: AGENT_LIMIT_DEFAULTS.lease, expiry: AGENT_LIMIT_DEFAULTS.expiry, resolutions: "", fallback: "", severities: "both", reportNotice: "off",
+      approval: "required", singlePerson: "false",
       saved: [], hooks: {}, removes: {}, recipients: "", recipientsWas: "", modifiedAt: null,
     };
   }
@@ -78,6 +93,11 @@ export function entriesFromRoute(r) {
     fallback: r.fallback_route_id != null ? String(r.fallback_route_id) : "",
     /* #6928: a route read without the field, or with a word this page does not know, edits as Both. */
     severities: r.severities === "critical" || r.severities === "warning" ? r.severities : "both",
+    /* #6979: a route read without the field, or with a word this page does not know, edits as Off. */
+    reportNotice: r.report_notice === "needs_person_or_change" || r.report_notice === "all" ? r.report_notice : "off",
+    /* #7109: a route read without the field, or with a word this page does not know, edits as Required, the safe side. */
+    approval: r.action_approval === "off" ? "off" : "required",
+    singlePerson: r.approval_single_person === true ? "true" : "false",
     saved: Array.isArray(r.configured_channels) ? r.configured_channels : [],
     hooks: {},
     removes: {},
@@ -141,6 +161,9 @@ export function routePayload(entries) {
       send_resolutions: entries.resolutions === "" ? null : entries.resolutions === "true",
       fallback_route_id: fallback,
       severities: entries.severities === "critical" || entries.severities === "warning" ? entries.severities : "both",
+      report_notice: entries.reportNotice === "needs_person_or_change" || entries.reportNotice === "all" ? entries.reportNotice : "off",
+      action_approval: entries.approval === "off" ? "off" : "required",
+      approval_single_person: entries.singlePerson === "true",
       ...(entries.id != null ? { expected_modified_at: entries.modifiedAt } : {}),
     },
   };
@@ -210,6 +233,10 @@ function routeForm(options) {
     match: text("match", entries.match, { placeholder: "family, 'Analysis: <category>', exact metric or *" }),
     scope: select("scope", scopeChoices, entries.scope),
     severities: select("severities", [{ value: "both", label: "Both (Warning and Critical)" }, { value: "critical", label: "Critical only" }, { value: "warning", label: "Warning only" }], entries.severities || "both"),
+    reportNotice: select("reportNotice", REPORT_NOTICE_CHOICES, entries.reportNotice || "off"),
+    /* #7109: whether a Level 3 action waits for a person's approval, and whether the person who asked may approve it. An admin seat sets any value. */
+    approval: select("approval", [{ value: "required", label: "Required (a person approves each Level 3 action)" }, { value: "off", label: "Off (Level 3 actions run without approval)" }], entries.approval || "required"),
+    singlePerson: select("singlePerson", [{ value: "false", label: "No (a second person approves)" }, { value: "true", label: "Yes (the person who asked may approve)" }], entries.singlePerson || "false"),
     level: select("level", AGENT_LEVEL_CHOICES, entries.level),
     perHour: text("perHour", entries.perHour, { inputmode: "numeric" }),
     perDay: text("perDay", entries.perDay, { inputmode: "numeric" }),
@@ -220,6 +247,19 @@ function routeForm(options) {
   };
   const enabled = el("input", { type: "checkbox", "data-field": "enabled" });
   enabled.checked = entries.enabled;
+  /* #6979: a report notice fires for a request of this route, and only a route with its own agent level (Investigate, Act or Act on servers)
+     owns requests. While the level is Inherit or Off the setting is disabled, with a hint; the stored value is kept and still saved. */
+  const noticeHint = el("span", { class: "mute-label", text: " Applies once the Agent level is Investigate, Act or Act on servers." });
+  const syncNoticeEnabled = () => {
+    const owns = controls.level.value === "1" || controls.level.value === "2" || controls.level.value === "3";
+    controls.reportNotice.disabled = !owns;
+    /* The author rule `.mute-label { display: block }` outranks the browser's [hidden] rule, so the attribute alone leaves the hint on screen
+       (as setShown in admin.js notes); the inline display is what hides it. */
+    noticeHint.hidden = owns;
+    noticeHint.style.display = owns ? "none" : "";
+  };
+  syncNoticeEnabled();
+  controls.level.addEventListener("input", syncNoticeEnabled);
   /* The webhook boxes never hold a saved value (the page is never given one): a box is for a NEW value, and Remove is for a saved one. */
   const hookBoxes = {};
   const removeBoxes = {};
@@ -261,7 +301,8 @@ function routeForm(options) {
     onClick: () => sendRoute("save", read(), options.repaint),
   });
   const parts = [
-    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level),
+    field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
+    field("Action approval:", controls.approval), field("Single-person approval:", controls.singlePerson),
     field("Requests per hour:", controls.perHour), field("Requests per day:", controls.perDay),
     field("Lease minutes:", controls.lease), field("Expiry minutes:", controls.expiry),
     field("Send resolutions:", controls.resolutions), field("Fallback route:", controls.fallback),

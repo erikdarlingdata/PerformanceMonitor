@@ -78,7 +78,7 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         await SeedAsync(connection, ct);
@@ -174,7 +174,7 @@ public sealed class PlanRegressionDrillDownDailyParityLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipText);
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
         await using var connection = await OpenStoreAsync(scratch, ct);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         await SeedAsync(connection, ct);

@@ -177,6 +177,21 @@ public sealed class WebPlainTextTests
         }
     }
 
+    /* #7557: two reads that one tab shows, named one after the other, are that tab once, with a capital when the text or a sentence opens with them. */
+    [Fact]
+    public void TwoReadsOnOneTab_AreThatTabOnce()
+    {
+        var o = Run(
+        [
+            "get_pg_top_queries or get_pg_plans has the statements.",
+            "Try get_pg_top_queries, get_pg_plans for the slow ones.",
+            "Read the captured graphs (get_pg_deadlocks, then get_pg_deadlock_detail for one) for the lock modes.",
+        ], out _);
+        Assert.Equal("The Activity tab has the statements.", o[0]);
+        Assert.Equal("Try the Activity tab for the slow ones.", o[1]);
+        Assert.Equal("Read the captured graphs (the Activity tab for one) for the lock modes.", o[2]);
+    }
+
     /* #6750: the empty-baseline sentence and the cut-recent-window sentences, read from the C# that owns them, reach the page without
        the MCP answer's field names, as the baseline sentence above does. */
     [Fact]
@@ -433,7 +448,7 @@ public sealed class WebPlainTextTests
             "Nothing to report.",
         ], out _);
         Assert.Equal("No findings in the requested time range.", o[0]);
-        Assert.Equal("If a replica is supposed to be attached, check the Replication tab.", o[1]);
+        Assert.Equal("If a replica is supposed to be attached, check the Slots section of the Replication tab.", o[1]);
         Assert.Equal("The Trace Flags collector has never run against this server, while the server itself is up.", o[2]);
         Assert.Equal("No rows. Check the Trace Flags collector's latest successful run.", o[3]);
         Assert.Equal("3 point-in-time fact(s) could still be read here.", o[4]);

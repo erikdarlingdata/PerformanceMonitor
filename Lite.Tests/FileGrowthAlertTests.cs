@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Lite.Tests;
@@ -190,6 +191,37 @@ public class FileGrowthAlertTests
         Assert.Contains(fields, x => x.Item1 == "Physical Name");
         Assert.Contains(fields, x => x.Item1 == "Volume Free");
         Assert.Contains(fields, x => x.Item1 == "Autogrowth" && x.Item2.Contains("percent growth", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #7068: the card lists five files, the stored context names every breached one, and a persisted row answers for
+    /// all of them (an old row, with no list, answers from its five details).
+    /// </summary>
+    [Fact]
+    public void TheStoredContext_NamesEveryBreachedFile_NotOnlyTheFiveTheCardShows()
+    {
+        var files = Enumerable.Range(1, 8).Select(i => File(name: $"tempdev{i}", sizeMb: 90_000, growthMb: 40_000)).ToList();
+
+        var context = AlertContextBuilders.BuildFileGrowthContext(Server, files)!;
+
+        Assert.Equal(5, context.Details.Count(d => d.Fields.Any(x => x.Item1 == "File")));
+        Assert.Equal(8, context.FileGrowthFiles!.Count);
+
+        var stored = AlertContextSerializer.Serialize(context);
+        Assert.True(AlertContextSerializer.ContextJsonNamesFile(stored, "tempdb", "tempdev8"));
+        Assert.False(AlertContextSerializer.ContextJsonNamesFile(stored, "tempdb", "tempdev9"));
+        Assert.False(AlertContextSerializer.ContextJsonNamesFile(stored, "other", "tempdev8"));
+        Assert.False(AlertContextSerializer.ContextJsonNamesFile(stored, "tempdb", "tempdev"));
+
+        context.FileGrowthFiles = null;
+        var old = AlertContextSerializer.Serialize(context);
+        Assert.True(AlertContextSerializer.ContextJsonNamesFile(old, "tempdb", "tempdev5"));
+        Assert.False(AlertContextSerializer.ContextJsonNamesFile(old, "tempdb", "tempdev6"));
+        Assert.False(AlertContextSerializer.ContextJsonNamesFile(old, "tempdb", "tempdev"));
+
+
+        Assert.True(AlertContextSerializer.TryDeserialize(stored, out var round));
+        Assert.Equal(8, round.FileGrowthFiles!.Count);
     }
 
     [Fact]

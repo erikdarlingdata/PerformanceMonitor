@@ -57,7 +57,7 @@ public class EventBaselineCoveredDaysTests : IClassFixture<SharedDuckDbFixture>,
     public void Dispose() => _conn?.Dispose();
 
     private static (string Metric, string Collector, string Key, string Noun) Family(string name) => name == "blocking"
-        ? (MetricNames.Blocking, "blocked_process_report", "ANOMALY_BLOCKING_SPIKE", "blocking events")
+        ? (MetricNames.Blocking, "blocked_process_report", "ANOMALY_BLOCKING_SPIKE", "blocked process reports")
         : (MetricNames.Deadlock, "deadlocks", "ANOMALY_DEADLOCK_SPIKE", "deadlocks");
 
     /* ───────────────────────── seeding ───────────────────────── */

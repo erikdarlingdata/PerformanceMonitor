@@ -152,6 +152,71 @@ public sealed class AdminPendingNotesTests
         Assert.Equal("both", Sent("someday"));
     }
 
+    /* #6979: the Routes list names the report notice setting (Off when the field is missing or unknown), the editor reads it back from a
+       route, and the save sends it. A word the page does not know is sent as off, so it never turns a notice on. */
+    [Fact]
+    public void TheRoutesList_ShowsTheReportNotice_AndTheEditorRoundTripsIt_Pure()
+    {
+        var data = JsonNode.Parse("""
+            {"routes":[
+              {"route_id":1,"metric_match":"blocking","report_notice":"needs_person_or_change","enabled":true},
+              {"route_id":2,"metric_match":"performance","report_notice":"all","enabled":true},
+              {"route_id":3,"metric_match":"reports","report_notice":"off","enabled":true},
+              {"route_id":4,"metric_match":"agent-jobs","enabled":true},
+              {"route_id":5,"metric_match":"waits","report_notice":"someday","enabled":true}
+            ]}
+            """);
+        var rows = Pure("routeRows", data).EnumerateArray().ToArray();
+        Assert.Equal(new[] { "Needs a person or made a change", "All reports", "Off", "Off", "Off" }, rows.Select(r => r.GetProperty("report_notice").GetString()));
+
+        var columns = Pure("ROUTE_COLUMNS").EnumerateArray().Select(c => c.GetProperty("key").GetString()).ToList();
+        Assert.Equal(columns.IndexOf("severities") + 1, columns.IndexOf("report_notice"));
+
+        Assert.Equal("all", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking", report_notice = "all" }).GetProperty("reportNotice").GetString());
+        Assert.Equal("off", Pure("entriesFromRoute", new { route_id = 1, metric_match = "blocking" }).GetProperty("reportNotice").GetString());
+        Assert.Equal("off", Pure("entriesFromRoute", (object?)null).GetProperty("reportNotice").GetString());
+
+        string Sent(string reportNotice) => Pure("routePayload", new { id = (int?)null, match = "blocking", perHour = "10", perDay = "50", lease = "30", expiry = "120", fallback = "", scope = "", level = "", resolutions = "", enabled = true, severities = "both", reportNotice })
+            .GetProperty("payload").GetProperty("report_notice").GetString()!;
+        Assert.Equal("needs_person_or_change", Sent("needs_person_or_change"));
+        Assert.Equal("all", Sent("all"));
+        Assert.Equal("off", Sent("off"));
+        Assert.Equal("off", Sent("someday"));
+    }
+
+    /* #6979: the editor opens on a stored route with its report notice showing, and Save sends the choice made in the box. */
+    [Fact]
+    public void TheRouteEditor_ShowsTheStoredReportNotice_AndSavingSendsTheChosenOne()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeEdit:warning,all");
+
+        Assert.Equal("needs_person_or_change", result.GetProperty("reportNoticeShown").GetString());
+        var write = Assert.Single(result.GetProperty("writes").EnumerateArray().ToArray());
+        Assert.Equal("all", write.GetProperty("body").GetProperty("report_notice").GetString());
+    }
+
+    /* #6979: the report notice box is disabled with its hint showing while the route's agent level is Inherit or Off, and enabled with the
+       hint gone once a level is chosen. The hint must be hidden by display as well as by the hidden attribute, because the .mute-label
+       rule would otherwise keep it on screen next to an enabled box. */
+    [Fact]
+    public void TheReportNoticeBox_IsDisabledWithItsHintUntilTheRouteHasAnAgentLevel()
+    {
+        var result = AdminServerEditBehaviourTests.Run("routeEdit:warning");
+
+        foreach (var name in new[] { "noticeAtInherit", "noticeAtOff" })
+        {
+            var state = result.GetProperty(name);
+            Assert.True(state.GetProperty("disabled").GetBoolean(), name);
+            Assert.False(state.GetProperty("hidden").GetBoolean(), name);
+            Assert.Equal("", state.GetProperty("display").GetString());
+        }
+
+        var investigate = result.GetProperty("noticeAtInvestigate");
+        Assert.False(investigate.GetProperty("disabled").GetBoolean());
+        Assert.True(investigate.GetProperty("hidden").GetBoolean());
+        Assert.Equal("none", investigate.GetProperty("display").GetString());
+    }
+
     /* #6936: Edit then Save on the Routes tab sends the version the form read (expected_modified_at), because the service refuses an edit
        without it with a 400. The test drives the page itself: it opens the editor on a stored Critical only route, picks Warning only,
        presses Save and reads the write the page made. */

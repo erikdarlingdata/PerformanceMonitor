@@ -178,7 +178,7 @@ public sealed class DarlingWebEndpointsTests
     {
         var read = DarlingWebEndpoints.CatalogDescriptors["get_active_queries"];
         Assert.Equal(
-            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of", "tag", "collection_time", "snapshots_only" },
+            new[] { "server", "hours", "database_name", "blocking_only", "wait_type", "limit", "as_of", "tag", "collection_time", "snapshots_only", "include_monitor" },
             read.Params.Select(p => p.Name).ToArray());
         var waitType = Assert.Single(read.Params, p => p.Name == "wait_type");
         Assert.Equal("text", waitType.Type);
@@ -854,7 +854,7 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.True(File.Exists(path), $"#4198 scan target not found: {path}");
 
-        return File.ReadAllText(path);
+        return RepoFile.ReadRepoFile(relative);
     }
 
     private const string WebEndpointsSourcePath =

@@ -23,8 +23,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed class QueryTagUsageWindow : Window
 {
     private readonly ViewerDataService _data;
-    private readonly (int Id, string Name) _here;
-    private readonly Func<Task<List<(int Id, string Name)>>> _fleet;
+    private readonly DarlingServer _here;
+    private readonly Func<Task<List<DarlingServer>>> _fleet;
     private readonly ComboBox _scope = new() { Width = 130, Margin = new Thickness(0, 0, 8, 0) };
     private readonly ComboBox _hours = new() { Width = 110, Margin = new Thickness(0, 0, 8, 0) };
     private readonly ComboBox _tag = new() { Width = 220, Margin = new Thickness(0, 0, 8, 0) };
@@ -33,7 +33,7 @@ public sealed class QueryTagUsageWindow : Window
     private IReadOnlyList<Storage.QueryTagNode> _tags = [];
     private bool _loading;
 
-    public QueryTagUsageWindow(ViewerDataService data, (int Id, string Name) here, Func<Task<List<(int Id, string Name)>>> fleet)
+    public QueryTagUsageWindow(ViewerDataService data, DarlingServer here, Func<Task<List<DarlingServer>>> fleet)
     {
         _data = data;
         _here = here;
@@ -86,7 +86,8 @@ public sealed class QueryTagUsageWindow : Window
         {
             var allServers = _scope.SelectedIndex == 1;
             var hours = _hours.SelectedIndex switch { 0 => 1, 2 => 168, _ => 24 };
-            var scope = allServers ? await _fleet() : [_here];
+            var servers = allServers ? await _fleet() : [_here];
+            var scope = servers.Select(s => (Id: s.ServerId, Name: s.DisplayName)).ToList();
             var end = DateTime.UtcNow;
             var data = await _data.GetQueryTagRollupDataAsync(scope.Select(s => s.Id).ToList(), end.AddHours(-hours), end);
 
@@ -98,8 +99,21 @@ public sealed class QueryTagUsageWindow : Window
                 _tag.SelectedItem = QueryTagUsageView.AllChoice;
             }
 
+            /* #7374: every server is read first, in both scopes (a server whose registry row says PostgreSQL but that holds SQL Server rows keeps
+               them). Only a server the read found no rows for is asked the engine question: a PostgreSQL server has none of these sources, so it
+               reads not_collected with the engine reason. If every server in scope is such a server, the reason is the whole answer. */
+            var notCollected = QueryTagUsageView.NotCollectedReasons(servers, data);
+            if (notCollected.Count == scope.Count)
+            {
+                _message.Text = notCollected[scope[0].Id];
+                _tables.Children.Clear();
+                return;
+            }
+
             var filter = QueryTagUsageView.FilterFor(data.Tags, _tag.SelectedItem as string);
-            Render(QueryTagUsageView.Build(data, scope, allServers, filter));
+            /* #7376: Query Store alone reads not_collected for a readable secondary Darling does not collect it from, with get_query_store_top's reason. */
+            var queryStoreNotCollected = await _data.GetQueryStoreNotCollectedAsync(data, servers, notCollected);
+            Render(QueryTagUsageView.Build(data, scope, allServers, filter, notCollected: notCollected, queryStoreNotCollected: queryStoreNotCollected));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

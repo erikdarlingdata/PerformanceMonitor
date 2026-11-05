@@ -177,6 +177,10 @@ A named MCP token can have the `agent` role (see [MCP configuration](configurati
 
 If the store has no agent-role token, the store is not called. The caller gets an `unavailable` message that says no agent-role token is configured. So an agent never reaches a store with the operator token. The operator token skips the limits that the store sets for agents.
 
+### The caller's data detail level
+
+A named MCP token can narrow the data detail it is served, with `dataDetail` in `mcp.tokens` (see [MCP configuration](configuration-mcp.md)). Below `full`, the front door sends its whole resolved level to the store in an `X-Darling-Data-Detail` header with each forwarded call. That level is the strictest of the front door's own `mcp.dataDetail`, the calling token's `dataDetail` and any level the call was itself sent. The store serves the strictest of the header's level and its own levels (its `mcp.dataDetail` and its own token's `dataDetail`). Free text such as a report's `root_cause` then comes back masked at the caller's level, even when the store is at `full`. The header can only narrow: a missing or unrecognized value changes nothing. A store from an older build ignores the header and answers at its own level.
+
 ## The web dashboard
 
 ### Sign-in and roles

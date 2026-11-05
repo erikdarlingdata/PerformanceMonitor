@@ -119,8 +119,8 @@ public sealed class RecommendationItem
     /// is derived from. Carried so the card can reconstruct the incident-vs-config-fix distinction the
     /// Dashboard draws from its RecommendationSetting taxonomy (<c>RecommendationsViewModel.IsIncident</c>).
     /// The viewer reads only engine findings (there is no legacy critical_issues RecommendationSetting
-    /// store here), so a structured standing-config action — DB_CONFIG / RCSI / FILE_AUTOGROWTH_PERCENT /
-    /// SERVER_CONFIG — is the only signal that a finding is a config fix rather than a time-bound incident,
+    /// store here), so a structured standing-config action — DB_CONFIG / RCSI / FILE_AUTOGROWTH_PERCENT
+    /// — is the only signal that a finding is a config fix rather than a time-bound incident,
     /// and it gates whether the "Open in Active Queries" deep-link is offered.
     /// </summary>
     public RemediationAction? Remediation { get; init; }
@@ -245,13 +245,12 @@ public sealed class RecommendationCardViewModel
 
     /// <summary>
     /// Whether this row carries a STRUCTURED standing config-fix action — a persisted
-    /// <see cref="RemediationAction"/> whose typed per-target lists map to a database- or server-level
+    /// <see cref="RemediationAction"/> whose typed per-target lists map to a database-level
     /// configuration change: DB_CONFIG safe settings (<see cref="RemediationAction.DbConfigTargets"/>),
     /// per-database RCSI (<see cref="RemediationAction.RcsiTargets"/> — a DB_CONFIG action can carry ONLY
-    /// these, so they must be checked), percent-autogrowth files
-    /// (<see cref="RemediationAction.FileGrowthTargets"/>), or server config MAXDOP/CTFP/memory
-    /// (<see cref="RemediationAction.ServerConfigTargets"/>). Mirrors the Dashboard card's
-    /// <c>HasStructuredFixAction</c>. Plan-regression (force-plan), clear-plan, and MISSING_INDEX actions
+    /// these, so they must be checked), or percent-autogrowth files
+    /// (<see cref="RemediationAction.FileGrowthTargets"/>). Mirrors the Dashboard card's
+    /// <c>HasStructuredFixAction</c>. Plan-regression (force-plan) and MISSING_INDEX actions
     /// are deliberately NOT structured config fixes — their target lists are empty here — so they remain
     /// incidents, matching the Dashboard (where MISSING_INDEX keeps the incident affordances).
     /// </summary>
@@ -286,7 +285,8 @@ public sealed class RecommendationCardViewModel
     /// </summary>
     public bool ShowOpenInActiveQueries =>
         IsIncident && Item.ServerId != 0 && Item.WindowStartUtc.HasValue && Item.WindowEndUtc.HasValue
-        && LinkTarget != RecommendationLinkTarget.None;
+        && LinkTarget != RecommendationLinkTarget.None
+        && !FactKinds.IsStandingStateKey(Item.RootFactKey); // #7416: no running query explains a setting or a volume's free space
 
     /// <summary>
     /// Where the deep-link goes for this finding's engine (#6134): Active Queries on SQL Server, the PostgreSQL
@@ -682,11 +682,10 @@ public sealed class RecommendationsViewModel
     /// ephemeral drill-down is NOT stored (so <see cref="FactRemediation.GenerateForFinding"/> returns
     /// null on read), and the built action IS persisted. Because the viewer has NO in-app remediation
     /// executor (advise-only, Postgres read-through), a runnable copy-paste command is the ONLY
-    /// remediation surface, so the shared renderer covers ALL seven remediation shapes — the three
+    /// remediation surface, so the shared renderer covers ALL five remediation shapes — the three
     /// always-safe ones (percent-autogrowth MODIFY FILE, missing-index CREATE, safe DB-config
-    /// ALTER DATABASE … SET) render bare, and force-plan, server-config, RCSI, and clear-plan (the four
-    /// that were previously copy-paste dead ends) now render too, the two destructive ones (RCSI,
-    /// clear-plan) carrying their two-sided risk disclosure as a comment header. Kept as a thin
+    /// ALTER DATABASE … SET) render bare, and force-plan and RCSI render too, the destructive one
+    /// (RCSI) carrying its two-sided risk disclosure as a comment header. Kept as a thin
     /// <c>internal</c> seam (exercised directly by the viewer tests) over the shared renderer so the
     /// viewer and the Dashboard reader cannot drift. Null when the action carries no renderable target.
     /// </summary>

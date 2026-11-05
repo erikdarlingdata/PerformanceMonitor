@@ -246,8 +246,8 @@ export const DASHBOARD_TEMPLATES = [
                  out in each tile because this file is a literal that the template tests read without running it. */
               { key: "total_physical_memory_mb", label: "Physical", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
               { key: "total_physical_memory_mb", label: "Memory limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
-              { key: "available_physical_memory_mb", label: "Available", format: "mb", hideWhen: { key: "engine_edition", equals: 5 } },
-              { key: "available_physical_memory_mb", label: "Available under limit", format: "mb", showWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available", format: "mbfit", hideWhen: { key: "engine_edition", equals: 5 } },
+              { key: "available_physical_memory_mb", label: "Available under limit", format: "mbfit", showWhen: { key: "engine_edition", equals: 5 } },
               { key: "memory_utilization_pct", label: "Utilization", format: "pct" },
               { key: "total_server_memory_mb", label: "Total server", format: "mb" },
               { key: "target_server_memory_mb", label: "Target server", format: "mb" },
@@ -282,7 +282,7 @@ export const DASHBOARD_TEMPLATES = [
             emptyText: "No memory clerks in the latest snapshot — the clerk collector may not have run yet.",
             columns: [
               { key: "clerk_type", label: "Clerk" },
-              { key: "memory_mb", label: "Memory", format: "mb" },
+              { key: "memory_mb", label: "Memory", format: "mbfit" },
             ],
           },
           {
@@ -311,6 +311,7 @@ export const DASHBOARD_TEMPLATES = [
               { key: "summary.total_plans", label: "Plans", format: "int" },
               { key: "summary.single_use_plans", label: "Single-use", format: "int" },
               { key: "summary.single_use_percent", label: "Single-use %", format: "num1" },
+              { key: "summary.compiled_single_use_percent", label: "Compiled single-use %", format: "num1" },
               { key: "summary.total_size_mb", label: "Cache size", format: "mb" },
               { key: "summary.wasted_percent", label: "Wasted %", format: "num1" },
             ],

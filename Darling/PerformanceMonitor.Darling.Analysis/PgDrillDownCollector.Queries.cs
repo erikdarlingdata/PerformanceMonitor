@@ -47,7 +47,7 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY sqlserver_cpu_utilization DESC
 LIMIT 1";
 
-    public const string QueriesAtSpikeSql = @"
+    public const string QueriesAtSpikeSql = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
@@ -57,6 +57,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 
@@ -937,6 +938,9 @@ scored AS
         COALESCE(x.query_sql_text, l.query_text) AS query_text,
         l.replica_role,
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: the CPU the regression lost, the PLAN_REGRESSION fact's ranking key (PlanRegressionRanking). The force
+        -- statement is built from the rows of this read in order, so it must rank them the way the fact does.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us,
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
@@ -987,6 +991,8 @@ SELECT
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
+-- #7417: the fact's lost-CPU floor on the CPU path, and its order. The first row is the fact's lead offender.
+AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
 AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                       WHERE x.server_id = $1
@@ -995,7 +1001,7 @@ AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                         AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-ORDER BY regression_factor DESC
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
 LIMIT 5";
 
     /// <summary>
@@ -1148,7 +1154,9 @@ scored AS
                 THEN l.dur_per_exec / NULLIF(b.dur_per_exec, 0) / 2
         END AS regression_factor,
         l.replica_role,
-        l.execs * l.cpu_per_exec AS latest_total_cpu_us
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        -- #7417: as in the table read above.
+        " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuExpressionSql + @" AS lost_cpu_us
     FROM latest AS l
     JOIN cheapest AS b
       ON  b.database_name = l.database_name
@@ -1162,6 +1170,8 @@ top_five AS
     FROM scored
     WHERE regression_factor >= 2
     AND   latest_total_cpu_us >= 10000000
+    -- #7417: as in the table read above.
+    AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
     -- #6548: as in the table read above.
     AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                           WHERE x.server_id = $1
@@ -1170,7 +1180,7 @@ top_five AS
                             AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-    ORDER BY regression_factor DESC
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
     LIMIT 5
 )
 SELECT
@@ -1242,7 +1252,7 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = t.database_name
   AND x.query_id = t.query_id
-ORDER BY t.regression_factor DESC";
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
 
     /// <summary>
     /// Top regressed queries behind a PLAN_REGRESSION finding.

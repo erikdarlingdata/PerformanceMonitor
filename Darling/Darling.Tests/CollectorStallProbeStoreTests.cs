@@ -225,7 +225,7 @@ public class CollectorStallProbeStoreTests
     [Fact]
     public void TheArmIsWiredOnTheServerScopedPath_AndItsProbeIsNotAwaited()
     {
-        var runner = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
+        var runner = RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingCollectorRunner.cs");
 
         /* Exactly one arm in the runner: a second call site would be a second concurrent probe per server,
            which is the pool bound this design promises not to exceed. */

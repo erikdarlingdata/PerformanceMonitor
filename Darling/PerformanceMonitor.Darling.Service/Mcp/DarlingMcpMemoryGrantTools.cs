@@ -43,6 +43,32 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpMemoryGrantTools
 {
+    /// <summary>
+    /// #7010: the window-floor notice of the raw memory_grant_stats table (the table the web's memory grants panels probe), over
+    /// [<paramref name="start"/>, <paramref name="end"/>]. A failed probe answers <see cref="McpWindowNotice.Unavailable"/>, which costs the
+    /// notice and never the rows.
+    /// </summary>
+    private static Task<McpWindowNotice> NoticeAsync(
+        NpgsqlDataSource postgres, string serverName, DateTime start, DateTime end, bool emptyAnswer, CancellationToken cancellationToken) =>
+        DarlingMcpWindowNotice.ReadAsync(
+            () => DarlingMcpWindowNotice.Probe(postgres, "memory_grant_stats", serverName, start, end, cancellationToken),
+            start, end, "memory_grant_stats", emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
+
+    /// <summary>
+    /// #7010: the answer for a window with no snapshot. A server whose engine never collects memory grants says so first, bare (that status
+    /// carries no notice, so it stays distinguishable from a quiet window); otherwise "unavailable" carries the window-floor notice under
+    /// <c>hints</c>, because an empty answer over a window the store does not reach back to is not a true negative.
+    /// </summary>
+    private static async Task<string> UnavailableAsync(
+        NpgsqlDataSource postgres, int serverId, string serverName, string displayName, DateTime start, DateTime end, CancellationToken cancellationToken)
+    {
+        var notCollected = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, displayName, "memory_grant_stats", cancellationToken);
+        if (notCollected is not null) return notCollected;
+
+        var notice = await NoticeAsync(postgres, serverName, start, end, emptyAnswer: true, cancellationToken);
+        return DarlingMcpWindowNotice.FinishEmpty(McpHelpers.Status("unavailable", "No memory grant data available.", notice.AsHints()), notice);
+    }
+
     [ReadsLatestSnapshot(LatestSnapshotShape.Windowed)]
     [McpServerTool(Name = "get_resource_semaphore"), Description("Resource semaphore stats: granted/available memory vs target/max-target ceiling, waiters, timeout/forced pressure, window ends at as_of. TWO READS, per semaphore+pool: grants[] is the NEWEST snapshot (moment: captured_at/age_seconds); window[] aggregates EVERY snapshot (peak waiters+when, peak/min memory, summed timeout/forced deltas). Read window[] for 'was there pressure', grants[] for 'is there pressure now'. No rows: unavailable (not_collected first). sample_interval_seconds/interval_known null/false on a restart-marker or pre-column row; its zero deltas aren't 'no timeouts'. <<GUIDE>> Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling, waiter counts, and timeout/forced grant pressure indicators. High waiter counts or rising timeout/forced deltas indicate memory grant pressure affecting query performance. TWO READS UNDER ONE WINDOW: grants[] is the NEWEST snapshot in the window (one row per resource semaphore and pool), stamped once as captured_at with age_seconds against the window's end - it is a moment, not the window. window[] aggregates EVERY snapshot in the window per (resource_semaphore_id, pool_id): peak_waiter_count and peak_waiters_at (the most sessions ever seen waiting for a grant and when), peak_granted_memory_mb and peak_granted_at (the largest granted memory and when - not the time of peak waiters), min_available_memory_mb, and timeout_errors_in_window / forced_grants_in_window (the SUM of the per-interval deltas across the window). Each grants[] row also carries sample_interval_seconds, the measured seconds its two deltas accrued over; it is null with interval_known false when the row is a restart marker (no delta was knowable, so the zero deltas beside it are not 'no timeouts') or predates the column. interval_seconds is the interval these deltas cover, null when it can't be known - the same name the latch and spinlock tools use; sample_interval_seconds carries the same value and is kept for existing readers. " + McpToolGuideTopics.MemoryGrantWindowReadOrder)]
     public static async Task<string> GetResourceSemaphore(
@@ -65,8 +91,7 @@ public sealed class DarlingMcpMemoryGrantTools
             var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await UnavailableAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, windowStart, now, cancellationToken);
 
             /* Same window bounds as the latest read, so the window's last_snapshot_at IS captured_at and the
                two halves describe one span of the same rows (#3541 A10). */
@@ -102,10 +127,14 @@ public sealed class DarlingMcpMemoryGrantTools
                 interval_known = r.SampleIntervalSeconds is > 0
             });
 
-            return JsonSerializer.Serialize(new
+            var notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 window_start = windowStart.ToString("o"),
                 window_end = now.ToString("o"),
                 /* Every grants[] row shares this stamp by construction (the read is WHERE collection_time =
@@ -115,7 +144,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 grants,
                 window = window.Select(WindowShape),
                 window_note = WindowSamplingNote
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -162,6 +191,8 @@ public sealed class DarlingMcpMemoryGrantTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
+            /* One name for both answers' notice: the window-floor census reads the write as `effective_start = notice.EffectiveStart,`. */
+            McpWindowNotice notice;
             if (chart)
             {
                 var points = await DarlingMemoryGrantReader.GetMemoryGrantChartAsync(
@@ -169,13 +200,17 @@ public sealed class DarlingMcpMemoryGrantTools
                 /* A window with no collected snapshot is no data, never a line of zeros; a collected snapshot with no grants is a
                    point of zeros (the viewer's own reading). */
                 if (points.Count == 0)
-                    return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
-                        ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+                    return await UnavailableAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, windowStart, now, cancellationToken);
 
-                return JsonSerializer.Serialize(new
+                notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
+
+                return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
                 {
                     server = resolved.DisplayName,
                     hours_back,
+                    effective_start = notice.EffectiveStart,
+                    window_truncated = notice.WindowTruncated,
+                    truncation_note = notice.TruncationNote,
                     window_start = windowStart.ToString("o"),
                     window_end = now.ToString("o"),
                     bucket_minutes = bucketMinutes,
@@ -195,14 +230,13 @@ public sealed class DarlingMcpMemoryGrantTools
                         forced_grant_count_delta = p.ForcedGrantCountDelta,
                         snapshots = p.Snapshots
                     })
-                }, McpHelpers.JsonOptions);
+                }, McpHelpers.JsonOptions), notice);
             }
 
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "memory_grant_stats", cancellationToken)
-                    ?? McpHelpers.Status("unavailable", "No memory grant data available.");
+                return await UnavailableAsync(postgres, resolved.ServerId, resolved.ServerName, resolved.DisplayName, windowStart, now, cancellationToken);
 
             var window = await DarlingMemoryGrantReader.GetMemoryGrantsWindowAsync(
                 postgres, resolved.ServerId, windowStart, now, cancellationToken);
@@ -220,10 +254,14 @@ public sealed class DarlingMcpMemoryGrantTools
                 forced_grant_count_delta = r.ForcedGrantCountDelta
             });
 
-            return JsonSerializer.Serialize(new
+            notice = await NoticeAsync(postgres, resolved.ServerName, windowStart, now, emptyAnswer: false, cancellationToken);
+            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
                 window_start = windowStart.ToString("o"),
                 window_end = now.ToString("o"),
                 captured_at = rows[0].CollectionTime.ToString("o"),
@@ -231,7 +269,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 grants,
                 window = window.Select(WindowShape),
                 window_note = WindowSamplingNote
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -273,14 +311,35 @@ public sealed class DarlingMcpMemoryGrantTools
         forced_grants_in_window = w.ForcedGrantsInWindow
     };
 
-    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure notification events (memory_notification: RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR (sp_pressuredetector's source), over a sample_time window ending at as_of (default 24h), oldest first. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed).")]
-    public static async Task<string> GetMemoryPressureEvents(
+    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure events (memory_notification: RESOURCE_MEMPHYSICAL_LOW/_HIGH, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEM_STEADY) from RING_BUFFER_RESOURCE_MONITOR, over a sample_time window ending at as_of (default 24h), oldest first. Newest 200 (limit); summary counts the window; read truncated. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed).")]
+    public static Task<string> GetMemoryPressureEvents(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("Newest events to return, still oldest first. Default 200, max 1000. summary counts the whole window; read truncated.")] int limit = DefaultPressureEventsLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
+    {
+        var limitError = McpHelpers.ValidateTop(limit);
+        return limitError != null
+            ? Task.FromResult(limitError)
+            : GetMemoryPressureEventsCore(postgres, server_name, hours_back, limit, as_of, logger, cancellationToken);
+    }
+
+    /// <summary>The default page of get_memory_pressure_events (#7516): a server under pressure writes thousands of samples a day.</summary>
+    public const int DefaultPressureEventsLimit = 200;
+
+    /// <summary>
+    /// get_memory_pressure_events with EVERY event in the window (#7516): the web Memory tab counts all the samples into its
+    /// per-hour chart, so it must not take the tool's default page. The reply still carries the summary.
+    /// </summary>
+    internal static Task<string> GetMemoryPressureEventsUncapped(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, ILogger? logger, CancellationToken cancellationToken) =>
+        GetMemoryPressureEventsCore(postgres, server_name, hours_back, null, as_of, logger, cancellationToken);
+
+    private static async Task<string> GetMemoryPressureEventsCore(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int? limit, string? as_of, ILogger? logger, CancellationToken cancellationToken)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
@@ -291,8 +350,9 @@ public sealed class DarlingMcpMemoryGrantTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            var page = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit, cancellationToken);
+            var rows = page.Rows;
 
             /* #4966: where the store's coverage of the window starts, in the three keys every window-floor tool writes. The events are
                windowed on sample_time, and an event can predate the collection that stored it (a ring-buffer read hands back history), so
@@ -315,7 +375,10 @@ public sealed class DarlingMcpMemoryGrantTools
                 windowStart, now, "memory_pressure_events", emptyAnswer: rows.Count == 0, logger: logger, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
-                return McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints());
+                /* #7167: an offline server's empty window answers unavailable, as Lite's twin does. */
+                return await DarlingServerOfflineNote.EmptyAsync(
+                    postgres, resolved.ServerId, resolved.DisplayName, now,
+                    McpHelpers.Status("empty", "No memory pressure events found in the requested time range.", notice.AsHints()), cancellationToken);
 
             var payload = new
             {
@@ -324,6 +387,28 @@ public sealed class DarlingMcpMemoryGrantTools
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
+                /* #7516: the cap, whether the window held more (observed from the extra row), and the whole window's counts. events_returned is the
+                   page's count; total_events is the window's. */
+                limit,
+                truncated = page.Truncated,
+                events_returned = rows.Count,
+                order = "oldest_first",
+                oldest_returned_at = McpHelpers.FormatEffectiveStart(rows[0].SampleTime),
+                newest_returned_at = McpHelpers.FormatEffectiveStart(rows[^1].SampleTime),
+                limit_note = page.Truncated
+                    ? $"Showing the newest {rows.Count} of {page.TotalEvents} events in the window (limit {limit}); the older {page.TotalEvents - rows.Count} are left out. Raise limit (max {McpHelpers.MaxTop}) or narrow the window with hours_back and as_of to see them. summary counts the whole window."
+                    : null,
+                summary = new
+                {
+                    total_events = page.TotalEvents,
+                    medium_or_worse_events = page.MediumOrWorseEvents,
+                    by_notification = page.ByNotification.Select(n => new
+                    {
+                        memory_notification = n.MemoryNotification,
+                        events = n.Events,
+                        medium_or_worse_events = n.MediumOrWorseEvents
+                    })
+                },
                 events = rows.Select(r => new
                 {
                     sample_time = r.SampleTime.ToString("o"),

@@ -31,11 +31,6 @@ public class StoredEventCopiesSweepTests
         [("StoredEventCopies.cs", "v_system_health_events")] = 1,
         [("StoredEventCopies.cs", "v_deadlocks")] = 2,
 
-        /* HasAnyBlockingCaptureAsync's EXISTS over the server's rows, with no time window: a stored copy cannot
-           change whether a row exists. */
-        [("LocalDataService.BlockingStats.cs", "v_blocked_process_reports")] = 1,
-        [("LocalDataService.BlockingStats.cs", "v_deadlocks")] = 1,
-
         /* The deadlock reads that do not return rows, which count or take a MAX over the plain union (no helper): the
            counts and buckets count COUNT(DISTINCT StoredEventCopies.DeadlockIdentityTuple), pinned by
            EveryDeadlockCountReadsThePlainUnionWithTheSharedIdentity below, and a MAX is unchanged by a copy.
@@ -46,6 +41,7 @@ public class StoredEventCopiesSweepTests
         [("DuckDbFactCollector.Waits.cs", "v_deadlocks")] = 1,
         [("LocalDataService.Overview.cs", "v_deadlocks")] = 1,
         [("LocalDataService.DailySummary.cs", "v_deadlocks")] = 1,
+        [("DrillDownCollector.Config.cs", "v_deadlocks")] = 1, // #7448: the per-database RCSI deadlock count, DeadlockDistinctCount grouped by database
 
         /* The two last-capture reads, MAX(collection_time) with no time window: a batch that stored only copies of
            events already held still read the session, so its collection_time is a true capture. */
@@ -170,6 +166,7 @@ public class StoredEventCopiesSweepTests
             ["DuckDbFactCollector.Waits.cs"] = 1,
             ["LocalDataService.Overview.cs"] = 1,
             ["LocalDataService.DailySummary.cs"] = 1,
+            ["DrillDownCollector.Config.cs"] = 2,
         };
         var actual = LiteSources()
             .Select(p => (File: Path.GetFileName(p), Count: Regex.Matches(File.ReadAllText(p), @"StoredEventCopies\.DeadlockDistinctCount").Count))

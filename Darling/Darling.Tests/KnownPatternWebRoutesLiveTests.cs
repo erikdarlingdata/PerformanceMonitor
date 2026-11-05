@@ -75,7 +75,7 @@ public sealed class KnownPatternWebRoutesLiveTests
         try
         {
             await ExecAsync(owner, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
-            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "viewer"))
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "web"))
             {
                 await ExecAsync(owner, statement, ct);
             }
@@ -108,7 +108,7 @@ public sealed class KnownPatternWebRoutesLiveTests
                 {
                     context.Response.StatusCode = StatusCodes.Status403Forbidden;
                     context.Response.ContentType = "application/json; charset=utf-8";
-                    await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                    await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = DarlingWebEndpoints.ReadOnlyAccountText }));
                     return;
                 }
 

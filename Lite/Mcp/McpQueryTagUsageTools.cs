@@ -22,8 +22,88 @@ public sealed class McpQueryTagUsageTools
     private const int DefaultLimit = 25;
     private const int MaxLimit = 200;
 
-    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. The all-servers answer lists each server and gives fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the section's source table does not exist in this store. A tag that exists but matches no row in the window gives a top-level empty with a message saying so. The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
+    [McpServerTool(Name = "get_resource_use_by_tag"), Description("Rolls resource use up by query tag, one section per source: plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks. SECTIONS ARE NEVER SUMMED: the plan cache and Query Store count the same executions. Each section has tag rows (own figure and subtree figure), an untagged row and a total. Omit server_name for the fleet. tag limits the answer to that tag's subtree. <<GUIDE>> Rolls resource use up by query tag from the tag map (query_tag_map); nothing is evaluated at read time, so a rule change shows after the map's next pass. Sections: plan_cache (cpu_ms, duration_ms, logical_reads, logical_writes, executions), query_store (the same plus peak_memory_pages, a maximum not a sum), procedures (as plan_cache), blocking_reports and blocking_snapshots (blocked_ms is wait time on the blocked side's tag, caused_ms the same wait on the blocking side's tag; in blocking_reports each wait counts once at its longest report and the blocked_reports and caused_reports counts are waits, while the snapshot figures repeat a still-open wait once per sample), deadlocks (deadlocks and processes: a deadlock counts once for each tag among its processes, so the rows do not add up to the total). Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children, a parent's own figure leaves its children out. A key tagged on one server is untagged on another. The all-servers answer lists each server and gives fleet_total per section. With tag set there is no untagged row and total is that tag's subtree. truncated says a section held more tag rows than limit; scan_truncated says the deadlock graphs read hit their ceiling. A section status of empty means no rows in the window; unavailable means the section's source table does not exist in this store. A tag that exists but matches no row in the window gives a top-level empty with a message saying so. The sections answer independently: the top-level status is unavailable only when every section is, empty when every served section is empty, and a top-level message names any section not served.")]
     public static async Task<string> GetResourceUseByTag(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        [Description("Server name or display name. Omit for all servers.")] string? server_name = null,
+        [Description("Hours of history. Default 24.")] int hours_back = 24,
+        [Description("A tag name or id: shows only that tag's subtree (the tag and its children), with no untagged row.")] string? tag = null,
+        [Description("Maximum tag rows per section (per server in the all-servers view). Default 25. Read truncated to know whether a section held more.")] int limit = DefaultLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+    {
+        var answer = await GetResourceUseByTagCore(dataService, serverManager, server_name, hours_back, tag, limit, as_of);
+        /* #7005: the window is fully covered only when every table the roll-up reads is, so the floor is the LATEST of the six sections' floors
+           (each the earliest any scoped server answers), and the one notice sits at the top level, not per section. */
+        if (McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) != null)
+        {
+            return answer;
+        }
+
+        try
+        {
+            List<int> ids;
+            if (string.IsNullOrWhiteSpace(server_name))
+            {
+                ids = serverManager.GetEnabledServers().Select(RemoteCollectorService.GetServerId).ToList();
+            }
+            else
+            {
+                var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
+                if (error != null) return answer;
+                ids = [resolved.ServerId];
+            }
+
+            if (ids.Count == 0)
+            {
+                return answer;
+            }
+
+            var windowStart = windowEnd.AddHours(-hours_back);
+            /* One fleet-form probe per section relation, scoped to the servers the roll-up reads (six at most, whatever the server count), not one per relation per server. */
+            return await McpQueryTools.WithProbedWindowNoticeAsync(
+                answer,
+                () => LatestSectionFloorAsync(relation => dataService.GetFleetWindowFloorAsync(relation, windowStart, windowEnd, ids)),
+                () => LatestSectionFloorAsync(relation => dataService.GetOldestFleetWindowRowAsync(relation, ids)),
+                windowStart, windowEnd, "query tag roll-up tables");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError("get_resource_use_by_tag", ex);
+        }
+    }
+
+    /// <summary>The six relations the roll-up reads, one per section (plan_cache, query_store, procedures, blocking_reports, blocking_snapshots, deadlocks).</summary>
+    private static readonly QueryWindowRelation[] SectionRelations =
+    [
+        QueryWindowRelation.QueryStats, QueryWindowRelation.QueryStoreStats, QueryWindowRelation.ProcedureStats,
+        QueryWindowRelation.BlockedProcessReports, QueryWindowRelation.DmvBlockingSnapshots, QueryWindowRelation.Deadlocks,
+    ];
+
+    /// <summary>The LATEST of the sections' answers: a section that answers null (nothing in the window) gives way to the others.</summary>
+    private static async Task<DateTime?> LatestSectionFloorAsync(Func<QueryWindowRelation, Task<DateTime?>> perRelation)
+    {
+        DateTime? latest = null;
+        foreach (var relation in SectionRelations)
+        {
+            /* A section whose table is missing is already answered "unavailable" by the roll-up itself; it has no floor, so it gives way to the others. */
+            DateTime? floor;
+            try
+            {
+                floor = await perRelation(relation);
+            }
+            catch (DuckDB.NET.Data.DuckDBException)
+            {
+                floor = null;
+            }
+
+            latest = LocalDataService.LaterCoverageFloor(latest, floor);
+        }
+
+        return latest;
+    }
+
+    private static async Task<string> GetResourceUseByTagCore(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name. Omit for all servers.")] string? server_name = null,
@@ -151,7 +231,7 @@ public sealed class McpQueryTagUsageTools
                 payload["message"] = "No resource use was collected in the window" + (allServers ? " on any server." : " on this server.");
             }
 
-            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children.";
+            payload["note"] = "Each section names its own source and is never summed with another. Within a section the tag rows' own figures plus untagged add up to total; a subtree figure is a tag plus its children. For the plan_cache section: " + QueryStatsCoverage.StoredRowsNote;
             payload["sections"] = sections;
             return JsonSerializer.Serialize(payload, McpHelpers.JsonOptions);
         }

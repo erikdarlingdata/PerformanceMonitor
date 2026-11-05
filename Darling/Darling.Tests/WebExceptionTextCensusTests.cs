@@ -135,6 +135,12 @@ public sealed class WebExceptionTextCensusTests
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "[\"message\"] = result.Message",
+            "#7109: PressJson's ProposalPressResult.Message (DarlingWebEndpoints.Proposals.cs) - the press's own refusal sentence or the " +
+            "server-action writer's outcome sentence, which the MCP tools answer too. ActionProposalPress sends an exception only to its log."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "invalid.Message",
             "CustomViewResult.Invalid / CustomAlertRuleResult.Invalid's own validation text (400 body) " +
             "— the store-write layer's own sentence, never ex.Message."
@@ -378,7 +384,7 @@ public sealed class WebExceptionTextCensusTests
             var path = Path.Combine(root, relative);
             Assert.True(File.Exists(path), $"#4283 census target not found: {path}");
 
-            unaccounted.AddRange(ComputeUnaccounted(relative, StripComments(File.ReadAllText(path))));
+            unaccounted.AddRange(ComputeUnaccounted(relative, StripComments(RepoFile.ReadRepoFile(path))));
         }
 
         Assert.True(unaccounted.Count == 0,
@@ -448,7 +454,7 @@ public sealed class WebExceptionTextCensusTests
         var root = RepoFile.Root;
         foreach (var (file, snippet, reason) in s_allowList)
         {
-            var code = StripComments(File.ReadAllText(Path.Combine(root, file)));
+            var code = StripComments(RepoFile.ReadRepoFile(Path.Combine(root, file)));
             Assert.True(code.Contains(snippet, StringComparison.Ordinal),
                 $"#4283 allow-list entry no longer found in {file} (\"{reason}\"): {snippet}");
         }

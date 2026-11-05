@@ -13,6 +13,7 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
@@ -174,9 +175,10 @@ SELECT d.database_name,
        (SELECT i.skip_reason FROM collect.identity_capacity AS i
         WHERE i.server_id = $1 AND i.database_name = d.database_name AND i.column_name IS NULL AND i.skip_reason IS NOT NULL
         AND   i.collection_time >= $5 AND i.collection_time <= $2
-        ORDER BY i.collection_time DESC LIMIT 1)
+        ORDER BY i.collection_time DESC LIMIT 1),
+       d.capture_time
 FROM (
-    SELECT DISTINCT v.database_name FROM v_database_config AS v
+    SELECT DISTINCT v.database_name, v.capture_time FROM v_database_config AS v
     CROSS JOIN (
         SELECT COALESCE(array_agg(lower(btrim(s.name, E' \t\r\n'))) FILTER (WHERE btrim(s.name, E' \t\r\n') <> ''), ARRAY[]::text[]) AS names
         FROM unnest(COALESCE(
@@ -189,7 +191,7 @@ FROM (
     AND   v.database_name IS NOT NULL
     AND   v.database_name <> ALL($4){databases.Clause("v.database_name", 3)}
     AND   (cardinality(scope.names) = 0 OR lower(v.database_name) = ANY(scope.names))) AS d
-ORDER BY d.database_name";
+ORDER BY lower(d.database_name), d.database_name";
 
     /// <summary>
     /// The newest scan's columns of every database with a marker in the window, and nothing else (#6875): the read behind the self-alert
@@ -200,10 +202,13 @@ ORDER BY d.database_name";
     public static async Task<IdentityCapacityRead> ReadNewestScansAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var (scanned, columns) = await ReadScansAsync(postgres, serverId, databases, start, end, commandTimeoutSeconds, cancellationToken);
+        var current = await ReadCurrentDatabasesAsync(postgres, serverId, databases, end, logger, cancellationToken);
+        OmitDropped(scanned, columns, current);
         return Assemble(scanned, columns, null, null);
     }
 
@@ -211,10 +216,13 @@ ORDER BY d.database_name";
     public static async Task<IdentityCapacityRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime start, DateTime end,
         int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var (scanned, columns) = await ReadScansAsync(postgres, serverId, databases, start, end, commandTimeoutSeconds, cancellationToken);
+        var current = await ReadCurrentDatabasesAsync(postgres, serverId, databases, end, logger, cancellationToken);
+        OmitDropped(scanned, columns, current);
 
         // A database the rotation has not reached has no marker, so the scan answer alone would leave it out and the server could look
         // clean. The server's database list is its newest database config capture (every online database, once per capture).
@@ -235,6 +243,11 @@ ORDER BY d.database_name";
                 if (scanned.ContainsKey(name))
                     continue;
 
+                /* #7547: a database the snapshot does not name is dropped, unless the config capture that lists it is newer than the snapshot
+                   (it may have been created since), the same guard OmitDropped gives a marker. */
+                if (CurrentDatabaseScope.IsDropped(current?.Databases, name) && !(current is not null && names.GetDateTime(3) > current.TakenAt))
+                    continue;
+
                 var lastScannedAt = names.IsDBNull(1) ? null : (DateTime?)names.GetDateTime(1);
                 if (names.IsDBNull(2))
                     notYetScanned.Add(new IdentityNotYetScannedDatabase(name, lastScannedAt));
@@ -244,6 +257,39 @@ ORDER BY d.database_name";
         }
 
         return Assemble(scanned, columns, notYetScanned, skipped);
+    }
+
+    /// <summary>
+    /// The databases the server has now (#7547): its newest <c>database_states</c> snapshot at or before <paramref name="end"/>, the one
+    /// <see cref="CurrentDatabaseScope"/> gives every other read of stored history. Null (nothing is left out) when a database filter is chosen,
+    /// because naming a database is a question about its history, and when the snapshot is unknown: none stored, older than its horizon, or
+    /// the read failed.
+    /// </summary>
+    private static Task<CurrentDatabaseScope.Snapshot?> ReadCurrentDatabasesAsync(
+        NpgsqlDataSource postgres, int serverId, DatabaseFilter databases, DateTime end, ILogger? logger, CancellationToken cancellationToken) =>
+        databases.IsAll
+            ? CurrentDatabaseScope.ReadSnapshotAsync(postgres, serverId, asOfUtc: end, logger: logger, cancellationToken: cancellationToken)
+            : Task.FromResult<CurrentDatabaseScope.Snapshot?>(null);
+
+    /// <summary>
+    /// Takes a dropped database out of the scan answer (#7547), so its last marker and its columns stop counting once the server no longer
+    /// has it: they would otherwise stay for the whole window, and a full column on a dropped database would hold the server critical for
+    /// seven days. A marker stamped after the snapshot was taken is kept, because its database may have been created since.
+    /// </summary>
+    private static void OmitDropped(Dictionary<string, DateTime> scanned, List<IdentityColumnFact> columns, CurrentDatabaseScope.Snapshot? current)
+    {
+        if (current is null)
+            return;
+
+        var dropped = scanned.Where(d => CurrentDatabaseScope.IsDropped(current.Databases, d.Key) && d.Value <= current.TakenAt)
+            .Select(d => d.Key).ToHashSet(StringComparer.Ordinal);
+        if (dropped.Count == 0)
+            return;
+
+        foreach (var name in dropped)
+            scanned.Remove(name);
+
+        columns.RemoveAll(c => dropped.Contains(c.DatabaseName));
     }
 
     private static async Task<(Dictionary<string, DateTime> Scanned, List<IdentityColumnFact> Columns)> ReadScansAsync(
@@ -286,7 +332,18 @@ ORDER BY d.database_name";
             columns.OrderByDescending(c => c.PercentUsed ?? -1)
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
-            scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
+            scanned.OrderBy(d => FoldAscii(d.Key), StringComparer.Ordinal).ThenBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
             notYetScanned,
             skipped);
+
+    /// <summary>
+    /// Lower-cases only A-Z (#7550). The SQL lists in the same card sort on <c>lower()</c>, which under a managed store's <c>LC_CTYPE C</c>
+    /// folds only ASCII letters, so the scanned list folds the same way and a name that starts with a non-ASCII capital lands in one place in all three.
+    /// </summary>
+    private static string FoldAscii(string name) =>
+        string.Create(name.Length, name, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+                span[i] = source[i] is >= 'A' and <= 'Z' ? (char)(source[i] + ('a' - 'A')) : source[i];
+        });
 }

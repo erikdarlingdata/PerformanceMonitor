@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -20,12 +21,12 @@ public sealed record ViewerAgentAlertGapRow(string Message, string Which);
 /// <summary>One alert row of the Agent Alerts tab, in the web page's columns and words.</summary>
 public sealed record ViewerAgentAlertRow(
     string Name, string Enabled, string Severity, string Error, string Database, string Operators,
-    string FiredInWindow, string TimesFired, string LastFired);
+    string FiredInWindow, string TimesFired, string LastFired, DateTime? LastFiredAt = null);
 
 /// <summary>
 /// The words of the Agent Alerts tab (#6874), as functions of <see cref="ViewerAgentAlertsRead"/>. They match the Configuration
 /// tab on the web page: the same empty sentences, the same column words, "yes" and "no" for a flag and a dash for an unknown. The last
-/// fired time is the monitored server's own clock, as msdb stores it and the web page shows it, so it carries no zone.
+/// fired time is the monitored server's own clock, as msdb stores it and the web page shows it, so it carries no zone and is written in the current culture's date and time format (#7243), sorted by the time itself.
 /// </summary>
 public static class ViewerAgentAlertsText
 {
@@ -46,20 +47,45 @@ public static class ViewerAgentAlertsText
 
     private const string Dash = "—";
 
-    /// <summary>The status line: the alert setup word, the alerts defined and when the newest capture was taken.</summary>
-    public static string StatusLine(ViewerAgentAlertsRead read)
+    /// <summary>
+    /// The status line: the alert setup word, the alerts defined and when the newest capture was taken. The capture time is stored
+    /// naive UTC and belongs to the picked server, so it reads in the display mode's zone on that server's <paramref name="clock"/> (#7343).
+    /// </summary>
+    public static string StatusLine(ViewerAgentAlertsRead read, ServerClock clock)
     {
         ArgumentNullException.ThrowIfNull(read);
+        ArgumentNullException.ThrowIfNull(clock);
         if (read.Read is not { HasCapture: true } capture || read.InstanceStatus is null)
         {
             return read.Message ?? NoCapture;
         }
 
         var captured = capture.NewestCapture is { } t
-            ? DateTime.SpecifyKind(t, DateTimeKind.Utc).ToLocalTime().ToString("g", CultureInfo.CurrentCulture)
+            ? ViewerTimeHelper.FormatForDisplay(t, ViewerTimeHelper.DisplayZoneFor(ViewerTimeHelper.CurrentDisplayMode, clock), "g")
             : Dash;
         return string.Create(CultureInfo.InvariantCulture,
-            $"Alert setup: {read.InstanceStatus.Word}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");
+            $"Alert setup: {SetupWord(read.InstanceStatus)}   Alerts defined: {capture.Alerts.Count}   Captured: {captured}");
+    }
+
+    /// <summary>
+    /// The setup word the web tile shows (#7416): "OK" for ok, and the number of gaps ("1 gap", "3 gaps") for gaps, the count of the rows of the gap list
+    /// below. A gaps word with no gap row falls back to the word.
+    /// </summary>
+    public static string SetupWord(AgentAlertInstanceStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        var word = status.Word;
+        if (string.Equals(word, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            return "OK";
+        }
+
+        if (string.Equals(word, "gaps", StringComparison.OrdinalIgnoreCase) && status.Gaps.Count > 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{status.Gaps.Count} {(status.Gaps.Count == 1 ? "gap" : "gaps")}");
+        }
+
+        return word.Length > 0 ? char.ToUpperInvariant(word[0]) + word[1..] : word;
     }
 
     /// <summary>The gaps, one row each. Empty when the status is ok or the read holds no capture.</summary>
@@ -71,13 +97,12 @@ public static class ViewerAgentAlertsText
             : read.InstanceStatus.Gaps.Select(g => new ViewerAgentAlertGapRow(g.Message, GapWhich(g))).ToList();
     }
 
-    /// <summary>The alerts the gap is about, else the severities or errors that have no alert.</summary>
+    /// <summary>The alerts the gap is about, empty when it is about severities or errors that have no alert (#7416): the sentence beside it already
+    /// lists those numbers, so a second column repeating them said nothing new.</summary>
     public static string GapWhich(AgentAlertGap gap)
     {
         ArgumentNullException.ThrowIfNull(gap);
-        return gap.Alerts.Count > 0
-            ? string.Join(", ", gap.Alerts)
-            : string.Join(", ", gap.Missing.Select(m => m.ToString(CultureInfo.InvariantCulture)));
+        return string.Join(", ", gap.Alerts);
     }
 
     /// <summary>The sentence under the gaps list when it has no row: the all-clear for ok, <see cref="NoData"/> otherwise (the status line has the reason).</summary>
@@ -110,7 +135,8 @@ public static class ViewerAgentAlertsText
         Number(a.OperatorCount),
         YesNo(a.FiredInWindow),
         Number(a.OccurrenceCount),
-        a.LastOccurrence is { } t ? t.ToString("s", CultureInfo.InvariantCulture) : "");
+        a.LastOccurrence is { } t ? t.ToString("G", CultureInfo.CurrentCulture) : "",
+        a.LastOccurrence);
 
     private static string YesNo(bool? value) => value is true ? "yes" : value is false ? "no" : Dash;
 

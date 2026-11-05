@@ -16,6 +16,7 @@
  *   #/server/{name}/{tab} — one server's detail, opened on a named sub-tab (pages/server-tabs.js)
  *   #/alerts            — fleet-wide Alert History
  *   #/investigations    — agent investigation requests, their reports and journal (#5904)
+ *   #/proposals         — server actions an agent proposed, and the two presses that approve one (#7109)
  *   #/alert-rules       — Custom Alert Rules list (#3285)
  *   #/alert-rule/new    — the alert-rule editor creating a new rule (optionally /new/{template})
  *   #/alert-rule/{id}   — the alert-rule editor editing a saved rule (#3285)
@@ -47,7 +48,8 @@ import { renderAdmin } from "./pages/admin.js";
 import { renderServer } from "./pages/server.js";
 import { renderFinops } from "./pages/finops.js";
 import { renderAlerts } from "./pages/alerts.js";
-import { renderInvestigations } from "./pages/investigations.js";
+import { renderInvestigations, requestIdFromQuery } from "./pages/investigations.js";
+import { renderProposals, proposalIdFromQuery } from "./pages/proposals.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
 import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
 import { REFRESH_CHOICES, PAGE_REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel, loadPageRefreshChoice, savePageRefreshChoice, PAGE_REFRESH_KEY } from "./refresh-policy.js";
@@ -100,6 +102,13 @@ function currentRoute() {
   }
   if (h.startsWith("#/alerts")) return { name: "alerts" };
   if (h === "#/investigations" || h === "#/investigations/") return { name: "investigations" };
+  /* #/investigations?request=<id> (#6979) — the link a report notice carries: that one request, its report and its agent changes. */
+  if (h.startsWith("#/investigations?")) {
+    return { name: "investigations", request: requestIdFromQuery(h.slice("#/investigations?".length)) };
+  }
+  if (h === "#/proposals" || h === "#/proposals/") return { name: "proposals" };
+  /* #/proposals?proposal=<id> (#7109): one proposal, the link a proposal notice carries. */
+  if (h.startsWith("#/proposals?")) return { name: "proposals", proposal: proposalIdFromQuery(h.slice("#/proposals?".length)) };
   /* Alert-rule routes (#3285): the list, the new form (optionally /new/{template}), then the bare /{id} edit form,
      tested most-specific first. Distinct from #/alerts above (which cannot collide: #/alert- never starts #/alerts). */
   if (h === "#/alert-rules" || h === "#/alert-rules/") return { name: "alertRules" };
@@ -283,7 +292,8 @@ function route(opts) {
   else if (r.name === "ag") renderAg(main, opts);
   else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
-  else if (r.name === "investigations") renderInvestigations(main);
+  else if (r.name === "investigations") renderInvestigations(main, r.request);
+  else if (r.name === "proposals") renderProposals(main, r.proposal, opts);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
   else if (r.name === "admin") renderAdmin(main, r.tab);
@@ -466,11 +476,17 @@ let storeSizeStale = false;
 let storeSizeAttemptAt = 0;
 let storeSizeInFlight = false;
 
-/* The Viewer's wording (ViewerSeatIndicator): "Seat: read-write" / "Seat: read-only" / "Seat: not connected". */
+/* The Viewer's wording (ViewerSeatIndicator): "Access: read-write" / "Access: read-only" / "Access: not connected". The hover says what the word
+   means, because a bare "read-write" does not say what is written: #7416. */
+const ACCESS_HOVER = {
+  write: "What this browser's token may change. Read-write: it can change the monitoring store (alert rules, mutes, collector schedules, the server list). Nothing is ever written to a monitored SQL Server.",
+  read: "What this browser's token may change. Read-only: it can read everything but change nothing in the monitoring store. Nothing is ever written to a monitored SQL Server.",
+  none: "What this browser's token may change. The service could not say, so nothing is claimed about it.",
+};
 function seatLabel(session) {
   if (!session) return null;
-  if (session.probe_failed) return "Seat: not connected";
-  return session.can_edit ? "Seat: read-write" : "Seat: read-only";
+  if (session.probe_failed) return { text: "Access: not connected", title: ACCESS_HOVER.none };
+  return session.can_edit ? { text: "Access: read-write", title: ACCESS_HOVER.write } : { text: "Access: read-only", title: ACCESS_HOVER.read };
 }
 
 /* The Viewer's FormatBytes: GB with one decimal from 1 GB up, whole MB below. */
@@ -547,12 +563,12 @@ function renderStatusBar() {
   const servers = d.total_servers || 0;
   const items = [
     el("span", { class: "sb-item", text: servers + (servers === 1 ? " server" : " servers") }),
-    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + (warning > 0 ? warning + " warning · " : "") + failing + " failing" + (notCollected > 0 ? " · " + notCollected + " not collected" : "") + (noPermission > 0 ? " · " + noPermission + " no permission" : "") }),
+    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + (warning > 0 ? warning + " warning · " : "") + failing + " failing" + (notCollected > 0 ? " · " + notCollected + " not collected" : "") + (noPermission > 0 ? " · " + noPermission + " need setup" : "") }),
   ];
   if (storeSizeBytes != null) {
     items.push(el("span", { class: "sb-item sb-store-size" + (storeSizeStale ? " muted" : ""), text: "Database: " + formatStoreSize(storeSizeBytes) + (storeSizeStale ? " (stale)" : "") }));
   }
-  if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat }));
+  if (statusSeat) items.push(el("span", { class: "sb-item sb-seat", text: statusSeat.text, title: statusSeat.title }));
   if (statusCollection && NON_OK_COLLECTION_STATES.has(statusCollection)) {
     items.push(el("span", { class: "sb-item sb-collection sb-warn", text: "Collection: " + statusCollection[0].toUpperCase() + statusCollection.slice(1) }));
   }

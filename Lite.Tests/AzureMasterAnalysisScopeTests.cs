@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -209,6 +210,22 @@ public class AzureMasterAnalysisScopeTests : IClassFixture<SharedDuckDbFixture>,
         var spike = (await AnomaliesAsync(Gp)).Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
 
         Assert.Equal(5.0, spike.Value);
+    }
+
+    /* #7537: the detector stamps the DMV arm, and only that arm, so the spike text names blocking snapshot rows. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task BlockingSpike_StampsTheDmvArmOnly_WhenNoBlockedProcessReportsExist(bool bpr)
+    {
+        await SeedHistoryAsync();
+        if (bpr) await SeedBprAsync(6, "HS"); else await SeedDmvAsync(6, "HS");
+
+        foreach (var scope in new IReadOnlyList<string>?[] { null, Gp })
+        {
+            var spike = (await AnomaliesAsync(scope)).Single(f => f.Key == "ANOMALY_BLOCKING_SPIKE");
+            Assert.Equal(bpr ? 0.0 : 1.0, spike.Metadata.GetValueOrDefault(CountFamilyMetadata.FromDmvSnapshotsKey));
+        }
     }
 
     [Fact]

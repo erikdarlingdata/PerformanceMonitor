@@ -28,6 +28,7 @@ public sealed class KillSessionTests
     [InlineData("own_session", "own_session")]
     [InlineData("session_gone", "session_gone")]
     [InlineData("session_reused", "session_reused")]
+    [InlineData("session_changed", "session_changed")]
     [InlineData("not_user_session", "not_user_session")]
     [InlineData("kill_permission_denied", "kill_permission_denied")]
     public void EveryRefusalOfTheBatch_IsARefusalWithItsOwnReason_AndNeverSaysItWrote(string outcome, string reason)
@@ -42,6 +43,44 @@ public sealed class KillSessionTests
         }
     }
 
+    /// <summary>#7109: a write carries the expected last request end, a NULL as a NULL, and a call with no binding turns the check off.</summary>
+    [Fact]
+    public void TheKillBatchParameters_CarryTheExpectedLastRequestEnd_AndNullStaysNull()
+    {
+        static (bool Check, object Value) Read(KillExpectedActivity? expected)
+        {
+            using var command = new Microsoft.Data.SqlClient.SqlCommand();
+            SqlServerRemediationExecutor.AddKillActivityParameters(command, expected);
+            return ((bool)command.Parameters["@check_activity"].Value, command.Parameters["@expected_last_end"].Value);
+        }
+
+        var ended = new DateTime(2026, 10, 19, 8, 5, 0, 123);
+        var withTime = Read(new KillExpectedActivity(ended));
+        Assert.True(withTime.Check);
+        Assert.Equal(ended, withTime.Value);
+
+        var neverEnded = Read(new KillExpectedActivity(null));
+        Assert.True(neverEnded.Check);
+        Assert.Equal(DBNull.Value, neverEnded.Value);
+
+        Assert.False(Read(null).Check);
+    }
+
+    /// <summary>#7109: the SQL Server batches refuse on the new outcome without wording it as a reused id, and the Azure batch says so too.</summary>
+    [Fact]
+    public void ASessionThatRanSomethingNew_IsRefusedInPlainWords_OnBothBatches()
+    {
+        foreach (var database in new string?[] { null, "Sales" })
+        {
+            var result = SqlServerRemediationExecutor.KillAnswer(Name, false, 57, "session_changed", Facts(), null, null, database: database);
+            Assert.Equal(RemediationOutcome.Refused, result.Outcome);
+            Assert.Equal(RemediationResult.Reasons.SessionChanged, result.Reason);
+            Assert.Contains("run something new since the dry run", result.Message);
+            Assert.Contains("Nothing was run", result.Message);
+            Assert.False(result.Wrote);
+        }
+    }
+
     /// <summary>#5632: every refusal of the Azure SQL Database batch is a refusal with its own reason, and never says it wrote.</summary>
     [Theory]
     [InlineData("not_azure_sql_database", "not_azure_sql_database")]
@@ -51,6 +90,7 @@ public sealed class KillSessionTests
     [InlineData("own_session", "own_session")]
     [InlineData("session_gone", "session_gone")]
     [InlineData("session_reused", "session_reused")]
+    [InlineData("session_changed", "session_changed")]
     [InlineData("session_in_other_database", "session_in_other_database")]
     [InlineData("not_user_session", "not_user_session")]
     [InlineData("tool_login_session", "tool_login_session")]

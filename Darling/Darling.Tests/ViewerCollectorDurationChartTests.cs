@@ -256,6 +256,6 @@ public sealed class ViewerCollectorDurationChartTests
 
         var reads = Matches(tabs, "\"get_collection_log\"");
         Assert.Equal(2, reads);
-        Assert.Equal(reads, Matches(tabs, @"table\(\s*""Collection Log"",\s*""get_collection_log"","));
+        Assert.Equal(reads, Matches(tabs, @"tablePanel\(\s*""Collection Log"",\s*""get_collection_log"","));
     }
 }

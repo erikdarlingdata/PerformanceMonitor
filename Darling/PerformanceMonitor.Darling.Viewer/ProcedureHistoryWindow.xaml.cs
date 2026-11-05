@@ -8,14 +8,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
-using Microsoft.Win32;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
@@ -188,11 +185,15 @@ public partial class ProcedureHistoryWindow : Window
         if (sender is not Button btn) return;
         if (string.IsNullOrEmpty(_objectName)) return;
 
+        /* #7175: the clicked row's own compiled plan, not the newest plan for the procedure. */
+        var row = HistoryRowPlanTarget.Resolve<ViewerProcedureStatsHistoryRow>(sender, HistoryDataGrid);
+
         btn.IsEnabled = false;
         btn.Content = "...";
         try
         {
-            var plan = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName);
+            var read = await _dataService.GetProcedureStatsPlanAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            var plan = read?.PlanXml;
             if (string.IsNullOrEmpty(plan))
             {
                 MessageBox.Show(this, "No plan was captured in the collected data for this procedure.",
@@ -203,21 +204,19 @@ public partial class ProcedureHistoryWindow : Window
             /* #5320: a plan the statement filter withheld whole is the marker, not a plan: say so, save nothing. */
             if (WithheldPlanGuard.RefuseSave(plan)) return;
 
-            var dialog = new SaveFileDialog
+            if (read!.IsFallback)
             {
-                Filter = "SQL Plan files (*.sqlplan)|*.sqlplan|All files (*.*)|*.*",
-                DefaultExt = ".sqlplan",
-                FileName = $"proc_plan_{_objectName}_{DateTime.Now:yyyyMMdd_HHmmss}.sqlplan"
-            };
+                MessageBox.Show(this, StoredPlanNotice.Text, "Showing The Newest Plan", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
-            if (dialog.ShowDialog() != true) return;
-            File.WriteAllText(dialog.FileName, plan, Encoding.UTF8);
-            btn.Content = "Saved";
+            /* The history window pre-fills the clicked snapshot's own time (UTC), so a plan saved from a fallback or an old row names its source. */
+            var stamp = read!.CollectionTime is { } snapshot ? $"{snapshot:yyyyMMdd_HHmmss}Z" : null;
+            if (FileSaveHelper.SavePlanFile(plan, $"proc_plan_{_objectName}", stamp)) btn.Content = "Saved";
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
         finally
         {
@@ -233,13 +232,16 @@ public partial class ProcedureHistoryWindow : Window
     {
         var fullName = string.IsNullOrEmpty(_schemaName) ? _objectName : $"{_schemaName}.{_objectName}";
         string? planXml;
+        var row = HistoryRowPlanTarget.Resolve<ViewerProcedureStatsHistoryRow>(sender, HistoryDataGrid);
+        StoredPlanRead? read;
         try
         {
-            planXml = await _dataService.GetProcedureStatsPlanXmlAsync(_serverId, _databaseName, _schemaName, _objectName);
+            read = await _dataService.GetProcedureStatsPlanAsync(_serverId, _databaseName, _schemaName, _objectName, row?.PlanHandle);
+            planXml = read?.PlanXml;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(this, $"Could not read the plan for this procedure from the store: {ex.Message}. If this repeats, check the Viewer log (sidebar: View Log).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
@@ -250,7 +252,9 @@ public partial class ProcedureHistoryWindow : Window
             return;
         }
 
-        var label = $"Est Plan - {fullName}";
+        /* #7175: name the plan that was read. On a fallback, say the clicked row's plan was not stored. */
+        var label = read!.CollectionTime is { } snapshot ? $"Est Plan - {fullName} ({snapshot:yyyy-MM-dd HH:mm}Z)" : $"Est Plan - {fullName}";
+        if (read.IsFallback) label += " - " + StoredPlanNotice.Text;
         var viewer = new PlanViewerControl();
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
@@ -297,13 +301,14 @@ public partial class ProcedureHistoryWindow : Window
         }
         catch (ViewerReadOnlyException)
         {
-            MessageBox.Show(this, "This is a read-only viewer seat, which cannot ask the service to fetch a live plan.",
+            MessageBox.Show(this, "This viewer is connected with a read-only store login, so it cannot ask the service to fetch a live plan. " +
+                ViewerReadOnlyException.HowToConnectAsAdmin,
                 "Read-Only", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to fetch the live plan: {ex.Message}", "Cached Plan Error",
+            MessageBox.Show(this, $"The service could not fetch the live plan: {ex.Message}", "Cached Plan Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }

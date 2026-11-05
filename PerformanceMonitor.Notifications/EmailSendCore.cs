@@ -30,6 +30,41 @@ namespace PerformanceMonitor.Notifications;
 /// </summary>
 public sealed class EmailSendCore
 {
+    /// <summary>The most addresses one recipient list holds.</summary>
+    public const int MaxRecipients = 50;
+
+    /// <summary>
+    /// The refusal for a recipient list, or null when it is fine or blank (#6231, #7184). The list is comma separated, as the send
+    /// splits it, and each entry must be one plain address (no display name, no group). One copy for the Viewer's and Lite's SMTP
+    /// settings, the Viewer's route window and the MCP tools: a single entry the send cannot parse (an Outlook-style
+    /// <c>a@x.com;b@x.com</c>) makes <c>MailAddressCollection.Add</c> throw and the whole message fails, and <c>a@x.com; b@x.com</c> parses
+    /// as one recipient, <c>b@x.com</c>, with the first address as its display name, so the first is silently dropped. The text never carries an address.
+    /// </summary>
+    public static string? RecipientsRefusal(string? recipients)
+    {
+        if (string.IsNullOrWhiteSpace(recipients))
+        {
+            return null;
+        }
+
+        var entries = recipients.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (entries.Length > MaxRecipients)
+        {
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"A recipient list holds at most {MaxRecipients} email addresses.");
+        }
+
+        foreach (var entry in entries)
+        {
+            if (!MailAddress.TryCreate(entry, out var address) || !string.Equals(address.Address, entry, StringComparison.Ordinal)
+                || !string.IsNullOrEmpty(address.DisplayName))
+            {
+                return "The email recipients are a comma separated list of plain addresses such as name@example.com. (The value is not echoed.)";
+            }
+        }
+
+        return null;
+    }
+
     private readonly IAlertSettings _settings;
     private readonly WebhookAlertService _webhookAlertService;
     private readonly AlertBranding _branding;
@@ -201,6 +236,21 @@ public sealed class EmailSendCore
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
                     render.Context, render.Prose, displayName, triageUrl);
+
+                /* #7041: a scheduled report that rendered its own page (the Daily Health Report) supplies the HTML
+                   view and the subject. Read from the ORIGINAL context: the delivery filter's copy carries only what
+                   the channel builders render. The plain view stays the template's own, built from the report's
+                   text, so a client that shows plain text still gets the report. The HTML is used as given and is
+                   not run through the template's escaping a second time. */
+                if (!string.IsNullOrEmpty(context?.EmailHtmlBody))
+                {
+                    htmlBody = context.EmailHtmlBody;
+                }
+
+                if (!string.IsNullOrWhiteSpace(context?.EmailSubject))
+                {
+                    subject = context.EmailSubject.Trim();
+                }
 
                 /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
                    else the parent's list. Resolved here, after the cooldown and the budget, so a throttled alert
@@ -438,6 +488,15 @@ public sealed class EmailSendCore
     /// parent's <see cref="IAlertSettings.SmtpRecipients"/>.</param>
     private static async Task SendEmailAsync(IAlertSettings settings, string subject, string htmlBody, string plainTextBody, AlertContext? context = null, string? recipients = null)
     {
+        /* #7184: a default list stored before the settings windows checked it is re-checked here. Left alone,
+           "a@x.com; b@x.com" mailed only b@x.com with nothing in alert history, and "a@x.com;b@x.com" failed with the
+           raw FormatException text. The send still fails, now before any message is built and with the sentence the
+           settings windows show. Route lists already pass this rule when they are saved. */
+        if (RecipientsRefusal(recipients ?? settings.SmtpRecipients) is { } recipientsRefusal)
+        {
+            throw new InvalidOperationException(recipientsRefusal);
+        }
+
         using var smtpClient = new SmtpClient(settings.SmtpServer, settings.SmtpPort)
         {
             EnableSsl = settings.SmtpUseSsl,

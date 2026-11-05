@@ -231,7 +231,7 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         var parallel = FactAdvice.Compose("THREADPOOL_PARALLEL", Facts(hardware, Config("CONFIG_MAXDOP", 0), Config("CONFIG_CTFP", 5)))!;
         Assert.Contains("cost threshold for parallelism is 5 (cores per socket 4).", parallel.Remediation, StringComparison.Ordinal);
-        Assert.Contains("cap MAXDOP at 4 (this server's per-NUMA-node processor count, capped at 8)", parallel.Remediation, StringComparison.Ordinal);
+        Assert.Contains("cap MAXDOP at 4 (this server's cores-per-socket, capped at 8)", parallel.Remediation, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -586,15 +586,15 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
         {
             Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Physical\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
             Assert.Contains($"{{ key: \"total_physical_memory_mb\", label: \"Memory limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
-            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available\", format: \"mb\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
-            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available under limit\", format: \"mb\", showWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available\", format: \"mbfit\", hideWhen: {condition} }}", source, StringComparison.Ordinal);
+            Assert.Contains($"{{ key: \"available_physical_memory_mb\", label: \"Available under limit\", format: \"mbfit\", showWhen: {condition} }}", source, StringComparison.Ordinal);
         }
         Assert.Contains("const AZURE_SQL_DATABASE = { key: \"engine_edition\", equals: 5 };", tabs, StringComparison.Ordinal);
     }
 
     /// <summary>audit_config reads PostgreSQL, which this suite does not stand up, so the tool is pinned at the source: its MAXDOP
-    /// recommendation comes from the shared basis (the vCores on an Azure SQL Database, cores per socket elsewhere) and says which.
-    /// Lite.Tests runs the same tool end to end over a seeded store.</summary>
+    /// recommendation comes from the shared basis (the vCores on an Azure SQL Database, cores per socket elsewhere). The sentence
+    /// that names the figure is covered by ConfigAuditGuidanceTests and, end to end over a seeded store, by Lite.Tests.</summary>
     [Fact]
     public void AuditConfig_TakesItsMaxdopRecommendationFromTheSharedBasis_AndNamesTheDatabasesVcores()
     {
@@ -602,6 +602,5 @@ public sealed class AzureSqlDatabaseOwnFiguresTests
 
         Assert.Contains("var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);", tool, StringComparison.Ordinal);
         Assert.Contains("var recommended = (int)FactRemediation.RecommendedMaxdop(maxdopBasis.Cores);", tool, StringComparison.Ordinal);
-        Assert.Contains("(maxdopBasis.FromVcores ? \"this database's vCores\" : \"this server's cores-per-socket\")", tool, StringComparison.Ordinal);
     }
 }

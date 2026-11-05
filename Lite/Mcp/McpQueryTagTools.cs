@@ -38,7 +38,6 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTagTools
 {
-    internal const int MaxKeyPartLength = 256;
     internal const int MaxListedAssignments = 2000;
     internal const int MaxSamples = QueryTagRuleTester.MaxSamples;
     internal const int MaxHeldSamples = QueryTagRuleTester.MaxHeldSamples;
@@ -51,7 +50,6 @@ public sealed class McpQueryTagTools
     private const string RuleMapNote = "The tag map is rebuilt on the next map pass; this call changed no map row.";
 
     private const string KindHash = "hash";
-    private const string KindObject = "object";
 
     // ------------------------------------------------------------------ tag tools
 
@@ -817,71 +815,15 @@ public sealed class McpQueryTagTools
         bool requireHashShape = false)
     {
         refusal = null;
-        var cleanKind = kind?.Trim().ToLowerInvariant();
-        if (cleanKind is not (KindHash or KindObject))
+        var parts = QueryTagKeyParser.TryParse(kind, queryHash, databaseName, schemaName, objectName, serverId, requireHashShape, out var problem);
+        if (parts is null)
         {
-            refusal = Refusal("invalid", "bad_kind", "kind must be 'hash' or 'object'.");
+            refusal = Refusal("invalid", problem!.Code, problem.Message);
             return null;
         }
 
-        /* No sign test on server_id: ids are FNV hashes and half of them are negative. The registry decides (UnknownServer). */
-        var hash = Clean(queryHash);
-        var database = Clean(databaseName);
-        var schema = Clean(schemaName);
-        var obj = Clean(objectName);
-        foreach (var (field, value) in new[] { ("query_hash", hash), ("database_name", database), ("schema_name", schema), ("object_name", obj) })
-        {
-            if (value is not null && (value.Length > MaxKeyPartLength || value.Any(char.IsControl)))
-            {
-                refusal = Refusal("invalid", "bad_key", string.Create(CultureInfo.InvariantCulture, $"{field} must be at most {MaxKeyPartLength} characters with no control characters."));
-                return null;
-            }
-        }
-
-        if (cleanKind == KindHash)
-        {
-            if (hash is null)
-            {
-                refusal = Refusal("invalid", "missing_key", "kind 'hash' needs query_hash.");
-                return null;
-            }
-
-            if (database is not null || schema is not null || obj is not null)
-            {
-                refusal = Refusal("invalid", "bad_key", "kind 'hash' takes query_hash only; database_name, schema_name and object_name belong to kind 'object'.");
-                return null;
-            }
-
-            /* #6455: a NEW assignment must name something a query hash can be, the same refusal the Darling twin gives; unassign
-               skips this so a key stored before the check can still be removed. */
-            if (requireHashShape && !QueryHashIdentity.IsAssignableHash(hash))
-            {
-                refusal = Refusal("invalid", "bad_key", "query_hash must be hexadecimal: 0x followed by 1 to 16 hex digits (for example 0x1A2B3C4D5E6F7081), or the decimal number the long-query trace stores.");
-                return null;
-            }
-
-            /* The resolver matches a hash ignoring case, so the key stores one spelling of it. Unassign skips the shape check
-               above, so a key stored before it is kept as typed and can be removed. */
-            return new QueryTagKey(KindHash, serverId, QueryHashIdentity.CanonicalKey(hash) ?? hash, null, null, null);
-        }
-
-        var missing = new[] { ("database_name", database), ("schema_name", schema), ("object_name", obj) }.Where(p => p.Item2 is null).Select(p => p.Item1).ToList();
-        if (missing.Count > 0)
-        {
-            refusal = Refusal("invalid", "missing_key", $"kind 'object' needs database_name, schema_name and object_name; missing: {string.Join(", ", missing)}.");
-            return null;
-        }
-
-        if (hash is not null)
-        {
-            refusal = Refusal("invalid", "bad_key", "kind 'object' takes database_name, schema_name and object_name only; query_hash belongs to kind 'hash'.");
-            return null;
-        }
-
-        return new QueryTagKey(KindObject, serverId, null, database, schema, obj);
+        return new QueryTagKey(parts.Kind, parts.ServerId, parts.Hash, parts.Database, parts.Schema, parts.Name);
     }
-
-    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     /// <summary>The shared validation, then the references: null when the rule may be saved, else the refusal envelope.</summary>
     private static string? CheckRule(

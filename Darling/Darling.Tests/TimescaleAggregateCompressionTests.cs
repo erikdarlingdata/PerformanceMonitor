@@ -359,7 +359,7 @@ public sealed class TimescaleAggregateCompressionTests
         var state = TimescaleSupport.AggregateCompressionStateSql;
         Assert.Contains("j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name", state, StringComparison.Ordinal);
         Assert.Contains("j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name", state, StringComparison.Ordinal);
-        Assert.Contains("WHERE ca.view_schema = 'collect'", state, StringComparison.Ordinal);
+        Assert.Contains("WHERE c.view_schema = 'collect'", state, StringComparison.Ordinal);
         Assert.DoesNotContain("hypertable_size", state, StringComparison.Ordinal);
         Assert.DoesNotContain("timescaledb_information.chunks", state, StringComparison.Ordinal);
 
@@ -668,6 +668,42 @@ public sealed class TimescaleAggregateCompressionTests
             Assert.Contains("0 changed this start", widthLog.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("materialization now chunks at", widthLog.Joined, StringComparison.Ordinal);
             Assert.Equal(widths, await MaterializationChunkIntervalSecondsAsync(connection, ct));
+
+            /* The state read itself (#7016): one row per aggregate in collect, never a duplicate from the
+               two-identity job join, and every target's row carries its converged job. */
+            var stateRows = new List<(string View, bool Enabled, int? JobId, long? CompressAfter, long? Schedule, bool? Fixed, int? Hour, int? Minute)>();
+            await using (var stateCommand = new NpgsqlCommand(TimescaleSupport.AggregateCompressionStateSql, connection))
+            await using (var stateReader = await stateCommand.ExecuteReaderAsync(ct))
+            {
+                while (await stateReader.ReadAsync(ct))
+                {
+                    stateRows.Add((
+                        stateReader.GetString(0),
+                        stateReader.GetBoolean(1),
+                        stateReader.IsDBNull(2) ? null : stateReader.GetInt32(2),
+                        stateReader.IsDBNull(3) ? null : stateReader.GetInt64(3),
+                        stateReader.IsDBNull(4) ? null : stateReader.GetInt64(4),
+                        stateReader.IsDBNull(5) ? null : stateReader.GetBoolean(5),
+                        stateReader.IsDBNull(6) ? null : stateReader.GetInt32(6),
+                        stateReader.IsDBNull(7) ? null : stateReader.GetInt32(7)));
+                }
+            }
+
+            Assert.Equal(stateRows.Count, stateRows.Select(r => r.View).Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal(
+                (await ExistingCaggsAsync(connection, ct)).Length,
+                stateRows.Count);
+            foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+            {
+                var row = Assert.Single(stateRows, r => r.View == view);
+                Assert.True(row.Enabled);
+                Assert.NotNull(row.JobId);
+                Assert.Equal((long?)TimescaleSupport.AggregateCompressAfterSpanFor(view).TotalSeconds, row.CompressAfter);
+                Assert.Equal((long?)TimescaleSupport.AggregateCompressionScheduleSpan.TotalSeconds, row.Schedule);
+                Assert.True(row.Fixed);
+                Assert.NotNull(row.Hour);
+                Assert.NotNull(row.Minute);
+            }
 
             /* Every aggregate: compression enabled, exactly one compression job, at its tier's window, on the daily
                cadence, on a fixed schedule at its hour and the band's minute. Read back from the catalog, not from

@@ -839,7 +839,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
             "Set DARLING_TEST_PG to a Postgres connection string to run the investigation evidence family live tests.");
 
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);

@@ -464,9 +464,7 @@ public class AnalysisService
                 finding.Remediation =
                     FactRemediation.BuildAction(finding)
                     ?? FactRemediation.BuildRcsiAction(finding)
-                    ?? FactRemediation.BuildClearPlanAction(finding)
                     ?? FactRemediation.BuildFileAutogrowthAction(finding) // advisory copy-paste (no handler)
-                    ?? FactRemediation.BuildServerConfigAction(finding)   // server-level config — MAXDOP/CTFP/memory
                     ?? FactRemediation.BuildMissingIndexAction(finding);  // missing-index CREATE — copy-paste only
             }
 
@@ -737,6 +735,14 @@ public class AnalysisService
         }
         return dispersion;
     }
+
+    /// <summary>
+    /// #7005: the collector-data probe the MCP analysis reads take their window floor from: the same shared <see cref="LocalDataService"/>
+    /// window-floor read every other windowed tool uses, over the store this service reads. The floor is the data the analysis scores
+    /// (the <c>wait_stats</c> relation, the anchor <c>analyze_server</c> itself requires), not the stored findings, which a quiet
+    /// pass never writes.
+    /// </summary>
+    internal LocalDataService CollectorWindowProbe() => new(_duckDb);
 
     /// <summary>
     /// Gets the latest findings for a server without running a new analysis.
@@ -1293,11 +1299,15 @@ WHERE server_id = $1";
 
         try
         {
+            /* #7256: a table whose archive holds nothing in the lookback is read as its hot table. */
+            var nowUtc = DateTime.UtcNow;
+            var plan = await _duckDb.PlanArchiveReadAsync(cancellationToken,
+                [.. ForcePlanTargetStateReader.ArchivedTables.Select(t => new ArchiveWindow(t, "collection_time", nowUtc - ForcePlanTargetState.Lookback))]);
             using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
-            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, DateTime.UtcNow, cancellationToken), null);
+            return (await ForcePlanTargetStateReader.ReadAsync(command, serverId, targets, nowUtc, plan, cancellationToken), null);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {

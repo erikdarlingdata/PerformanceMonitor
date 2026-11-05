@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using Lite.Tests;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitorLite.Database;
 using Xunit;
@@ -319,7 +320,7 @@ public sealed class DeltaFamilySeedingCensusTests
     /// checkout. The root is the tracked solution file, a marker that survives a git worktree (whose
     /// <c>.git</c> is a file) — the RepoFile idiom Darling.Tests consolidated on.</summary>
     private static string ReadRepoFile(string relative) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relative.Replace('/', Path.DirectorySeparatorChar))).Replace("\r\n", "\n", StringComparison.Ordinal);
+        SplitRepoFile.ReadAllText(Path.Combine(RepoRoot(), relative.Replace('/', Path.DirectorySeparatorChar))).Replace("\r\n", "\n", StringComparison.Ordinal);
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")
     {

@@ -22,7 +22,7 @@ namespace Darling.Tests;
 public class ComposeHourlyEdgesRunnerTests
 {
     private static string Source(params string[] relative) =>
-        File.ReadAllText(RepoFile.PathTo(relative)).Replace("\r\n", "\n");
+        RepoFile.ReadRepoFile(relative).Replace("\r\n", "\n");
 
     /* #6390 S2c: the run core moved to Storage; the rules read the endpoints and the runner as one text. */
     private static string Web() => Source("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs") + Source("Darling", "PerformanceMonitor.Darling.Storage", "Compose", "ComposePanelRunner.cs");

@@ -75,7 +75,7 @@ public sealed class QueryStoreAzureLoopWatermarkLiveTests
         public static async Task<Rig> OpenAsync(CancellationToken ct)
         {
             var rig = new Rig();
-            rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+            rig.Scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct, emptyStore: true);
             await using (var migrate = new NpgsqlConnection(rig.Scratch.ConnectionString))
             {
                 await migrate.OpenAsync(ct);

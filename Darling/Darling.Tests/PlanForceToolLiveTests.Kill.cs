@@ -18,6 +18,7 @@ using Microsoft.Data.SqlClient;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Remediation;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Service.Targets;
@@ -114,6 +115,47 @@ public sealed partial class PlanForceToolLiveTests
     }
 
     /// <summary>
+    /// #7108: the prepare step returns the facts that decide the kill, with the last request's end time among them, kills nothing, and the write step
+    /// then ends the session it names.
+    /// </summary>
+    [Fact]
+    public async Task ThePrepareStep_ReturnsTheBindingFacts_KillsNothing_AndTheWriteStepEndsTheSession()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var offset = await SeedClockAsync(c);
+            var victim = await OpenVictimAsync(c);
+            using var _ = victim.Connection;
+            await using var admin = await OpenAsync(c.Sql.Admin(), c.Ct);
+            var lastEnd = (DateTime)(await ScalarAsync(admin, $"SELECT last_request_end_time FROM sys.dm_exec_sessions WHERE session_id = {victim.SessionId};", c.Ct))!;
+
+            var store = new InvestigationRequestStore(c.Source, 30, agentActionSource: c.Source);
+            var decision = await ServerActionGate.AuthorizeAsync(store, c.Source, c.Log, DarlingMcpPlanForceTools.KillToolName, ServerActionNames.KillSession, c.Arg,
+                new AgentActionTarget(7, "srv-7", victim.SessionId.ToString(CultureInfo.InvariantCulture), null), c.Ct);
+            var permit = decision.Permit!;
+
+            var prepared = await DarlingMcpPlanForceTools.PrepareKillSessionAsync(c.Source, c.Source, c.Log, permit, 7, "srv-7", azure: false, victim.SessionId,
+                victim.LoginLocal.AddMinutes(-offset), null, c.Ct);
+            Assert.True(prepared.Proceed);
+            var binding = prepared.Binding!;
+            Assert.Equal(victim.SessionId, binding.SessionId);
+            Assert.Equal(victim.LoginLocal.AddMinutes(-offset), binding.LoginTimeUtc);
+            Assert.Equal(victim.LoginLocal, binding.LoginTimeServerLocal);
+            Assert.Equal(lastEnd, binding.LastRequestEndTimeServerLocal);
+            Assert.Equal(lastEnd.AddMinutes(-offset), binding.LastRequestEndTimeUtc);
+            Assert.Equal("sleeping", binding.Status);
+            Assert.Equal(0, binding.OpenTransactionCount);
+            Assert.True(await SessionAliveAsync(c, victim));
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+
+            var written = await DarlingMcpPlanForceTools.WriteKillSessionAsync(prepared.Executor!, permit, azure: false, binding, c.Ct);
+            Assert.Equal(RemediationOutcome.Done, written.Outcome);
+            Assert.True(written.Wrote);
+            Assert.False(await SessionAliveAsync(c, victim));
+        });
+    }
+
+    /// <summary>
     /// #5632: a session of Darling itself is never killed, dry run or real: one whose program name starts with PerformanceMonitorDarling AND whose
     /// login is the monitoring login, and another session of the remediation login with any program name. The refusal returns no facts about the
     /// session, and journals nothing. The monitoring login's name alone is not a reason to refuse, so an ordinary session of the same login stays
@@ -197,7 +239,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Equal((long)json["journal_id"]!, (long)done["called_id"]!);
             Assert.NotNull(done["after"]!["rollback"]);
 
-            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct);
+            var list = await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct);
             var change = Assert.Single(list.Changes);
             Assert.Equal(KillKind, change.Kind);
             Assert.False(change.CanTryUndo(DateTime.UtcNow), "a kill has no undo");
@@ -272,7 +314,7 @@ public sealed partial class PlanForceToolLiveTests
             Assert.Single(await RowsAsync(c, "action_called"));
             Assert.Empty(await RowsAsync(c, "action_failed"));
             Assert.Empty(await RowsAsync(c, "action_done"));
-            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, c.Ct)).Changes);
+            var change = Assert.Single((await new AgentChangeUndo(c.Source, 30).ReadAsync(50, cancellationToken: c.Ct)).Changes);
             Assert.Equal(AgentChangeResult.Unknown, change.Result);
             AssertNoSecret(c, answer, await JournalTextAsync(c));
         });
@@ -355,6 +397,24 @@ public sealed partial class PlanForceToolLiveTests
             Assert.True(await SessionAliveAsync(c, victim));
             Assert.Equal(0, await JournalActionRowsAsync(c));
         });
+    }
+
+    /// <summary>
+    /// #7108: the refusal for a server whose clock was never collected comes from the prepare step, after the gate passed. The tool journals it as a refusal with its
+    /// reason on the agent's request. The store is enough: nothing reaches the monitored server.
+    /// </summary>
+    [Fact]
+    public async Task WithoutAServerClock_TheRefusalIsJournaledOnTheRequestWithItsReason()
+    {
+        await RunAsync(Without.Nothing, async c =>
+        {
+            var json = Parse(await KillAsync(c, 55, "2026-10-19T12:00:00Z", dryRun: false));
+            Assert.Equal("refused", (string?)json["status"]);
+            Assert.Equal("server_clock_unknown", (string?)json["reason"]);
+            Assert.Equal(0, await JournalActionRowsAsync(c));
+            Assert.Equal("1", await PgScalarAsync(c.Connection, "SELECT count(*) FROM config.investigation_journal WHERE event = 'refused' AND reason = 'server_clock_unknown' AND actor = 'agent:agent-a' "
+                + "AND request_id = (SELECT request_id FROM config.investigation_requests LIMIT 1)", c.Ct));
+        }, storeOnly: true);
     }
 
     [Fact]

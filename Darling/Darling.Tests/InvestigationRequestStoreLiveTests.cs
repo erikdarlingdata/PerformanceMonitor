@@ -845,15 +845,16 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
                                 && !block.Contains("practice_of", StringComparison.Ordinal)))
             .ToList();
 
-        /* The viewer carve, the mcp carve, and step 3i, retargeted at per-run roles. */
-        Assert.Equal(3, blocks.Count);
+        /* The viewer carve, the web carve, the mcp carve, and step 3i, retargeted at per-run roles. */
+        Assert.Equal(4, blocks.Count);
         var token = Guid.NewGuid().ToString("N")[..8];
-        var (admin, viewer, mcp) = ("inv_a_" + token, "inv_v_" + token, "inv_m_" + token);
+        var (admin, viewer, web, mcp) = ("inv_a_" + token, "inv_v_" + token, "inv_w_" + token, "inv_m_" + token);
         blocks = blocks
-            .Select(block => Regex.Replace(block, @"\b(admin|viewer|mcp)\b", m => m.Value switch
+            .Select(block => Regex.Replace(block, @"\b(admin|viewer|web|mcp)\b", m => m.Value switch
             {
                 "admin" => admin,
                 "viewer" => viewer,
+                "web" => web,
                 _ => mcp,
             }))
             .ToList();
@@ -872,8 +873,9 @@ SELECT has_table_privilege('{viewer}', 'config.config_notification_routes', 'SEL
             var roles = $@"
 CREATE ROLE {admin} NOLOGIN;
 CREATE ROLE {viewer} NOLOGIN;
+CREATE ROLE {web} NOLOGIN;
 CREATE ROLE {mcp} NOLOGIN;
-GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {mcp};";
+GRANT SELECT ON ALL TABLES IN SCHEMA config TO {viewer}, {web}, {mcp};";
 
             Assert.Equal("false|true|true|true|true", await RunBlocksRolledBackAsync(connection, roles, blocks, privileges, ct));
 

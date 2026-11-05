@@ -33,6 +33,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpJobTools
 {
+    /// <summary>#7459: the answer for no running jobs once every gate and the freshness bound have passed. A successful running_jobs run
+    /// says no job was running as of that run (empty); with no successful run the tool never looked (unavailable).</summary>
+    internal static string EmptyRunningJobsStatus(CollectorRunFacts runFacts)
+    {
+        var (status, message) = runFacts.RunningJobsEmpty();
+        return McpHelpers.Status(status, message);
+    }
+
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
     [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the captured_at on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree. LATEST IS A TIME: this reads the newest running-jobs snapshot, not a window, and captured_at is the instant it was collected - a job listed here was running AT that stamp, and current_duration_seconds is how long it had been running AT that stamp, not now.")]
     public static async Task<string> GetRunningJobs(
@@ -79,7 +87,9 @@ public sealed class DarlingMcpJobTools
                     ?? (read.LastGoodCollection is DateTime lastGood
                         ? McpHelpers.Status("unavailable", PerformanceMonitor.Alerting.RunningJobsCurrency.NotCurrentNote(lastGood))
                         : null)
-                    ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
+                    /* #7459: the last fallback used to say "empty" and hedge that the collector may not have run, which is the tool saying it
+                       does not know whether it looked. A good run on record is the look: empty, as of that run. No run on record is unavailable. */
+                    ?? EmptyRunningJobsStatus(await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "running_jobs", null, null, cancellationToken));
 
             var jobs = rows.Select(r => new
             {
@@ -191,15 +201,15 @@ public sealed class DarlingMcpJobTools
                 .ToList();
 
             var source = DataWindowFloor.Source.ForCollectorTable("job_history");
-            var floor = scope is { } one
-                ? await DataWindowFloor.GetForServerAsync(postgres, source, one.ServerId, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken)
-                : await DataWindowFloor.GetAsync(postgres, [source], null, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            /* Job history is an event surface: a run's own time can sit long before the collection that stored it,
-               so coverage starts at the earlier of the probe's floor and the oldest run shown. */
-            if (rows.Count > 0 && rows[^1].RunDateTimeUtc is { } oldest && (floor is null || oldest < floor))
-                floor = oldest;
-            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
-            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+            /* #7010: the shared notice. This read built its own verdict from GetForServerAsync, which answers null for a window of 90 minutes or
+               less and for one the store holds nothing in, and a null floor read as covered, so an EMPTY answer over a window before the data
+               said window_truncated false. The notice reads a null floor on an empty answer as NOT covered. Job history is an event surface (a
+               run's own time can sit long before the collection that stored it), so coverage starts at the earlier of the probe's floor and the
+               oldest run shown (ReadEventAsync). */
+            string[]? scopedNames = scope is { } one ? [servers.First(x => x.ServerId == one.ServerId).ServerName] : null;
+            var notice = await DarlingMcpWindowNotice.ReadEventAsync(
+                () => DataWindowFloor.GetAsync(postgres, [source], scopedNames, requestedStart, windowEnd, McpCommandDeadlines.ReadSeconds, cancellationToken),
+                rows.Count > 0 ? rows[^1].RunDateTimeUtc : null, requestedStart, windowEnd, "job_history", emptyAnswer: rows.Count == 0, cancellationToken: cancellationToken);
 
             if (rows.Count == 0)
             {
@@ -218,8 +228,13 @@ public sealed class DarlingMcpJobTools
 
                 /* An empty answer is where "the Agent was stopped" matters most, so its hints carry the Agent state too. */
                 var emptyHints = new Dictionary<string, object?>();
-                emptyHints["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
-                emptyHints["window_truncated"] = windowTruncated;
+                if (!notice.IsUnavailable)
+                {
+                    emptyHints["effective_start"] = notice.EffectiveStart;
+                    emptyHints["window_truncated"] = notice.WindowTruncated;
+                    emptyHints["truncation_note"] = notice.TruncationNote;
+                }
+
                 AddAgentState(emptyHints, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
                 return McpHelpers.Status("empty", "No job runs matched in the requested time range.", emptyHints);
             }
@@ -243,8 +258,13 @@ public sealed class DarlingMcpJobTools
             var envelope = new Dictionary<string, object?>();
             envelope["server"] = scope?.DisplayName;
             envelope["hours_back"] = hours_back;
-            envelope["effective_start"] = McpHelpers.FormatEffectiveStart(effectiveStart);
-            envelope["window_truncated"] = windowTruncated;
+            if (!notice.IsUnavailable)
+            {
+                envelope["effective_start"] = notice.EffectiveStart;
+                envelope["window_truncated"] = notice.WindowTruncated;
+                envelope["truncation_note"] = notice.TruncationNote;
+            }
+
             envelope["shown"] = runs.Count;
             envelope["truncated"] = truncated;
             AddAgentState(envelope, scope, answerNames, await TryReadAgentStatesAsync(postgres, scope?.ServerId, windowEnd, cancellationToken));
