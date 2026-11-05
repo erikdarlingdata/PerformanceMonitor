@@ -984,9 +984,7 @@ public static class DimensionTableExporter
     /// reads the plan-shape key rows from the DuckDB query_stats raw-window cache (<see
     /// cref="SqlBuilder.PlanShapeKeyDuckDbSql"/>) instead of a second store read. The window
     /// predicate is already baked into the cached `query_stats_raw` table, so this query
-    /// carries no `@from`/`@to` parameters. <see cref="SqlBuilder.PlanShapeKeySql"/> stays in
-    /// <see cref="SqlBuilder"/> only as a test oracle -- no code path here passes it to an
-    /// NpgsqlCommand.
+    /// carries no `@from`/`@to` parameters.
     /// </summary>
     private static async Task ReadPlanShapeKeysFromQueryStatsAsync(QueryStatsWindowCache windowCache, ExportTimings timings, CancellationToken ct, Action<DuckDBDataReader> onRow)
     {
