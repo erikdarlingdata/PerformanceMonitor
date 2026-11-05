@@ -45,7 +45,14 @@ Rules, in order:
      changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
      not know), the whole pull request runs as rule 5 says, and `why` says so. The full suite runs when the pull
      request is marked ready for review (`ready_for_review` starts a run), so every merge still has a full green run
-     behind it. A pull request that is ready, a dev push, a docs-only change and a test-only change are as before.
+     behind it. A dev push, a docs-only change and a test-only change are as before.
+  8. A pull request that is ready for review and changes product files (#7728): the test classes the newest nightly
+     `test-map` selects (ci-select.py's map_select), plus the classes of its changed test files, plus the Darling
+     Stage=Guard classes, as areas classes. FULL (rule 5) instead, with `why` saying which: the map is missing or cannot be
+     read, it is older than MAP_MAX_AGE_HOURS (48), map_select answers FULL (a keep-full file, a file the map does not know,
+     a new product file, a constant or enum of a shared project), the diff could not be read, no class is selected, or a class
+     list is longer than the runner's environment variable allows. There is no drift rule: a changed or new test file is
+     always picked, and a dev push still runs everything. The map is never a reason for a red run.
 
 Standard library only. Run: python -I .github/scripts/ci-plan.py --event pull_request --base dev --files-file FILE
 """
@@ -101,6 +108,12 @@ PG_OLD_TARGET_PATHS = (
     "Darling/tools/fetch-pg-target.ps1",
     ".github/scripts/start-test-pg.ps1",
 )
+# #7728: a ready pull request picks its classes from the newest nightly test map, and only while the map is at most this old.
+# The nightly builds one at 06:00 and one at 14:00 UTC, so a healthy map is at most about 16 hours old.
+MAP_MAX_AGE_HOURS = 48
+# A class list goes to the test legs in an environment variable, and a Windows variable holds 32,767 characters. A list longer
+# than this runs FULL instead.
+MAX_CLASS_LIST_CHARS = 30000
 # The test trees a changed class file may sit in for the changed-classes plan (#6734).
 TEST_TREES = {"darling": "Darling/Darling.Tests/", "lite": "Lite.Tests/"}
 
@@ -190,8 +203,64 @@ def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, 
     return (picks, "") if any(picks.values()) else (None, "no class is selected")
 
 
-def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None, draft: bool = False) -> dict:
-    """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727)."""
+def _map_age(selection: dict) -> str:
+    """The map's build time and age for a `why` line, or a word on why there is none."""
+    test_map = selection.get("map")
+    built = _CS._parse_time(test_map.get("built_at")) if isinstance(test_map, dict) else None
+    if built is None:
+        return "no readable map"
+    now = selection.get("now") or _CS.datetime.datetime.now(_CS.datetime.timezone.utc)
+    hours = (now - built).total_seconds() / 3600.0
+    return f"map built {built:%Y-%m-%d %H:%M} UTC, {hours:.1f} hours old"
+
+
+def ready_picks(rules, files: "list[str]", base: str, catalog: dict, selection: dict
+                ) -> "tuple[dict[str, list[str]] | None, str]":
+    """(picks, why) for a pull request that is ready for review (#7728): the classes map_select picks from the nightly map,
+    plus the classes of the test files it changed, plus the Darling Stage=Guard classes. picks is None, with the reason,
+    when the pull request must run as rule 5 says (see the module docstring, rule 8). Never raises: any failure is FULL.
+    selection: {map: the parsed map or None, error: why there is none, now: the clock (tests), shared_diff: the -U0 diff text
+    of the shared-project files, named: map_select's `named`}."""
+    age = _map_age(selection)
+    try:
+        test_map = selection.get("map")
+        if not isinstance(test_map, dict):
+            return None, selection.get("error") or "no test map was given"
+        sel = _CS.map_select(test_map, files, [], catalog["classes"], event="pull_request", base_ref=base,
+                             now=selection.get("now"), max_age_days=MAP_MAX_AGE_HOURS / 24.0, named=selection.get("named"),
+                             shared_diff=selection.get("shared_diff"), **_CS.selection_args(rules))
+        if sel["full"]:
+            return None, f"{sel['reason']} ({age})"
+        table = catalog.get("files") or {}
+        picks: "dict[str, list[str]]" = {}
+        for suite in ("darling", "lite"):
+            tree = catalog["classes"].get(suite, {})
+            runs = {c for c, t in tree.items() if _CS.NO_TESTS_TRAIT not in t}
+            names = [c for c in sel["selected"].get(suite, []) if c in runs]
+            for f in files:
+                row = table.get(f) if f.endswith(".cs") else None
+                if row and row["suite"] == suite:
+                    names += [c for c in row["tests"] if c in runs]
+            if suite == "darling":
+                names += [c for c, t in tree.items() if c in runs and "Stage=Guard" in t]
+            picks[suite] = list(dict.fromkeys(names))
+        if not any(picks.values()):
+            return None, f"the map selected no class ({age})"
+        for suite, names in picks.items():
+            if len(",".join(names)) > MAX_CLASS_LIST_CHARS:
+                return None, (f"the {suite} class list is {len(','.join(names))} characters, over the {MAX_CLASS_LIST_CHARS} "
+                              f"the runner's environment holds ({len(names)} classes, {age})")
+        return picks, (f"a ready pull request runs the classes the nightly test map selects, {len(picks['darling'])} Darling "
+                       f"and {len(picks['lite'])} Lite, with the Darling Guard classes and the classes of its changed test files "
+                       f"({age}).")
+    except Exception as exc:  # the map is never a reason for a red run
+        return None, f"the map selection failed ({type(exc).__name__}: {str(exc)[:80]})"
+
+
+def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None, draft: bool = False,
+             selection: "dict | None" = None) -> dict:
+    """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727).
+    selection: the nightly map and what the pick reads (#7728, see ready_picks); None leaves that rule off."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
     if event != "pull_request":
         return {**everything, "reason": f"a {event} runs every area."}
@@ -247,6 +316,13 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
                     "reason": "a draft runs only its own test classes and the Guard classes; "
                               "the full suite runs when it is marked ready for review."}
         reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
+    if not draft and selection is not None and areas != "none":
+        picks, why = ready_picks(rules, files, base, catalog if catalog is not None else load_catalog(), selection)
+        if picks:
+            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                    "lite_scope": "classes" if picks["lite"] else "none",
+                    "darling_classes": picks["darling"], "lite_classes": picks["lite"], "reason": why}
+        reason += f" A ready pull request picks its classes from the nightly test map, but {why}, so it runs as rule 5 says."
     return {"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode, "reason": reason}
 
 
@@ -349,7 +425,7 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
 # The plan.
 # ---------------------------------------------------------------------------------------------------------
 def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
-         rules, catalog: "dict | None" = None, draft: bool = False) -> "dict[str, str]":
+         rules, catalog: "dict | None" = None, draft: bool = False, selection: "dict | None" = None) -> "dict[str, str]":
     outcome, why = gate(event, head_ref, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
@@ -358,8 +434,9 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
     if outcome != "run":
         return out
 
-    catalog = catalog if catalog is not None else (load_catalog() if draft or _may_narrow(files) else None)
-    c = classify(rules, event, base, files, catalog, draft and event == "pull_request")
+    picks_from_map = selection is not None and event == "pull_request" and not draft and not _all_docs(rules, files)
+    catalog = catalog if catalog is not None else (load_catalog() if draft or picks_from_map or _may_narrow(files) else None)
+    c = classify(rules, event, base, files, catalog, draft and event == "pull_request", selection)
     out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
@@ -382,6 +459,11 @@ def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list
         out["legs"] = str(n)
         out["legs_json"] = json.dumps(list(range(1, n + 1)), separators=(",", ":"))
     return out
+
+
+def _all_docs(rules, files: "list[str]") -> bool:
+    """True when every file is documentation, so the class scan is not needed."""
+    return bool(files) and set(rules._hits(rules.build["docs"], files)) >= set(files)
 
 
 def _may_narrow(files: "list[str]") -> bool:
@@ -409,12 +491,44 @@ def parse_labels(text: str) -> "list[str]":
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
+def build_selection(map_path: str, map_error: str, root: str = ROOT) -> dict:
+    """The input of ready_picks for a pull request run (#7728): the map file the workflow downloaded, or why there is none, and
+    the two things map_select reads from the pull request's own change. The checkout is the pull request's merge commit, so its
+    change is `HEAD^1..HEAD`. A map that cannot be read, or a diff that cannot be read, leaves `map` None: the run is FULL."""
+    out: dict = {"map": None, "error": map_error or "no test map was downloaded", "now": None, "shared_diff": None, "named": None}
+    if not map_path or not os.path.isfile(map_path):
+        return out
+    loaded = _CS.load_map(map_path)
+    if not isinstance(loaded, dict):
+        out["error"] = "the downloaded test map cannot be read"
+        return out
+    try:
+        if _CS._git(root, "rev-parse", "-q", "--verify", "HEAD^2") is None:
+            out["error"] = "the checkout is not the pull request's merge commit, so its change cannot be read"
+            return out
+        text = _CS.symbol_diff_text(root, "HEAD^1", "HEAD")
+        if text is None:
+            out["error"] = "the pull request's diff could not be read"
+            return out
+        tokens, _tests = _CS.changed_symbols(text)
+        out["named"] = _CS.named_classes(_CS.symbol_matches(tokens, set(), _CS.test_file_index(root), None))
+        out["shared_diff"] = text
+    except Exception as exc:  # never red because of the map
+        out["error"] = f"the pull request's diff could not be read ({type(exc).__name__})"
+        return out
+    out["map"], out["error"] = loaded, ""
+    return out
+
+
 def main(argv: "list[str]") -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--event", required=True, choices=["pull_request", "push"])
     ap.add_argument("--base", default="dev", help="the base branch of a pull request; the pushed branch for a push")
     ap.add_argument("--head-ref", default="", help="the head branch of a pull request")
     ap.add_argument("--draft", default="false", help="true when the pull request is a draft (it narrows the scope, #7727)")
+    ap.add_argument("--map", default=None, help="the nightly test-map.json.gz a pull request picks its classes from (#7728); give it "
+                                                "(even empty) to turn the map rule on")
+    ap.add_argument("--map-error", default="", help="why there is no map file: the plan says it in `why` and runs every class")
     ap.add_argument("--labels", default="", help="a JSON array or a comma list")
     ap.add_argument("--files-file", help="changed files, one a line (default: stdin)")
     ap.add_argument("--github-output", help="also append the outputs to this file ($GITHUB_OUTPUT)")
@@ -427,8 +541,12 @@ def main(argv: "list[str]") -> int:
         text = sys.stdin.read()
     files = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
+    draft = parse_bool(args.draft)
+    selection = None
+    if args.event == "pull_request" and args.map is not None and not draft:
+        selection = build_selection(args.map, args.map_error)
     out = plan(args.event, args.base, args.head_ref, parse_labels(args.labels), files,
-               _CS.Rules(), draft=parse_bool(args.draft))
+               _CS.Rules(), draft=draft, selection=selection)
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))
     if out["legs"] != "0":
