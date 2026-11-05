@@ -85,6 +85,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", _nextId--, at, ServerId, "NameOrderSer
             (await _dataService.GetLatestDatabaseScopedConfigAsync(ServerId)).Select(r => r.DatabaseName + "/" + r.ConfigurationName));
     }
 
+    /// <summary>#7689: the Databases picker ended in a plain ORDER BY, so Alpha, Beta and Gamma came before delta and epsilon.</summary>
+    [Fact]
+    public async Task DatabasesPicker_OrdersNamesWithoutCase()
+    {
+        var at = DateTime.UtcNow.AddMinutes(-5);
+        at = new DateTime(at.Ticks - (at.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
+
+        foreach (var name in new[] { "Gamma", "delta", "Alpha", "epsilon", "Beta" })
+        {
+            await ExecAsync(
+                @"INSERT INTO database_config (config_id, capture_time, server_id, server_name, database_name, state_desc, compatibility_level)
+VALUES ($1, $2, $3, $4, $5, $6, $7)", _nextId--, at, ServerId, "NameOrderServer", name, "ONLINE", 160);
+        }
+
+        Assert.Equal(["Alpha", "Beta", "delta", "epsilon", "Gamma"], await _dataService.GetCollectedDatabaseNamesAsync(ServerId));
+    }
+
     [Fact]
     public async Task PerfmonCounters_OrderNamesWithoutCase_ThenByInstance()
     {
