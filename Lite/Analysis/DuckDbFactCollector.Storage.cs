@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -356,15 +357,20 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
 
             /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). */
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 WITH latest AS (
     SELECT volume_mount_point, volume_total_mb, volume_free_mb,
            ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
-    FROM v_database_size_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   volume_total_mb > 0
+    FROM (
+        /* #7704: the volume key (VolumeKey) names a volume with no stored name by its files' directory. */
+        SELECT {VolumeKey.Sql} AS volume_mount_point, volume_total_mb, volume_free_mb, collection_time
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   volume_total_mb > 0
+    ) AS keyed
+    WHERE volume_mount_point IS NOT NULL
 ),
 tightest AS (
     /* #7179: the free MB the card quotes is the scoring volume's (the lowest percent free), not the

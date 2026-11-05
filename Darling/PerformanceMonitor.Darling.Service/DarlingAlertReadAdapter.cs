@@ -1305,7 +1305,7 @@ WITH current_files AS (
     SELECT DISTINCT ON (database_name, file_name)
         database_name, file_name, physical_name, file_type_desc, collection_time,
         total_size_mb, auto_growth_mb, is_percent_growth, growth_pct, max_size_mb,
-        volume_mount_point, volume_total_mb, volume_free_mb
+        " + VolumeKey.Sql + @" AS volume_mount_point, volume_total_mb, volume_free_mb
     FROM database_size_stats
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -1408,7 +1408,7 @@ ORDER BY c.database_name, c.file_name";
     /// <summary>Lite's per-volume free-space read verbatim (database_size_stats table).</summary>
     public const string VolumeFreeSpaceSql = @"
 SELECT
-    volume_mount_point,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
     MIN(volume_free_mb) AS volume_free_mb,
     MAX(collection_time) AS newest_collection_time
@@ -1419,9 +1419,9 @@ AND   collection_time = (
     FROM database_size_stats
     WHERE server_id = $1
 )
-AND   volume_mount_point IS NOT NULL
+AND   " + VolumeKey.Sql + @" IS NOT NULL
 AND   volume_total_mb > 0
-GROUP BY volume_mount_point
+GROUP BY " + VolumeKey.Sql + @"
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
     /// <summary>
@@ -1432,7 +1432,7 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
     /// </summary>
     public const string VolumeFreeSpaceSinceSql = @"
 SELECT
-    volume_mount_point,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
     MAX(volume_total_mb) AS volume_total_mb,
     MIN(volume_free_mb) AS volume_free_mb,
     MAX(collection_time) AS newest_collection_time
@@ -1445,9 +1445,9 @@ AND   collection_time = (
     WHERE server_id = $1
     AND   collection_time >= $2
 )
-AND   volume_mount_point IS NOT NULL
+AND   " + VolumeKey.Sql + @" IS NOT NULL
 AND   volume_total_mb > 0
-GROUP BY volume_mount_point
+GROUP BY " + VolumeKey.Sql + @"
 ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
 
     /// <summary>Where each server's next volume free-space read starts (#7017).</summary>
