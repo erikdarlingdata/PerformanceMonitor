@@ -9,9 +9,7 @@ namespace PerformanceMonitor.Exporter;
 /// loads one export window's `collect.query_stats` rows into an on-disk DuckDB temp file,
 /// ONE store read shared by `query_stats_hourly`, `plan_shape` and `query_text` (origin
 /// query_stats), replacing the three separate store-side passes that used to read
-/// `collect.query_stats` three times per window (<see cref="SqlBuilder.QueryStatsHourlySql"/>,
-/// <see cref="SqlBuilder.PlanShapeKeySql"/>, <see cref="SqlBuilder.QueryTextKeySql"/> --
-/// all three stay in <see cref="SqlBuilder"/> only as test oracles). Mirrors <see
+/// `collect.query_stats` three times per window. Mirrors <see
 /// cref="QueryStoreWindow"/> shape: a plain projection, streamed into DuckDB via the
 /// appender, with every GROUP BY/min/max derived from the cached table afterward.
 /// </summary>

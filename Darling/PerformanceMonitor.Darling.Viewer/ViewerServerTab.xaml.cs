@@ -401,7 +401,7 @@ public partial class ViewerServerTab : UserControl
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = FreshnessLabel(
                 freshness.TryGetValue(_server.ServerId, out var lastUtc) ? lastUtc : null,
-                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone);
+                _server.RegisteredAt, DateTime.UtcNow, TabDisplayZone, _server.ConnectDownSince, _server.LastConnectError);
         }
         catch
         {
@@ -416,9 +416,19 @@ public partial class ViewerServerTab : UserControl
     /// The time is written in <paramref name="zone"/>, the tab's own server clock, because the process-wide clock may belong to
     /// another server's tab by the time this awaited read returns.
     /// </summary>
-    internal static string FreshnessLabel(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null)
+    internal static string FreshnessLabel(
+        DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc, TimeZoneInfo? zone = null,
+        DateTime? connectDownSinceUtc = null, string? lastConnectError = null)
     {
-        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc) == ServerFreshness.Offline;
+        connectDownSinceUtc = ServerHealthClassifier.EffectiveConnectDownSince(lastCollectionUtc, connectDownSinceUtc);
+        var offline = ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, registeredAtUtc, nowUtc, connectDownSinceUtc) == ServerFreshness.Offline;
+        /* #7590: the service's connect failed. The header says so, with the last values' age and the error, in place of the age-based note. */
+        if (connectDownSinceUtc.HasValue)
+        {
+            var known = ServerHealthClassifier.LastKnownLabel(lastCollectionUtc, nowUtc);
+            return $"{ServerHealthClassifier.UnreachableReason(connectDownSinceUtc.Value, lastConnectError).TrimEnd('.')}. Values shown are {known}";
+        }
+
         if (lastCollectionUtc is null)
         {
             return offline ? "no collection retained" : "no data collected yet";

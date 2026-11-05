@@ -476,6 +476,32 @@ public sealed class McpDataDetailMaskerTests
     }
 
     /// <summary>
+    /// #7590: <c>last_connect_error</c> is the connect exception's message, which quotes the host, the port or the login the server
+    /// refused. list_servers carries it on the row and get_collection_health inside the <c>server_connection</c> block; neither masked
+    /// level returns the raw text, and the fields beside it are not touched.
+    /// </summary>
+    [Fact]
+    public void LastConnectError_IsMasked_AtBothMaskedLevels_OnARowAndInsideTheConnectionBlock()
+    {
+        const string raw = "Login failed for user 'svc_monitor' on sql-prod-07.corp.test,1433";
+        var json = "{\"servers\":[{\"server_name\":\"sql-prod-07\",\"last_connect_error\":\"" + raw + "\"}],"
+            + "\"server_connection\":{\"last_connect_error\":\"" + raw + "\",\"state\":\"down\"}}";
+
+        var literals = Masked(json, McpDataDetail.MaskLiterals);
+        Assert.DoesNotContain("svc_monitor", literals.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("sql-prod-07.corp", literals.ToJsonString(), StringComparison.Ordinal);
+        Assert.Equal("down", literals["server_connection"]!["state"]!.GetValue<string>());
+
+        var meta = Masked(json, McpDataDetail.MetadataOnly);
+        Assert.Equal(Withheld, meta["servers"]![0]!["last_connect_error"]!.GetValue<string>());
+        Assert.Equal(Withheld, meta["server_connection"]!["last_connect_error"]!.GetValue<string>());
+        Assert.Equal("down", meta["server_connection"]!["state"]!.GetValue<string>());
+
+        var full = Masked(json, McpDataDetail.Full);
+        Assert.Equal(raw, full["server_connection"]!["last_connect_error"]!.GetValue<string>());
+    }
+
+    /// <summary>
     /// The sweep as a test, so the next error-text key fails here rather than shipping raw: every answer key the MCP tools of
     /// either SKU name <c>error</c>, or end in <c>_error</c>, <c>_error_message</c> or <c>_error_text</c>, is masked as
     /// statement-class text. The one exception is a number, not text, and says why.

@@ -79,9 +79,8 @@ public static class SqlBuilder
     /// `collect.query_stats` over the export window, with no GROUP BY, sort or key derivation
     /// on the store side. Every rollup and key below runs against the DuckDB-side
     /// `query_stats_raw` table this loads (see <see cref="QueryStatsWindow"/>,
-    /// <see cref="QueryStatsWindowCache"/>), replacing three separate store reads
-    /// (<see cref="QueryStatsHourlySql"/>, <see cref="PlanShapeKeySql"/>, <see
-    /// cref="QueryTextKeySql"/>) with one.
+    /// <see cref="QueryStatsWindowCache"/>), replacing three separate store reads with one.
+    /// <see cref="QueryStatsHourlySql"/> stays as the store-side form of the hourly rollup.
     /// </summary>
     public const string QueryStatsWindowSql = """
         /* darling-export:query_stats.window */
@@ -224,36 +223,19 @@ public static class SqlBuilder
         """;
 
     /// <summary>
-    /// The window's distinct (server_name, query_plan_hash) keys, with a deterministic
-    /// example digest per key (min(), not sorted output) and the first/last collection_time
-    /// seen for that key. Rows with a NULL plan hash or a NULL plan digest are excluded: they
-    /// have no plan to attach. Keyed by plan hash rather than digest because showplan XML
-    /// differs on every compile, so digests barely repeat within a plan hash (one day on one
-    /// store had 302,106 distinct plan digests but only 4,247 distinct plan hashes).
-    ///
-    /// kept only as a test oracle. No code path passes this to an NpgsqlCommand any more --
-    /// <see cref="PlanShapeKeyDuckDbSql"/> computes the identical key in DuckDB, over the
-    /// single query_stats read shared with query_stats_hourly/query_text.
-    /// </summary>
-    public const string PlanShapeKeySql = """
-        /* darling-export:plan_shape.key */
-        SELECT server_name, query_plan_hash, min(collection_time) AS first_seen, max(collection_time) AS last_seen,
-               min(query_plan_digest) AS example_digest
-        FROM collect.query_stats
-        WHERE collection_time >= @from AND collection_time < @to
-              AND query_plan_digest IS NOT NULL AND query_plan_hash IS NOT NULL
-        GROUP BY server_name, query_plan_hash
-        """;
-
-    /// <summary>
-    /// <see cref="PlanShapeKeySql"/>'s key, run in DuckDB over `query_stats_raw` instead of a second read of
-    /// `collect.query_stats`. `min(query_plan_digest)` over BLOB reproduces PostgreSQL's `min()` over bytea exactly:
-    /// both compare as unsigned bytes. ORDER BY the key columns makes the output order deterministic for the caller's
-    /// first-row-wins merge, same as the Query Store key queries. Plan-fetch gate: the last two columns are this
-    /// window's totals for the key, `executions` = sum(delta_execution_count) and `cpu_us` = sum(delta_worker_time)
-    /// (worker time is in microseconds). The delta columns are the exporter's own per-sample deltas, 0 when the
-    /// collector could not compute a real one, so a plan's first-ever sample adds nothing (a conservative undercount:
-    /// it can only delay a plan's fetch by one sample).
+    /// The window's distinct (server_name, query_plan_hash) keys, with a deterministic example digest per key (min(),
+    /// not sorted output) and the first/last collection_time seen for that key. Rows with a NULL plan hash or a NULL
+    /// plan digest are excluded: they have no plan to attach. Keyed by plan hash rather than digest because showplan
+    /// XML differs on every compile, so digests barely repeat within a plan hash (one day on one store had 302,106
+    /// distinct plan digests but only 4,247 distinct plan hashes). Runs in DuckDB over `query_stats_raw`, the one
+    /// <see cref="QueryStatsWindowSql"/> read shared with query_stats_hourly and query_text, so the store sees no
+    /// GROUP BY. `min(query_plan_digest)` over BLOB compares as unsigned bytes. ORDER BY the key columns makes the
+    /// output order deterministic for the caller's first-row-wins merge, same as the Query Store key queries.
+    /// Plan-fetch gate: the last two columns are this window's totals for the key, `executions` =
+    /// sum(delta_execution_count) and `cpu_us` = sum(delta_worker_time) (worker time is in microseconds). The delta
+    /// columns are the exporter's own per-sample deltas, 0 when the collector could not compute a real one, so a
+    /// plan's first-ever sample adds nothing (a conservative undercount: it can only delay a plan's fetch by one
+    /// sample).
     /// </summary>
     public const string PlanShapeKeyDuckDbSql = """
         SELECT server_name, query_plan_hash, min(collection_time) AS first_seen, max(collection_time) AS last_seen,
@@ -268,27 +250,11 @@ public static class SqlBuilder
 
     /// <summary>
     /// The window's distinct (server_name, database_name, query_hash) keys, with a deterministic example text digest
-    /// per key and the first/last collection_time seen. Rows with a NULL query_text_digest are excluded. kept only
-    /// as a test oracle. No code path passes this to an NpgsqlCommand any more -- <see cref="QueryTextKeyDuckDbSql"/>
-    /// computes the identical key in DuckDB, over the single query_stats read shared with
-    /// query_stats_hourly/plan_shape. This is also the query that used to spill about 1.5 GB of temp per call on a
-    /// large store.
-    /// </summary>
-    public const string QueryTextKeySql = """
-        /* darling-export:query_text.key */
-        SELECT server_name, database_name, query_hash, min(collection_time) AS first_seen, max(collection_time) AS last_seen,
-               min(query_text_digest) AS example_digest
-        FROM collect.query_stats
-        WHERE collection_time >= @from AND collection_time < @to AND query_text_digest IS NOT NULL
-        GROUP BY server_name, database_name, query_hash
-        """;
-
-    /// <summary>
-    /// <see cref="QueryTextKeySql"/>'s key, run in DuckDB over `query_stats_raw` instead
-    /// of a second read of `collect.query_stats`. `min(query_text_digest)` over BLOB
-    /// reproduces PostgreSQL's `min()` over bytea exactly (see <see
-    /// cref="PlanShapeKeyDuckDbSql"/>). ORDER BY the key columns makes the output order
-    /// deterministic for the caller's first-row-wins merge.
+    /// per key and the first/last collection_time seen. Rows with a NULL query_text_digest are excluded. Runs in DuckDB
+    /// over `query_stats_raw`, the one <see cref="QueryStatsWindowSql"/> read shared with query_stats_hourly and
+    /// plan_shape. A store-side GROUP BY for this key used to spill about 1.5 GB of temp per call on a large store.
+    /// `min(query_text_digest)` over BLOB compares as unsigned bytes (see <see cref="PlanShapeKeyDuckDbSql"/>). ORDER
+    /// BY the key columns makes the output order deterministic for the caller's first-row-wins merge.
     /// </summary>
     public const string QueryTextKeyDuckDbSql = """
         SELECT server_name, database_name, query_hash, min(collection_time) AS first_seen, max(collection_time) AS last_seen,
@@ -640,15 +606,14 @@ public static class SqlBuilder
           ON t.server_id = k.sid AND t.queryid = k.qid
         """;
 
-    /// <summary>Returns the store-side SQL text for a table name from <see cref="ExportOptions.AllTables"/>. Dimension tables are built by <see cref="DimensionTableExporter"/>, not this path.</summary>
+    /// <summary>Returns the store-side SQL text for a table name from <see cref="ExportOptions.AllTables"/>. Dimension tables are built by <see cref="DimensionTableExporter"/>, not this path. For plan_shape and query_text the store read is the shared query_stats window read, and the key is built in DuckDB afterward.</summary>
     public static string BuildSelect(string table, IReadOnlyList<string>? rawColumns) => table switch
     {
         HourlyTables.QueryStatsHourly => QueryStatsHourlySql,
         HourlyTables.ProcedureStatsHourly => ProcedureStatsHourlySql, // test oracle only; see ProcedureStatsHourlyDuckDbSql
 
         QueryStoreTables.QueryStoreStats => QueryStoreStatsRawSql,
-        DimensionTables.PlanShape => PlanShapeKeySql,
-        DimensionTables.QueryText => QueryTextKeySql,
+        DimensionTables.PlanShape or DimensionTables.QueryText => QueryStatsWindowSql,
         DimensionTables.ProcedurePlan => ProcedurePlanKeySql,
         _ => BuildRawSelect(table, rawColumns ?? throw new ArgumentNullException(nameof(rawColumns), $"Raw table '{table}' needs a discovered column list.")),
     };

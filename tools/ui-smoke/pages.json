@@ -12,7 +12,8 @@
   "servers": [
     "ui-sql",
     "ui-pg",
-    "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary"
+    "ui-long-name-sql-server-production-east-region-cluster-demo-01-primary",
+    "ui-down-sql"
   ],
   "pages": [
     {
@@ -105,7 +106,7 @@
         "grids": [
           {
             "index": 0,
-            "exactRows": 3
+            "exactRows": 4
           }
         ]
       }
