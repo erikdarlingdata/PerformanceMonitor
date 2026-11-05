@@ -393,17 +393,19 @@ public static class DarlingPgTrendReader
     /// The statement that spent the most execution time in the window. Same purpose as
     /// <see cref="DominantWaitEventSql"/>: a caller with no queryid gets the one worth looking at.
     /// </summary>
-    public const string TopQueryIdSql = """
-        SELECT queryid
-        FROM pg_statement_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY queryid
-        HAVING SUM(delta_total_exec_time_ms) > 0
-        ORDER BY SUM(delta_total_exec_time_ms) DESC
-        LIMIT 1
-        """;
+    public const string TopQueryIdSql =
+        "SELECT queryid\n"
+        + "FROM pg_statement_stats\n"
+        + "WHERE server_id = $1\n"
+        + "AND   collection_time >= $2\n"
+        + "AND   collection_time <= $3\n"
+        /* #7567: never one of the service's own statements (PgOwnStatement.Marker): on a quiet server the wait sampler's
+           pg_sleep is the heaviest statement, and a chart of the service's own sampler is nobody's question. */
+        + "AND   " + PerformanceMonitor.Collectors.PgOwnStatement.NotOwnOnStats + "\n"
+        + "GROUP BY queryid\n"
+        + "HAVING SUM(delta_total_exec_time_ms) > 0\n"
+        + "ORDER BY SUM(delta_total_exec_time_ms) DESC\n"
+        + "LIMIT 1";
 
     public static async Task<string?> GetDominantWaitEventAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,

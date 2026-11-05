@@ -418,6 +418,14 @@ $aurora_probe$;
 SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
 
     /// <summary>
+    /// #7567: marks BOTH statements of <see cref="PostgresAuroraProbeQueryText"/> (the DO block and the SELECT) as the
+    /// service's own, so neither one is counted as the application's in pg_stat_statements.
+    /// </summary>
+    internal static string MarkAuroraProbe(string probeSql) =>
+        PerformanceMonitor.Collectors.PgOwnStatement.Mark(
+            probeSql.Replace("$aurora_probe$;", "$aurora_probe$\n" + PerformanceMonitor.Collectors.PgOwnStatement.Marker + ";", StringComparison.Ordinal));
+
+    /// <summary>
     /// Whether this target is Aurora, decided by CALLING <c>aurora_version()</c> (#2340). True when the call
     /// succeeds; false when it raises — <c>42883 undefined_function</c> is stock PostgreSQL's answer and is
     /// the expected negative, so it is caught rather than propagated.
@@ -439,7 +447,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
         {
             var schema = await ResolveAuroraFunctionSchemaAsync(connection, "aurora_version", cancellationToken);
             using var command = new NpgsqlCommand(
-                PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal), connection) { CommandTimeout = 15 };
+                MarkAuroraProbe(PostgresAuroraProbeQueryText.Replace("{0}", schema, StringComparison.Ordinal)), connection) { CommandTimeout = 15 };
             /* Both statements go in one batch, so they share one implicit transaction and the is_local setting the DO
                block wrote is still there for the SELECT. The DO block returns no rows: the answer is the SELECT's.
                That holds only because Npgsql sends both statements before ONE Sync, and the server runs everything up
@@ -480,7 +488,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
     {
         string? statementsSchema = null;
         var functions = new List<(string Function, string Schema)>();
-        using (var command = new NpgsqlCommand(DarlingCollectorRunner.PgExtensionSchemasSql, connection)
+        using (var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark(DarlingCollectorRunner.PgExtensionSchemasSql), connection)
                { CommandTimeout = DarlingCollectorRunner.PgExtensionSchemasTimeoutSeconds })
         {
             command.Parameters.AddWithValue("functions", new[] { functionName });
@@ -527,7 +535,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
     {
         try
         {
-            using var command = new NpgsqlCommand(PostgresWaitSamplingProbeQueryText, connection) { CommandTimeout = 15 };
+            using var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark(PostgresWaitSamplingProbeQueryText), connection) { CommandTimeout = 15 };
             var present = await command.ExecuteScalarAsync(cancellationToken);
             return present is bool b && b;
         }
@@ -653,7 +661,7 @@ SELECT pg_catalog.current_setting('performance_monitor.is_aurora', true)";
                 config.DisplayName, $"it refused the sign-in: {CleanServerText(ex.MessageText, MaxPoolerTextLength)}", ex);
         }
 
-        using var command = new NpgsqlCommand(PostgresDetectionQueryText, connection) { CommandTimeout = 30 };
+        using var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark(PostgresDetectionQueryText), connection) { CommandTimeout = 30 };
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         int majorVersion = 0, versionNum = 0;
@@ -779,7 +787,7 @@ FROM pg_catalog.pg_control_system() AS s";
         try
         {
             /* #6888: a refused role is told apart BEFORE the call, so the server never raises (and logs) 42501 for it. */
-            using (var privilege = new NpgsqlCommand(PostgresIdentityPrivilegeQueryText, connection) { CommandTimeout = 30 })
+            using (var privilege = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark(PostgresIdentityPrivilegeQueryText), connection) { CommandTimeout = 30 })
             {
                 if (await privilege.ExecuteScalarAsync(cancellationToken) is not true)
                 {
@@ -788,7 +796,7 @@ FROM pg_catalog.pg_control_system() AS s";
                 }
             }
 
-            using var command = new NpgsqlCommand(PostgresIdentityQueryText, connection) { CommandTimeout = 30 };
+            using var command = new NpgsqlCommand(PerformanceMonitor.Collectors.PgOwnStatement.Mark(PostgresIdentityQueryText), connection) { CommandTimeout = 30 };
             using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0) && !reader.IsDBNull(1))
             {
