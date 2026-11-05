@@ -214,6 +214,8 @@ export const tab = {
           rowsKey: "samples",
           xKey: "sample_time",
           series: CPU_SERIES,
+          hideEmptySeries: true,
+          footNoteKey: "host_cpu_note",
           format: "pct",
           unit: "%",
           emptyText: "No CPU samples in this window.",
