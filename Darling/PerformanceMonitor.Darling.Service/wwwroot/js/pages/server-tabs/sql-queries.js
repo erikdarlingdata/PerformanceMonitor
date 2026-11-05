@@ -115,8 +115,9 @@ function topQueriesCard(server, ctx, ranking, picker, w = ctx, onRow = null) {
         const select = picker.querySelector ? picker.querySelector("select") : null;
         if (at < 0 || !select) return;
         select.value = String(at);
-        drawQueryTrend(chartSlot, server, ctx, trendable[at].query, signal);
+        /* Scroll first: drawQueryTrend swaps the chart for a loading strip at once, which shortens the page, and a smooth scroll started after that stops short of the picker. */
         if (picker.scrollIntoView) picker.scrollIntoView({ block: "start", behavior: "smooth" });
+        drawQueryTrend(chartSlot, server, ctx, trendable[at].query, signal);
       };
     } else if (queries.length) {
       parts.push(
