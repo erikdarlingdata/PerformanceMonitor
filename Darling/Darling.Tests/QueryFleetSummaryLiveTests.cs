@@ -121,6 +121,9 @@ public sealed class QueryFleetSummaryLiveTests
             using (var doc = JsonDocument.Parse(json))
             {
                 Assert.False(doc.RootElement.TryGetProperty("error", out _), json);
+                /* The start is the asked-for one, named so: this read sends no window notice, so it must not call it an effective start. */
+                Assert.True(doc.RootElement.TryGetProperty("requested_start", out _), json);
+                Assert.False(doc.RootElement.TryGetProperty("effective_start", out _), json);
                 Assert.Equal(5, doc.RootElement.GetProperty("server_database_pairs").GetInt32());
                 Assert.False(doc.RootElement.GetProperty("truncated").GetBoolean());
                 Assert.Equal(3, doc.RootElement.GetProperty("servers_returned").GetInt32());

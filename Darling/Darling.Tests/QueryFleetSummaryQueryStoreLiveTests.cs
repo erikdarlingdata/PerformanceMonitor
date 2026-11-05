@@ -220,6 +220,80 @@ public sealed class QueryFleetSummaryQueryStoreLiveTests
     }
 
     [Fact]
+    public async Task TheKeptIndexStep_OnASettledStore_TakesNoLockOnTheMaterialization_AndStillBuildsAMissingIndex()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live kept-index lock test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenTimescaleStoreAsync(scratch, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+            Assert.True(await IndexExistsAsync(connection, ct), "a fresh store has the (query_hash, bucket) index");
+
+            string materialization;
+            string materializationSchema;
+            await using (var find = new NpgsqlCommand(
+                @"SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name), materialization_hypertable_schema
+                  FROM timescaledb_information.continuous_aggregates
+                  WHERE view_schema = 'collect' AND view_name = 'query_store_stats_corrected_hourly'", connection))
+            {
+                await using var found = await find.ExecuteReaderAsync(ct);
+                Assert.True(await found.ReadAsync(ct));
+                materialization = found.GetString(0);
+                materializationSchema = found.GetString(1);
+            }
+
+            var keptIndexStep = TimescaleSupport.QueryStoreRollupKeptIndexesSql[TimescaleSupport.QueryStoreStatsCorrectedHourlyView];
+
+            /* A session holding what the view's refresh holds: ROW EXCLUSIVE on the materialization. CREATE INDEX asks for SHARE, which conflicts. */
+            await using var refresh = new NpgsqlConnection(scratch.ConnectionString);
+            await refresh.OpenAsync(ct);
+            await using var refreshTransaction = await refresh.BeginTransactionAsync(ct);
+            await DarlingMcpTestData.ExecAsync(refresh, ct, $"LOCK TABLE {materialization} IN ROW EXCLUSIVE MODE");
+
+            /* The premise: CREATE INDEX IF NOT EXISTS on the existing index still waits for the lock, even though it would build nothing. */
+            await using (var premise = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await premise.OpenAsync(ct);
+                await DarlingMcpTestData.ExecAsync(premise, ct, "SET lock_timeout = '500ms'");
+                var blocked = await Assert.ThrowsAsync<PostgresException>(() => DarlingMcpTestData.ExecAsync(
+                    premise, ct, $"CREATE INDEX IF NOT EXISTS {IndexName} ON {materialization} (query_hash, bucket DESC)"));
+                Assert.Equal("55P03", blocked.SqlState);
+            }
+
+            /* The step on a settled store reads the catalog and asks for no lock: it returns at once instead of waiting out its own 280 s lock timeout. */
+            await using (var step = new NpgsqlCommand(keptIndexStep, connection) { CommandTimeout = 20 })
+            {
+                await step.ExecuteNonQueryAsync(ct);
+            }
+
+            await refreshTransaction.RollbackAsync(ct);
+
+            /* With the index missing, the same step builds it. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DROP INDEX \"{materializationSchema}\".{IndexName}");
+            Assert.False(await IndexExistsAsync(connection, ct));
+            await using (var step = new NpgsqlCommand(keptIndexStep, connection) { CommandTimeout = 60 })
+            {
+                await step.ExecuteNonQueryAsync(ct);
+            }
+
+            Assert.True(await IndexExistsAsync(connection, ct), "the step builds a missing index");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task TheV246Index_ExistsOnAFreshStore_AndIsRebuiltByTheUpgradeFromV245()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

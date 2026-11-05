@@ -124,6 +124,9 @@ public sealed class DarlingMcpQueryFleetSummaryTools
     /// interval-deduped raw rows at or above it, the split <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> makes, so an hour is never
     /// counted twice. With <paramref name="useRollup"/> false the whole window is raw (a store with no rollup keeps its raw rows).
     /// $1 query_hash, $2/$3 window (naive UTC), $4 the instant raw takes over, $5 the row cap.
+    /// <para>The deduped raw arm is a copy of the <c>placed</c> arm in <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/>, with <c>server_id</c> added
+    /// to the dedup partition because this read has no server filter. That arm is welded to its own <c>server_id = $1</c> filter, optional database
+    /// filter and column list, so sharing it would mean reshaping the statement <c>get_query_store_duration_trend</c> runs (#7667).</para>
     /// </summary>
     public static string BuildQueryStoreSql(bool useRollup)
     {
@@ -323,7 +326,8 @@ public sealed class DarlingMcpQueryFleetSummaryTools
                 query_hash = hash,
                 hours_back,
                 as_of = windowEnd.ToString("o", CultureInfo.InvariantCulture),
-                effective_start = start.ToString("o", CultureInfo.InvariantCulture),
+                /* The asked-for start, not the first row served: this read sends no window notice (tracked in #7010), so it must not claim coverage with an effective_start. */
+                requested_start = start.ToString("o", CultureInfo.InvariantCulture),
                 source = sourceWord,
                 sources = new[] { PlanCacheSource, QueryStoreSource },
                 query_store = new

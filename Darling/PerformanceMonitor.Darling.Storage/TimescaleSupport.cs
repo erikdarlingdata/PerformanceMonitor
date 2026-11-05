@@ -3548,9 +3548,13 @@ WITH NO DATA";
     /// #7609 (V246): the index <c>get_query_fleet_summary</c>'s Query Store source reads, <c>(query_hash, bucket DESC)</c> on the corrected hourly
     /// rollup's materialization hypertable. V152 dropped the auto-created <c>query_hash</c> group index there for zero scans, because no reader
     /// filtered on the hash; this read filters on the hash alone across every server, so without it the statement scans the whole rollup. A named
-    /// index with IF NOT EXISTS: V246 runs it on an upgraded store and <see cref="QueryStoreRollupKeptIndexesSql"/> runs it after the view is created
-    /// on a fresh one, so both land the same index, and the Viewer's schema probe finds it by name. A store without TimescaleDB, or without the view,
-    /// returns before touching anything. The lock timeout is V152's: the build waits out one refresh and then fails retryably.
+    /// index: V246 runs it on an upgraded store and <see cref="QueryStoreRollupKeptIndexesSql"/> runs it after the view is created on a fresh one,
+    /// so both land the same index, and the Viewer's schema probe finds it by name. <see cref="QueryStoreRollupKeptIndexesSql"/> also runs it on
+    /// EVERY hourly convergence pass, so the block reads <c>pg_index</c> for the name first and issues the <c>CREATE INDEX</c> only when the index is
+    /// missing: <c>CREATE INDEX IF NOT EXISTS</c> alone saves the build but still takes a ShareLock on the materialization before it checks the name,
+    /// which conflicts with the refresh's RowExclusiveLock. A settled store therefore does a catalog read with no lock request. A store without
+    /// TimescaleDB, or without the view, returns before touching anything. The lock timeout is V152's: the build waits out one refresh and then
+    /// fails retryably (#7667).
     /// </summary>
     public static readonly string CreateQueryStoreCorrectedHourlyHashIndexSql = @"
 SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + @"s';
@@ -3568,6 +3572,16 @@ BEGIN
     INTO v_mat_oid;
 
     IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_mat_oid
+        AND   c.relname = '" + QueryStoreCorrectedHourlyHashIndexName + @"'
+    ) THEN
         RETURN;
     END IF;
 
