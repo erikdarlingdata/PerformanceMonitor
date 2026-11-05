@@ -777,29 +777,30 @@ LIMIT 6";
     {
         try
         {
-            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
-            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
+            long currentBlocking;
+            bool blockingFromDmv;
+            long currentDeadlocks;
+            /* #7588: the store read is its own block, closed before the baselines are fetched. The baseline follows the arm the window
+               counted, and the provider takes the same store read lock, so it cannot be fetched while this one is held. */
+            using (var readLock = _duckDb.AcquireReadLock(context.CancellationToken))
+            using (var connection = _duckDb.CreateConnection())
+            {
+                await connection.OpenAsync(context.CancellationToken);
 
-            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-            using var connection = _duckDb.CreateConnection();
-            await connection.OpenAsync(context.CancellationToken);
-
-            using var cmd = connection.CreateCommand();
-            /* On an Azure SQL Database master target, events of databases monitored as their own targets
-               are skipped (their findings come from those targets). Only the current-window counts are
-               filtered; the baseline stays server-wide, which can only make a master spike less likely,
-               an accepted trade because master is not those databases' alerting home.
-               The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
-            var scopeList = context.SeparatelyMonitoredDatabases;
-            var scoped = scopeList is { Count: > 0 };
-            var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
-            /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking.
-               current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
-               snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
-               overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
-            cmd.CommandText = (@"
+                using var cmd = connection.CreateCommand();
+                /* On an Azure SQL Database master target, events of databases monitored as their own targets
+                   are skipped (their findings come from those targets). Only the current-window counts are
+                   filtered; the baseline stays server-wide, which can only make a master spike less likely,
+                   an accepted trade because master is not those databases' alerting home.
+                   The DMV arm below stays on collection_time because a snapshot's event_time IS its collection time. */
+                var scopeList = context.SeparatelyMonitoredDatabases;
+                var scoped = scopeList is { Count: > 0 };
+                var rowScope = SeparatelyMonitoredScope.BprFilter(scopeList, 4);
+                /* #6645: a row whose blocked and blocking spid are the same is a parallel query waiting on itself, not blocking.
+                   current_blocking: prefer the blocked-process-report; fall back to the always-on DMV
+                   snapshot so RDS (where the BPR session is empty) still counts blocking. Mirrors the
+                   overview/alert path (LocalDataService.Overview.cs / LocalDataService.Blocking.cs). */
+                cmd.CommandText = (@"
 SELECT
     COALESCE(NULLIF(b.bpr_count, 0),
         (SELECT COUNT(*) FROM v_dmv_blocking_snapshots
@@ -807,30 +808,35 @@ SELECT
     (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time < $3) AS current_deadlocks,
     b.bpr_count = 0 AS from_dmv
 FROM (SELECT (SELECT COUNT(*) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time < $3 AND " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + "{SCOPE}") + @" AS ev) AS bpr_count) AS b")
-                .Replace("{SCOPE}", rowScope);
+                    .Replace("{SCOPE}", rowScope);
 
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
-            SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
+                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                SeparatelyMonitoredScope.AddParameters(cmd, scopeList);
 
-            long currentBlocking;
-            bool blockingFromDmv;
-            long currentDeadlocks;
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
-            {
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-                currentBlocking = Convert.ToInt64(reader.GetValue(0));
-                currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
-                blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+                {
+                    if (!await reader.ReadAsync(context.CancellationToken)) return;
+                    currentBlocking = Convert.ToInt64(reader.GetValue(0));
+                    currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
+                    blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
+                }
+
+                if (scoped)
+                {
+                    currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
+                        connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
+                        inclusiveEnd: false, scopeList!, context.CancellationToken);
+                }
             }
 
-            if (scoped)
-            {
-                currentDeadlocks = await SeparatelyMonitoredScope.CountDeadlocksAsync(
-                    connection, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-                    inclusiveEnd: false, scopeList!, context.CancellationToken);
-            }
+            /* #7588: the baseline follows the arm the window counted. Report rows are judged against report history and snapshot rows
+               against snapshot history, so the ratio never divides one unit by the other. */
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, blockingFromDmv ? MetricNames.BlockingSnapshot : MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
 
             /* Baseline mean is events per hour-of-day/dow bucket (≈ events per hour at this time of
                day). current_* are raw counts over the whole analysis window (hoursBack, default 4),

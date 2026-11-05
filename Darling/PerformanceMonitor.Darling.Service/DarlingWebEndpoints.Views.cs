@@ -998,6 +998,7 @@ public static partial class DarlingWebEndpoints
             ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PDatabases()),
             ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PDatabases()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
+            ["get_query_fleet_summary"] = R(CatTrends, "One query_hash on every monitored server: executions, CPU and elapsed time per server and database, ranked by CPU (requires query_hash); truncated says limit cut rows.", PReqText("query_hash"), PHours(168), PAsOf(), PInt("limit")),
 
             /* ── health / overview (DarlingMcpHealthTools / DarlingMcpFleetTools) ── */
             ["get_server_summary"] = R(CatOverview, "A one-shot health summary for a server.", PServer()),

@@ -282,7 +282,7 @@ SELECT
     CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END
 FROM combined c
 CROSS JOIN totals t
-ORDER BY c.database_name";
+ORDER BY lower(c.database_name), c.database_name";
 
     /// <summary>Per-database resource usage for the window starting at <paramref name="cutoffUtc"/>.</summary>
     public static async Task<List<DatabaseResourceUsage>> GetDatabaseResourceUsageAsync(

@@ -405,7 +405,7 @@ public sealed class DarlingMcpTrendTools
             return DarlingMcpWindowNotice.Attach(
                 TrendPayloads.FileIoTrend(
                     resolved.DisplayName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
-                    budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo),
+                    budget.AutoFor(TrendPayloads.LinesFor(series.Count)), BaselineDiscontinuities.ToPayload(discontinuities), databaseEcho: echo),
                 notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

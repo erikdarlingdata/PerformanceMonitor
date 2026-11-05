@@ -144,7 +144,7 @@ SELECT database_name, actual_state, capture_time, interval_length_minutes
 FROM v_query_store_health
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)" + dbClause + @"
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)

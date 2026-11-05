@@ -595,6 +595,10 @@ public static partial class TimescaleSupport
     public const string QueryStatsBaselineView = "query_stats_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
     public const string DeadlockBaselineView = "deadlock_baseline";
+    /// <summary>#7588: the DMV blocking snapshot baseline, the Blocking spike's history when the window counted snapshot rows
+    /// (RDS, Azure, or any window with no blocked process report). A PLAIN view over the raw table, never an aggregate: see
+    /// <see cref="PlainBaselineViews"/>.</summary>
+    public const string DmvBlockingBaselineView = "dmv_blocking_baseline";
     public const string MemoryBaselineView = "memory_baseline";
 
     /// <summary>
@@ -807,6 +811,24 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>#7588: the blocking baseline for the DMV snapshot arm. The Blocking spike counts its window as blocked process
+    /// reports, or as snapshot rows when the window holds no report; each arm is judged against its own history so the ratio never
+    /// divides snapshot rows by report rows. Same shape and the same self-wait filter as <see cref="CreateBlockedProcessBaselineSql"/>,
+    /// over <c>dmv_blocking_snapshots</c>, so the provider's event baseline reads either one. Written in the aggregate's text so
+    /// <see cref="CreateBaselineFallbackViewSql"/> derives the view, but it is never created as an aggregate (a sixteenth
+    /// hourly refresh would leave the refresh grid's heaviest window 4 s of headroom).</summary>
+    public const string CreateDmvBlockingBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.dmv_blocking_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    count(*) AS event_count
+FROM collect.dmv_blocking_snapshots
 WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
@@ -1073,7 +1095,7 @@ WITH NO DATA";
 
         var filled = 0;
 
-        foreach (var (createSql, view) in BaselineAggregates)
+        foreach (var (createSql, view) in BaselineAggregates.Concat(PlainBaselineViews))
         {
             try
             {
@@ -2514,6 +2536,18 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
     };
 
     /// <summary>
+    /// #7588: baseline relations that are ordinary views on every store. <see cref="EnsureBaselineFallbackViewsAsync"/> creates
+    /// them, on a fresh store and on an upgraded one alike (it runs on every start and skips what exists). Not in
+    /// <see cref="BaselineAggregates"/>, so they take no slot on the refresh grid, in the compression targets or in the retention
+    /// policies. The raw table behind them is purged at the collector's own retention, and the baseline read clamps its
+    /// window to that horizon (<c>PgBaselineProvider.EventSupplyFor</c>), the same as the report arm.
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] PlainBaselineViews =
+    {
+        (CreateDmvBlockingBaselineSql, DmvBlockingBaselineView),
+    };
+
+    /// <summary>
     /// The seven DAILY continuous aggregates in CREATION order — every one of them hierarchical, sourced from
     /// an hourly aggregate rather than from raw, which is why the ensure sweep creates them after
     /// <see cref="HourlyAggregates"/> and why the order inside this list is load-bearing too: the day-grain
@@ -3506,6 +3540,53 @@ WITH NO DATA";
     /// </summary>
     public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
         KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
+
+    /// <summary>The name of the (query_hash, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#7609, V246).</summary>
+    public const string QueryStoreCorrectedHourlyHashIndexName = "ix_qs_corrected_hourly_hash_bucket";
+
+    /// <summary>
+    /// #7609 (V246): the index <c>get_query_fleet_summary</c>'s Query Store source reads, <c>(query_hash, bucket DESC)</c> on the corrected hourly
+    /// rollup's materialization hypertable. V152 dropped the auto-created <c>query_hash</c> group index there for zero scans, because no reader
+    /// filtered on the hash; this read filters on the hash alone across every server, so without it the statement scans the whole rollup. A named
+    /// index: V246 runs it on an upgraded store and <see cref="QueryStoreRollupKeptIndexesSql"/> runs it after the view is created on a fresh one,
+    /// so both land the same index, and the Viewer's schema probe finds it by name. <see cref="QueryStoreRollupKeptIndexesSql"/> also runs it on
+    /// EVERY hourly convergence pass, so the block reads <c>pg_index</c> for the name first and issues the <c>CREATE INDEX</c> only when the index is
+    /// missing: <c>CREATE INDEX IF NOT EXISTS</c> alone saves the build but still takes a ShareLock on the materialization before it checks the name,
+    /// which conflicts with the refresh's RowExclusiveLock. A settled store therefore does a catalog read with no lock request. A store without
+    /// TimescaleDB, or without the view, returns before touching anything. The lock timeout is V152's: the build waits out one refresh and then
+    /// fails retryably (#7667).
+    /// </summary>
+    public static readonly string CreateQueryStoreCorrectedHourlyHashIndexSql = @"
+SET LOCAL lock_timeout = '" + (PgMigrations.MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_mat_oid regclass;
+BEGIN
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE 'SELECT format(''%I.%I'', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+             FROM timescaledb_information.continuous_aggregates
+             WHERE view_schema = ''collect'' AND view_name = ''" + QueryStoreStatsCorrectedHourlyView + @"'''
+    INTO v_mat_oid;
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE i.indrelid = v_mat_oid
+        AND   c.relname = '" + QueryStoreCorrectedHourlyHashIndexName + @"'
+    ) THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
+END $$;";
 
     /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
@@ -13406,7 +13487,7 @@ END $$;";
     public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
-        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql + "\n" + CreateQueryStoreCorrectedHourlyHashIndexSql,
         [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
         [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
         [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,

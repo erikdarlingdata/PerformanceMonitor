@@ -258,7 +258,7 @@ public sealed class WebChartAxisBehaviourTests
         var r = Run();
         var big = r.GetProperty("bigAxis");
         Assert.Equal(new[] { "0 GB", "19.5 GB", "39.1 GB", "58.6 GB", "78.1 GB" }, Strings(big.GetProperty("left")));
-        Assert.Equal("80,000.0", Strings(big.GetProperty("right")).Last());
+        Assert.Equal("80,000", Strings(big.GetProperty("right")).Last()); // #7552: a 20,000 step needs no decimal
         Assert.True(big.GetProperty("leftRoom").GetDouble() >= big.GetProperty("leftNeed").GetDouble());
         Assert.True(big.GetProperty("rightRoom").GetDouble() >= big.GetProperty("rightNeed").GetDouble());
 

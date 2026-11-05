@@ -66,6 +66,8 @@ import {
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
+import { panelPlotPx } from "./trend-points.js";
+import { withheldDisplayText } from "./mute-context.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -199,9 +201,14 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
   /* A read that keeps less history than the page's Range is asked again for what it keeps, and the panel says
      so through keptWindowStrip (readWithinKeptHistory in util.js, shared with the server-tab composites). */
   /* #7257: a panel of a saved view (it has onRetry) sends a read the service refused busy (429) once more after its Retry-After. */
+  /* #7661: a trend chart asks for about one point per 2 px of its plot (trend-points.js), so a day does not come back as 1-minute buckets the
+     plot cannot show. Measured here, when the panel loads: from its body when it is on the page, else estimated from the window. */
+  /* Only a panel that draws a line has a plot: a table, a stat or a band list sends no `plotPx`, so its read keeps the old budget and its rows. */
+  const plotPx = panelPlotPx(desc, body.clientWidth, typeof window !== "undefined" ? window.innerWidth : 0);
+  const readOptions = plotPx > 0 ? { plotPx } : undefined;
   const readOnce = (tool, params) => onRetry
-    ? retryOnceWhenBusy(() => readTool(tool, params, signal), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
-    : readTool(tool, params, signal);
+    ? retryOnceWhenBusy(() => readTool(tool, params, signal, readOptions), (seconds) => mount(body, busyRetryStrip(seconds)), signal)
+    : readTool(tool, params, signal, readOptions);
   const res = await readWithinKeptHistory(
     (params) => (desc.read ? readOnce(desc.read, params) : apiGet(desc.path + buildQuery(params), signal)),
     desc.params
@@ -1315,7 +1322,7 @@ export function visibleColumns(cols, rows) {
 }
 
 function isNumericCol(c) {
-  return c.align === "right" || ["int", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
+  return c.align === "right" || ["int", "id", "num1", "num2", "rate", "ms", "mb", "mbfit", "bytes", "pct"].includes(c.format);
 }
 
 /* #7410: a column with `exportOnly: true` is built and not drawn (`.export-only`), so Copy and the CSV carry its value under its label. The Logging
@@ -1388,7 +1395,7 @@ function cell(row, c) {
      same body carries query and SQL lines that must print as written. Never use `localizeText` on a column that holds SQL. */
   const text = c.localizeAlertDetail && !c.format
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
-    : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
+    : c.localizeText && !c.format ? localizeIsoText(shown) : withheldDisplayText(shown); /* #7548: the stored marker reads as words, nothing else changes */
   /* #7533: `name: true` is a name column (Database, File, Path, Job, Instance): one line under the stylesheet's window-following cap, an ellipsis, and the whole name in the cell's title.
      `path: true` (a file path) cuts the START instead, so the file name at the end stays visible (#7533 review): see clampText.
      It does not open on a click, because a name is read and copied, not expanded. Copy cell and the CSV read the row, so they carry the whole name too. */
@@ -1459,8 +1466,11 @@ function vizStat(data, desc) {
     /* `appendKey` adds a second field of the payload after the value, when it has one: the product level "RTM" and its update level "CU20" read "RTM CU20" (#6159). */
     const extra = raw != null && s.appendKey ? getPath(data, s.appendKey) : null;
     const shownValue = applyFormat(made != null ? "text" : s.format, raw) + (extra != null && extra !== "" ? " " + String(extra) : "");
+    const valueText = why != null && why !== "" ? String(why) : shownValue;
+    /* #7552: a wait name (SOS_SCHEDULER_YIELD) may break after an underscore, so a narrow tile wraps between words and not at its last letter. */
+    const valueKids = s.breakAfterUnderscore ? valueText.split(/(?<=_)/).flatMap((part, i) => (i ? [el("wbr"), part] : [part])) : null;
     return el("div", { class: "stat", title: s.hint || null }, [
-      el("div", { class: valueClass, text: why != null && why !== "" ? String(why) : shownValue }),
+      valueKids ? el("div", { class: valueClass }, valueKids) : el("div", { class: valueClass, text: valueText }),
       el("div", { class: "label", text: s.label }),
     ]);
   };
@@ -1585,7 +1595,10 @@ function vizLine(data, desc) {
   /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
      Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
   const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
-  return zoomableLineChart({
+  /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
+     (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
+  const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  const chart = zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
@@ -1608,6 +1621,7 @@ function vizLine(data, desc) {
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
+  return typeof footNote === "string" && footNote ? el("div", {}, [chart, noticeStrip(footNote)]) : chart;
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */
@@ -1703,6 +1717,7 @@ export function statusToSev(status) {
       return "Healthy";
     case "STALE":
     case "WARNING":
+    case "REVIEW":
     case "PERMISSIONS":
     case "SKIPPED":
       return "Warning";

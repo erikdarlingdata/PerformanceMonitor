@@ -259,7 +259,7 @@ public sealed class WebWaitStatsMultiSelectBehaviourTests
     public void TheWaitsPanel_ReadsGetWaitTrend_OncePerWait_WithTheWaitTypeAndHours_AndImportsThePickerOnlyHere()
     {
         var tabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal)", tabs);
+        Assert.Contains("readToolWithinKeptHistory(\"get_wait_trend\", { server, wait_type: waitType, hours: ctx.hours }, mine.signal, { plotPx: estimatedPlotPx() })", tabs);
         Assert.Contains("waitTypes.map(", tabs);
         Assert.Contains("const MAX_WAITS_CHARTED = 10;", tabs);
         Assert.Contains("from \"../../multi-picker.js\"", tabs); /* #7027: the import sits in the tab module, two folders down. */

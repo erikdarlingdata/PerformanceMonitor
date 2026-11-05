@@ -2686,6 +2686,53 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 10, 1000000, 2000000, 1000, 10, $8)";
     }
 
     /// <summary>
+    /// #7695: query hashes that ran in several databases. LATEWINNER: the alphabetically later database did nearly all
+    /// the CPU. TIED: two databases did the same CPU, and the name decides (case-insensitively, so "alpha" beats "Zulu").
+    /// SOLO: one database.
+    /// </summary>
+    internal async Task SeedQueryStatsAcrossDatabasesAsync()
+    {
+        await ClearTestDataAsync();
+        await SeedTestServerAsync();
+
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var batch = new SeedBatch(connection);
+
+        var rows = new (string hash, string database, long workTime)[]
+        {
+            ("LATEWINNER", "Alpha", 1_000_000L),
+            ("LATEWINNER", "Zulu", 9_000_000L),
+            ("TIED", "Zulu", 5_000_000L),
+            ("TIED", "alpha", 5_000_000L),
+            ("SOLO", "Mid", 3_000_000L),
+        };
+
+        foreach (var (hash, database, workTime) in rows)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, query_hash, query_text,
+     delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, max_grant_kb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 10, $8, 2000000, 1000, 10, 1024)";
+
+            cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestPeriodEnd.AddMinutes(-30) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = TestServerName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = database });
+            cmd.Parameters.Add(new DuckDBParameter { Value = hash });
+            cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT /* {hash} */ * FROM dbo.SomeTable" });
+            cmd.Parameters.Add(new DuckDBParameter { Value = workTime });
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    /// <summary>
     /// Seeds database_size_stats with named databases.
     /// Used for dev/test detection testing and general size seeding.
     /// </summary>
