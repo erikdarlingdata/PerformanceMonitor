@@ -24,7 +24,7 @@
  */
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
-         ALERT_STATE_LABELS, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
+         ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
 import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
@@ -41,13 +41,21 @@ const STATE_ONLY_CHANNELS = new Set(Object.keys(ALERT_STATE_LABELS));
 /* Most urgent first when ascending, the order the fleet bands use (Critical, Warning, then the calm states). */
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2, resolution: 3 };
 
+/* #7646: a state-only alert (get_alert_history's state_only, the server's AlertMetricClassifier.IsStateOnly) never had a number, so
+   its stored 0 shows as a dash, as the Viewer's grid does, not as "0.0". A nonzero value on such a row is a real measurement and
+   stays a number. */
+function stateOrNumber(a, key) {
+  const v = a[key];
+  return a.state_only === true && Number(v) === 0 ? "—" : applyFormat("num1", v);
+}
+
 const ALERT_COLUMNS = [
   { key: "alert_time", label: "Time", format: "time" },
   { key: "server_name", label: "Server" },
   { key: "metric_name", label: "Metric" },
   { key: "severity", label: "Severity", sortValue: (a) => (a.severity == null ? null : (SEVERITY_RANK[a.severity] ?? 9)), render: (a) => severityCell(a) },
-  { key: "current_value", label: "Value", format: "num1" },
-  { key: "threshold_value", label: "Threshold", format: "num1" },
+  { key: "current_value", label: "Value", format: "num1", display: (a) => stateOrNumber(a, "current_value") },
+  { key: "threshold_value", label: "Threshold", format: "num1", display: (a) => stateOrNumber(a, "threshold_value") },
   { key: "status", label: "Status", render: (a) => statusCell(a) },
   { key: "detail_text", label: "Detail", render: (a) => detailCell(a), copyValue: (a) => detailFullText(a) },
 ];

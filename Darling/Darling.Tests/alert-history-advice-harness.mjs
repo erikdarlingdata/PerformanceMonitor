@@ -196,6 +196,22 @@ try {
       out.request = detailReadsOf()[0];
       out.fields = s.fields;
     },
+    /* #7646: a state_only row's stored 0 reads as a dash in the Value and Threshold cells, a nonzero value on such a row and a 0 on a
+       measured row stay numbers. */
+    async stateOnlyValue() {
+      alertsReply = { alerts: [
+        row(0, { metric_name: "Database State", current_value: 0, threshold_value: 0, state_only: true }),
+        row(1, { metric_name: "Agent Not Running", current_value: 3, threshold_value: 0, state_only: true }),
+        row(2, { metric_name: "High CPU", current_value: 0, threshold_value: 0, state_only: false }),
+      ], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      out.cells = {};
+      const heads = main.all("th").map((th) => th.textContent);
+      const at = (label) => heads.indexOf(label);
+      for (const tr of bodyRows(main)) {
+        out.cells[tr.children[at("Metric")].textContent] = [tr.children[at("Value")].textContent, tr.children[at("Threshold")].textContent];
+      }
+    },
     async failedFetch() {
       alertsReply = { alerts: [analysisRow({ server_id: 3 })], truncated: false };
       detailsReply = () => ({ status: 500, body: { error: "read failed" } });

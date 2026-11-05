@@ -158,6 +158,17 @@ public sealed class AlertHistoryAdviceTests
         Assert.Equal(0, r.GetProperty("imgs").GetInt32());
     }
 
+    /// <summary>#7646: a state-only row (the reply's state_only) shows its stored 0 as a dash in the Value and Threshold cells,
+    /// as the Viewer's grid does; a nonzero value on such a row and a 0 on a measured row stay numbers.</summary>
+    [Fact]
+    public void AStateOnlyRow_ShowsADashForItsStoredZero_AndOtherValuesStayNumbers()
+    {
+        var cells = Run("stateOnlyValue").GetProperty("cells");
+        Assert.Equal(new[] { "—", "—" }, Strings(cells.GetProperty("Database State")));
+        Assert.Equal(new[] { "3.0", "—" }, Strings(cells.GetProperty("Agent Not Running")));
+        Assert.Equal(new[] { "0.0", "0.0" }, Strings(cells.GetProperty("High CPU")));
+    }
+
     /// <summary>#5825: a resolution row's expanded detail shows what its send did (outcome, channels, when), and its
     /// collapsed summary names the outcome when the row has no detail text; a fire row, whose three fields are null,
     /// shows none of them.</summary>

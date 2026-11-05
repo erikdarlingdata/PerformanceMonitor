@@ -196,6 +196,9 @@ public sealed partial class DarlingMcpAlertTools
                     external_source = AlertMuteContext.ExternalSourceOf(r.MetricName),
                     current_value = r.CurrentValue,
                     threshold_value = r.ThresholdValue,
+                    /* #7646: true for a metric whose current and threshold are a state, not a measurement (AlertMetricClassifier.IsStateOnly),
+                       so the web Value and Threshold columns show a dash for its stored 0 as the Viewer's grid does. */
+                    state_only = AlertMetricClassifier.IsStateOnly(r.MetricName),
                     alert_sent = r.AlertSent,
                     notification_type = r.NotificationType,
                     send_error = r.SendError,
