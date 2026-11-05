@@ -155,7 +155,9 @@ const panelsOf = (root) => {
       if (hasClass(x, "source")) strips.push(x.textContent);
       if (hasClass(x, "empty")) empties.push(x.textContent);
     });
-    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties });
+    /* #7543: the heading's subtitle spans (the h3's children after the title), where the source now sits beside the window label. */
+    const subtitles = h3 ? h3.children.slice(1).filter((c) => hasClass(c, "panel-sub") && c.textContent).map((c) => c.textContent) : [];
+    found.push({ title: h3 && h3.children[0] ? h3.children[0].textContent : "", strips, empties, subtitles });
   });
   return found;
 };
