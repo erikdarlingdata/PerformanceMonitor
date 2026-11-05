@@ -128,7 +128,7 @@ LIMIT $5";
         + ((int)TimescaleSupport.RawRetentionSpan.TotalDays).ToString(CultureInfo.InvariantCulture)
         + " days, one row per query_hash. A statement that left the plan cache before that, or ran only before the server was monitored, is not here.";
 
-    [McpServerTool(Name = ToolName), Description(
+    [McpServerTool(Name = "find_queries_by_text"), Description(
         "Finds statements on ONE server whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. server_name is required; database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. There is no index on the text, so each source has a 4 second budget; a source that runs out is reported stopped (name a database to narrow it). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
