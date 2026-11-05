@@ -189,15 +189,15 @@ WITH newest AS (
 )
 SELECT
     d.server_id,
-    d.volume_mount_point,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
     MAX(d.volume_total_mb) AS volume_total_mb,
     MIN(d.volume_free_mb) AS volume_free_mb,
     MAX(d.collection_time) AS newest_collection_time
 FROM database_size_stats AS d
 JOIN newest AS n ON n.server_id = d.server_id AND n.collection_time = d.collection_time
-WHERE d.volume_mount_point IS NOT NULL
+WHERE " + VolumeKey.Sql + @" IS NOT NULL
 AND   d.volume_total_mb > 0
-GROUP BY d.server_id, d.volume_mount_point";
+GROUP BY d.server_id, " + VolumeKey.Sql + @"";
 
     /// <summary>
     /// The period's alert counts per (server, metric): $1 window start, $2 window end (naive UTC), $3 the report's own delivery row,

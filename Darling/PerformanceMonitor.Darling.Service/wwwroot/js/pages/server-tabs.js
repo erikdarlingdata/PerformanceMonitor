@@ -991,6 +991,8 @@ export const SERVER_TABS = [
           unit: "%",
           /* #7416 item 1: on SQL Server on Linux the read leaves System CPU out and says why here. */
           noteKey: "system_cpu_note",
+          /* #7593: the note says System CPU is not shown, so the legend does not list it either. */
+          dropWhenNote: ["system_cpu_utilization"],
           emptyText: "No system_health entries in this window.",
         },
         /* The Corruption and Contention Events charts (#6295), off the same fetch. */
@@ -1004,6 +1006,7 @@ export const SERVER_TABS = [
           rowsKey: "entries",
           columns: HEALTH_ENTRY_COLUMNS,
           noteKey: "system_cpu_note",
+          dropWhenNote: ["system_cpu_utilization"],
           emptyText: "No system_health entries in this window.",
         },
       ]),
