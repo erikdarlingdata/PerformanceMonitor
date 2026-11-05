@@ -233,6 +233,7 @@ try {
   const stamp = "2026-11-05T10:00:00Z";
   const windowGrid = panels.VIZ.table({ rows: [{ pool_id: 1, resource_semaphore_id: 0, peak_waiters_at: stamp, peak_granted_at: stamp, first_snapshot_at: stamp, last_snapshot_at: stamp, snapshots_in_window: 9 }] }, { rowsKey: "rows", columns: memory.SEMAPHORE_WINDOW_COLUMNS });
   const windowCellClasses = Object.fromEntries(headersOf(windowGrid).map((h, i) => [h, findAll(windowGrid, (n) => n.tag === "td")[i].className || ""]));
+  const windowHeaderClasses = Object.fromEntries(findAll(windowGrid, (n) => n.tag === "th").map((n) => [n.textContent, n.className || ""]));
   const fileIo = (await imp("read-fields.js")).READ_FIELDS.get_file_io_stats.table;
   const fileIoHeaders = headersOf(panels.VIZ.table({ rows: [{}] }, { ...fileIo, rowsKey: "rows" }));
   const runnable = {
@@ -265,7 +266,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, semaphoreWords, windowCellClasses, fileIoHeaders, runnable, platform, unrateable,
+    alertSetup, quietChips, engineChips, windowChips, sweepTiles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, fileIoHeaders, runnable, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,

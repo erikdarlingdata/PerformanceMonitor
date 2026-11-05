@@ -616,6 +616,9 @@ table.data .export-only { display: none; }
 table.data td.flow-cell { min-width: 12rem; max-width: none; overflow-wrap: anywhere; }
 /* #7410: a narrower floor for the short wrapping columns of a wide grid (Logging Settings Audit), so its last column is not pushed past the panel at 1280 px. */
 table.data td.flow-cell.flow-narrow { min-width: 8rem; }
+/* #7578: a floor that holds a date over its time ("11/5/2026," over "3:41:00 PM") for the date-time columns of a wide grid (Resource Semaphore Pressure), and a header that wraps at its spaces (`wrapHead`), so twelve columns fit the 948 px panel of a 1280 px window. */
+table.data td.flow-cell.flow-tight { min-width: 6rem; }
+table.data th.wrap-head { white-space: normal; }
 /* #7539: a one-word setting column (Change needs: "reload" or "restart") wraps its longer note, so the width goes to the text columns. */
 table.data td.change-cell { white-space: normal; min-width: 4.5rem; max-width: 8rem; }
 table.data td.flow-cell .disclosure { max-width: none; }

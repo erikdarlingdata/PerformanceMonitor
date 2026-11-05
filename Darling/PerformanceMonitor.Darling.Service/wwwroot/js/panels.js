@@ -1113,7 +1113,7 @@ function gridFilter(desc, cols, head, tbody) {
 /* An unsortable header cell. The sortable one is built by makeGridSort().headerCell; both are the place a later
    header affordance (a filter, a menu) attaches. */
 function headerCell(c) {
-  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") || null, title: c.hint || null });
+  return el("th", { text: c.label, class: (isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "") || null, title: c.hint || null });
 }
 
 /* The sort state of every grid, at MODULE scope so the 60 s poll's rebuild of a page re-applies the chosen sort.
@@ -1211,7 +1211,7 @@ function makeGridSort(desc, cols, rows) {
       const th = ths[i];
       if (!th) return;
       const live = sortable[i];
-      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "");
+      th.className = (live ? "sortable" + (isNumericCol(c) ? " num" : "") : isNumericCol(c) ? "num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : "");
       th.setAttribute("tabindex", live ? "0" : "-1");
       /* The column's `hint` is its header tooltip; this refresh runs after the header is built, so it must not replace it. */
       th.setAttribute("title", live ? (c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label) : c.hint || "");
@@ -1247,7 +1247,7 @@ function makeGridSort(desc, cols, rows) {
     eligible: cols.map((c) => c.sortable !== false),
     headerCell(c, i) {
       const ind = el("span", { class: "sort-ind", "aria-hidden": "true" });
-      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
+      const th = el("th", { class: "sortable" + (isNumericCol(c) ? " num" : "") + (c.exportOnly ? " export-only" : "") + (c.wrapHead ? " wrap-head" : ""), tabindex: "0", "aria-sort": "none", title: c.hint ? c.hint + " (click to sort)" : "Sort by " + c.label }, [c.label, ind]);
       th.sortInd = ind;
       const cycle = () => {
         if (!sortable[i]) return;

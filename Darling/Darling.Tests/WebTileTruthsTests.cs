@@ -259,8 +259,12 @@ public sealed class WebTileTruthsTests
             var cls = classes.GetProperty(header).GetString()!.Split(' ');
             Assert.Contains("wrap", cls);
             Assert.Contains("flow-cell", cls);
-            Assert.Contains("flow-narrow", cls);
+            Assert.Contains("flow-tight", cls);
         }
+        // #7578: every header wraps at its spaces, so twelve columns fit the 948 px panel of a 1280 px window (a header of nowrap text kept the grid at 1389 px).
+        var headers = Run().GetProperty("windowHeaderClasses");
+        foreach (var header in headers.EnumerateObject())
+            Assert.Contains("wrap-head", header.Value.GetString()!.Split(' '));
         // A number column keeps its single line.
         Assert.DoesNotContain("wrap", classes.GetProperty("Snapshots").GetString()!.Split(' '));
     }

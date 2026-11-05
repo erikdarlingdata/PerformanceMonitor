@@ -70,8 +70,8 @@ export function semaphoreName(id) {
 }
 const SEMAPHORE_COLUMN = { key: "resource_semaphore_id", label: "Semaphore", display: (r) => semaphoreName(r.resource_semaphore_id), sortValue: (r) => r.resource_semaphore_id };
 
-/* #7578: the four date-time columns of the window grid wrap at their space ("11/5/2026," over "3:16:21 PM") with the narrow flow-cell floor, the rule the Logging Settings Audit grid uses (#7410), so First and Last stay inside the panel at 1280 and 1536 px and no width is set for one screen. */
-const WRAPPING_TIME = { wrap: true, cellClass: () => "flow-cell flow-narrow" };
+/* #7578: the four date-time columns of the window grid wrap at their space ("11/5/2026," over "3:16:21 PM") with a floor that holds a date over its time (flow-tight), and every header wraps at its spaces (wrapHead), so the grid fits the panel at 1280 px with no sideways scroll and no width is set for one screen. */
+const WRAPPING_TIME = { wrap: true, cellClass: () => "flow-cell flow-tight" };
 
 export const GRANT_WINDOW_COLUMNS = [
   POOL_COLUMN,
@@ -85,11 +85,11 @@ export const GRANT_WINDOW_COLUMNS = [
   { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
   { key: "first_snapshot_at", label: "First", format: "time", small: true, ...WRAPPING_TIME },
   { key: "last_snapshot_at", label: "Last", format: "time", small: true, ...WRAPPING_TIME },
-];
+].map((c) => ({ ...c, wrapHead: true }));
 
 /* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
    semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
-export const SEMAPHORE_WINDOW_COLUMNS = [SEMAPHORE_COLUMN, ...GRANT_WINDOW_COLUMNS];
+export const SEMAPHORE_WINDOW_COLUMNS = [{ ...SEMAPHORE_COLUMN, wrapHead: true }, ...GRANT_WINDOW_COLUMNS];
 
 /* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
    Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
