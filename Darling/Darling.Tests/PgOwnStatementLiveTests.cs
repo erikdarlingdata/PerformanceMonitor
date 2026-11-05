@@ -42,6 +42,10 @@ public sealed class PgOwnStatementLiveTests
     private const long AppUserId = 20;
     private const long DatabaseId = 16384;
 
+    /* #7630: pg_stat_statements covers the whole cluster, and other classes send statements with the same fragments
+       (has_table_privilege(, string_to_array() and no marker. Every read keeps to the rows of the database the probes ran in. */
+    private const string OwnDatabase = "dbid = (SELECT oid FROM pg_database WHERE datname = current_database())";
+
     internal static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
@@ -118,7 +122,7 @@ public sealed class PgOwnStatementLiveTests
 
             var texts = new List<string>();
             await using (var read = new NpgsqlCommand(
-                "SELECT query FROM pg_stat_statements WHERE query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
+                "SELECT query FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pg\\_catalog.pg\\_extension AS e%'", connection))
             await using (var reader = await read.ExecuteReaderAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
@@ -226,8 +230,8 @@ public sealed class PgOwnStatementLiveTests
 
         var stored = new Dictionary<string, string>(StringComparer.Ordinal);
         await using (var read = new NpgsqlCommand(
-            "SELECT query FROM pg_stat_statements WHERE query LIKE '%pm7567\\_%' OR query LIKE '%pg\\_stat\\_clear\\_snapshot%' OR query LIKE '%pg\\_sleep(%' "
-            + "OR query LIKE '%pg\\_catalog.pg\\_extension AS e%' OR query LIKE '%aurora\\_probe%' OR query LIKE 'SELECT pg\\_catalog.current\\_setting(%'",
+            "SELECT query FROM pg_stat_statements WHERE " + OwnDatabase + " AND (query LIKE '%pm7567\\_%' OR query LIKE '%pg\\_stat\\_clear\\_snapshot%' OR query LIKE '%pg\\_sleep(%' "
+            + "OR query LIKE '%pg\\_catalog.pg\\_extension AS e%' OR query LIKE '%aurora\\_probe%' OR query LIKE 'SELECT pg\\_catalog.current\\_setting(%')",
             connection))
         await using (var reader = await read.ExecuteReaderAsync(ct))
         {
@@ -253,7 +257,7 @@ public sealed class PgOwnStatementLiveTests
 
         /* The SQL predicate the readers use agrees with the C# one on the stored text. */
         await using var predicate = new NpgsqlCommand(
-            "SELECT " + PgOwnStatement.IsOwnSql("query") + " FROM pg_stat_statements WHERE query LIKE '%pm7567\\_single%'", connection);
+            "SELECT " + PgOwnStatement.IsOwnSql("query") + " FROM pg_stat_statements WHERE " + OwnDatabase + " AND query LIKE '%pm7567\\_single%'", connection);
         Assert.True((bool)(await predicate.ExecuteScalarAsync(ct))!);
 
         /* Round 7: the commands that build their own SQL and skip the provider. The zone read is a two-statement batch, and
@@ -272,7 +276,7 @@ public sealed class PgOwnStatementLiveTests
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "pm7567-r7", ct);
 
         var texts = new List<string>();
-        await using (var readAll = new NpgsqlCommand("SELECT query FROM pg_stat_statements", connection))
+        await using (var readAll = new NpgsqlCommand("SELECT query FROM pg_stat_statements WHERE " + OwnDatabase, connection))
         await using (var readerAll = await readAll.ExecuteReaderAsync(ct))
         {
             while (await readerAll.ReadAsync(ct))
