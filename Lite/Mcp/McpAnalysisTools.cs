@@ -695,6 +695,7 @@ public sealed class McpAnalysisTools
                for a store with no properties snapshot, and then edition_note says so. */
             var propertiesRow = await dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             var (editionName, editionNote) = AuditEditionLabel(propertiesRow?.Edition, edition);
+            totalMemoryMb = AuditPhysicalMemoryMb(totalMemoryMb, propertiesRow);
             /* The recommended MAXDOP follows the cores per socket the SERVER_HARDWARE fact carries. On an Azure SQL Database the fact carries its vCores instead, because the stored
                cores_per_socket is the host's (see FactRemediation.MaxdopBasisFrom). */
             var maxdopBasis = FactRemediation.MaxdopBasisFrom(factsByKey);
@@ -847,6 +848,14 @@ public sealed class McpAnalysisTools
         engineEdition == CollectorEngineCapability.UnknownEngineEdition
             ? "Unknown"
             : CollectorEngineCapability.DescribeEngineEdition(engineEdition);
+
+    /// <summary>
+    /// The physical memory the max server memory audit quotes (#7552 item 7): the stored server property when the store holds one, the
+    /// fact otherwise. The selection and its Azure SQL Database exception live in <see cref="ServerHardwareScope.AuditPhysicalMemoryMb"/>,
+    /// which Darling's <c>audit_config</c> calls too.
+    /// </summary>
+    internal static double AuditPhysicalMemoryMb(double factMb, PerformanceMonitorLite.Services.ServerPropertiesRow? propertiesRow)
+        => ServerHardwareScope.AuditPhysicalMemoryMb(factMb, propertiesRow?.EngineEdition, propertiesRow?.PhysicalMemoryMb);
 
     /// <summary>
     /// The <c>edition</c> and <c>edition_note</c> audit_config echoes (#5633 item 10). The stored <c>Edition</c> property

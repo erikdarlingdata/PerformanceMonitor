@@ -136,19 +136,20 @@ public sealed class DarlingMcpHealthParserTools
     /// <summary>The web page's CPU chart (#6158): the same parsed SYSTEM snapshots, but the answer is one row per time bucket
     /// (the mean of each CPU reading) across the whole window, instead of the newest <c>limit</c> rows. A day of snapshots used
     /// to stop at the limit and draw only its newest hours. The width is <paramref name="bucket_minutes"/>, or sized so the
-    /// answer fits <see cref="TrendBudget.Chart"/>'s point budget. Not an MCP tool: the agent read keeps its shape.</summary>
+    /// answer fits <paramref name="budget"/> (the web page's plot-sized ask, #7661) or <see cref="TrendBudget.Chart"/>'s point budget. Not an MCP tool: the agent read keeps its shape.</summary>
     internal static async Task<string> GetSystemHealthChart(
         NpgsqlDataSource postgres,
         string? server_name,
         int hours_back,
         int? bucket_minutes,
         string? as_of,
+        TrendBudget? budget = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 2, TrendBudget.Chart, out var bucketMinutes);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 2, budget ?? TrendBudget.Chart, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
             var c = await CollectAsync(postgres, server_name, hours_back, 50, as_of,
@@ -435,11 +436,11 @@ public sealed class DarlingMcpHealthParserTools
             var c = await CollectAsync(postgres, server_name, hours_back, limit, as_of,
                 SystemHealthParser.SchedulerMonitorEvent,
                 xml => One(SystemHealthParser.ParseSchedulerIssue(xml)),
-                SystemHealthSignificance.IsSignificant, cancellationToken);
+                SystemHealthSignificance.IsSignificant, SystemHealthHostCpu.Apply, cancellationToken);
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
-                return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", logger, cancellationToken);
+                return SystemHealthHostCpu.WithNote(await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SchedulerMonitorEvent,
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", logger, cancellationToken), c.HostOs)!;
 
             var notice = await NoticeAsync(postgres, c, hours_back, EarliestOf(c.Rows.Select(r => r.EventTime)), emptyAnswer: false, logger, cancellationToken);
 
@@ -451,6 +452,7 @@ public sealed class DarlingMcpHealthParserTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 source_observed = true,
+                system_cpu_note = SystemHealthHostCpu.SchedulerNoteFor(c.HostOs),
                 last_captured_at = Stamp(c.LastCapturedAt),
                 issue_count = c.Rows.Count,
                 shown = Math.Min(c.Rows.Count, limit),
@@ -821,7 +823,7 @@ public sealed class DarlingMcpHealthParserTools
     /// <see cref="Rows"/>. The id rides along for the #2511 engine-capability probe on the zero-row path —
     /// re-resolving the name there would be a second registry read, which could answer for a different server.</summary>
     private readonly record struct Collected<T>(
-        string? EarlyReturn, int ServerId, string ServerName, string DisplayName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd, IReadOnlyDictionary<string, int>? NotificationCounts = null);
+        string? EarlyReturn, int ServerId, string ServerName, string DisplayName, List<T> Rows, int RawEventCount, DateTime? LastCapturedAt, DateTime WindowEnd, IReadOnlyDictionary<string, int>? NotificationCounts = null, string? HostOs = null);
 
     /// <summary>
     /// Resolves the server, validates hours_back + as_of + limit, reads the raw event_xml for
@@ -836,9 +838,17 @@ public sealed class DarlingMcpHealthParserTools
     /// (so a caller can see whether the source was ever observed at all). The witness is one index-walk
     /// per call — see <see cref="DarlingSystemHealthReader.LastCaptureSql"/>.</para>
     /// </summary>
+    private static Task<Collected<T>> CollectAsync<T>(
+        NpgsqlDataSource postgres, string? serverName, int hoursBack, int limit, string? asOf, string eventType,
+        Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class =>
+        CollectAsync(postgres, serverName, hoursBack, limit, asOf, eventType, shred, significant, null, cancellationToken);
+
+    /// <summary><see cref="CollectAsync{T}(NpgsqlDataSource, string?, int, int, string?, string, Func{string, IEnumerable{T}}, Func{T, bool}, CancellationToken)"/>
+    /// with <paramref name="hostAdjust"/> (#7688), applied to each shredded record with the server's host OS BEFORE the significance gate: the
+    /// scheduler read clears the figures derived from idle CPU for a server that cannot report it.</summary>
     private static async Task<Collected<T>> CollectAsync<T>(
         NpgsqlDataSource postgres, string? serverName, int hoursBack, int limit, string? asOf, string eventType,
-        Func<string, IEnumerable<T>> shred, Func<T, bool> significant, CancellationToken cancellationToken = default) where T : class
+        Func<string, IEnumerable<T>> shred, Func<T, bool> significant, Func<T, string?, T>? hostAdjust, CancellationToken cancellationToken) where T : class
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
         if (error != null) return new Collected<T>(error, 0, "", "", new List<T>(), 0, null, default);
@@ -851,17 +861,22 @@ public sealed class DarlingMcpHealthParserTools
             postgres, resolved.ServerId, now.AddHours(-hoursBack), now, eventType, cancellationToken);
         var lastCapturedAt = await DarlingSystemHealthReader.GetLastCaptureAsync(postgres, resolved.ServerId, cancellationToken);
 
+        /* #7688: a read whose figures derive from the host's idle CPU clears them for a server that cannot report it BEFORE the
+           significance gate, so a Linux sample does not pass the gate on a figure that is not real. */
+        var hostOs = hostAdjust is null ? null : await DarlingSystemHealthReader.GetHostOsVersionAsync(postgres, resolved.ServerId, cancellationToken);
+
         var rows = new List<T>();
         foreach (var xml in xmls)
         {
-            foreach (var record in shred(xml))
+            foreach (var parsed in shred(xml))
             {
+                var record = parsed != null && hostAdjust != null ? hostAdjust(parsed, hostOs) : parsed;
                 if (record != null && significant(record))
                     rows.Add(record);
             }
         }
 
-        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now);
+        return new Collected<T>(null, resolved.ServerId, resolved.ServerName, resolved.DisplayName, rows, xmls.Count, lastCapturedAt, now, HostOs: hostOs);
     }
 
     /* ─────────────────────────── the four nothings (#3541 A12) ─────────────────────────── */

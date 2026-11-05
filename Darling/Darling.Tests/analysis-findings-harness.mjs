@@ -133,7 +133,7 @@ try {
       return groupsOf(root).map((g) => ({ head: sum(g), links: byTag(g, "a").map((a) => a.textContent) }));
     },
     sameRoot: async () => {
-      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures and the other chain named under it. */
+      /* #7416: two chains on one root in one incident are one card, with the newest chain's figures. */
       const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, advice: { headline: "Latch contention", investigation: "i", remediation: "r" }, ...over });
       const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5 });
       const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2 });
@@ -143,7 +143,7 @@ try {
       return { headers: groups.map(sum), cards: byTag(root, "h4").map((h) => h.textContent), text: root.textContent };
     },
     sameRootOtherSentence: async () => {
-      /* #7416 still holds where the headlines differ: two chains on one root with two sentences are one card, the other chain named under it. */
+      /* #7416, #7696: two chains on one root with two sentences are one card, whatever the headlines say: the chains are listed in words under it. */
       const latch = (over) => finding({ incident_id: "inc-1", root_fact: { key: "LATCH_EX", value: 1 }, ...over });
       const newest = latch({ finding_id: 1, severity: 0.8, story_path: "LATCH_EX → CXPACKET", last_seen: "2026-01-01T10:00:00Z", occurrences: 5, advice: { headline: "Latch contention", investigation: "i", remediation: "r" } });
       const older = latch({ finding_id: 2, severity: 0.3, story_path: "LATCH_EX → TEMPDB_USAGE", last_seen: "2026-01-01T08:30:00Z", occurrences: 2, advice: { headline: "Tempdb latch contention", investigation: "i", remediation: "r" } });
@@ -166,12 +166,34 @@ try {
       return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
     },
     pileupAlsoSeen: async () => {
-      /* #7582: one incident's pileup read back under two headlines: the other is named under the card as "also seen as", with no hash. */
+      /* #7582, #7696: one incident's pileup read back under two headlines that differ only in the figures is one card at the newest headline, with no hash. */
       const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", ...over });
       const newer = pile({ finding_id: 1, last_seen: "2026-01-01T10:00:00Z", advice: { headline: "4 sessions ran one statement for 30 s", investigation: "i", remediation: "r" } });
       const older = pile({ finding_id: 2, last_seen: "2026-01-01T08:00:00Z", advice: { headline: "3 sessions ran one statement for 20 s", investigation: "i", remediation: "r" } });
       const root = await run("srv-a", { findings: [newer, older] });
       return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    pileupTwoStatementsOneIncident: async () => {
+      /* #7696: two pileups on different statements in ONE incident print one headline and stay two cards, each with its own remediation. */
+      const head = "4 sessions ran one statement for 30 s";
+      const pile = (over) => finding({ incident_id: "inc-a", root_fact: { key: "SAME_STATEMENT_PILEUP", value: 1 }, ...over });
+      const a = pile({ finding_id: 1, story_path: "SAME_STATEMENT_PILEUP → 0x1A2B3C4D5E6F7A8B", advice: { headline: head, investigation: "i", remediation: "Fix statement A" } });
+      const b = pile({ finding_id: 2, story_path: "SAME_STATEMENT_PILEUP → 0x99887766AABBCCDD", advice: { headline: head, investigation: "i", remediation: "Fix statement B" } });
+      const root = await run("srv-a", { findings: [a, b] });
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, text: root.textContent };
+    },
+    objectAnomalyOneIncident: async () => {
+      /* #7696: two tables (growth) and two objects (contention) under one root fact each, in ONE incident: every one keeps its own card, so no subject is lost. */
+      const row = (key, id, headline) => finding({ finding_id: id, incident_id: "inc-a", root_fact: { key, value: 1 }, story_path: key, advice: { headline, investigation: "i", remediation: "r" } });
+      const findings = [
+        row("ANOMALY_OBJECT_GROWTH", 1, "dbo.Orders grew 900 MB day-over-day"),
+        row("ANOMALY_OBJECT_GROWTH", 2, "dbo.Events grew 700 MB day-over-day"),
+        row("ANOMALY_OBJECT_CONTENTION", 3, "dbo.Queue accrued 40 s of new lock-wait time"),
+        row("ANOMALY_OBJECT_CONTENTION", 4, "dbo.Jobs accrued 30 s of new lock-wait time"),
+      ];
+      const root = await run("srv-a", { findings });
+      const merged = mod.mergeBySentence(findings);
+      return { cards: all(root, (x) => /\breco-card\b/.test(x.className)).length, titles: merged.map((m) => m.finding_title), text: root.textContent };
     },
     sameSentence: async () => {
       /* #7582: one sentence on rows of two incidents is one card, Critical, with the occurrences added up, and the chains it covers named in words. */
@@ -181,6 +203,31 @@ try {
       const other = finding({ finding_id: 3, incident_id: "inc-3", severity: 0.2, peak_severity: 0.2, advice: { headline: "Something else", investigation: "i", remediation: "r" } });
       const root = await run("srv-a", { findings: [warn, crit, other] });
       return { headers: groupsOf(root).map(sum), text: root.textContent };
+    },
+    sameRootOtherFigure: async () => {
+      /* #7696: one root fact on two incidents whose headlines differ only in the figure is one card: Critical, the newest figure, the occurrences added up. */
+      const wl = (over) => finding({ root_fact: { key: "ANOMALY_WRITE_LATENCY", value: 1 }, story_path: "ANOMALY_WRITE_LATENCY", ...over });
+      const older = wl({ finding_id: 1, incident_id: "inc-1", severity: 1.6, peak_severity: 1.6, occurrences: 25, first_seen: "2026-01-01T01:00:00Z", last_seen: "2026-01-01T08:50:00Z", time_range: { start: "2026-01-01T01:41:00Z", end: "2026-01-01T08:50:00Z" }, advice: { headline: "Write latency spiked to 2300 ms", investigation: "i", remediation: "r" } });
+      const newer = wl({ finding_id: 2, incident_id: "inc-2", severity: 1.3, peak_severity: 1.3, occurrences: 5, first_seen: "2026-01-01T00:11:00Z", last_seen: "2026-01-01T09:20:00Z", time_range: { start: "2026-01-01T00:11:00Z", end: "2026-01-01T09:20:00Z" }, advice: { headline: "Write latency spiked to 4935.5 ms", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [older, newer] });
+      const merged = mod.mergeBySentence([older, newer]);
+      return { headers: groupsOf(root).map(sum), text: root.textContent, rows: merged.length, title: merged[0].finding_title, start: merged[0].time_range.start, end: merged[0].time_range.end, label: mod.severityLabel(merged[0].severity) };
+    },
+    noRootStillMergesByTitle: async () => {
+      /* #7696: a row with no root fact keeps the old key, its headline. */
+      const row = (over) => finding({ root_fact: null, story_path: "", advice: { headline: "Same words", investigation: "i", remediation: "r" }, ...over });
+      const other = row({ finding_id: 3, incident_id: "inc-3", advice: { headline: "Other words", investigation: "i", remediation: "r" } });
+      const merged = mod.mergeBySentence([row({ finding_id: 1, incident_id: "inc-1", occurrences: 2 }), row({ finding_id: 2, incident_id: "inc-2", occurrences: 4 }), other]);
+      return { rows: merged.length, occurrences: merged.map((m) => m.occurrences) };
+    },
+    objectAnomalyTwoTables: async () => {
+      /* #7696: ANOMALY_OBJECT_GROWTH names its table only in the headline, so two tables stay two cards. */
+      const grow = (over) => finding({ root_fact: { key: "ANOMALY_OBJECT_GROWTH", value: 1 }, story_path: "ANOMALY_OBJECT_GROWTH", ...over });
+      const merged = mod.mergeBySentence([
+        grow({ finding_id: 1, incident_id: "inc-1", advice: { headline: "dbo.Orders grew 900 MB day-over-day", investigation: "i", remediation: "r" } }),
+        grow({ finding_id: 2, incident_id: "inc-2", advice: { headline: "dbo.Events grew 700 MB day-over-day", investigation: "i", remediation: "r" } }),
+      ]);
+      return { titles: merged.map((m) => m.finding_title) };
     },
     peakSeverity: async () => {
       /* #7582: the newest occurrence scored 0.62 but the peak was 1.3, so the card reads Warning. */

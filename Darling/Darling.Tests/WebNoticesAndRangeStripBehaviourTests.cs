@@ -136,7 +136,7 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
             .Where(f => f.IsLiteral && f.Name.StartsWith("Reason", StringComparison.Ordinal))
             .Select(f => (string)f.GetRawConstantValue()!)
             .ToArray();
-        Assert.Equal(11, tokens.Length);
+        Assert.Equal(12, tokens.Length);
         foreach (var token in tokens)
         {
             Assert.True(all.TryGetProperty(token, out var words), "the page has no words for " + token);

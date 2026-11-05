@@ -107,8 +107,8 @@ LIMIT 1";
     /// <c>get_resource_semaphore</c> / <c>ServerHealthStatus.MemorySeverity</c> reads: grant waiters,
     /// timeout-error and forced-grant deltas, and total granted MB, summed across every pool at the newest
     /// collection instant. The Dashboard live-sums <c>sys.dm_exec_query_resource_semaphores.waiter_count</c>
-    /// (WHERE max_target_memory_kb IS NOT NULL, which the <c>memory_grant_stats</c> collector already
-    /// applies at capture); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
+    /// (WHERE max_target_memory_kb IS NOT NULL, which is the regular semaphore: this read filters
+    /// <c>resource_semaphore_id = 0</c> because the <c>memory_grant_stats</c> collector now keeps the small-query row too, #7676); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
     /// </summary>
     public const string ServerSummaryMemoryPressureSql = @"
 SELECT
@@ -118,6 +118,7 @@ SELECT
     CAST(COALESCE(SUM(granted_memory_mb), 0) AS double precision)
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: the small-query semaphore (id 1) is collected too; the Dashboard's filter now lives here */
 AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_grant_stats WHERE server_id = $1)";
 
     /// <summary>
@@ -1050,7 +1051,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
+            if (IsOffline || (!TotalCpuPercent.HasValue && !CpuPercent.HasValue)) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside
@@ -1062,7 +1063,10 @@ public sealed class ServerSummaryItem
                 return $"{TotalCpuPercent:F0}% (ACU {AcuUtilizationPercent:F0}%)";
             }
 
-            if (!CpuPercent.HasValue || !OtherProcessCpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
+            /* #7682: a ring-buffer reading with no other-process share (SQL Server on Linux before 2025 CU1 cannot report
+               host CPU) has no known total, so the figure is the SQL Server's own and the headline says so. */
+            if (CpuPercent.HasValue && !OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
+            if (!CpuPercent.HasValue) return $"{TotalCpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }

@@ -56,6 +56,17 @@ public static class ServerHardwareScope
     public static bool HardwareIsTheHosts(int? engineEdition) => engineEdition == AzureSqlDatabaseEngineEdition;
 
     /// <summary>
+    /// The physical memory the max server memory audit quotes (#7552 item 7), shared by Darling's and Lite's <c>audit_config</c>.
+    /// The Configuration tab prints Server Properties' physical memory beside this audit, and the memory facts read the same RAM a moment
+    /// apart (1,022 MB against 1,023 MB), so the audit quotes the stored server property whenever the store holds one. On an Azure SQL
+    /// Database the fact is the database's own memory limit and the stored property is the host's, so the fact stays. The edition is the
+    /// properties row's own <c>EngineEdition</c>, the same row the property comes from, so a missing <c>SERVER_EDITION</c> fact cannot
+    /// let an Azure SQL Database quote its host's RAM.
+    /// </summary>
+    public static double AuditPhysicalMemoryMb(double factMb, int? propertiesEngineEdition, long? propertyMb)
+        => !HardwareIsTheHosts(propertiesEngineEdition) && propertyMb is > 0 ? propertyMb.Value : factMb;
+
+    /// <summary>
     /// The <c>hardware_note</c> <c>get_server_properties</c> returns on an Azure SQL Database, word for word in both
     /// apps (the web Server Properties list reads the same payload).
     /// </summary>

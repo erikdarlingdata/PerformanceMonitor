@@ -124,6 +124,21 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
     }
 
     [Fact]
+    public async Task GetResourceSemaphore_ShowsNoMaxTargetForTheSmallQuerySemaphore_NotAZero()
+    {
+        var (@base, anchor) = Past();
+        /* The DMV has no max target for the small-query semaphore (id 1), so the stored NULL reads null, not a 0 ceiling (#7676). */
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 500, semaphore: 0);
+        await SeedGrantAsync(@base, waiters: 0, timeoutsDelta: 0, grantedMb: 100, semaphore: 1);
+
+        var root = Parse(await McpMemoryTools.GetResourceSemaphore(_dataService, _serverManager, ServerName, 1, anchor));
+
+        var bySemaphore = root.GetProperty("grants").EnumerateArray().ToDictionary(g => g.GetProperty("resource_semaphore_id").GetInt32());
+        Assert.Equal(12000d, bySemaphore[0].GetProperty("max_target_memory_mb").GetDouble());
+        Assert.Equal(JsonValueKind.Null, bySemaphore[1].GetProperty("max_target_memory_mb").ValueKind);
+    }
+
+    [Fact]
     public async Task GetMemoryGrants_ReadsThePoolWindow_WithANullSemaphoreId()
     {
         var (@base, anchor) = Past();
@@ -442,7 +457,7 @@ INSERT INTO memory_grant_stats
     (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id,
      target_memory_mb, max_target_memory_mb, total_memory_mb, available_memory_mb, granted_memory_mb, used_memory_mb,
      grantee_count, waiter_count, timeout_error_count, forced_grant_count, timeout_error_count_delta, forced_grant_count_delta)
-VALUES ($1, $2, $3, $4, $5, $6, 8000, 12000, 8000, $7, $8, $8, 3, $9, 4, 2, $10, 0)",
+VALUES ($1, $2, $3, $4, $5, $6, 8000, CASE WHEN $5 = 1 THEN NULL ELSE 12000 END, 8000, $7, $8, $8, 3, $9, 4, 2, $10, 0)",
         _nextId--, Naive(at), _serverId, ServerName, semaphore, pool, 8000 - grantedMb, grantedMb, waiters, timeoutsDelta);
 
     private Task SeedSchedulerAsync(DateTime at, int runnable) => ExecAsync(@"

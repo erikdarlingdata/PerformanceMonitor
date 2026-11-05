@@ -111,37 +111,6 @@ function rootKeyOf(f) {
   return (f.root_fact && f.root_fact.key) || "";
 }
 
-/**
- * One card per root fact in a group (#7416): the chain seen most recently speaks, with its own figures, and the other chains on the
- * same root are named under it in `also`. The read keeps every chain; only the page folds them. A finding with no root key is never folded.
- */
-function foldByRoot(items) {
-  const byRoot = new Map();
-  const out = [];
-  for (const f of items) {
-    const root = rootKeyOf(f);
-    if (!root) {
-      out.push({ ...f, also: [] });
-      continue;
-    }
-    const seen = byRoot.get(root);
-    if (!seen) {
-      const card = { ...f, also: [] };
-      byRoot.set(root, card);
-      out.push(card);
-      continue;
-    }
-    const newer = (Date.parse(f.last_seen) || 0) > (Date.parse(seen.last_seen) || 0);
-    if (newer) {
-      const { also, ...rest } = seen;
-      Object.assign(seen, f, { also: [...also, rest] });
-    } else {
-      seen.also.push(f);
-    }
-  }
-  return out;
-}
-
 /** A finite number, or null. A missing score is not 0: a row with none keeps showing none. */
 function finiteOrNull(v) {
   const n = v == null || v === "" ? NaN : Number(v);
@@ -189,30 +158,48 @@ export function chainLine(c) {
 }
 
 /**
- * #7582: one row per sentence. The read keeps one entry per chain and incident, and chains that start at the same fact print the same
- * headline, so the page showed one sentence on two or three rows with nothing to tell them apart. Rows with the same headline become
+ * Root facts whose headline is the only place that names what they are about: ANOMALY_OBJECT_GROWTH and ANOMALY_OBJECT_CONTENTION print the
+ * table or index ("dbo.Orders grew 900 MB day-over-day") and their key is the bare fact key. These keep the headline in the merge key, so
+ * two tables stay two rows (#7696).
+ */
+const SUBJECT_IN_TITLE_ROOTS = new Set(["ANOMALY_OBJECT_GROWTH", "ANOMALY_OBJECT_CONTENTION"]);
+
+/**
+ * What makes two rows one (#7696): the root fact and the statement identity, not the headline. An anomaly headline prints the observed
+ * figure ("Write latency spiked to 2300 ms"), and the figure is the window's peak at the time of each analysis pass, so one condition
+ * read on two incidents prints two sentences. A row with no root key, or a root whose headline names its subject, still keys on the headline.
+ */
+function mergeKeyOf(f) {
+  const root = rootKeyOf(f);
+  const byRoot = root && !SUBJECT_IN_TITLE_ROOTS.has(root);
+  return (byRoot ? "root:" + root : "title:" + findingTitle(f) + "\u0000" + root) + "\u0000" + identityOf(f);
+}
+
+/**
+ * #7582, #7696: one row per root fact. The read keeps one entry per chain and incident, and chains that start at the same fact print the same
+ * headline, so the page showed one sentence on two or three rows with nothing to tell them apart. Rows with the same root fact (#7696: not the same headline, which prints the observed figure) become
  * one: the worst severity any of them reached (counting each row's peak, so a row whose newest occurrence is Info but whose peak was
  * Warning reads Warning), the earliest first seen, the latest last seen and the occurrences added up. The newest row speaks for the
  * rest (its advice, its incident, its figures). `chains` lists what the row covers, one entry per distinct chain, worst first, for the
  * detail. The grid and the Recommendations tab both call this, so they cannot disagree. Nothing in the input is changed.
  * One exception: a path that names a statement (a same-statement pileup's hash) keeps the statement in the merge key, so two pileups
  * on different statements with the same headline stay two rows, each with its own advice and remediation. The same statement on two
- * incidents still merges.
+ * incidents still merges. This is the one place rows fold: groupFindings takes the merged rows as they are, so a row never hides
+ * another row's remediation, and two pileups or two tables in one incident are two cards.
  */
 export function mergeBySentence(findings) {
   const order = [];
   const buckets = new Map();
   for (const f of findings || []) {
-    const title = findingTitle(f);
-    const key = title + "\u0000" + identityOf(f);
+    const key = mergeKeyOf(f);
     if (!buckets.has(key)) {
-      buckets.set(key, { title, rows: [] });
+      buckets.set(key, { rows: [] });
       order.push(key);
     }
     buckets.get(key).rows.push(f);
   }
   return order.map((key) => {
-    const { title, rows } = buckets.get(key);
+    const { rows } = buckets.get(key);
     let newest = rows[0];
     let first = null;
     let last = null;
@@ -245,7 +232,7 @@ export function mergeBySentence(findings) {
       .map((c) => ({ path: c.path, severity: c.score, label: severityLabel(c.score), occurrences: c.occurrences }));
     return {
       ...newest,
-      finding_title: title,
+      finding_title: findingTitle(newest),
       severity: worst,
       peak_severity: worst,
       occurrences,
@@ -274,7 +261,7 @@ export function groupFindings(findings) {
     buckets.get(key).push(f);
   }
   const groups = order.map((key) => {
-    const items = foldByRoot(buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0)));
+    const items = buckets.get(key).slice().sort((a, b) => (b.severity || 0) - (a.severity || 0));
     const primary = items[0];
     return { key, items, primary, label: severityLabel(primary.severity) };
   });
@@ -476,11 +463,6 @@ function severityText(severity) {
   return Number.isFinite(n) ? " (score " + n.toFixed(2) + ")" : "";
 }
 
-/** One folded chain, named under the card that stands for its root: its facts in words (as the merged chains are, #7582), its band and when it was last seen. */
-function alsoText(f) {
-  return plainChain(f) + " (" + severityLabel(f.severity) + ", last seen " + localTime(f.last_seen) + ")";
-}
-
 /* #6159: a lone finding's title is already on its group's summary line directly above, so its card does not repeat it as a heading. */
 function card(server, f, showTitle) {
   const label = severityLabel(f.severity);
@@ -497,9 +479,6 @@ function card(server, f, showTitle) {
   ];
   if (f.chains && f.chains.length > 1) {
     kids.push(el("div", { class: "muted", text: "Seen as " + f.chains.length + " chains: " + f.chains.map(chainLine).join("; ") }));
-  }
-  if (f.also && f.also.length) {
-    kids.push(el("div", { class: "muted", text: "Same cause, also seen as: " + f.also.map(alsoText).join(" · ") }));
   }
   if (f.remediation_command) {
     kids.push(el("pre", { class: "reco-fix", text: f.remediation_command }));

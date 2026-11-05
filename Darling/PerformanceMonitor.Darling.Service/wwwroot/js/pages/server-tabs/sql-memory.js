@@ -78,7 +78,7 @@ export const GRANT_WINDOW_COLUMNS = [
 
 /* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null
    semaphore id by design, so the column is added here rather than shared and rendered as a dash there. */
-export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "int" }, ...GRANT_WINDOW_COLUMNS];
+export const SEMAPHORE_WINDOW_COLUMNS = [{ key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" }, ...GRANT_WINDOW_COLUMNS];
 
 /* The `grants[]` half of get_memory_grants: the NEWEST snapshot, one row per pool with its semaphores summed.
    Waiters lead the deltas: the deltas are the interval ending at this snapshot, the waiter count is the
@@ -95,9 +95,11 @@ export const GRANT_COLUMNS = [
   { key: "forced_grant_count_delta", label: "Forced grants", format: "int" },
 ];
 
+/* #7676: one row per pool AND semaphore (id 0 regular, id 1 small query), so the Semaphore column names which. */
 export const SEMAPHORE_COLUMNS = [
   { key: "collection_time", label: "Time", format: "time" },
   POOL_COLUMN,
+  { key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" },
   { key: "target_memory_mb", label: "Target", format: "mb" },
   { key: "total_memory_mb", label: "Total", format: "mb" },
   { key: "granted_memory_mb", label: "Granted", format: "mbfit" },
@@ -167,7 +169,8 @@ export function pressureEventBuckets(events, win) {
   }
   const points = [...hours]
     .sort((a, b) => a - b)
-    .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
+    /* #7552: a bar is centred on its stamp, so an hour is stamped at its middle: the 5 PM bar sits over 5:30, not on the 5:00 line ahead of the tab's other charts. */
+    .map((h) => ({ time: new Date(h + HOUR_MS / 2).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
   return { points, drawn };
 }
 

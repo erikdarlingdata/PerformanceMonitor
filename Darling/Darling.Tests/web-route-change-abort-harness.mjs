@@ -338,7 +338,9 @@ const scenarios = {
     rangeBody = { to_date: "2026-10-03", days: [{ summary_date: "2026-10-01", top_wait_type: "WAIT_OLD" }, { summary_date: "2026-10-03", top_wait_type: "WAIT_TODAY" }] };
     await boot("#/server/alpha/overview");
     await advance(2);
-    const has = (t) => !!byId.main.find((x) => x.textContent === t);
+    /* #7552: the Top wait value breaks after an underscore, so it is a few text nodes with <wbr> between them: read a node as the text of its whole subtree, the way a browser's textContent does. */
+    const full = (n) => (n.children.length ? n.children.map((c) => (c && c.children ? full(c) : "")).join("") : n.textContent || "");
+    const has = (t) => !!byId.main.find((x) => full(x) === t);
     const read = (re) => fetchLog.filter((r) => re.test(r.url));
     return {
       rangeReads: read(/get_daily_summary_range/).length,

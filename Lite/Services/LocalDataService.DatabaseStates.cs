@@ -425,7 +425,7 @@ WHERE (e.expected_state IS NULL
    OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
         AND l.eff IS DISTINCT FROM e.expected_state
         AND p.eff IS DISTINCT FROM e.expected_state)
-ORDER BY l.database_name";
+ORDER BY lower(l.database_name), l.database_name";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         var items = new List<DatabaseStateInfo>();
@@ -483,7 +483,7 @@ FROM latest l
 LEFT JOIN config_database_state_expected e
   ON  e.server_id = $1
   AND e.database_name = l.database_name
-ORDER BY l.database_name";
+ORDER BY lower(l.database_name), l.database_name";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 
         var items = new List<DatabaseStateExpectedRow>();

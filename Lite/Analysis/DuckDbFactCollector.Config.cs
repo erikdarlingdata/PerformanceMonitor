@@ -150,6 +150,7 @@ LIMIT 1";
     /// </summary>
     private async Task CollectDatabaseConfigFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        await AddQueryStoreErrorFactAsync(context, facts);
         try
         {
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
@@ -236,6 +237,65 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
             /* Degrades to "no facts" so one unavailable input cannot cost this server its other
                facts — but WHY it degraded is reported, not assumed (#2826): a cancelled query is
                not "no data". An abandonment is NOT swallowed here (#2443). */
+            ReportCollectionFailure(ex, context);
+        }
+    }
+
+    /// <summary>
+    /// #7675: ONE <c>QUERY_STORE_ERROR</c> fact when the newest <c>query_store_health</c> capture holds a database whose actual state is
+    /// <c>ERROR</c>: the store stopped on an internal error, so its newest rows are old and nothing else in the analysis says so. The
+    /// capture is read whatever the window, as the <c>DB_CONFIG</c> fact's is. <c>read_write_count</c> counts the databases that WANT to
+    /// record (desired state READ_WRITE), which the scorer ranks above a store that was turned OFF and then errored; the database names ride
+    /// <see cref="Fact.ObjectName"/>. The same shape, key and metadata in Lite and Darling.
+    /// </summary>
+    private async Task AddQueryStoreErrorFactAsync(AnalysisContext context, List<Fact> facts)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(context.CancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT database_name, desired_state
+FROM v_query_store_health
+WHERE server_id = $1
+AND   capture_time = (SELECT MAX(capture_time) FROM v_query_store_health WHERE server_id = $1)
+AND   upper(trim(actual_state)) = 'ERROR'
+/*SEC*/
+ORDER BY database_name";
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "QUERY_STORE_ERROR", "database_name", 2);
+
+            var names = new List<string>();
+            long wantsRecording = 0;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                names.Add(reader.GetString(0));
+                if (!reader.IsDBNull(1) && string.Equals(reader.GetString(1).Trim(), "READ_WRITE", StringComparison.OrdinalIgnoreCase))
+                    wantsRecording++;
+            }
+
+            if (names.Count == 0) return;
+
+            facts.Add(new Fact
+            {
+                Source = "database_config",
+                Key = "QUERY_STORE_ERROR",
+                Value = names.Count,
+                ServerId = context.ServerId,
+                ObjectName = string.Join(", ", names),
+                Metadata = new Dictionary<string, double>
+                {
+                    ["error_count"] = names.Count,
+                    ["read_write_count"] = wantsRecording
+                }
+            });
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
+        {
             ReportCollectionFailure(ex, context);
         }
     }
