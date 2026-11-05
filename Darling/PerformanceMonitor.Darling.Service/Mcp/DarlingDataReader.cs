@@ -379,8 +379,10 @@ internal static class DarlingDataReader
     /// CPU BUCKETED (#3960): <see cref="CpuUtilizationSql"/>'s de-skewed samples, byte for byte, averaged per bucket of
     /// <c>$4</c> minutes on the samples' own UTC instant — the tool used to bucket every sample to the minute in C#,
     /// after reading a week of them (40,000 rows on an Azure SQL DB source) — with the busiest sample's SQL and total
-    /// CPU beside the averages and the sample count. A NULL reading counts as 0, as the per-sample reader always read
-    /// it. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
+    /// CPU beside the averages and the sample count. A NULL SQL reading counts as 0, as the per-sample reader always read
+    /// it. A NULL other-process reading (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU) is NOT 0: the other, total, idle and
+    /// peak-total figures average or take the maximum over the rows that have one, so a bucket with none returns NULL for all four and a bucket
+    /// that mixes both keeps what it can measure. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
     /// collection_time, and a collection can carry samples from before it, which the per-minute points always showed
     /// at their own minute. $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.
     /// </summary>
@@ -388,11 +390,12 @@ internal static class DarlingDataReader
         SELECT
             date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
             AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
-            AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
-            AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
-            AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+            AVG(other_process_cpu_utilization) AS other_process_cpu,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization) AS total_cpu,
+            AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL
+                     THEN GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization)) END) AS idle_cpu,
             MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
-            MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization) AS peak_total_cpu,
             COUNT(*) AS samples
         FROM (
         {CpuUtilizationSql}
@@ -418,11 +421,11 @@ internal static class DarlingDataReader
             items.Add(new CpuBucketPoint(
                 reader.GetDateTime(0),
                 Convert.ToDouble(reader.GetValue(1)),
-                Convert.ToDouble(reader.GetValue(2)),
-                Convert.ToDouble(reader.GetValue(3)),
-                Convert.ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
                 Convert.ToInt32(reader.GetValue(5)),
-                Convert.ToInt32(reader.GetValue(6)),
+                reader.IsDBNull(6) ? null : Convert.ToInt32(reader.GetValue(6)),
                 reader.GetInt64(7)));
         }
 

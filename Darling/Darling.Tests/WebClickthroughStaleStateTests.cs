@@ -272,7 +272,8 @@ public sealed class WebClickthroughStaleStateTests
         Assert.Equal("", card.ThreadsDetail);
 
         var live = new ServerSummaryItem { IsOnline = true, CpuPercent = 0, MemoryMb = 908, TotalThreads = 100, CurrentWorkers = 23 };
-        Assert.Equal("0%", live.CpuDisplay);
+        /* #7682: no other-process figure, so there is no host total and the display says it is the SQL Server's own. */
+        Assert.Equal("SQL CPU 0%", live.CpuDisplay);
         Assert.Equal("0.9 GB", live.MemoryDisplay);
         Assert.Equal("OK", live.ThreadsDisplay);
     }
