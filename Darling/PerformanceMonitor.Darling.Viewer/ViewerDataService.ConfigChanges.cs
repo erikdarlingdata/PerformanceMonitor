@@ -155,49 +155,14 @@ public sealed partial class ViewerDataService
            The grid lists settings only (Change Watch and the analysis engine drop it the same way). */
         var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, startUtc, endUtc);
         /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. */
-        var dated = ConfigChangeDiff.ApplyDatabaseStateTimes(diffed, await ReadDatabaseStateReadingsAsync(serverId, diffed, cancellationToken));
+        var dated = ConfigChangeDiff.ApplyDatabaseStateTimes(
+            diffed,
+            await DatabaseStateReadings.ReadAsync(_dataSource, serverId, diffed, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken),
+            startUtc, endUtc);
         return dated
             .Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName))
             .Select(c => new DatabaseConfigChangeRow(c))
             .ToList();
-    }
-
-    /// <summary>#7662: the database_states readings (collected every minute) of the databases whose <c>state_desc</c> changed, between the
-    /// snapshot before the earliest such change and the latest. $1 server_id, $2 database names, $3 and $4 naive UTC.</summary>
-    public const string DatabaseStateReadingsSql = """
-        SELECT collection_time, database_name, state_desc
-        FROM database_states
-        WHERE server_id = $1
-        AND   database_name = ANY($2)
-        AND   collection_time > $3
-        AND   collection_time <= $4
-        AND   state_desc IS NOT NULL
-        ORDER BY collection_time
-        """;
-
-    private async Task<List<ConfigChangeDiff.DatabaseStateObservation>> ReadDatabaseStateReadingsAsync(
-        int serverId, IReadOnlyList<ConfigChangeDiff.DatabaseConfigChange> changes, CancellationToken cancellationToken)
-    {
-        var rows = new List<ConfigChangeDiff.DatabaseStateObservation>();
-        var stateChanges = changes.Where(c => c.SettingName == "state_desc").ToList();
-        if (stateChanges.Count == 0)
-        {
-            return rows;
-        }
-
-        await using var command = _dataSource.CreateCommand(DatabaseStateReadingsSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = stateChanges.Select(c => c.DatabaseName).Distinct(StringComparer.Ordinal).ToArray() });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(stateChanges.Min(c => c.PreviousCaptureTime ?? c.ChangeTime.AddDays(-1)), DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(stateChanges.Max(c => c.ChangeTime), DateTimeKind.Unspecified) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new ConfigChangeDiff.DatabaseStateObservation(reader.GetDateTime(0), reader.GetString(1), reader.GetString(2)));
-        }
-
-        return rows;
     }
 
     /// <summary>Trace-flag changes in the window [startUtc, endUtc]. Reads every snapshot up to endUtc then

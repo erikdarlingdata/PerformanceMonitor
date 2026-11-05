@@ -156,10 +156,14 @@ public sealed class DarlingMcpConfigHistoryTools
             var windowEndNaive = NaiveUtc(windowEnd);
             var windowStart = windowEndNaive.AddHours(-hours_back);
             var snapshots = await DarlingConfigHistoryReader.GetDatabaseConfigSnapshotsAsync(postgres, resolved.ServerId, databases, cancellationToken);
-            var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, UpperEdge(as_of, windowEndNaive));
-            /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. */
+            var windowEndEdge = UpperEdge(as_of, windowEndNaive);
+            var diffed = ConfigChangeDiff.DiffDatabaseConfigChanges(snapshots, windowStart, windowEndEdge);
+            /* #7662: a state_desc change takes the minute database_states first saw the new state, not the next config snapshot. A row
+               dated back out of the window is not a change of the window, so it is dropped from the list and the counts. */
             var allChanges = ConfigChangeDiff.ApplyDatabaseStateTimes(
-                diffed, await DarlingConfigHistoryReader.GetDatabaseStateReadingsAsync(postgres, resolved.ServerId, diffed, cancellationToken));
+                diffed,
+                await DatabaseStateReadings.ReadAsync(postgres, resolved.ServerId, diffed, McpCommandDeadlines.ReadSeconds, cancellationToken),
+                windowStart, windowEndEdge);
             /* #7416 item 2: log_reuse_wait_desc is the engine's live reason the log cannot truncate, not a setting. It is reported apart in
                status_changes so the history is kept without calling it a configuration change. */
             var changes = allChanges.Where(c => ConfigChangeAttribution.IsAttributableDatabaseSetting(c.SettingName)).ToList();

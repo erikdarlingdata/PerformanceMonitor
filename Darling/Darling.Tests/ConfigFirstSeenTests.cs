@@ -61,7 +61,7 @@ public sealed class ConfigFirstSeenTests
             new(seen.AddMinutes(1), "Sales", "ONLINE"),
         };
 
-        var result = ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings);
+        var result = ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings, Before.AddDays(-1), After.AddDays(1));
 
         var state = result.Single(c => c.SettingName == "state_desc");
         Assert.Equal(seen, state.ChangeTime);
@@ -77,10 +77,31 @@ public sealed class ConfigFirstSeenTests
         var changes = new List<ConfigChangeDiff.DatabaseConfigChange> { new(After, "Sales", "state_desc", "OFFLINE", "ONLINE", Before) };
         var readings = new List<ConfigChangeDiff.DatabaseStateObservation> { new(Before.AddMinutes(5), "Sales", "OFFLINE") };
 
-        var state = Assert.Single(ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings));
+        var state = Assert.Single(ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings, Before.AddDays(-1), After.AddDays(1)));
 
         Assert.Equal(After, state.ChangeTime);
         Assert.Equal(Before, state.PreviousCaptureTime);
+    }
+
+    [Fact]
+    public void ADatabaseStateChange_ReDatedBeforeTheWindow_IsNotAChangeOfTheWindow()
+    {
+        /* The prior snapshot is at -40 h, the state moved at -30 h, the next snapshot is at -2 h: a 24 h window holds the snapshot but
+           not the minute the state was seen, so the row is not a change of the window. */
+        var now = After;
+        var changes = new List<ConfigChangeDiff.DatabaseConfigChange>
+        {
+            new(now.AddHours(-2), "Sales", "state_desc", "OFFLINE", "ONLINE", now.AddHours(-40)),
+            new(now.AddHours(-2), "Sales", "recovery_model", "FULL", "SIMPLE", now.AddHours(-40)),
+        };
+        var readings = new List<ConfigChangeDiff.DatabaseStateObservation> { new(now.AddHours(-30), "Sales", "ONLINE") };
+
+        var inWindow = ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings, now.AddHours(-24), now);
+        Assert.Equal("recovery_model", Assert.Single(inWindow).SettingName);
+
+        /* The same reading inside a 48 h window dates the row to the minute it was seen. */
+        var wider = ConfigChangeDiff.ApplyDatabaseStateTimes(changes, readings, now.AddHours(-48), now);
+        Assert.Equal(now.AddHours(-30), wider.Single(c => c.SettingName == "state_desc").ChangeTime);
     }
 
     [Fact]
@@ -140,5 +161,20 @@ public sealed class ConfigFirstSeenTests
         Assert.StartsWith("latest snapshot, captured ", subtitle, StringComparison.Ordinal);
         Assert.EndsWith("(3h ago)", subtitle, StringComparison.Ordinal);
         Assert.Equal(JsonValueKind.Null, result.GetProperty("otherSubtitle").ValueKind);
+    }
+
+    [Fact]
+    public void ThePanelHeading_GetsTheSnapshotAge_OnlyForALatestSnapshotPanelWhoseAnswerHasCapturedAt()
+    {
+        var result = RunNode();
+
+        /* applyDataSubtitle writes the heading itself: a "latest snapshot" panel with captured_at in its answer gets the age. */
+        var written = result.GetProperty("appliedSnapshot").GetString()!;
+        Assert.StartsWith(" latest snapshot, captured ", written, StringComparison.Ordinal);
+        Assert.EndsWith("(3h ago)", written, StringComparison.Ordinal);
+        /* An answer with no captured_at, another subtitle, and a descriptor that names its own subtitle all keep what they had. */
+        Assert.Equal(" latest snapshot", result.GetProperty("appliedNoCapturedAt").GetString());
+        Assert.Equal(" hourly collection", result.GetProperty("appliedOtherSubtitle").GetString());
+        Assert.Equal(" from the answer", result.GetProperty("appliedSubtitleFrom").GetString());
     }
 }

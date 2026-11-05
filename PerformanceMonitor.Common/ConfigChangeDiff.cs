@@ -237,10 +237,13 @@ public static class ConfigChangeDiff
     /// the state moved (the config snapshots run on connect and once a day). database_states is collected every minute, so the
     /// first reading of the new state after the previous snapshot is the time the state was seen. A <c>state_desc</c> row with
     /// such a reading takes that time and loses its span (the minute is already exact); every other row, and a state row with no
-    /// reading to match, stays as it was. Newest first, as the diff returns them.
+    /// reading to match, stays as it was. The diff kept a row for its snapshot's time, so a re-dated row is judged again on its
+    /// final time: one that now falls before <paramref name="startUtc"/> is dropped, since the state moved before the window.
+    /// Newest first, as the diff returns them.
     /// </summary>
     public static List<DatabaseConfigChange> ApplyDatabaseStateTimes(
-        IReadOnlyList<DatabaseConfigChange> changes, IReadOnlyList<DatabaseStateObservation> observations)
+        IReadOnlyList<DatabaseConfigChange> changes, IReadOnlyList<DatabaseStateObservation> observations,
+        DateTime startUtc, DateTime endUtc)
     {
         if (observations.Count == 0)
         {
@@ -272,6 +275,7 @@ public static class ConfigChangeDiff
         }
 
         return result
+            .Where(c => c.ChangeTime >= startUtc && c.ChangeTime <= endUtc)
             .OrderByDescending(c => c.ChangeTime)
             .ThenBy(c => c.DatabaseName, StringComparer.Ordinal)
             .ThenBy(c => c.SettingName, StringComparer.Ordinal)
