@@ -295,7 +295,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
     {
         var util = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "util.js");
         Assert.Contains("export async function readWithinKeptHistory(fetchWith, params) {", util, StringComparison.Ordinal);
-        Assert.Contains("export function readToolWithinKeptHistory(tool, params, signal) {", util, StringComparison.Ordinal);
+        Assert.Contains("export function readToolWithinKeptHistory(tool, params, signal, options) {", util, StringComparison.Ordinal);
         Assert.Contains("export function keptWindowStrip(res) {", util, StringComparison.Ordinal);
 
         var panels = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "panels.js");
@@ -304,7 +304,7 @@ public sealed class WebRangeKeptHistoryBehaviourTests
 
         var serverTabs = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.DoesNotMatch(new Regex(@"readTool\(\s*[A-Za-z_""]+\s*,\s*\{[^}]*\bhours\b"), serverTabs);
-        Assert.Contains("const res = await readToolWithinKeptHistory(read, params, signal);", serverTabs, StringComparison.Ordinal);
+        Assert.Contains("const res = await readToolWithinKeptHistory(read, params, signal, plotPx > 0 ? { plotPx } : undefined);", serverTabs, StringComparison.Ordinal);
 
         /* The view editor's three sample reads (Save, Auto-detect fields, the field lists) send the panel's own params,
            hours included, so none of them may call readTool directly. */

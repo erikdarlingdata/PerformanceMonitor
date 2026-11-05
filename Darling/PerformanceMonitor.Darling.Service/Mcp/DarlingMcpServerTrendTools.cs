@@ -139,7 +139,7 @@ public sealed class DarlingMcpServerTrendTools
                 ["hours_back"] = hours_back,
                 ["bucket"] = TrendBuckets.Word(bucketMinutes),
                 ["bucket_minutes"] = bucketMinutes,
-                ["aggregate_note"] = Note(name, bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
+                ["aggregate_note"] = Note(name, bucketMinutes, bucket_minutes is not null, budget.AutoFor(seriesCount)),
             };
 
             if (kind is not null)

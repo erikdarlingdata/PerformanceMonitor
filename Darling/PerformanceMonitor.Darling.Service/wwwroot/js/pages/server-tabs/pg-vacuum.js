@@ -117,7 +117,7 @@ export const PG_XMIN_COLUMNS = [
    next to a long duration and is precisely the misreading that gets a harmless backend killed. The WPF grid
    renders the same sentinel as the same words for the same reason. */
 export const PG_SESSION_STATE_COLUMNS = [
-  { key: "pid", label: "PID", format: "int" },
+  { key: "pid", label: "PID", format: "id" },
   /* The collector's synthetic (backend_start, pid) identity. Shown because a pid alone is not one - pids are
      reused, and this is the id that matches the same backend on the blocking grid. */
   { key: "backend_id", label: "Backend", mono: true },

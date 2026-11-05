@@ -16,7 +16,7 @@ namespace PerformanceMonitor.Common;
 /// it (<see cref="AutoPoints"/>), and the most it will serve when the caller names a width (<see cref="MaxPoints"/>).
 /// Points are counted across every series, because a payload's size is what the budget protects.
 /// </summary>
-internal readonly record struct TrendBudget(int AutoPoints, int MaxPoints)
+internal readonly record struct TrendBudget(int AutoPoints, int MaxPoints, bool PerSeries = false)
 {
     /// <summary>An MCP answer: sized for a model's context, capped at the read's own ceiling.</summary>
     public static TrendBudget Mcp(int maxPoints) => new(TrendBuckets.McpPointBudget, maxPoints);
@@ -30,6 +30,24 @@ internal readonly record struct TrendBudget(int AutoPoints, int MaxPoints)
     /// read, and a chart at the MCP budget would plot a day of file I/O as a couple of dozen hourly dots. Still a
     /// bound, so a week-long chart no longer ships every collection.</summary>
     public static readonly TrendBudget Chart = new(TrendBuckets.ChartPointBudget, TrendBuckets.ChartPointBudget);
+
+    /// <summary>
+    /// The web chart sized to its plot (#7661): the page asks for about one point per 2 px of the plot, so a narrow
+    /// window gets fewer points and a wide one more, instead of every chart getting <see cref="TrendBuckets.ChartPointBudget"/>
+    /// whatever its width and drawing a solid wall. <paramref name="points"/> is one series' share, clamped between
+    /// <see cref="TrendBuckets.ChartFloorPoints"/> and the chart budget, so a bad or absent ask never draws finer than
+    /// <see cref="Chart"/> does today. The explicit-width cap stays the chart budget. Null is <see cref="Chart"/> itself.
+    /// </summary>
+    public static TrendBudget ChartFor(int? points) =>
+        points is int asked
+            ? new TrendBudget(
+                Math.Clamp(asked, TrendBuckets.ChartFloorPoints, TrendBuckets.ChartPointBudget), TrendBuckets.ChartPointBudget, PerSeries: true)
+            : Chart;
+
+    /// <summary>The total points the ladder aims for across <paramref name="seriesCount"/> series: the budget as it
+    /// is, or for a plot-sized ask the per-series count times the series, never past the cap.</summary>
+    public int AutoFor(int seriesCount) =>
+        PerSeries ? Math.Min(MaxPoints, AutoPoints * Math.Max(1, seriesCount)) : AutoPoints;
 }
 
 /// <summary>
@@ -70,6 +88,10 @@ internal static class TrendBuckets
 
     /// <summary>The web charts' budget (<see cref="TrendBudget.Chart"/>): a day stays per-minute on one series.</summary>
     public const int ChartPointBudget = 1500;
+
+    /// <summary>The fewest points per series a plot-sized web ask (<see cref="TrendBudget.ChartFor"/>) may be cut to,
+    /// so a very narrow panel still draws a line (#7661).</summary>
+    public const int ChartFloorPoints = 60;
 
     /* Each read's cap on an explicitly requested width, sized so the largest answer the read can give stays under
        256 KB (the bytes per point differ fourfold across the reads). The light single-series reads can serve a
@@ -196,7 +218,7 @@ internal static class TrendBuckets
 
         if (requested is not int width)
         {
-            bucketMinutes = AutoMinutes(windowMinutes, seriesCount, budget.AutoPoints);
+            bucketMinutes = AutoMinutes(windowMinutes, seriesCount, budget.AutoFor(seriesCount));
             return null;
         }
 

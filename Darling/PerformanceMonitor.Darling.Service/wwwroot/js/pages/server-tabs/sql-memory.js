@@ -167,7 +167,8 @@ export function pressureEventBuckets(events, win) {
   }
   const points = [...hours]
     .sort((a, b) => a - b)
-    .map((h) => ({ time: new Date(h).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
+    /* #7552: a bar is centred on its stamp, so an hour is stamped at its middle: the 5 PM bar sits over 5:30, not on the 5:00 line ahead of the tab's other charts. */
+    .map((h) => ({ time: new Date(h + HOUR_MS / 2).toISOString().slice(0, 19), ...(counts.get(h) || { sql_medium: 0, sql_severe: 0, os_medium: 0, os_severe: 0 }) }));
   return { points, drawn };
 }
 
