@@ -80,9 +80,19 @@ export function scopedConfigPanel(server) {
   return panel;
 }
 
+export function isQsErrorState(state) {
+  return typeof state === "string" && state.trim().toUpperCase() === "ERROR";
+}
+export function qsActualStateText(r) {
+  const state = r.actual_state == null ? "" : String(r.actual_state);
+  return isQsErrorState(state) ? "! " + state : state;
+}
+
 export const QS_HEALTH_COLUMNS = [
   { key: "database_name", label: "Database", name: true },
-  { key: "actual_state", label: "Actual" },
+  /* #7675: a store in ERROR has stopped on an internal error, so its row is marked here. The one-line meaning rides in the Read-only reason cell
+     (the service words it in readonly_reason_decoded). The mark is a "! " in the text and the high band's colour, so it shows without the colour too. */
+  { key: "actual_state", label: "Actual", display: (r) => qsActualStateText(r), cellClass: (r) => (isQsErrorState(r.actual_state) ? "sev-High" : null) },
   { key: "desired_state", label: "Desired" },
   { key: "state_matches_desired", label: "Match", format: "bool" },
   { key: "readonly_reason_decoded", label: "Read-only reason", wrap: true },

@@ -658,7 +658,7 @@ export const SERVER_TABS = [
             "truncation_note",
             /* #5094: when whole days came from the daily summary the answer says so (`approximate`), and its note is
                drawn above the grid as text, so the totals are not read as exact. Null (no line) on an exact answer. */
-            ["approximation_note"],
+            ["approximation_note", "query_store_error_note"],
             null,
             picker,
             null,

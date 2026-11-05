@@ -1811,6 +1811,13 @@ public sealed class DarlingMcpDataTools
                 storePayload["tag_filter"] = storeTagName;
             }
 
+            /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
+            if (await DarlingRuntimePrecondition.QueryStoreErrorNoteAsync(postgres, resolved.ServerId, databases,
+                    rows.Select(r => r.DatabaseName).Where(n => n is not null).Select(n => n!), cancellationToken) is { } storeErrorNote)
+            {
+                storePayload[DarlingRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
+            }
+
             /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured
                177 KB with nothing to say rows had been left out. The rows are heaviest first, so the cut drops the lightest.
                `truncated` is this page cut ONLY: the window floor keeps its own flag, window_truncated, and its own note.

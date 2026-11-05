@@ -224,7 +224,7 @@ public sealed class McpConfigTools
                 /* The condition this collector exists to surface, pre-folded so a client cannot miss it. */
                 state_matches_desired = string.Equals(r.ActualState, r.DesiredState, StringComparison.OrdinalIgnoreCase),
                 readonly_reason = r.ReadonlyReason,
-                readonly_reason_decoded = r.ReadonlyReason == 0 ? null : QueryStoreReadonlyReason.Decode(r.ReadonlyReason),
+                readonly_reason_decoded = QueryStoreReadonlyReason.DecodeWithState(r.ActualState, r.ReadonlyReason) is { Length: > 0 } decoded ? decoded : null,
                 current_storage_size_mb = r.CurrentStorageMb,
                 max_storage_size_mb = r.MaxStorageMb,
                 pct_of_cap = r.MaxStorageMb > 0 ? Math.Round(100.0 * r.CurrentStorageMb / r.MaxStorageMb, 1) : (double?)null,

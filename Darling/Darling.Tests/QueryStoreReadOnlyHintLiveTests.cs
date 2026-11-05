@@ -71,4 +71,61 @@ public sealed class QueryStoreReadOnlyHintLiveTests
         Assert.Contains("is not READ_WRITE on RoDb (READ_ONLY)", wholeServer.GetProperty("message").GetString()!, StringComparison.Ordinal);
         Assert.Contains("get_query_store_health", wholeServer.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #7675: a read that RETURNS rows from a store in the ERROR state says so. Before, only an empty or unavailable answer carried a
+    /// hint, so old rows read like live ones. A healthy sibling database's rows carry no note, and
+    /// <see cref="DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync"/> adds the same note to an answer with rows.
+    /// </summary>
+    [Fact]
+    public async Task AQueryStoreTopWithRows_FromAnErrorStore_CarriesTheNote_AndAHealthyDatabaseDoesNot()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), BaseSkip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        const string serverName = "qs-error-note-7675";
+        var serverId = ServerIdHelper.GetDeterministicHashCode(serverName);
+        await DarlingMcpTestData.RegisterServerAsync(connection, serverId, serverName, ct);
+        var now = DarlingMcpTestData.Naive(DateTime.UtcNow);
+        var queryId = 1L;
+        foreach (var (database, state, desired) in new[] { ("ErrDb", "ERROR", "OFF"), ("RwDb", "READ_WRITE", "READ_WRITE") })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_health (config_id, capture_time, server_id, server_name, database_name, actual_state, desired_state, readonly_reason, current_storage_size_mb, max_storage_size_mb, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, query_capture_mode)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,0,688,1000,'AUTO',21,200,60,'AUTO')",
+                CollectionIdGenerator.Next(), now.AddMinutes(-30), serverId, serverName, database, state, desired);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular','0xAB','0xCD','SELECT 1',100,5000,4000,800,0,40,250,1,4,$2)",
+                CollectionIdGenerator.Next(), now.AddMinutes(-20), serverId, serverName, database, queryId, queryId + 100);
+            queryId++;
+        }
+
+        var errored = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(dataSource, serverName, 24, 20, "ErrDb", cancellationToken: ct)).RootElement;
+        Assert.Equal(1, errored.GetProperty("queries").GetArrayLength());
+        var note = errored.GetProperty(DarlingRuntimePrecondition.QueryStoreErrorNoteKey).GetString()!;
+        Assert.Contains("ERROR state", note, StringComparison.Ordinal);
+        Assert.Contains("ErrDb", note, StringComparison.Ordinal);
+
+        var healthy = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(dataSource, serverName, 24, 20, "RwDb", cancellationToken: ct)).RootElement;
+        Assert.Equal(1, healthy.GetProperty("queries").GetArrayLength());
+        Assert.False(healthy.TryGetProperty(DarlingRuntimePrecondition.QueryStoreErrorNoteKey, out _));
+
+        /* Both databases in one read: the note names only the database whose rows came back from an ERROR store. */
+        var both = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(dataSource, serverName, 24, 20, cancellationToken: ct)).RootElement;
+        var bothNote = both.GetProperty(DarlingRuntimePrecondition.QueryStoreErrorNoteKey).GetString()!;
+        Assert.Contains("ErrDb", bothNote, StringComparison.Ordinal);
+        Assert.DoesNotContain("RwDb", bothNote, StringComparison.Ordinal);
+
+        /* The extended wrapper: an answer with rows gets the member, an empty answer keeps its message hint. */
+        var wrapped = await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
+            "{\"queries\":[{\"database_name\":\"ErrDb\"}]}", dataSource, serverId, serverName, DatabaseFilter.All, ct, rowDatabases: ["ErrDb"]);
+        Assert.Contains("ERROR state", JsonDocument.Parse(wrapped).RootElement.GetProperty(DarlingRuntimePrecondition.QueryStoreErrorNoteKey).GetString()!, StringComparison.Ordinal);
+    }
 }
