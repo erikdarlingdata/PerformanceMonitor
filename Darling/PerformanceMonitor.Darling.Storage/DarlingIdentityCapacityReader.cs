@@ -191,7 +191,7 @@ FROM (
     AND   v.database_name IS NOT NULL
     AND   v.database_name <> ALL($4){databases.Clause("v.database_name", 3)}
     AND   (cardinality(scope.names) = 0 OR lower(v.database_name) = ANY(scope.names))) AS d
-ORDER BY d.database_name";
+ORDER BY lower(d.database_name), d.database_name";
 
     /// <summary>
     /// The newest scan's columns of every database with a marker in the window, and nothing else (#6875): the read behind the self-alert
@@ -332,7 +332,7 @@ ORDER BY d.database_name";
             columns.OrderByDescending(c => c.PercentUsed ?? -1)
                 .ThenBy(c => c.DatabaseName, StringComparer.Ordinal).ThenBy(c => c.SchemaName, StringComparer.Ordinal)
                 .ThenBy(c => c.TableName, StringComparer.Ordinal).ThenBy(c => c.ColumnName, StringComparer.Ordinal).ToList(),
-            scanned.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
+            scanned.OrderBy(d => d.Key.ToLowerInvariant(), StringComparer.Ordinal).ThenBy(d => d.Key, StringComparer.Ordinal).Select(d => new IdentityScannedDatabase(d.Key, d.Value)).ToList(),
             notYetScanned,
             skipped);
 }

@@ -241,7 +241,7 @@ public static class DarlingPgServerConfigReader
                  CASE WHEN {{DiffersFromDefaultSql}} THEN 0
                       WHEN coalesce(c.source, 'default') <> 'default' THEN 1
                       ELSE 2 END,
-                 c.name
+                 lower(c.name), c.name
         LIMIT $3
         """;
 

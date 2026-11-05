@@ -54,7 +54,9 @@ export function perfmonPanel(server, ctx) {
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
-    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort();
+    /* #7550: no sort here. The reply is already in the store's name order (without case), and a plain .sort() put every
+       capitalized counter above every lower-case one, a second order for the same list. */
+    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))];
     if (!names.length) return mount(body, emptyStrip("The latest snapshot holds no perfmon counters."));
 
     /* The snapshot table lives HERE rather than in its own descriptor: this composite has already fetched the

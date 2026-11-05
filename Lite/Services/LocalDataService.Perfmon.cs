@@ -43,7 +43,7 @@ SELECT
 FROM {perfmonRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {perfmonRelation} WHERE server_id = $1)
-ORDER BY counter_name";
+ORDER BY lower(counter_name), counter_name, instance_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
 

@@ -1043,7 +1043,7 @@ internal static class DarlingDataReader
         FROM v_perfmon_stats
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_perfmon_stats WHERE server_id = $1)
-        ORDER BY counter_name
+        ORDER BY lower(counter_name), counter_name, instance_name
         """;
 
     public static async Task<LatestSnapshot<PerfmonRow>> GetLatestPerfmonStatsAsync(
