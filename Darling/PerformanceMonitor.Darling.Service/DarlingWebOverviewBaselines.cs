@@ -26,12 +26,29 @@ namespace PerformanceMonitor.Darling.Service;
 /// #6291: the web Overview's baseline read, <c>get_overview_baselines</c>. Web only, with no MCP tool behind it (see
 /// <see cref="DarlingWebEndpoints.WebOnlyReadNames"/>; agents already get baselines through analyze_server): the strips
 /// draw the Viewer's band and anomaly markers from it. It asks the SAME provider the Viewer's Overview lanes ask
-/// (<see cref="PgBaselineProvider.GetBaselineAsync(int, string, DateTime, CancellationToken)"/>, as
-/// <c>ViewerDataService.GetBaselineForLaneAsync</c> does) for the same four metrics at the window START, and adds no
-/// statistics of its own: the page turns each bucket into mean +- 2 effective sigma, as the Viewer's lanes do.
+/// (<see cref="PgBaselineProvider.GetBaselineStepsSharedAsync"/>, over the same four metrics: CPU, waits, the
+/// <see cref="MetricNames.IoLatencyChart"/> arm the Viewer's I/O lane reads, and blocking) and adds no statistics of its own.
+/// #7644: the answer is a stepped series, one step per local hour from the window start to now, so a window that crosses
+/// hours of the week draws each hour's own band; the page turns each step into mean +- 2 effective sigma, as the Viewer's
+/// lanes do. Because the read costs one step per hour of the window, <c>window_start</c> is bounded:
+/// <see cref="ValidateWindowStart"/> refuses one in the future (beyond <see cref="FutureSkew"/>) or older than
+/// <see cref="MaxWindowHours"/> plus <see cref="WindowSlack"/> before now, never clamping it.
 /// </summary>
 internal static class DarlingWebOverviewBaselines
 {
+    /// <summary>
+    /// The longest window the Overview page can ask for, in hours: the raw-table trends' reach (<see cref="WebReadReach.RawTrendHours"/>,
+    /// 30 days), the largest <c>max_hours</c> any of the reads <c>overview-strips.js</c> sends <c>ctx.hours</c> to accepts
+    /// (get_cpu_utilization, get_blocking_trend, get_deadlock_trend, get_memory_trend and get_file_io_trend; get_server_trend stops at 168).
+    /// </summary>
+    internal const int MaxWindowHours = WebReadReach.RawTrendHours;
+
+    /// <summary>Room past <see cref="MaxWindowHours"/> for a custom range picked a moment ago: one day.</summary>
+    internal static readonly TimeSpan WindowSlack = TimeSpan.FromDays(1);
+
+    /// <summary>A browser clock a few minutes ahead of the service's still sends a window start that is "now" to the page: this much is not refused as future.</summary>
+    internal static readonly TimeSpan FutureSkew = TimeSpan.FromMinutes(5);
+
     /// <summary>The four lane metrics, in the order the Viewer's Overview fetches them, with the name the page keys them by.</summary>
     private static readonly (string Key, string Metric)[] Lanes =
     [
@@ -54,6 +71,11 @@ internal static class DarlingWebOverviewBaselines
         /* The window start exactly as the page sends it: ISO 8601, UTC. The baseline buckets key on hour-of-day and day-of-week of the store's UTC stamps. */
         if (!DarlingMcpPlanTools.TryParseCollectionTime(windowStart, out var startUtc))
             return McpHelpers.Refusal("window_start", "Expected the window start as an ISO 8601 UTC time.");
+
+        /* #7644: the read costs one step per local hour from the window start to now, so an unbounded start (0001-01-01 is about 70 million steps)
+           is refused before anything is read or allocated, and a future one is refused instead of answering "not enough history". */
+        var windowError = ValidateWindowStart(startUtc, DateTime.UtcNow);
+        if (windowError != null) return windowError;
 
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverName, cancellationToken);
         if (error != null) return error;
@@ -89,6 +111,21 @@ internal static class DarlingWebOverviewBaselines
         {
             return McpHelpers.FormatError("get_overview_baselines", ex);
         }
+    }
+
+    /// <summary>
+    /// #7644: null when <paramref name="windowStartUtc"/> is a window the page can ask for at <paramref name="nowUtc"/>, else the
+    /// <see cref="McpHelpers.Refusal"/> envelope. Refused, never clamped: a shorter window than the one asked would draw a band
+    /// for a different span than the strips beside it.
+    /// </summary>
+    internal static string? ValidateWindowStart(DateTime windowStartUtc, DateTime nowUtc)
+    {
+        if (windowStartUtc > nowUtc + FutureSkew)
+            return McpHelpers.Refusal("window_start", "window_start is in the future. Use the start of the window the strips show, which is never later than now.");
+        if (windowStartUtc < nowUtc - TimeSpan.FromHours(MaxWindowHours) - WindowSlack)
+            return McpHelpers.Refusal("window_start",
+                $"window_start is more than {MaxWindowHours} hours (plus {WindowSlack.TotalHours:0} hours of slack) before now, the longest window the Overview can show. Use a later start.");
+        return null;
     }
 
     /// <summary>
