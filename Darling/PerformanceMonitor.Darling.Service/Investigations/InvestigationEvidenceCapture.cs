@@ -250,6 +250,7 @@ WITH snaps AS (
     WHERE server_id = $1
       AND collection_time >= $2
       AND collection_time <= $3
+      AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ), marked AS (
     SELECT s.*,
            CASE WHEN LAG(s.collection_time) OVER w IS NULL THEN 1

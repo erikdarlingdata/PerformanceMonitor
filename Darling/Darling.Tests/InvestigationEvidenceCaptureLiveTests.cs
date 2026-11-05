@@ -432,6 +432,28 @@ public sealed class InvestigationEvidenceCaptureLiveTests
     }
 
     [Fact]
+    public async Task ActiveRequests_LeaveTheMonitorsOwnSessionsOut_SoTheyNeverRankAsTheHeaviestCaller()
+    {
+        /* #7573: the monitor's sessions are stored again, and they are heavier here than the application's. The old read had no program
+           predicate, so the monitor's host ranked first and counted its CPU. */
+        await RunAsync(async (setup, ct) =>
+        {
+            var requestId = (await setup.Requests.OpenOrJoinAsync(HighCpu(), ct)).RequestId!.Value;
+            var t0 = AlertAt.AddMinutes(-6);
+            await PlantSnapshotAsync(setup.Connection, ct, t0, 61, 100, 1_000, "HOSTA", "Orders.Api");
+            await PlantSnapshotAsync(setup.Connection, ct, t0, 62, 9_000, 1_000, "MONHOST", "PerformanceMonitorDarling");
+            await PlantSnapshotAsync(setup.Connection, ct, t0, 63, 8_000, 1_000, "MONHOST2", "PerformanceMonitorLite");
+            await PlantRunAsync(setup.Connection, ct, "query_snapshots", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var section = Assert.Single(await setup.Requests.ReadEvidenceAsync(requestId, ct), r => r.Section == "active_requests");
+            var row = Assert.Single(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!;
+            Assert.Equal("HOSTA", row["host_name"]!.GetValue<string>());
+            Assert.Equal(100, row["total_cpu_ms"]!.GetValue<long>());
+        });
+    }
+
+    [Fact]
     public async Task ActiveRequests_CountOneRequestOnce_WhateverHowManySnapshotsSawIt_AndRankByThatFigure()
     {
         await RunAsync(async (setup, ct) =>
