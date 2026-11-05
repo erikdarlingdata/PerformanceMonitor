@@ -65,7 +65,7 @@ INSERT INTO database_size_stats
      total_size_mb, is_percent_growth, growth_pct, volume_mount_point, volume_total_mb, volume_free_mb)
 VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, $8, $9, $10)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = at });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(at) });
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(database);
         command.Parameters.AddWithValue(fileId);
@@ -129,8 +129,8 @@ VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, 
             /* The Daily Health Report volume read. */
             await using (var report = new NpgsqlCommand(DailyHealthReportBuilder.PeriodVolumesSql, connection))
             {
-                report.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = now.AddHours(-1) });
-                report.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = now });
+                report.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(now.AddHours(-1)) });
+                report.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(now) });
                 await using var reader = await report.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.Equal(LinuxServer, reader.GetInt32(0));
@@ -147,7 +147,7 @@ VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, 
             await using (var growth = new NpgsqlCommand(DarlingAlertReadAdapter.DatabaseFileGrowthSql, connection))
             {
                 growth.Parameters.AddWithValue(LinuxServer);
-                growth.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = now.AddHours(-1) });
+                growth.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(now.AddHours(-1)) });
                 await using var reader = await growth.ExecuteReaderAsync(ct);
                 var names = new List<string?>();
                 while (await reader.ReadAsync(ct)) names.Add(reader.IsDBNull(7) ? null : reader.GetString(7));
