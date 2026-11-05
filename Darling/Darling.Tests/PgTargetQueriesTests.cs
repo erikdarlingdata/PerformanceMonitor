@@ -840,13 +840,7 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("SUM(SUM(p.total_exec_ms)) OVER ()", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(p.total_exec_ms) > 0", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
-        /* The three-state interval (V128): stored → NULLIF, NULL → LAG, and no fabricated zero. */
-        Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY queryid ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
-        /* The rate is calls over the KNOWN span only. */
-        Assert.Contains("FILTER (WHERE p.interval_seconds IS NOT NULL)", sql, StringComparison.Ordinal);
+        /* The rate's denominator is the collector's runs (#7566); PgTargetBadActorCallsPerSecondLiveTests runs it. */
         /* Units: the ≥ 13 column name is the collector's; no pre-13 branch exists to write. */
         Assert.DoesNotContain("total_time", sql.Replace("total_exec_time", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
 
