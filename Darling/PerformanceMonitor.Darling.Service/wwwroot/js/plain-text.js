@@ -528,7 +528,7 @@ export function shortEmptyLine(res, extensionLine) {
     const top = h.suppressed_by_reason[0];
     return top && top.reason === "ColumnWidthsNotVisible"
       ? "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT
-      : "No index has a bloat estimate. The Index Bloat (estimated) table above gives the reason for each one.";
+      : "No index has a bloat estimate. The Not Measured column of the Index Bloat (estimated) table above says why.";
   }
   if (typeof h.reason !== "string") return null;
   if (h.reason === "pg_stats_unreadable") {

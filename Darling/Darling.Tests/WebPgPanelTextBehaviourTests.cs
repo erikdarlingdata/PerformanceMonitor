@@ -130,6 +130,9 @@ public sealed class WebPgPanelTextBehaviourTests
         var p = Run().GetProperty("bloatOther");
         var line = p.GetProperty("line").GetString()!;
         Assert.Contains("Index Bloat (estimated)", line, StringComparison.Ordinal);
+        // The table above lists at most 25 indexes, so the line names the column that holds each reason and does not promise a reason for every index.
+        Assert.Contains("Not Measured", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("each one", line, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT", line, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT ONE", line, StringComparison.Ordinal);
         Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
@@ -145,5 +148,25 @@ public sealed class WebPgPanelTextBehaviourTests
         Assert.Equal("It reads the facet (the setting of the Activity tab). It stays.", said[2]);
         // A hex colour is not an issue reference.
         Assert.Equal("A real color #416FA6 and a count of 3 stay.", said[3]);
+    }
+
+    [Fact]
+    public void TheStoredWithheldMarker_ReadsAsPlainWordsInAStatementCell_AndNoOtherTextIsTouched()
+    {
+        var w = Run().GetProperty("withheld");
+        Assert.Equal("Statement text withheld by the statement filter.", w.GetProperty("marker").GetString());
+        Assert.Equal("Statement text withheld by the statement filter.", w.GetProperty("padded").GetString());
+        // A statement that merely holds the marker, and a SQL comment that holds issue references, show exactly as stored.
+        Assert.Equal("SELECT 1 /* see -- statement text withheld (#4348) */", w.GetProperty("containing").GetString());
+        Assert.Equal("SELECT 1 -- fixed in (#123), then (#4046, #6866)", w.GetProperty("comment").GetString());
+    }
+
+    [Fact]
+    public void AWithheldPlan_ReadsAsPlainWords_AndARealPlanIsStillAPlan()
+    {
+        var w = Run().GetProperty("withheld");
+        Assert.Equal("none", w.GetProperty("plan").GetProperty("kind").GetString());
+        Assert.Equal("This plan was withheld by the statement filter.", w.GetProperty("plan").GetProperty("message").GetString());
+        Assert.Equal("plan", w.GetProperty("realPlan").GetProperty("kind").GetString());
     }
 }

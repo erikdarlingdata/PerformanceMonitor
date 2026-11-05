@@ -147,7 +147,26 @@ try {
   const storage = await draw("storage", { get_pg_index_bloat: bloatReply("ColumnWidthsNotVisible") });
   const storageOther = await draw("storage", { get_pg_index_bloat: bloatReply("Partial") });
 
+  /* #7548: the stored withheld marker reads as words in a statement cell and a plan, and only the exact marker does. */
+  const shared = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs", "shared.js")).href);
+  const planViewer = await import(pathToFileURL(path.join(scratch, "pages", "plan-viewer.js")).href);
+  const MARKER = "-- statement text withheld (#4348)";
+  const cellText = (v) => {
+    const n = shared.codeDisclosure(v);
+    const pre = n.tag === "#text" ? null : find(n, (x) => x.tag === "pre");
+    return n.tag === "#text" ? n.text : pre ? pre.textContent : n.textContent;
+  };
+  const withheld = {
+    marker: cellText(MARKER),
+    padded: cellText("  " + MARKER + "\n"),
+    containing: cellText("SELECT 1 /* see " + MARKER + " */"),
+    comment: cellText("SELECT 1 -- fixed in (#123), then (#4046, #6866)"),
+    plan: planViewer.classifyPlanRead({ kind: "data", data: { plan_xml: MARKER, truncated: false } }),
+    realPlan: planViewer.classifyPlanRead({ kind: "data", data: { plan_xml: "<ShowPlanXML/>", truncated: false } }),
+  };
+
   console.log(JSON.stringify({
+    withheld,
     deadlocks: strip(panelTitled(activity, "Deadlocks")),
     graphs: strip(panelTitled(activity, "Deadlock Graphs")),
     columns: strip(panelTitled(activity, "Column Statistics")),
