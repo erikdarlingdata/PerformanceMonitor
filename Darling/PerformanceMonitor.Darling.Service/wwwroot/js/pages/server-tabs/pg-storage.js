@@ -37,7 +37,7 @@ export const PG_INDEX_USAGE_STATS = [
   { key: "mb_held_by_those_indexes", label: "Held by those indexes", format: "mbfit" },
   { key: "invalid_index_count", label: "Invalid indexes", format: "int" },
   { key: "statistics_were_reset_in_window", label: "Stats reset in window", format: "bool" },
-  { key: "truncated", pageCut: (d) => pageCutLine("indexes", d.indexes_returned, d.indexes_in_window, "The tiles above count only the indexes listed."), label: "Truncated", format: "bool" },
+  { key: "truncated", pageCut: (d) => pageCutLine("indexes", d.indexes_returned, d.indexes_in_window, "The tiles above count every index in the window."), label: "Truncated", format: "bool" },
 ];
 
 export const PG_INDEX_BLOAT_COLUMNS = [

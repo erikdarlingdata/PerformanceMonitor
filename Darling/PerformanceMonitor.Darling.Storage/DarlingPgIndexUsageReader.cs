@@ -48,42 +48,23 @@ public static class DarlingPgIndexUsageReader
         DateTime? StatsReset,
         DateTime FirstSeenAt,
         int SampleCount,
-        bool StatsWereResetInWindow);
+        bool StatsWereResetInWindow,
+        bool IsUnscannedCandidate = false);
 
     /// <summary>
-    /// Latest state per index, joined to that index's EARLIEST reading in the window.
-    ///
-    /// <para><b>Two different "unused" claims come out of this, and they are not the same claim.</b>
-    /// <c>total_scans</c> is the server's own lifetime counter since its statistics were reset — the only
-    /// number <c>pg_stat_user_indexes</c> can give anyone. <c>scans_in_window</c> is the difference across
-    /// the stored samples, which is the more useful of the two and exists only because the store keeps
-    /// history the server does not: an index with nine million lifetime scans and zero in ninety days is
-    /// dead weight today, and no query against the live catalog can see that.</para>
-    ///
-    /// <para><c>scans_in_window</c> is <c>GREATEST(last - first, 0)</c>. The clamp is not decoration: a
-    /// statistics reset inside the window makes the counter go backwards and an unclamped difference would
-    /// report a NEGATIVE scan count, which would sort to the very top of a list whose whole purpose is to
-    /// rank least-used first. The clamp alone would then hide the reset, so <c>stats_were_reset_in_window</c>
-    /// travels beside it, taken from the server's own <c>stats_reset</c> timestamp moving between the two
-    /// samples rather than inferred from the counters — a reset followed by enough scans to climb back past
-    /// the old value leaves every difference positive and is invisible to the arithmetic. The timestamp is
-    /// NULL before and after a crash restart, which discards the counters without recording a reset (#7456),
-    /// so the flag is also set when the index's own counter fell between two consecutive samples.</para>
-    ///
-    /// <para><b><c>first_seen_at</c> and <c>sample_count</c> are what make the answer honest rather than
-    /// confident.</b> An index created twenty minutes ago has zero scans for the same reason a genuinely
-    /// dead one does, and PostgreSQL records no creation time anywhere — so the only available evidence is
-    /// how long WE have been watching, which is exactly what these two columns are. The tool refuses to call
-    /// anything unused on the strength of a window it has only one sample of.</para>
-    ///
-    /// <para>Ordered by the bytes of an index nothing scanned in the window, largest first, because the
-    /// finding is the space and write cost being paid for nothing — and an index nobody has scanned is
-    /// interesting in proportion to its size, not its name. Indexes that WERE scanned sort below all of
-    /// them regardless of size.</para>
-    ///
-    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
+    /// Below this many samples the read has not watched the index long enough to say anything about disuse. Two is the floor: the
+    /// minimum at which <c>scans_in_window</c> is a difference rather than a single reading.
     /// </summary>
-    public const string PgIndexUsageSql = """
+    public const int MinimumSamplesForADisuseClaim = 2;
+
+    /// <summary>The same number as <see cref="MinimumSamplesForADisuseClaim"/>, for splicing into SQL (an interpolated constant cannot take an int).</summary>
+    public const string MinimumSamplesForADisuseClaimSql = "2";
+
+    /// <summary>
+    /// The three per-index sets both the page and the whole-window tally read (#7575): the latest sample, the earliest sample and the
+    /// sample count with its counter-fell flag, over the same server and window. $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string WindowCtesSql = """
         WITH latest AS (
             SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
                 database_name, schema_name, table_name, index_name, collection_time,
@@ -131,6 +112,94 @@ public static class DarlingPgIndexUsageReader
             ) AS ordered
             GROUP BY database_name, schema_name, table_name, index_name
         )
+        """;
+
+    /// <summary>
+    /// The join of the three sets, one row per index. Aliases <c>l</c>, <c>e</c>, <c>s</c>. The IS NOT DISTINCT FROM lines say what
+    /// matches (a NULL name matches a NULL name); the COALESCE equalities beside them change no row but give the planner a key it can
+    /// HASH (#7575). IS NOT DISTINCT FROM alone cannot be hashed or merged, so the planner ran a nested loop that re-ran the samples
+    /// aggregate once per index: 150 seconds for 3,000 indexes, past the read's deadline.
+    /// </summary>
+    public const string WindowJoinSql = """
+        FROM latest AS l
+        JOIN earliest AS e
+          ON  e.database_name IS NOT DISTINCT FROM l.database_name
+          AND e.schema_name   IS NOT DISTINCT FROM l.schema_name
+          AND e.table_name    IS NOT DISTINCT FROM l.table_name
+          AND e.index_name    IS NOT DISTINCT FROM l.index_name
+          AND COALESCE(e.database_name, '') = COALESCE(l.database_name, '')
+          AND COALESCE(e.schema_name, '') = COALESCE(l.schema_name, '')
+          AND COALESCE(e.table_name, '') = COALESCE(l.table_name, '')
+          AND COALESCE(e.index_name, '') = COALESCE(l.index_name, '')
+        JOIN samples AS s
+          ON  s.database_name IS NOT DISTINCT FROM l.database_name
+          AND s.schema_name   IS NOT DISTINCT FROM l.schema_name
+          AND s.table_name    IS NOT DISTINCT FROM l.table_name
+          AND s.index_name    IS NOT DISTINCT FROM l.index_name
+          AND COALESCE(s.database_name, '') = COALESCE(l.database_name, '')
+          AND COALESCE(s.schema_name, '') = COALESCE(l.schema_name, '')
+          AND COALESCE(s.table_name, '') = COALESCE(l.table_name, '')
+          AND COALESCE(s.index_name, '') = COALESCE(l.index_name, '')
+        """;
+
+    /// <summary>
+    /// A reset inside the window, over the <c>l</c>, <c>e</c>, <c>s</c> aliases. IS DISTINCT FROM, not &lt;&gt;, because stats_reset is NULL
+    /// until a database's statistics are reset for the first time: the first reset a database ever has moves the column NULL -> timestamp,
+    /// and &lt;&gt; would evaluate to NULL and miss precisely the case the counters also cannot see. The flag is also set when the index's
+    /// own counter fell between two samples (#7456).
+    /// </summary>
+    public const string StatsResetConditionSql = "(l.stats_reset IS DISTINCT FROM e.first_stats_reset OR s.counter_fell)";
+
+    /// <summary>
+    /// The unscanned rule as SQL, the one copy the page's classing and the whole-window tiles both splice in (#7575; the pattern of
+    /// <see cref="DarlingPgTableBloatReader.UnpublishableConditionSql"/>): no scans in the window, no reset, valid, nothing structural
+    /// holding it, and enough samples to claim disuse. A NULL maps the way the row reader maps it: valid when NULL, a blocker when
+    /// <c>supports_constraint</c> is NULL, not a blocker for the other flags.
+    /// </summary>
+    public const string UnscannedConditionSql =
+        "(GREATEST(l.index_scans - e.first_scans, 0) = 0 AND NOT " + StatsResetConditionSql
+        + " AND COALESCE(l.is_valid, TRUE) AND NOT COALESCE(l.is_primary_key, FALSE) AND NOT COALESCE(l.supports_constraint, TRUE)"
+        + " AND NOT COALESCE(l.is_unique, FALSE) AND NOT COALESCE(l.is_replica_identity, FALSE)"
+        + " AND s.sample_count >= " + MinimumSamplesForADisuseClaimSql + ")";
+
+    /// <summary>The invalid rule as SQL: an index whose <c>is_valid</c> is false. A NULL reads as valid, as the row reader does.</summary>
+    public const string InvalidConditionSql = "NOT COALESCE(l.is_valid, TRUE)";
+
+    /// <summary>
+    /// Latest state per index, joined to that index's EARLIEST reading in the window.
+    ///
+    /// <para><b>Two different "unused" claims come out of this, and they are not the same claim.</b>
+    /// <c>total_scans</c> is the server's own lifetime counter since its statistics were reset — the only
+    /// number <c>pg_stat_user_indexes</c> can give anyone. <c>scans_in_window</c> is the difference across
+    /// the stored samples, which is the more useful of the two and exists only because the store keeps
+    /// history the server does not: an index with nine million lifetime scans and zero in ninety days is
+    /// dead weight today, and no query against the live catalog can see that.</para>
+    ///
+    /// <para><c>scans_in_window</c> is <c>GREATEST(last - first, 0)</c>. The clamp is not decoration: a
+    /// statistics reset inside the window makes the counter go backwards and an unclamped difference would
+    /// report a NEGATIVE scan count, which would sort to the very top of a list whose whole purpose is to
+    /// rank least-used first. The clamp alone would then hide the reset, so <c>stats_were_reset_in_window</c>
+    /// travels beside it, taken from the server's own <c>stats_reset</c> timestamp moving between the two
+    /// samples rather than inferred from the counters — a reset followed by enough scans to climb back past
+    /// the old value leaves every difference positive and is invisible to the arithmetic. The timestamp is
+    /// NULL before and after a crash restart, which discards the counters without recording a reset (#7456),
+    /// so the flag is also set when the index's own counter fell between two consecutive samples.</para>
+    ///
+    /// <para><b><c>first_seen_at</c> and <c>sample_count</c> are what make the answer honest rather than
+    /// confident.</b> An index created twenty minutes ago has zero scans for the same reason a genuinely
+    /// dead one does, and PostgreSQL records no creation time anywhere — so the only available evidence is
+    /// how long WE have been watching, which is exactly what these two columns are. The tool refuses to call
+    /// anything unused on the strength of a window it has only one sample of.</para>
+    ///
+    /// <para>Ordered by the bytes of an index nothing scanned in the window, largest first, because the
+    /// finding is the space and write cost being paid for nothing — and an index nobody has scanned is
+    /// interesting in proportion to its size, not its name. Indexes that WERE scanned sort below all of
+    /// them regardless of size.</para>
+    ///
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
+    /// </summary>
+    public const string PgIndexUsageSql = $"""
+        {WindowCtesSql}
         SELECT
             l.database_name,
             l.schema_name,
@@ -162,22 +231,10 @@ public static class DarlingPgIndexUsageReader
             l.stats_reset,
             e.first_seen_at,
             s.sample_count,
-            /* IS DISTINCT FROM, not <>, because stats_reset is NULL until a database's statistics are
-               reset for the first time — so the first reset a database ever has moves the column
-               NULL -> timestamp, and <> would evaluate to NULL and miss precisely the case the counters
-               also cannot see. */
-            (l.stats_reset IS DISTINCT FROM e.first_stats_reset OR s.counter_fell) AS stats_were_reset_in_window
-        FROM latest AS l
-        JOIN earliest AS e
-          ON  e.database_name IS NOT DISTINCT FROM l.database_name
-          AND e.schema_name   IS NOT DISTINCT FROM l.schema_name
-          AND e.table_name    IS NOT DISTINCT FROM l.table_name
-          AND e.index_name    IS NOT DISTINCT FROM l.index_name
-        JOIN samples AS s
-          ON  s.database_name IS NOT DISTINCT FROM l.database_name
-          AND s.schema_name   IS NOT DISTINCT FROM l.schema_name
-          AND s.table_name    IS NOT DISTINCT FROM l.table_name
-          AND s.index_name    IS NOT DISTINCT FROM l.index_name
+            {StatsResetConditionSql} AS stats_were_reset_in_window,
+            /* The page's own class of the row, from the one shared rule (#7575): the tiles tally the same condition over every index. */
+            {UnscannedConditionSql} AS is_unscanned_candidate
+        {WindowJoinSql}
         /* Biggest unscanned index first. An INVALID index sorts above everything: it is the one case where
            "unused" and "safe to drop" genuinely coincide (the planner will not use it, writes still
            maintain it), so it should never be pushed under the LIMIT by a larger index that is merely
@@ -243,7 +300,8 @@ public static class DarlingPgIndexUsageReader
                 reader.IsDBNull(25) ? null : reader.GetDateTime(25),
                 reader.GetDateTime(26),
                 reader.IsDBNull(27) ? 0 : (int)reader.GetInt64(27),
-                !reader.IsDBNull(28) && reader.GetBoolean(28)));
+                !reader.IsDBNull(28) && reader.GetBoolean(28),
+                !reader.IsDBNull(29) && reader.GetBoolean(29)));
         }
 
         return rows;
@@ -288,6 +346,45 @@ public static class DarlingPgIndexUsageReader
         }
 
         return new PgIndexUsageProbe(0, 0, 0);
+    }
+
+    /// <summary>
+    /// The whole window's tiles for the page (#7575), over every index the window held and not the listed page: the unscanned count and
+    /// the bytes those indexes hold, the invalid count, and whether any index saw a reset. It splices in the same
+    /// <see cref="UnscannedConditionSql"/> and <see cref="InvalidConditionSql"/> the page selects, over the same latest, earliest and
+    /// samples sets, so the two cannot disagree. An unmeasured size (NULL) adds nothing, as the page's -1 did.
+    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// </summary>
+    public const string PgIndexUsageTotalsSql = $"""
+        {WindowCtesSql}
+        SELECT
+            count(*) AS index_count,
+            count(*) FILTER (WHERE {UnscannedConditionSql}) AS unscanned_count,
+            COALESCE(sum(GREATEST(COALESCE(l.index_bytes, 0), 0)) FILTER (WHERE {UnscannedConditionSql}), 0)::bigint AS unscanned_bytes,
+            count(*) FILTER (WHERE {InvalidConditionSql}) AS invalid_count,
+            COALESCE(bool_or({StatsResetConditionSql}), FALSE) AS reset_seen
+        {WindowJoinSql}
+        """;
+
+    /// <summary>The whole window's tiles behind <see cref="PgIndexUsageTotalsSql"/>.</summary>
+    public sealed record PgIndexUsageTotals(long IndexCount, long UnscannedCount, long UnscannedBytes, long InvalidCount, bool StatsWereResetInWindow);
+
+    public static async Task<PgIndexUsageTotals> GetPgIndexUsageTotalsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(PgIndexUsageTotalsSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return new PgIndexUsageTotals(reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3), reader.GetBoolean(4));
+        }
+
+        return new PgIndexUsageTotals(0, 0, 0, 0, false);
     }
 
     /// <summary>
