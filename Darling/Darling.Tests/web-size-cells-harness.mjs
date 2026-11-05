@@ -38,6 +38,9 @@ const storage = await imp("pages/server-tabs/pg-storage.js");
 const io = await imp("pages/server-tabs/pg-io.js");
 const waits = await imp("pages/server-tabs/pg-waits.js");
 const mem = await imp("pages/server-tabs/sql-memory.js");
+const { READ_FIELDS } = await imp("read-fields.js");
+const dbSizes = await imp("pages/finops/database-sizes.js");
+const versionStore = await imp("pages/finops/version-store.js");
 
 const all = (n, out = []) => { out.push(n); for (const c of n.children) all(c, out); return out; };
 const norm = (t) => t.replace(/[▲▼▾ ]/g, "");
@@ -82,4 +85,25 @@ out.deviceWrite = cells(waits.PG_KERNEL_COLUMNS, [{ device_read_bytes: 209715, d
 /* The SQL Server grid columns that now use the fitting format: small values keep their MB, and the cell lines up with the numbers beside it. */
 out.granted = cells(mem.GRANT_COLUMNS, [{ granted_memory_mb: 0.5 }, { granted_memory_mb: 0 }, { granted_memory_mb: 2.5 }, { granted_memory_mb: null }], "Granted");
 out.clerk = cells(mem.CLERK_COLUMNS, [{ clerk_type: "MEMORYCLERK_SQLBUFFERPOOL", memory_mb: 0.75 }], "Memory");
+
+/* Round 2 (#7564): the columns outside the server tabs that read a two-decimal or one-decimal MB field. */
+const rf = (tool) => READ_FIELDS[tool].table.columns;
+out.r2 = {
+  semaphoreGranted: cells(rf("get_resource_semaphore"), [{ granted_memory_mb: 0.5 }, { granted_memory_mb: 2.5 }], "Granted MB"),
+  semaphoreAvailable: cells(rf("get_resource_semaphore"), [{ available_memory_mb: 0.25 }], "Available MB"),
+  grantsUsed: cells(rf("get_memory_grants"), [{ used_memory_mb: 0.5 }], "Used MB"),
+  tempdbVersionStore: cells(rf("get_tempdb_trend"), [{ version_store_mb: 0.25 }], "Version store"),
+  tempdbUser: cells(rf("get_tempdb_trend"), [{ user_objects_mb: 0.5 }], "User objects"),
+  dbTotal: cells(rf("get_database_sizes"), [{ total_size_mb: 0.5 }], "Total"),
+  dbUsed: cells(rf("get_database_sizes"), [{ used_size_mb: 2.5 }], "Used"),
+  fileSize: cells(rf("get_file_io_stats"), [{ size_mb: 0.5 }], "Size"),
+  pvsSize: cells(rf("get_pvs_stats"), [{ pvs_size_mb: 0.25 }], "PVS size"),
+  pvsData: cells(rf("get_pvs_stats"), [{ database_data_size_mb: 8.5 }], "Data size"),
+  growth: cells(rf("get_default_trace_events"), [{ growth_mb: 0.5 }], "Growth"),
+  finopsTotal: cells(dbSizes.COLUMNS, [{ total_size_mb: 0.5 }], "Total"),
+  finopsUsed: cells(dbSizes.COLUMNS, [{ used_size_mb: 0.25 }], "Used"),
+  finopsFree: cells(dbSizes.COLUMNS, [{ free_space_mb: 0.25 }], "Free MB"),
+  finopsVolumeFree: cells(dbSizes.COLUMNS, [{ volume_free_mb: 0.5 }], "Volume free"),
+  versionStoreData: cells(versionStore.COLUMNS, [{ database_data_size_mb: 4.5 }], "Database data size"),
+};
 console.log(JSON.stringify(out));

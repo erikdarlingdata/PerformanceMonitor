@@ -121,4 +121,28 @@ public sealed class WebSizeCellsBehaviourTests
         Assert.Equal(new[] { "0.75 MB" }, Texts(r, "clerk"));
         Assert.All(r.GetProperty("granted").GetProperty("aligned").EnumerateArray(), a => Assert.True(a.GetBoolean(), "a fitted MB cell lost its numeric alignment"));
     }
+
+    [Fact]
+    public void SizeColumnsOutsideTheServerTabs_KeepTheMegabytesTheirReplyCarries()
+    {
+        var r = Run().GetProperty("r2");
+        string[] One(string name) => r.GetProperty(name).GetProperty("texts").EnumerateArray().Select(e => e.GetString()!).ToArray();
+        // Whole-number MB used to round 0.5 up to "1 MB" and print 0.25 as "0 MB".
+        Assert.Equal(new[] { "0.5 MB", "2.5 MB" }, One("semaphoreGranted"));
+        Assert.Equal(new[] { "0.25 MB" }, One("semaphoreAvailable"));
+        Assert.Equal(new[] { "0.5 MB" }, One("grantsUsed"));
+        Assert.Equal(new[] { "0.25 MB" }, One("tempdbVersionStore"));
+        Assert.Equal(new[] { "0.5 MB" }, One("tempdbUser"));
+        Assert.Equal(new[] { "0.5 MB" }, One("dbTotal"));
+        Assert.Equal(new[] { "2.5 MB" }, One("dbUsed"));
+        Assert.Equal(new[] { "0.5 MB" }, One("fileSize"));
+        Assert.Equal(new[] { "0.25 MB" }, One("pvsSize"));
+        Assert.Equal(new[] { "8.5 MB" }, One("pvsData"));
+        Assert.Equal(new[] { "0.5 MB" }, One("growth"));
+        Assert.Equal(new[] { "0.5 MB" }, One("finopsTotal"));
+        Assert.Equal(new[] { "0.25 MB" }, One("finopsUsed"));
+        Assert.Equal(new[] { "0.25 MB" }, One("finopsFree"));
+        Assert.Equal(new[] { "0.5 MB" }, One("finopsVolumeFree"));
+        Assert.Equal(new[] { "4.5 MB" }, One("versionStoreData"));
+    }
 }
