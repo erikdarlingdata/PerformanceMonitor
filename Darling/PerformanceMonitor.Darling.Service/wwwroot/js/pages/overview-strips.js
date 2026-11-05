@@ -493,14 +493,21 @@ export function fillOverviewStrips(body, server, ctx) {
   (async () => {
     const asked = windowFromHours(ctx.hours);
     const baselineStart = new Date(asked ? asked.windowStart : Date.now() - ctx.hours * 3600000).toISOString();
-    const [results, baselineRes] = await Promise.all([
-      Promise.all(READS.map(([, tool, extra]) =>
-        readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })))),
-      /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. */
-      readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) })),
-    ]);
+    /* The Viewer's four baselines at the window start, from the one web-only read; a failure costs the bands, never the lines. #7644: it can
+       take many seconds on a busy server (the I/O baseline reads a month of per-file rows), so the strips are drawn when their own reads
+       return and the band and markers are added when this one does. */
+    let baselineRes = null;
+    let onBaseline = null;
+    readTool("get_overview_baselines", { server, window_start: baselineStart }, ctx && ctx.signal)
+      .catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))
+      .then((res) => {
+        baselineRes = res;
+        if (onBaseline) onBaseline();
+      });
+    const results = await Promise.all(READS.map(([, tool, extra]) =>
+      readToolWithinKeptHistory(tool, { server, hours: ctx.hours, ...extra }, ctx && ctx.signal).catch((e) => ({ kind: "error", message: String((e && e.message) || e) }))));
     /* #6793: the batch was cancelled (a redraw, or the user left the page). Nothing is drawn into a body nobody is looking at. */
-    if (baselineRes.kind === "aborted" || results.some((r) => r.kind === "aborted")) return;
+    if (results.some((r) => r.kind === "aborted")) return;
     const reads = {};
     READS.forEach(([key], i) => { reads[key] = results[i]; });
     const strips = buildStrips(reads);
@@ -512,7 +519,9 @@ export function fillOverviewStrips(body, server, ctx) {
     const kept = results.map((r) => r.keptHours).filter(Boolean);
     const window = windowFromHours(kept.length ? Math.min(...kept) : ctx.hours);
     const dbFilter = getActiveDatabaseFilter();
-    applyBaselines(strips, baselineRes, window, { databaseFiltered: !!(dbFilter && dbFilter.server === server) });
+    const applyOpts = { databaseFiltered: !!(dbFilter && dbFilter.server === server) };
+    /* The baseline may already be back (a cached one is); an aborted one adds nothing. */
+    if (baselineRes && baselineRes.kind !== "aborted") applyBaselines(strips, baselineRes, window, applyOpts);
     const id = "overview-strips|" + server;
     const scope = chartZoomScope(ctx.hours);
     const host = el("div", { class: "chart overview-strips-host" });
@@ -538,6 +547,15 @@ export function fillOverviewStrips(body, server, ctx) {
     };
     draw();
     mount(body, [keptWindowStrip(results.find((r) => r.keptHours || r.presetHours) || null), host]);
+    /* The baseline arrives after the strips: add the band and markers and draw again, with the held zoom. A read that failed adds its note and no band. */
+    if (!baselineRes) {
+      onBaseline = () => {
+        onBaseline = null;
+        if (baselineRes.kind === "aborted" || host.isConnected === false) return;
+        applyBaselines(strips, baselineRes, window, applyOpts);
+        draw();
+      };
+    }
     /* The first draw ran before the host was in the page, so it measured 0 and drew at the default width, which the browser then scaled
        down to the real one (#6360). A resize (a phone turned, a panel widened) redraws at the new width, as the line charts do, and so
        does the observer's first report, which is the host's laid-out width: it is compared with the width the strips were drawn at, not

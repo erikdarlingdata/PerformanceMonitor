@@ -227,6 +227,50 @@ if (scenario === "crosshair") {
   out.afterFill = sizes();
   observers.forEach((o) => o.cb([]));
   out.afterObserver = sizes();
+} else if (scenario === "latebaseline") {
+  /* #7644: the baseline read is slow (up to 23 s on a busy server). The six series reads answer at once; the strips must be drawn while the
+     baseline is still pending, and the band appears when it arrives. A second fill where the baseline read fails keeps the lines. */
+  const now = Date.now();
+  const sample = (m) => new Date(now - m * MIN).toISOString().slice(0, 19);
+  const bodies = {
+    get_cpu_utilization: { samples: Array.from({ length: 30 }, (_, i) => ({ sample_time: sample(i * 2), sql_server_cpu: 10 + i, other_process_cpu: 5 })) },
+    get_server_trend: { trend: Array.from({ length: 12 }, (_, i) => ({ time: sample(i * 5), wait_time_ms_per_second: 100 + i })) },
+    get_blocking_trend: { trend: [{ time: sample(20), count: 2 }] },
+    get_deadlock_trend: { trend: [] },
+    get_memory_trend: { trend: Array.from({ length: 6 }, (_, i) => ({ time: sample(i * 10), buffer_pool_mb: 2000 + i })) },
+    get_file_io_trend: { trend: Array.from({ length: 4 }, (_, i) => ({ time: sample(i * 15), database_name: "A", file_type: "ROWS", reads: 10, avg_read_latency_ms: 2 })) },
+  };
+  const baselineBody = { status: "ok", baselines: { cpu: { mean: 20, effective_std_dev: 5, sample_count: 40, tier: "Full" } } };
+  let releaseBaseline;
+  const baselineGate = new Promise((r) => { releaseBaseline = r; });
+  let failBaseline = false;
+  globalThis.fetch = async (url) => {
+    const tool = String(url).split("/api/read/")[1].split("?")[0];
+    if (tool === "get_overview_baselines") {
+      await baselineGate;
+      if (failBaseline) return { status: 500, ok: false, text: async () => "boom" };
+      return { status: 200, ok: true, text: async () => JSON.stringify(baselineBody) };
+    }
+    return { status: 200, ok: true, text: async () => JSON.stringify(bodies[tool] || {}) };
+  };
+  const body = document.createElement("div");
+  strips.fillOverviewStrips(body, "A", { hours: 1, label: "1h", signal: null });
+  await new Promise((r) => setTimeout(r, 50));
+  const stats = (root) => ({
+    lines: find(root, (n) => n.tag === "polyline").length,
+    bands: find(root, (n) => n.attrs.class === "strip-band").length,
+    notes: find(root, (n) => n.attrs.class === "strip-baseline-note").length,
+  });
+  out.whilePending = stats(body);
+  releaseBaseline();
+  await new Promise((r) => setTimeout(r, 50));
+  out.afterBaseline = stats(body);
+  /* The baseline read fails: the lines are drawn, with a note and no band. */
+  failBaseline = true;
+  const body2 = document.createElement("div");
+  strips.fillOverviewStrips(body2, "A", { hours: 1, label: "1h", signal: null });
+  await new Promise((r) => setTimeout(r, 50));
+  out.afterFailure = stats(body2);
 } else if (scenario === "waitsaxis") {
   /* the waits sample runs 100..220 ms/sec; the strip's lower axis label must be 0, not the series minimum */
   const drawn = strips.drawStrips(strips.buildStrips(reads), domain, 1000, null);

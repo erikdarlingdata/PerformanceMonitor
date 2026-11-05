@@ -289,6 +289,27 @@ public sealed class WebOverviewStripsBehaviourTests
     }
 
     /// <summary>
+    /// #7644: the baseline read took up to 23 s on a busy server and the strips waited for it. They draw when their own reads return, with
+    /// no band, and the band appears when the baseline read does. A baseline read that fails leaves the lines and says so in a note.
+    /// </summary>
+    [Fact]
+    public void TheStrips_DrawWhileTheBaselineIsPending_AndTheBandArrivesWhenItResolves()
+    {
+        var r = Run("latebaseline");
+
+        var pending = r.GetProperty("whilePending");
+        Assert.True(pending.GetProperty("lines").GetInt32() > 0, "no strip line was drawn while the baseline read was still pending");
+        Assert.Equal(0, pending.GetProperty("bands").GetInt32());
+        var after = r.GetProperty("afterBaseline");
+        Assert.True(after.GetProperty("lines").GetInt32() > 0);
+        Assert.True(after.GetProperty("bands").GetInt32() > 0, "the band did not appear once the baseline resolved");
+        var failed = r.GetProperty("afterFailure");
+        Assert.True(failed.GetProperty("lines").GetInt32() > 0);
+        Assert.Equal(0, failed.GetProperty("bands").GetInt32());
+        Assert.True(failed.GetProperty("notes").GetInt32() > 0);
+    }
+
+    /// <summary>
     /// The Waits strip's axis starts at 0 like the other strips. It used to start at the series minimum, so a window whose waits ran
     /// from 292 to 500 ms/sec was drawn on a 292-500 axis and a small swing looked like a spike. The harness waits run 100 to 220.
     /// </summary>

@@ -368,11 +368,22 @@ public class PgBaselineProvider
             return cached;
         }
 
+        var entry = await BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken);
+        Store(serverId, cacheKey, entry);
+
+        return entry;
+    }
+
+    /// <summary>The compute half of <see cref="GetOrComputeBaselinesAsync"/>, without the cache: one unkeyed series,
+    /// built and not yet stored.</summary>
+    private async Task<CachedBaseline> BuildEntryAsync(
+        int serverId, string metricName, DateTime analysisTime, DateTime roundedHour, CancellationToken cancellationToken)
+    {
         var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var buckets = BucketsOf(byMember, UnkeyedMember);
         var realTime = DateTime.UtcNow;
-        var entry = new CachedBaseline
+        return new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = realTime,
@@ -382,9 +393,78 @@ public class PgBaselineProvider
             UtcOffsetMinutes = utcOffsetMinutes,
             TimeZoneId = timeZoneId
         };
-        Store(serverId, cacheKey, entry);
+    }
 
-        return entry;
+    /// <summary>#7644: the longest a shared compute (<see cref="GetBaselineSharedAsync"/>) may run. It is the compute's
+    /// own limit, not a caller's: the busiest server's I/O arm took 16 to 23 s, and the statement's own command timeout
+    /// is <see cref="DarlingAnalysisService.AnalysisCommandTimeoutSeconds"/> seconds, so this only has to cover that
+    /// plus the connection and the clock read.</summary>
+    internal static readonly TimeSpan SharedComputeTimeout = TimeSpan.FromSeconds(DarlingAnalysisService.AnalysisCommandTimeoutSeconds + 30);
+
+    /// <summary>#7644: the computes this provider has started for <see cref="GetBaselineSharedAsync"/> and that have not
+    /// finished, one per (cache key, key time). A caller joins the running one instead of starting another.</summary>
+    private readonly ConcurrentDictionary<(string CacheKey, DateTime KeyTime), Lazy<Task<CachedBaseline?>>> _flights = new();
+
+    /// <summary>
+    /// #7644: the web Overview's read. The series is computed and cached at <paramref name="computeTime"/> (the web
+    /// passes "now", so a daily-cache arm lands on today's key, the same one the worker's pass uses and the shared tier
+    /// holds), and the bucket is picked at <paramref name="lookupTime"/> (the window start). The answer holds all 168
+    /// hour-of-week buckets, so any lookup instant is served by the one entry; a read at now minus 24 hours used to key
+    /// on yesterday and compute on the first load of each UTC day.
+    ///
+    /// <para>The compute does not belong to the caller. One compute runs at a time per key, on its own token with
+    /// <see cref="SharedComputeTimeout"/>; a caller that gives up (the browser aborted, the user switched server) stops
+    /// waiting and the compute finishes and stores its result for the next load. A compute that fails or times out
+    /// answers <see cref="BaselineBucket.Empty"/>, as <see cref="GetBaselineAsync(int, string, DateTime, CancellationToken)"/>
+    /// does for a failed one.</para>
+    /// </summary>
+    public async Task<BaselineBucket> GetBaselineSharedAsync(
+        int serverId, string metricName, DateTime lookupTime, DateTime computeTime, CancellationToken cancellationToken = default)
+    {
+        var cacheKey = CacheKeyFor(serverId, metricName, key: null);
+        var roundedKey = RoundedKeyTime(metricName, computeTime);
+        var entry = await GetOrComputeSharedAsync(
+            serverId, cacheKey, roundedKey,
+            ct => BuildEntryAsync(serverId, metricName, computeTime, roundedKey, ct),
+            SharedComputeTimeout, cancellationToken);
+        return entry is null ? BaselineBucket.Empty : LookUp(entry, lookupTime);
+    }
+
+    /// <summary>The single-flight body of <see cref="GetBaselineSharedAsync"/>, with the compute passed in. A fresh entry
+    /// is returned as it is; otherwise the caller joins the running compute for the key or starts it. The compute runs on
+    /// a token the caller cannot cancel, and stores its entry before it completes. Null when the compute timed out or
+    /// threw; the caller's own cancellation throws from the wait and leaves the compute running.</summary>
+    internal async Task<CachedBaseline?> GetOrComputeSharedAsync(
+        int serverId, string cacheKey, DateTime roundedKey,
+        Func<CancellationToken, Task<CachedBaseline>> compute, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (TryGetFresh(serverId, cacheKey, roundedKey, out var cached))
+        {
+            return cached;
+        }
+
+        var flightKey = (cacheKey, roundedKey);
+        var flight = _flights.GetOrAdd(flightKey, newKey => new Lazy<Task<CachedBaseline?>>(() => Task.Run(async () =>
+        {
+            try
+            {
+                using var own = new CancellationTokenSource(timeout);
+                var entry = await compute(own.Token);
+                Store(serverId, cacheKey, entry);
+                return (CachedBaseline?)entry;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("[PgBaselineProvider] Shared baseline compute for {CacheKey} did not finish: {Message}", cacheKey, ex.Message);
+                return null;
+            }
+            finally
+            {
+                _flights.TryRemove(flightKey, out _);
+            }
+        }, CancellationToken.None)));
+
+        return await flight.Value.WaitAsync(cancellationToken);
     }
 
     /// <summary>

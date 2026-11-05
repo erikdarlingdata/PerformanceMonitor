@@ -59,16 +59,13 @@ internal static class DarlingWebOverviewBaselines
         try
         {
             var provider = ProviderFor(postgres, analysis);
-            var tasks = new Task<BaselineBucket>[Lanes.Length];
-            for (var i = 0; i < Lanes.Length; i++)
-                tasks[i] = provider.GetBaselineAsync(resolved.ServerId, Lanes[i].Metric, startUtc, cancellationToken);
-            await Task.WhenAll(tasks);
+            var buckets = await ReadLaneBucketsAsync(provider, resolved.ServerId, startUtc, DateTime.UtcNow, cancellationToken);
 
             var baselines = new JsonObject();
             var any = false;
             for (var i = 0; i < Lanes.Length; i++)
             {
-                var bucket = tasks[i].Result;
+                var bucket = buckets[i];
                 var usable = Usable(bucket);
                 any |= usable;
                 baselines[Lanes[i].Key] = usable ? Bucket(bucket) : null;
@@ -91,6 +88,22 @@ internal static class DarlingWebOverviewBaselines
         {
             return McpHelpers.FormatError("get_overview_baselines", ex);
         }
+    }
+
+    /// <summary>
+    /// #7644: the four lanes' buckets at the window start, in <see cref="Lanes"/> order. The series is computed and cached
+    /// at <paramref name="nowUtc"/>, not at the window start: the answer holds all 168 hour-of-week buckets, and a
+    /// daily-cache arm (I/O latency, CPU, blocking) keys on the UTC day of the instant it is asked at, so a window
+    /// start of now minus 24 hours landed on yesterday's key, which the worker's pass never fills. Keyed on now it is the
+    /// key the worker uses and the shared tier holds.
+    /// </summary>
+    internal static async Task<BaselineBucket[]> ReadLaneBucketsAsync(
+        PgBaselineProvider provider, int serverId, DateTime windowStartUtc, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var tasks = new Task<BaselineBucket>[Lanes.Length];
+        for (var i = 0; i < Lanes.Length; i++)
+            tasks[i] = provider.GetBaselineSharedAsync(serverId, Lanes[i].Metric, windowStartUtc, nowUtc, cancellationToken);
+        return await Task.WhenAll(tasks);
     }
 
     /// <summary>The Viewer's own guard: a bucket with samples and a dispersion above zero draws a band; anything else draws none.</summary>
