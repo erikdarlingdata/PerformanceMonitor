@@ -13,24 +13,13 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// Source pins for the #5644 web UI audit labels W9, W14, W16 and W19: each label says what its value is. No JS runner
+/// Source pins for the #5644 web UI audit labels W14, W16 and W19: each label says what its value is. No JS runner
 /// is available to the C# tests, so these read the page sources, the way <c>MuteRulesPageTests</c> does.
 /// </summary>
 public sealed class WebAuditLaneDLabelTests
 {
     private static string Js(params string[] parts) =>
         ReadRepoFile([.. new[] { "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js" }, .. parts]).ReplaceLineEndings("\n");
-
-    [Fact]
-    public void W9_TheMemoryGrantWindowShowsTheTimeOfThePeakGrantBesideThePeakGrant()
-    {
-        var tabs = Js("pages", "server-tabs.js");
-        Assert.Contains("{ key: \"peak_waiters_at\", label: \"Peak waiters at\", format: \"time\" },", tabs, StringComparison.Ordinal);
-        Assert.Contains(
-            "{ key: \"peak_granted_memory_mb\", label: \"Peak granted\", format: \"mbfit\" },\n  { key: \"peak_granted_at\", label: \"Peak granted at\", format: \"time\" },",
-            tabs, StringComparison.Ordinal);
-        Assert.DoesNotContain("label: \"Peak at\"", tabs, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void W14_TriageAndMuteAreTheFirstAlertHistoryColumns()

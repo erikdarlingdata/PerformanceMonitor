@@ -201,7 +201,7 @@ export const READ_FIELDS = {
       emptyText: "No resource semaphore samples in this window.",
       columns: [
         { key: "collection_time", label: "Time", format: "time" },
-        { key: "resource_semaphore_id", label: "Semaphore", display: (r) => (r.resource_semaphore_id === 0 ? "Regular" : r.resource_semaphore_id === 1 ? "Small query" : String(r.resource_semaphore_id ?? "")), sortValue: (r) => r.resource_semaphore_id },
+        { key: "resource_semaphore_id", label: "Semaphore", format: "semaphore" },
         { key: "target_memory_mb", label: "Target MB", format: "mb" },
         { key: "granted_memory_mb", label: "Granted MB", format: "mbfit" },
         { key: "available_memory_mb", label: "Available MB", format: "mbfit" },

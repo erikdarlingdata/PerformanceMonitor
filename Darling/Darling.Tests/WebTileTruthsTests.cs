@@ -292,6 +292,20 @@ public sealed class WebTileTruthsTests
         var newest = Strings(words.GetProperty("newest"));
         Assert.Contains("Regular", newest);
         Assert.Contains("Small query", newest);
+        // The Resource Semaphore read of the Memory tab's table (read-fields.js) names them too.
+        var read = Strings(words.GetProperty("read"));
+        Assert.Contains("Regular", read);
+        Assert.Contains("Small query", read);
+    }
+
+    /// <summary>#5644 W9: the window grid shows the time of each peak beside the peak (waiters, then granted), under names that say which peak.</summary>
+    [Fact]
+    public void TheMemoryGrantWindow_ShowsTheTimeOfEachPeakBesideThePeak()
+    {
+        var headers = Run().GetProperty("windowCellClasses").EnumerateObject().Select(p => p.Name).ToList();
+        Assert.Equal(headers.IndexOf("Peak waiters") + 1, headers.IndexOf("Peak waiters at"));
+        Assert.Equal(headers.IndexOf("Peak granted") + 1, headers.IndexOf("Peak granted at"));
+        Assert.DoesNotContain("Peak at", headers);
     }
 
     /// <summary>#7578: the date-time columns of Resource Semaphore Pressure wrap with the narrow flow-cell floor, so First and Last are not pushed past the panel.</summary>
@@ -309,6 +323,10 @@ public sealed class WebTileTruthsTests
         // #7578: every header wraps at its spaces, so twelve columns fit the 948 px panel of a 1280 px window (a header of nowrap text kept the grid at 1389 px).
         var headers = Run().GetProperty("windowHeaderClasses");
         foreach (var header in headers.EnumerateObject())
+            Assert.Contains("wrap-head", header.Value.GetString()!.Split(' '));
+        // Choosing a sort rewrites every header's class name, and the rewrite keeps the wrapping header.
+        Assert.Equal("ascending", Run().GetProperty("sortedState").GetString());
+        foreach (var header in Run().GetProperty("windowHeaderClassesAfterSort").EnumerateObject())
             Assert.Contains("wrap-head", header.Value.GetString()!.Split(' '));
         // A number column keeps its single line.
         Assert.DoesNotContain("wrap", classes.GetProperty("Snapshots").GetString()!.Split(' '));

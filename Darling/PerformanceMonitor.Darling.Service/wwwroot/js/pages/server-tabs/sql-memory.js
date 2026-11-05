@@ -331,7 +331,7 @@ export function memoryPressurePanels(server, ctx) {
       windowFloorStrip(res.data, { viz: "table" }),
       /* #7578: the read sends oldest first (the chart and the MCP tool keep that order), but the rows someone opens this grid for are
          the newest, so the grid shows them first. */
-      VIZ.table({ ...res.data, events: [...res.data.events].reverse() }, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
+      VIZ.table(Array.isArray(res.data.events) ? { ...res.data, events: [...res.data.events].reverse() } : res.data, { rowsKey: "events", columns: PRESSURE_COLUMNS, emptyText: empty }),
     ]);
   })();
   return [chart.panel, grid.panel];
