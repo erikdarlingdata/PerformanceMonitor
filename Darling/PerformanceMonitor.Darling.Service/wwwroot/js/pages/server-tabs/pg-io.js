@@ -142,7 +142,7 @@ export const PG_BUFFER_USAGE_COLUMNS = [
   /* #7455: relation_display is the name, or a word for a buffer that has none (another database, shared catalogs). */
   { key: "relation_display", label: "Relation" },
   { key: "relation_kind", label: "Kind" },
-  { key: "buffer_mb", label: "Resident", format: "mb" },
+  { key: "buffer_bytes", label: "Resident", format: "bytes" },
   { key: "pct_of_pool", label: "% of Pool", format: "num1" },
   { key: "dirty_buffers", label: "Dirty", format: "int" },
   { key: "pct_dirty", label: "% Dirty", format: "num1" },

@@ -93,12 +93,12 @@ export const TABLE_SIZE_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
-  { key: "reserved_mb", label: "Reserved", format: "mb" },
-  { key: "used_mb", label: "Used", format: "mb" },
+  { key: "reserved_mb", label: "Reserved", format: "mbfit" },
+  { key: "used_mb", label: "Used", format: "mbfit" },
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "index_count", label: "Indexes", format: "int" },
-  { key: "growth_7d_mb", label: "7d growth", format: "mb" },
-  { key: "growth_30d_mb", label: "30d growth", format: "mb" },
+  { key: "growth_7d_mb", label: "7d growth", format: "mbfit" },
+  { key: "growth_30d_mb", label: "30d growth", format: "mbfit" },
   { key: "growth_pct_30d", label: "30d %", format: "num1" },
 ];
 
