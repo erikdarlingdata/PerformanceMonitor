@@ -1050,7 +1050,7 @@ public sealed class ServerSummaryItem
     {
         get
         {
-            if (!TotalCpuPercent.HasValue || IsOffline) return "--";
+            if (IsOffline || (!TotalCpuPercent.HasValue && !CpuPercent.HasValue)) return "--";
 
             /* #3281: on the Performance Insights arm the headline is percent of the capacity CURRENTLY
                ALLOCATED, which is NOT the figure the band read — so the figure that did is shown beside

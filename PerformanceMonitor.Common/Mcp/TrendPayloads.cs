@@ -41,7 +41,8 @@ internal sealed record LockWaitPoint(DateTime BucketStart, double WaitTimeMsPerS
 internal sealed record WaitBucketPoint(DateTime BucketStart, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond, double? PeakWaitTimeMsPerSecond);
 
 /// <summary>One bucket of CPU samples (#3960): each percentage averaged over the samples in the bucket, the busiest
-/// single sample's SQL and total CPU, and how many samples the bucket held.</summary>
+/// single sample's SQL and total CPU, and how many samples the bucket held. The other, total, idle and peak-total figures are
+/// null for a bucket whose samples all lack an other-process reading (#7682: SQL Server on Linux before 2025 CU1 cannot report host CPU).</summary>
 internal sealed record CpuBucketPoint(
     DateTime BucketStart, double SqlServerCpu, double? OtherProcessCpu, double? TotalCpu, double? IdleCpu,
     int PeakSqlServerCpu, int? PeakTotalCpu, long Samples);
@@ -355,14 +356,14 @@ internal static class TrendPayloads
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
-    /// <summary>What a null host-CPU figure in <c>get_cpu_utilization</c> means (#7682): the server cannot report it.</summary>
-    public const string CpuHostUnknownNote =
-        "A bucket with null other_process_cpu, total_cpu, idle_cpu and peak_total_cpu has no host CPU: the server cannot report it (SQL Server on Linux before 2025 CU1), so only sql_server_cpu is measured there. Null is not 0, and idle is not 100. A bucket that mixes both kinds of sample averages only the samples that report host CPU.";
-
     /// <summary>The source-cadence sentence <c>get_cpu_utilization</c> has carried since #3653 A15/A16, now beside
     /// the bucket disclosure: the one place both SKUs spell it.</summary>
     public const string CpuCadenceNote =
         "Source cadence: one RING_BUFFER_SCHEDULER_MONITOR record per minute on-prem, Managed Instance and RDS; one sys.dm_db_resource_stats row per 15 seconds on Azure SQL DB. samples_in_bucket is the measured count per bucket.";
+
+    /// <summary>Said on <c>get_cpu_utilization</c> when any bucket has no host figure (#7682): the null fields are not zeros.</summary>
+    public const string HostCpuUnavailableNote =
+        "other_process_cpu, total_cpu, idle_cpu and peak_total_cpu are null for buckets where the server cannot report host CPU (SQL Server on Linux before 2025 CU1). Only sql_server_cpu is measured there; null is not 0.";
 
     /// <summary>
     /// <c>get_cpu_utilization</c>'s data envelope (#3960), both SKUs. The percentages are the bucket's averages,
@@ -379,19 +380,23 @@ internal static class TrendPayloads
             ["bucket"] = TrendBuckets.Word(bucketMinutes),
             ["bucket_minutes"] = bucketMinutes,
             ["aggregate_note"] = TrendBuckets.LevelNote(bucketMinutes, requested, autoBudget, firstAtWindowStart: false),
-            ["note"] = points.Any(p => !p.OtherProcessCpu.HasValue) ? CpuCadenceNote + " " + CpuHostUnknownNote : CpuCadenceNote,
+            ["note"] = CpuCadenceNote,
             ["samples"] = points.Select(p => new
             {
                 sample_time = Stamp(p.BucketStart),
                 sql_server_cpu = (int)Math.Round(p.SqlServerCpu),
-                other_process_cpu = p.OtherProcessCpu.HasValue ? (int?)Math.Round(p.OtherProcessCpu.Value) : null,
-                total_cpu = p.TotalCpu.HasValue ? (int?)Math.Round(p.TotalCpu.Value) : null,
-                idle_cpu = p.IdleCpu.HasValue ? (int?)Math.Round(p.IdleCpu.Value) : null,
+                other_process_cpu = p.OtherProcessCpu is { } other ? (int)Math.Round(other) : (int?)null,
+                total_cpu = p.TotalCpu is { } total ? (int)Math.Round(total) : (int?)null,
+                idle_cpu = p.IdleCpu is { } idle ? (int)Math.Round(idle) : (int?)null,
                 peak_sql_server_cpu = p.PeakSqlServerCpu,
                 peak_total_cpu = p.PeakTotalCpu,
                 samples_in_bucket = p.Samples,
             }),
         };
+        if (points.Any(p => p.OtherProcessCpu is null))
+        {
+            envelope["host_cpu_note"] = HostCpuUnavailableNote;
+        }
 
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
