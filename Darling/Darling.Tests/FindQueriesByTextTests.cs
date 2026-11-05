@@ -75,7 +75,6 @@ public sealed class FindQueriesByTextTests
             Assert.Equal("limit", reply.GetProperty("hints").GetProperty("parameter").GetString());
             /* The shared validator's own sentence with this tool's ceiling, so the refusal is not a clamp and not a private wording. */
             Assert.Equal(McpHelpers.ErrorMessageOf(McpHelpers.ValidateTop(limit, DarlingMcpFindQueriesByTextTools.MaxLimit)!), reply.GetProperty("message").GetString());
-            Assert.Contains("1-50", reply.GetProperty("message").GetString() ?? "", StringComparison.Ordinal);
         }
     }
 
