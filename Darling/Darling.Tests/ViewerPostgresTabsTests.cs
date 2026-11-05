@@ -919,6 +919,7 @@ public sealed class ViewerPostgresTabsTests
             ["PgStatementRow.TempBlocksWritten"] = "TempWritten — labelled in blocks, not converted to bytes",
             ["PgStatementRow.WalBytes"] = "WalWritten — the same number, formatted",
             ["PgStatementRow.MaxPeakMemBytes"] = "PeakMemory — the same number, formatted; null off Aurora, where core PostgreSQL has no per-statement peak-memory figure at all (#2625)",
+            ["PgStatementRow.IsServiceStatement"] = "QueryText — a statement the service itself ran reads as a \"[Performance Monitor's own statement] \" prefix on the text, which says it where the operator is looking (#7567)",
             ["PgStatementRow.TotalExecTimeMs"] = "TotalExecTimeMs is shown; AvgExecTimeMs derives from it and Calls",
 
             ["PgDatabaseRow.BlksHit"] = "CacheHitPct — the hit side of that ratio",

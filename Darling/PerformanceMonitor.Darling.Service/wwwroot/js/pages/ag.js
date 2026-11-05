@@ -52,7 +52,7 @@ const NO_AGS_MESSAGE =
 const SEV_BADGE = { Critical: "CRIT", Warning: "WARN" };
 
 const DATABASE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "replica_server_name", label: "Replica" },
   { key: "synchronization_state", label: "Sync state", sevKey: "synchronization_state_severity" },
   /* Units go in the header: the DMV reports queues in KB and rates in KB/s, and a bare "6,000" in a cell is

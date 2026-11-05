@@ -204,6 +204,10 @@ public sealed class PgTargetAnomalyTests
            table alone a quiet month has no baseline and a server that blocks once a week has a baseline of blocking. Not a
            v_ view, not a SQL Server table by another name; nothing else is admitted. */
         tables.Add("collection_log");
+        /* One more (#7567): the statement arms drop the service's own entries with PgOwnStatement.NotOwnOnStats, a NOT EXISTS over
+           pg_statement_text, the store's own text lookup (a plain table the statements' text fetch writes, not a collector table).
+           It is scoped to the row's server in the splice itself (own.server_id = pg_statement_stats.server_id). */
+        tables.Add("pg_statement_text");
         foreach (var (metric, table) in s_metricTables)
         {
             var sql = PgTargetBaselineProvider.GetPgTargetBaselineQuery(metric)!;
@@ -341,6 +345,8 @@ public sealed class PgTargetAnomalyTests
         /* The same one admission as the baseline census above (lane 17): the blocked-sessions window read shares the
            arm's zero rule, so it reads the same log. */
         tables.Add("collection_log");
+        /* And the statement-share read's own-entry exclusion (#7567): the pg_statement_text lookup, server-scoped in the splice. */
+        tables.Add("pg_statement_text");
         foreach (var sql in s_detectorSql)
         {
             var upper = sql.ToUpperInvariant();

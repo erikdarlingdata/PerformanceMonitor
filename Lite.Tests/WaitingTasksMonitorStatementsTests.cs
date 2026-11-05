@@ -143,7 +143,7 @@ VALUES ($1, $2, $3, $4, 60, 'PAGEIOLATCH_SH', 500, 0, 'TestDb', 'PerformanceMoni
 }
 
 /// <summary>
-/// Lite v80 / Darling V242 (#7573): <c>waiting_tasks</c> gains <c>program_name</c>, VARCHAR, nullable, the LAST payload column (the DuckDB appender is
+/// Lite v80 / Darling V243 (#7573): <c>waiting_tasks</c> gains <c>program_name</c>, VARCHAR, nullable, the LAST payload column (the DuckDB appender is
 /// positional). A fresh file gets it from the generator, an existing file from the shared added-columns list, and the row stored before it reads NULL.
 /// </summary>
 public sealed class WaitingTasksProgramNameRungTests : IDisposable

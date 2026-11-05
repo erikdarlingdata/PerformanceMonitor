@@ -551,7 +551,7 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
   const labels = new Map(); // seriesKey -> display label
   const drills = new Map(); // seriesKey -> drill keys [{dimension, value}] (design D6)
   const byBucket = new Map(); // bucket -> point object
-  const order = []; // seriesKey first-seen order (stable colors)
+  const order = []; // seriesKey first-seen order; only the input to the ranking below, never the color order (#7563)
   const residual = new Set(); // seriesKeys that are the #2734 synthetic "(other)" fold
 
   for (const r of rows) {
@@ -590,19 +590,23 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
      bucket. It is held out of the competition instead: real members fill the cap on their own merits, and the
      residual rides along in its own slot (it is what keeps the visible buckets summing to the window total, so
      dropping it would make a partial chart look complete). */
-  const residualKeys = order.filter((k) => residual.has(k));
-  const realKeys = order.filter((k) => !residual.has(k));
+  /* #7563: the rows arrive in no set order (the statement ends ORDER BY bucket, so rows inside one bucket have none, and the oldest
+     bucket moves with the window), so a color given by first-seen order moved when the page loaded again. The series are ranked
+     by what the rows hold instead: largest total first, the name as the tie-break, and the colors follow that rank. The same
+     ranking picks the MAX_SERIES that stay, so a tie at the cut also falls by name and not by arrival. */
+  const byRank = (a, b) => totals.get(b) - totals.get(a) || compareText(labels.get(a), labels.get(b)) || compareText(a, b);
+  const residualKeys = order.filter((k) => residual.has(k)).sort(byRank);
+  const realKeys = order.filter((k) => !residual.has(k)).sort(byRank);
 
   let keptReal = realKeys;
   let hidden = 0;
   if (realKeys.length > MAX_SERIES) {
-    keptReal = [...realKeys].sort((a, b) => totals.get(b) - totals.get(a)).slice(0, MAX_SERIES);
+    keptReal = realKeys.slice(0, MAX_SERIES);
     hidden = realKeys.length - keptReal.length;
   }
 
-  /* Preserve first-seen order for stable colors, then append the residual last (it reads as the backdrop). */
-  const keptSet = new Set(keptReal);
-  const keptKeys = order.filter((k) => keptSet.has(k)).concat(residualKeys);
+  /* The residual goes last, so it reads as the backdrop. */
+  const keptKeys = keptReal.concat(residualKeys);
 
   const series = keptKeys.map((key, i) => ({
     key,
@@ -611,6 +615,11 @@ export function pivotTimeSeries(rows, groupDims, label, hasResidual = false) {
     drill: drills.get(key),
   }));
   return { points: [...byBucket.values()], series, hidden };
+}
+
+/** Code-unit order, the same on every machine (localeCompare follows the browser's locale, which would let two readers see two color orders). */
+function compareText(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /** Whether a panel spec is the #2734 rank-then-bucket mode (both keys set) — the server's own rule. */

@@ -1000,7 +1000,7 @@ function waitLinkCell(server, row, timeKey) {
    TOP_QUERY_GROUPS, all off at first. Last Execution and Creation Time arrive as UTC instants (the read converts them from the monitored
    server's clock) and print in the browser's local time; every grouped field is omitted by the read on the hourly tier and prints a dash. */
 export const TOP_QUERY_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "host_object", label: "Module" },
@@ -1059,7 +1059,7 @@ export const TOP_QUERY_GROUPS = {
    clock) and print in the browser's local time. The hourly tier carries none of the grouped fields, nor Type, the
    write and read totals or Avg Reads, and prints a dash for each. */
 export const TOP_PROC_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   tagColumn(),
   { key: "full_name", label: "Procedure" },
   { key: "object_type", label: "Type" },

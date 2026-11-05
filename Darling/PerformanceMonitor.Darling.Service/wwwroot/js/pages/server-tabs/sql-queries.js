@@ -326,7 +326,7 @@ export const QUERY_STORE_REGRESSION_GROUPS = { groups: ["CPU", "Executions and p
 export const QUERY_STORE_REGRESSION_COLUMNS = [
   { key: "severity", label: "Severity" },
   { key: "regression_reason", label: "Why" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
   { key: "recent_aborted_count", label: "Recent Timeouts", format: "int" },
@@ -378,7 +378,7 @@ export const QUERY_HEATMAP_COLUMNS = [
 ];
 
 export const QUERY_STORE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   tagColumn(),
   { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "query_id", label: "Query ID", format: "int" },
@@ -423,7 +423,7 @@ export function qsReasonsText(row) {
 }
 
 export const QS_CLUTTER_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "verdict", label: "Verdict", sevKey: "verdict" },
   { key: "verdict_reasons", label: "Reasons", render: (r) => document.createTextNode(qsReasonsText(r)) },
   /* Excluded is per-ROW and architectural (readonly_reason bit 8). The dash is the ordinary case. */
@@ -496,7 +496,7 @@ export const LONG_QUERY_COLUMNS = [
   { key: "writes", label: "Writes", group: "I/O and rows", format: "int" },
   { key: "row_count", label: "Rows", group: "I/O and rows", format: "int" },
   { key: "result", label: "Result" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "object_name", label: "Object" },
   { key: "session_id", label: "SPID", group: "Session", format: "int" },
   { key: "client_app_name", label: "App", group: "Session" },
@@ -514,8 +514,9 @@ export const PLAN_CORRECTION_COLUMNS = [
   { key: "first_seen", label: "First seen", format: "time" },
   { key: "collection_time", label: "Last seen", format: "time" },
   { key: "capture_count", label: "Captures", format: "int" },
-  { key: "query_text", label: "Query", valueList: false, render: (r) => codeDisclosure(r.query_text) },
-  { key: "database_name", label: "Database" },
+  /* #7541: the closed Query summary takes width from the window (wrap-follow), so Reason, which says why the row is there, is in view at 1280 and not 1200px along. */
+  { key: "query_text", label: "Query", wrap: true, follow: true, valueList: false, render: (r) => codeDisclosure(r.query_text) },
+  { key: "database_name", label: "Database", name: true },
   { key: "recommendation_state", label: "State" },
   { key: "recommendation_state_reason", label: "State Reason", wrap: true },
   { key: "recommendation_reason", label: "Reason", wrap: true },
@@ -540,7 +541,7 @@ export const PLAN_CORRECTION_COLUMNS = [
 ];
 
 export const AUTO_TUNING_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "force_last_good_plan_desired_state", label: "Desired" },
   { key: "force_last_good_plan_actual_state", label: "Actual" },
   { key: "force_last_good_plan_reason", label: "Reason", wrap: true },
@@ -553,7 +554,7 @@ const ACTIVE_COLUMNS = [
   { key: "query_text", label: "Query Text", valueList: false, render: (r) => codeDisclosure(r.query_text) },
   { key: "session_id", label: "SPID", format: "int" },
   tagColumn(),
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "login_name", label: "Login" },
   { key: "host_name", label: "Host" },
   { key: "program_name", label: "Program" },

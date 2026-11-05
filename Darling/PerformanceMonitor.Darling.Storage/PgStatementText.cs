@@ -107,6 +107,22 @@ public static class PgStatementText
 CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_statement_text(last_seen);";
 
     /// <summary>
+    /// V242 (#7567): the column holding which <c>{"u": user_id, "d": database_id}</c> entries of the queryid are the service's own
+    /// (<see cref="PgOwnStatement"/>). Not in <see cref="CreateTableSql"/>, which is V73's rung; the migration adds it.
+    /// </summary>
+    public const string AddOwnEntriesColumnSql =
+        "ALTER TABLE collect.pg_statement_text ADD COLUMN IF NOT EXISTS own_entries jsonb;";
+
+    /// <summary>
+    /// The window aggregate both fetches use to collect the service's own entries of a queryid (#7567): a JSON array of
+    /// <c>{"u": userid, "d": dbid}</c> pairs over the entries whose text ends with <see cref="PgOwnStatement.Marker"/>, NULL when
+    /// none does. A window, not a GROUP BY, so the DISTINCT ON below still picks the costliest entry's text.
+    /// </summary>
+    private static readonly string OwnEntriesWindow =
+        "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint)) FILTER (WHERE " + PgOwnStatement.IsOwnSql("s.query")
+        + ") OVER (PARTITION BY s.queryid) AS own_entries";
+
+    /// <summary>
     /// The text fetch, against the monitored PostgreSQL server. <c>$1</c> caps the rows.
     ///
     /// <para><c>showtext = true</c> is the entire point of this query and the reason it is separate from
@@ -134,7 +150,8 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     public static readonly string AuroraFetchSql = @"
 SELECT
     queryid,
-    " + SensitiveTextCase + @"
+    " + SensitiveTextCase + @",
+    own_entries
 FROM
 (
     /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
@@ -151,7 +168,8 @@ FROM
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
-        s.total_exec_time AS total_exec_time
+        s.total_exec_time AS total_exec_time,
+        " + OwnEntriesWindow + @"
     FROM {AURORA_SCHEMA}.aurora_stat_statements(true) AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
@@ -176,7 +194,8 @@ LIMIT $1";
     public static readonly string VanillaFetchSql = @"
 SELECT
     queryid,
-    " + SensitiveTextCase + @"
+    " + SensitiveTextCase + @",
+    own_entries
 FROM
 (
     /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
@@ -192,7 +211,8 @@ FROM
     SELECT DISTINCT ON (s.queryid)
         s.queryid AS queryid,
         s.query AS query_text,
-        s.{TOTAL_TIME} AS total_exec_time
+        s.{TOTAL_TIME} AS total_exec_time,
+        " + OwnEntriesWindow + @"
     FROM {STATEMENTS_SCHEMA}.pg_stat_statements AS s
     WHERE s.queryid IS NOT NULL
     AND   s.query IS NOT NULL
@@ -255,6 +275,10 @@ LIMIT $1";
     /// first seen on this server, which is the one fact that survives a major-version re-key and cannot be
     /// recovered afterwards; overwriting it would quietly turn every row's age into "since the last fetch".
     ///
+    /// <para><c>own_entries</c> (#7567) is the fetched list as it stands, NULL included: an entry that stopped being the
+    /// service's (a reset, then the application ran the statement first) drops out at the next fetch. <c>$5</c> is the
+    /// JSON text of the list, or NULL.</para>
+    ///
     /// <para><c>query_text</c> IS advanced on conflict. A <c>queryid</c> is derived from the parse tree so its
     /// text is stable in practice, but not by guarantee across versions — and if it ever differs, the newer text
     /// is the one that matches the stats being collected now.</para>
@@ -264,13 +288,14 @@ LIMIT $1";
     /// across a fleet. Cheap to keep, expensive to rediscover.</para>
     /// </summary>
     public const string UpsertSql = @"INSERT INTO collect.pg_statement_text
-    (server_id, queryid, query_text, first_seen, last_seen)
-SELECT server_id, queryid, query_text, stamped, stamped
-FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[])
-     AS batch(server_id, queryid, query_text, stamped)
+    (server_id, queryid, query_text, first_seen, last_seen, own_entries)
+SELECT server_id, queryid, query_text, stamped, stamped, own_entries::jsonb
+FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[])
+     AS batch(server_id, queryid, query_text, stamped, own_entries)
 ORDER BY server_id, queryid
 ON CONFLICT (server_id, queryid) DO UPDATE SET
     query_text = EXCLUDED.query_text,
+    own_entries = EXCLUDED.own_entries,
     last_seen = EXCLUDED.last_seen
 WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
 

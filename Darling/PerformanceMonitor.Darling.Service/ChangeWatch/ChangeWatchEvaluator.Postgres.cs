@@ -174,7 +174,10 @@ FROM d";
     private async Task<Dictionary<(long QueryId, long DatabaseId), DarlingPgStatementReader.PgStatementRow>> ReadStatementsAsync(
         int serverId, DateTime start, DateTime end, int limit, CancellationToken cancellationToken)
     {
-        var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(_dataSource, serverId, Open(start), end, limit, cancellationToken);
+        /* #7567: the monitoring service's own statements (the wait sampler's sleep, the collectors' reads) are left out, so they cannot
+           take a slot of the top-N a change is compared on. */
+        var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(
+            _dataSource, serverId, Open(start), end, limit, includeServiceStatements: false, cancellationToken);
         var rows = new Dictionary<(long, long), DarlingPgStatementReader.PgStatementRow>();
         foreach (var row in page.Rows)
         {

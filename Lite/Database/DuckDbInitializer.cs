@@ -3107,7 +3107,7 @@ public partial class DuckDbInitializer : IDisposable
 
         if (fromVersion < 80)
         {
-            /* v80 (#7573, twinning Darling's V242): waiting_tasks.program_name, the waiting task's session program name. VARCHAR, nullable, the LAST
+            /* v80 (#7573, twinning Darling's V243): waiting_tasks.program_name, the waiting task's session program name. VARCHAR, nullable, the LAST
                column (the shared added-columns list). NULL on a row stored before v80 and never hidden by a reader; the archive views union parquet by
                name, so a parquet file written before v80 reads NULL for it. */
             _logger?.LogInformation("Running migration to v80: adding waiting_tasks.program_name");
@@ -3195,7 +3195,7 @@ public partial class DuckDbInitializer : IDisposable
         (78, "collection_log", "read_source", "VARCHAR"),
         /* #7497: the blocking process's own trancount from the blocked process report (Darling's V241 column). NULL on a row stored before v79 and on a report that has none. */
         (79, "blocked_process_reports", "blocking_open_transaction_count", "INTEGER"),
-        /* #7573: the program name of the waiting task's session (Darling's V242 column). NULL on a row stored before v80; a reader never hides a NULL. */
+        /* #7573: the program name of the waiting task's session (Darling's V243 column). NULL on a row stored before v80; a reader never hides a NULL. */
         (80, "waiting_tasks", "program_name", "VARCHAR"),
     };
 

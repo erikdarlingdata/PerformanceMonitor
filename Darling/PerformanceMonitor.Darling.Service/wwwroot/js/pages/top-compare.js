@@ -228,7 +228,7 @@ function deltaColumns(kind) {
       render: (r) => (r.status ? el("span", { class: "badge band-" + (r.status === "NEW" ? "Warning" : "Offline"), text: r.status }) : document.createTextNode("")),
       sortValue: (r) => r._group,
     },
-    { key: "database_name", label: "Database" },
+    { key: "database_name", label: "Database", name: true },
     { key: "name", label: k.nameLabel, valueList: false },
     { key: "execution_count", label: "Execs", format: "int" },
     { key: "baseline_execution_count", label: "Before Execs", format: "int" },

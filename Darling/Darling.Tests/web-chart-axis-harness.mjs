@@ -174,17 +174,33 @@ const composedBoth = axes({
 });
 out.sizeAxis = {
   big: sized([42000, 51000, 60000, 58000]).leftLabels,
-  bigExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
+  bigExpected: [GB(0), GB(20), GB(40), GB(60)],
   bigWithout: unsized([42000, 51000, 60000, 58000]).leftLabels,
   small: sized([120, 340, 500, 410]).leftLabels,
   smallWithout: unsized([120, 340, 500, 410]).leftLabels,
-  edge: sized([300, 900, 1023]).leftLabels,
-  edgeWithout: unsized([300, 900, 1023]).leftLabels,
   composedLeft: composedBoth.leftLabels,
   composedRight: composedBoth.rightLabels,
-  composedLeftExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
-  composedRightExpected: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+  composedLeftExpected: [GB(0), GB(20), GB(40), GB(60)],
+  composedRightExpected: [GB(0), GB(10), GB(20), GB(30)],
 };
+
+/* #7555: each gridline of a one-point chart, as the value it stands at and the value its label says. The one point is drawn as a dot at a known
+   value, and the zero line is the lowest gridline, so a gridline's value is the dot's value scaled by its height above zero over the dot's height.
+   The label's value is its number times its unit (KB, MB, GB, 1,024 apart) in bytes or MB. */
+const UNIT_STEP = { B: 1, KB: 1024, MB: 1024 * 1024, GB: 1024 * 1024 * 1024 };
+function gridValues(host, peak, anchor, dotAt, unitBase) {
+  const texts = find(host, (n) => n.tag === "text" && !cls(n).includes("axis-unit") && n.attrs["text-anchor"] === anchor);
+  const dot = find(host, (n) => n.tag === "circle" && cls(n).includes("series-dot"))[dotAt];
+  const zeroY = Math.max(...texts.map((n) => Number(n.attrs.y)));
+  const dotUp = zeroY - 4 - Number(dot.attrs.cy);
+  return texts.filter((n) => n.text !== "").map((n) => {
+    const [num, unit] = n.text.replace(/,/g, "").split(" ");
+    const per = unitBase === "bytes" ? UNIT_STEP[unit] : { MB: 1, GB: 1024 }[unit];
+    return { label: n.text, tick: (peak * (zeroY - Number(n.attrs.y))) / dotUp, said: Number(num) * per };
+  });
+}
+const onePoint = (v, extra) => charts.renderLineChart({ xKey: "t", series: [{ key: "a", label: "A", color: "#f00" }], points: rows([v], "a", extra && extra.v2 != null ? [extra.v2] : null), ...(extra && extra.spec) });
+const bytesFmt = (v, o) => util.applyFormat("bytes", v, o);
 
 /* #7515: the same axes, drawn the way the pages draw them. A composed panel goes through renderComposedResult (the left axis and the
    overlay axis each pass their own size unit), and a "format: mb" panel through the panel table's line viz (VIZ.line, the public way
@@ -211,8 +227,48 @@ out.panelAxis = {
   mbPanel: mbPanel([42000, 51000, 60000, 58000]).leftLabels,
   mbPanelSmall: mbPanel([120, 340, 500, 410]).leftLabels,
   mbPanelSmallWithout: unsized([120, 340, 500, 410]).leftLabels,
-  expectedLeft: [util.fmtMb(0), GB(20), GB(40), GB(60)],
-  expectedRight: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+  expectedLeft: [GB(0), GB(20), GB(40), GB(60)],
+  expectedRight: [GB(0), GB(10), GB(20), GB(30)],
+};
+
+/* #7555: a "format: bytes" chart picks its ticks in the unit its labels print (20, 40, 60 KB, not 19.5, 39.1, 58.6), drawn through the public
+   way into a panel (VIZ.line), and every tick of a size axis prints in the unit of its largest tick (a 2 GB Memory Trend reads 0 GB,
+   0.5 GB, 1.0 GB, 1.5 GB, not 0 MB, 512 MB, 1.0 GB). Expected words are built with the page's own formatters, so the test holds in any locale. */
+const sizePanel = (values, format) => {
+  const holder = new FakeNode("div");
+  holder.appendChild(panels.VIZ.line({ trend: rows(values) }, { rowsKey: "trend", xKey: "t", series: [{ key: "a", label: "A" }], format, unit: format === "bytes" ? "/s" : undefined }));
+  return axesOf(holder);
+};
+const KB = (n) => util.fmtInt(n) + " KB";
+const MBw = (n) => util.fmtInt(n) + " MB";
+const unitsOf = (labels) => [...new Set(labels.filter((l) => l !== "").map((l) => l.split(" ").pop()))];
+const memory = sizePanel([300, 900, 1500, 1900, 1700], "mb");
+out.byteAxis = {
+  kb: sizePanel([20000, 41000, 60000, 52000], "bytes").leftLabels,
+  kbExpected: ["0 KB", KB(20), KB(40), KB(60)],
+  mb: sizePanel([20000000, 41000000, 60000000, 52000000], "bytes").leftLabels,
+  mbExpected: ["0 MB", MBw(20), MBw(40), MBw(60)],
+  small: sizePanel([120, 340, 500, 410], "bytes").leftLabels,
+  cell: [0, 900, 1536, 2 * 1024 * 1024, 3 * 1024 * 1024 * 1024].map((v) => util.fmtBytes(v)),
+  mapIndex: [900, 2048].map(util.fmtBytes),
+};
+out.memoryAxis = {
+  labels: memory.leftLabels,
+  units: unitsOf(memory.leftLabels),
+  expected: ["0 GB", util.fmtNum(0.5, 1) + " GB", util.fmtNum(1, 1) + " GB", util.fmtNum(1.5, 1) + " GB"],
+  tooltipCell: [512, 1536].map((v) => util.fmtMb(v)),
+};
+
+/* #7555: the gridlines of a size axis whose data max sits just under a unit step (1,023 MB rounds up to a 1,500 MB top tick) say what they stand
+   for. Each is the value the gridline is drawn at, next to the value its label states. */
+const mbEdge = (v) => gridValues(onePoint(v, { spec: { formatValue: mbFmt, sizeUnit: "mb" } }), v, "end", 0, "mb");
+out.gridAxis = {
+  mb1023: mbEdge(1023),
+  mb1010: mbEdge(1010),
+  mb386: mbEdge(386),
+  bytes1030000: gridValues(onePoint(1030000, { spec: { formatValue: bytesFmt, sizeUnit: "bytes" } }), 1030000, "end", 0, "bytes"),
+  right386: gridValues(onePoint(5, { v2: 386, spec: { formatValue: (v) => String(v), series2: { key: "b", label: "B", color: "#00f", formatValue: mbFmt, sizeUnit: "mb" } } }), 386, "start", 1, "mb"),
+  right1023: gridValues(onePoint(5, { v2: 1023, spec: { formatValue: (v) => String(v), series2: { key: "b", label: "B", color: "#00f", formatValue: mbFmt, sizeUnit: "mb" } } }), 1023, "start", 1, "mb"),
 };
 
 /* A chart of counts keeps every tick on a whole number (integerTicks), where the same range without it steps by 0.2. */

@@ -107,7 +107,7 @@ public static class PgReadBinaryFileCapability
         }
 
         using var command = connection.CreateCommand();
-        command.CommandText = ProbeSql;
+        command.CommandText = PgOwnStatement.Mark(ProbeSql);
         var result = await command.ExecuteScalarAsync(cancellationToken);
 
         bool? granted;

@@ -120,7 +120,7 @@ public static class PgLogFormatCapability
         }
 
         using var command = connection.CreateCommand();
-        command.CommandText = ProbeSql;
+        command.CommandText = PgOwnStatement.Mark(ProbeSql);
         var result = await command.ExecuteScalarAsync(cancellationToken);
 
         var usesCsvlog = false;

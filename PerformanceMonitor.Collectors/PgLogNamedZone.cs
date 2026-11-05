@@ -120,11 +120,11 @@ public static class PgLogNamedZone
     /// every instant a local time can come from, since no offset is outside -12 to +14. A candidate that is not the
     /// instant of a real transition simply fails the render check.
     /// </summary>
-    public const string ResolveSql = ZoneLookupSql + MatchSql;
+    public static readonly string ResolveSql = PgOwnStatement.MarkBatch(new[] { ZoneLookupSql, MatchSql });
 
     /// <summary>The batched check once <see cref="ResolveSql"/> has found <c>@zone</c> to be a named zone (#7397): the
     /// same statement two, and statement one pins the session zone to that name without reading the view.</summary>
-    public const string ResolveKnownZoneSql = ZoneSetSql + MatchSql;
+    public static readonly string ResolveKnownZoneSql = PgOwnStatement.MarkBatch(new[] { ZoneSetSql, MatchSql });
 
     private const string ZoneLookupSql = @"
 SELECT pg_catalog.set_config('TimeZone', n.name, true)

@@ -111,7 +111,7 @@ export const BLOCKING_COLUMNS = [
   { key: "blocked_sql_text", label: "Blocked SQL", valueList: false, render: (r) => codeDisclosure(r.blocked_sql_text) },
   { key: "blocking_sql_text", label: "Blocking SQL", valueList: false, render: (r) => codeDisclosure(r.blocking_sql_text) },
   { key: "source", label: "Source" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "blocked_spid", label: "Blocked SPID", format: "int" },
   { key: "blocking_spid", label: "Blocking SPID", format: "int" },
   { key: "wait_time_ms", label: "Wait Time", format: "ms" },
@@ -155,7 +155,7 @@ const DEADLOCK_PROCESS_COLUMNS = [
   { key: "deadlock_type", label: "Type" },
   { key: "victim", label: "Victim", render: (r) => document.createTextNode(r.victim ? "Victim" : "") },
   { key: "spid", label: "SPID", format: "int" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "object_names", label: "Object(s)", wrap: true },
   { key: "proc_name", label: "Procedure" },
   { key: "lock_mode", label: "Lock Mode" },
@@ -380,7 +380,7 @@ export const BPR_COLUMNS = [
     render: (r) =>
       r.xml_left_out ? loadAndSaveButton(r) : saveXmlButton(r.blocked_process_report_xml, "blocked_process_" + fileStamp(r.event_time) + ".xml", "application/xml;charset=utf-8", false),
   },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "blocked_spid", label: "Blocked SPID", format: "int" },
   { key: "blocking_spid", label: "Blocking SPID", format: "int" },
   { key: "wait_time_ms", label: "Wait Time", format: "ms" },
@@ -388,7 +388,7 @@ export const BPR_COLUMNS = [
 ];
 
 export const OBJECT_LOCK_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "schema_name", label: "Schema" },
   { key: "table_name", label: "Table" },
   { key: "index_name", label: "Index" },
