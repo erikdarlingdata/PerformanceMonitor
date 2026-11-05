@@ -494,7 +494,7 @@ public class PgBaselineProvider
     /// side is what makes them daily arms. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/> is the
     /// seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
-        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.Deadlock;
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency or MetricNames.IoWriteLatency or MetricNames.Blocking or MetricNames.BlockingSnapshot or MetricNames.Deadlock;
 
     /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
     /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
@@ -975,6 +975,7 @@ LIMIT 1";
             {
                 windowStart = supplyFloor;
             }
+
 
             /* #3653 Q6: the target's clock over this window, read on the same connection and INSIDE this try on
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
@@ -1520,6 +1521,11 @@ WITH clean AS (
                run without complaint and key on UTC; the local-clock census in LocalClockBucketKeyTests is what
                forbids it. */
             MetricNames.Blocking => EventBaselineSql("blocked_process_report", "collection_log", "blocked_process_baseline", "SUM(event_count)"),
+
+            /* #7588: the DMV snapshot arm of the blocking spike. Its window counts dmv_blocking_snapshots rows, so its history is
+               the same rows (dmv_blocking_baseline, a plain view over the raw table with the same self-wait filter, whose raw retention is
+               floored at the baseline window), covered by the snapshot collector's own runs. */
+            MetricNames.BlockingSnapshot => EventBaselineSql("dmv_blocking_snapshot", "collection_log", "dmv_blocking_baseline", "SUM(event_count)"),
 
             // Event-based — same approach as blocking; the deadlocks collector's own runs cover the hours.
             MetricNames.Deadlock => EventBaselineSql("deadlocks", "collection_log", "deadlock_baseline", "SUM(event_count)"),

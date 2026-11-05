@@ -595,6 +595,10 @@ public static partial class TimescaleSupport
     public const string QueryStatsBaselineView = "query_stats_baseline";
     public const string BlockedProcessBaselineView = "blocked_process_baseline";
     public const string DeadlockBaselineView = "deadlock_baseline";
+    /// <summary>#7588: the DMV blocking snapshot baseline, the Blocking spike's history when the window counted snapshot rows
+    /// (RDS, Azure, or any window with no blocked process report). A PLAIN view over the raw table, never an aggregate: see
+    /// <see cref="PlainBaselineViews"/>.</summary>
+    public const string DmvBlockingBaselineView = "dmv_blocking_baseline";
     public const string MemoryBaselineView = "memory_baseline";
 
     /// <summary>
@@ -807,6 +811,24 @@ SELECT
     collection_time,
     count(*) AS event_count
 FROM collect.blocked_process_reports
+WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
+GROUP BY server_id, bucket, collection_time
+WITH NO DATA";
+
+    /// <summary>#7588: the blocking baseline for the DMV snapshot arm. The Blocking spike counts its window as blocked process
+    /// reports, or as snapshot rows when the window holds no report; each arm is judged against its own history so the ratio never
+    /// divides snapshot rows by report rows. Same shape and the same self-wait filter as <see cref="CreateBlockedProcessBaselineSql"/>,
+    /// over <c>dmv_blocking_snapshots</c>, so the provider's event baseline reads either one. Written in the aggregate's text so
+    /// <see cref="CreateBaselineFallbackViewSql"/> derives the view, but it is never created as an aggregate (a sixteenth
+    /// hourly refresh would leave the refresh grid's heaviest window 4 s of headroom).</summary>
+    public const string CreateDmvBlockingBaselineSql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.dmv_blocking_baseline
+WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
+SELECT
+    server_id,
+    time_bucket('1 hour', collection_time) AS bucket,
+    collection_time,
+    count(*) AS event_count
+FROM collect.dmv_blocking_snapshots
 WHERE " + PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql + @"
 GROUP BY server_id, bucket, collection_time
 WITH NO DATA";
@@ -1073,7 +1095,7 @@ WITH NO DATA";
 
         var filled = 0;
 
-        foreach (var (createSql, view) in BaselineAggregates)
+        foreach (var (createSql, view) in BaselineAggregates.Concat(PlainBaselineViews))
         {
             try
             {
@@ -2511,6 +2533,18 @@ AND   EXISTS (SELECT 1 FROM unnest($1::integer[]) AS id WHERE a.backend_type LIK
         (CreateBlockedProcessBaselineSql, BlockedProcessBaselineView),
         (CreateDeadlockBaselineSql,       DeadlockBaselineView),
         (CreateMemoryBaselineSql,         MemoryBaselineView),
+    };
+
+    /// <summary>
+    /// #7588: baseline relations that are ordinary views on every store. <see cref="EnsureBaselineFallbackViewsAsync"/> creates
+    /// them, on a fresh store and on an upgraded one alike (it runs on every start and skips what exists). Not in
+    /// <see cref="BaselineAggregates"/>, so they take no slot on the refresh grid, in the compression targets or in the retention
+    /// policies. The raw table behind them is floored at the baseline window by
+    /// <see cref="DarlingRetentionHorizons.BaselineServingRawCollectors"/>.
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] PlainBaselineViews =
+    {
+        (CreateDmvBlockingBaselineSql, DmvBlockingBaselineView),
     };
 
     /// <summary>

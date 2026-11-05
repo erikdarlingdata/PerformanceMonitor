@@ -975,14 +975,9 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
-            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
-
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            /* The baselines above stay server-wide: a server-wide baseline against a filtered count can only
+            /* The baselines below stay server-wide: a server-wide baseline against a filtered count can only
                make a master spike less likely, which is accepted. */
             var separate = PgFactCollector.SeparateDatabases(context);
             using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
@@ -1002,6 +997,12 @@ ORDER BY ms_delta DESC LIMIT 1";
                 currentDeadlocks = Convert.ToInt64(reader.GetValue(1));
                 blockingFromDmv = Convert.ToBoolean(reader.GetValue(2)); // #7537: the count is DMV snapshots, not blocked process reports
             }
+            /* #7588: the baseline follows the arm the window counted. Report rows are judged against report history and
+               snapshot rows against snapshot history, so the ratio never divides one unit by the other. */
+            var blockingBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, blockingFromDmv ? MetricNames.BlockingSnapshot : MetricNames.Blocking, context.TimeRangeStart, context.CancellationToken);
+            var deadlockBaseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.Deadlock, context.TimeRangeStart, context.CancellationToken);
             if (separate is not null)
                 currentDeadlocks = await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
                     connection, DeadlockOutsideCountSql, DeadlockGraphsCountSql, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,

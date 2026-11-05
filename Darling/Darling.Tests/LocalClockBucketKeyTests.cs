@@ -272,7 +272,7 @@ public sealed class LocalClockBucketKeyTests
 
         var bareKey = new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase);
         var bareDate = new Regex(@"(?<![\w.])collection_time::DATE", RegexOptions.IgnoreCase);
-        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.Deadlock };
+        var ownExtract = new HashSet<string>(StringComparer.Ordinal) { MetricNames.Blocking, MetricNames.BlockingSnapshot, MetricNames.Deadlock };
         var unkeyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6 };
         var keyedParameters = new SortedSet<int> { 1, 2, 3, 4, 5, 6, 7 };
 

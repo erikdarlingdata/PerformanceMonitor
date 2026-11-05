@@ -2155,16 +2155,15 @@ public static class FactAdvice
 
     /// <summary>
     /// #7537: the same figure when the detector took its DMV arm (the window holds no blocked process reports, as on
-    /// RDS and Azure), so the rows are blocking snapshots. The baseline is still built from report rows, so the
-    /// note says the two are different units instead of claiming they match.
+    /// RDS and Azure), so the rows are blocking snapshots. The baseline is built from snapshot rows too (#7588), so the
+    /// note names the source it counted and says the baseline counts the same thing.
     /// </summary>
     private const string BlockingSpikeDmvUnitNote =
         " This counts blocking snapshot rows from the DMVs, because the window holds no blocked process reports for the " +
         "databases this target covers, and " +
         "the snapshot job adds a row at every sample a session keeps waiting, so one long wait adds several. It is not " +
         "the blocking event count, which counts each wait once; the two figures for the same window will differ. " +
-        "The baseline it is compared with is built from blocked process report rows, not snapshot rows, so it does " +
-        "not measure the same thing as this window's count.";
+        "The baseline it is compared with is built from snapshot rows too.";
 
     /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how

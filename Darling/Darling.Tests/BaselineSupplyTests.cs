@@ -221,7 +221,9 @@ public class BaselineSupplyTests
     {
         var pgSources = PgTargetBaselineSources();
         Assert.Equal(12, pgSources.Count);  /* the four v1 tables + pg_replication_stats + pg_io_stats + pg_write_stats + pg_blocking_edges (lane 17) + pg_wait_sampling (lane 24) + pg_statement_stats (lane 27) + pg_kernel_stats (lane 28) + pg_database_size_stats (lane 38) */
-        Assert.Equal(2 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
+        /* Three SQL Server members since #7588: the snapshot-arm blocking baseline reads dmv_blocking_snapshots directly. */
+        Assert.Equal(3 + pgSources.Count, DarlingRetention.BaselineServingRawCollectors.Count);
+        Assert.Contains("dmv_blocking_snapshot", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("cpu_utilization", DarlingRetention.BaselineServingRawCollectors);
         Assert.Contains("file_io_stats", DarlingRetention.BaselineServingRawCollectors);
         foreach (var table in pgSources)
