@@ -108,6 +108,22 @@ public sealed class WebDisplayDetailsBehaviourTests
         Assert.Equal(2, tile.GetProperty("breaks").GetInt32());
     }
 
+    [Theory]
+    [InlineData("server")]
+    [InlineData("finops")]
+    [InlineData("template")]
+    public void TheMemoryStateTile_ShowsTheServersNote_WhereTheStateIsNull(string where)
+    {
+        var tile = Run().GetProperty("memoryState").GetProperty(where);
+        Assert.Equal(1, tile.GetProperty("count").GetInt32());
+        Assert.Equal("n/a (Azure SQL Database)", tile.GetProperty("noted").GetString());
+        // With no note either, the dash stays; with a state, the state wins over the note.
+        var bare = tile.GetProperty("bare").GetString()!;
+        Assert.NotEmpty(bare);
+        Assert.DoesNotContain("n/a", bare, System.StringComparison.Ordinal);
+        Assert.Equal("Available physical memory is high", tile.GetProperty("valued").GetString());
+    }
+
     [Fact]
     public void AnHourOfMemoryPressure_IsStampedAtItsMiddle() => Assert.Equal("2026-11-05T17:30:00", Str("pressureStamp"));
 

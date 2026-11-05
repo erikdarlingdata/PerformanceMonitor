@@ -83,6 +83,24 @@ out.planId = cellOf(QUERY_STORE_COLUMNS, [{ query_id: 5568, plan_id: 7712 }], "P
   out.topWait = { text: tile.textContent.replace("Top wait", ""), breaks: tile.findAll((n) => n.tag === "wbr").length };
 }
 
+/* The Memory tiles' System state tile (the server page, the FinOps utilization panel and the Memory pressure custom-view template) shows the
+   server's own note where the state is null, not a bare dash (#6159, #7552). The descriptors are the shipped ones. */
+{
+  const { MEMORY_STATS: serverStats } = await import(pathToFileURL(root + "/pages/server-tabs/sql-memory.js").href);
+  const { MEMORY_STATS: finopsStats } = await import(pathToFileURL(root + "/pages/finops/utilization.js").href);
+  const { DASHBOARD_TEMPLATES } = await import(pathToFileURL(root + "/view-templates.js").href);
+  const found = [];
+  const seek = (n) => { if (!n || typeof n !== "object") return; if (n.key === "system_memory_state") found.push(n); (Array.isArray(n) ? n : Object.values(n)).forEach(seek); };
+  DASHBOARD_TEMPLATES.forEach((t) => seek(t.make("example-sql-01")));
+  const tile = (st, data) => VIZ.stat(data, { stats: [st] }).textContent.replace(st.label, "");
+  const note = "n/a (Azure SQL Database)";
+  const sets = { server: serverStats.filter((st) => st.key === "system_memory_state"), finops: finopsStats.filter((st) => st.key === "system_memory_state"), template: found };
+  out.memoryState = {};
+  for (const [name, list] of Object.entries(sets)) {
+    out.memoryState[name] = { count: list.length, noted: list.map((st) => tile(st, { system_memory_state: null, system_memory_state_note: note })).join("|"), bare: list.map((st) => tile(st, { system_memory_state: null })).join("|"), valued: list.map((st) => tile(st, { system_memory_state: "Available physical memory is high", system_memory_state_note: note })).join("|") };
+  }
+}
+
 /* #7552 item 10: an hour of memory pressure events is stamped at its middle, because the chart centres a bar on its stamp. */
 {
   const { pressureEventBuckets } = await import(pathToFileURL(root + "/pages/server-tabs/sql-memory.js").href);
