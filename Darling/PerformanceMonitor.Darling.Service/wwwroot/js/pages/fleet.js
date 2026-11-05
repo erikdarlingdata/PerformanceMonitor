@@ -27,8 +27,9 @@ import { createRule, deleteRule } from "./mute-rules.js";
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
 
 /** Client-side card orderings (M8). Severity is the default; CPU sorts busiest-first (grids default DESC). */
-const SORTS = {
-  severity: (a, b) => (BAND_RANK[a.band] ?? 9) - (BAND_RANK[b.band] ?? 9) || a.display_name.localeCompare(b.display_name),
+export const SORTS = {
+  /* #7561: inside one band, a server with a tile no band reads (has_advisory_tile, set by the service) sorts above one without. */
+  severity: (a, b) => (BAND_RANK[a.band] ?? 9) - (BAND_RANK[b.band] ?? 9) || (b.has_advisory_tile ? 1 : 0) - (a.has_advisory_tile ? 1 : 0) || a.display_name.localeCompare(b.display_name),
   name: (a, b) => a.display_name.localeCompare(b.display_name),
   cpu: (a, b) =>
     (b.total_cpu_percent ?? b.cpu_percent ?? -1) - (a.total_cpu_percent ?? a.cpu_percent ?? -1) ||
@@ -72,8 +73,16 @@ function writeStored(key, value) { try { localStorage.setItem(key, value); } cat
    client-side approximation of "needs attention" would eventually disagree with the number that sent the
    reader here, which is this defect wearing a new hat. R1 still holds — no threshold is re-derived here, a
    server-computed band is read. */
-function cardNeedsAttention(c) {
-  return c.band !== "Healthy";
+export function cardNeedsAttention(c) {
+  /* #7561: a Healthy band with a tile no band reads (a warning identity column, an Agent alert gap, an overdue backup) is still listed. */
+  return c.band !== "Healthy" || c.has_advisory_tile === true;
+}
+
+/* #7561: how many servers the overview's problem list holds: the rows it lists plus the ones past its cap. The "All N servers healthy" line shows only when
+   this is 0. It is the server's own problem list (band not Healthy, or a tile no band reads), not the band counts alone, which leave out a Healthy-banded
+   server with a warning tile. */
+export function problemServerCount(d) {
+  return ((d && d.worst_servers) || []).length + ((d && d.additional_problem_count) || 0);
 }
 
 /* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
@@ -358,8 +367,7 @@ export async function renderFleet(main, opts) {
     return;
   }
 
-  const problems = d.critical_count + d.warning_count + d.offline_count;
-  if (problems === 0) {
+  if (problemServerCount(d) === 0) {
     nodes.push(
       el("div", { class: "all-healthy" }, [
         el("span", { class: "dot band-Healthy" }),
