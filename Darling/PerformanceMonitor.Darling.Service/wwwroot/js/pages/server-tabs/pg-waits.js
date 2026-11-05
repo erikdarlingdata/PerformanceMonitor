@@ -89,10 +89,9 @@ export const PG_KERNEL_COLUMNS = [
   { key: "user_cpu_ms", label: "User CPU", format: "ms" },
   { key: "system_cpu_ms", label: "System CPU", format: "ms" },
   { key: "pct_of_total_cpu", label: "% of CPU", format: "num1" },
-  /* mb, from the _mb fields the tool emits beside the byte counts — "bytes" is not one of the renderer's
-     formats, and an unrecognised one falls through to raw text rather than erroring. */
-  { key: "device_read_mb", label: "Device Read", format: "mb" },
-  { key: "device_write_mb", label: "Device Write", format: "mb" },
+  /* #7556: the exact byte counts the tool emits beside its rounded _mb fields, shown with the "bytes" format. */
+  { key: "device_read_bytes", label: "Device Read", format: "bytes" },
+  { key: "device_write_bytes", label: "Device Write", format: "bytes" },
   { key: "major_faults", label: "Major Faults", format: "int" },
   /* #7428: see PG_WAIT_SAMPLING_COLUMNS. */
   { key: "query_text", label: "Query", wrap: true, valueList: false, render: (row) => codeDisclosure(row.query_text) },

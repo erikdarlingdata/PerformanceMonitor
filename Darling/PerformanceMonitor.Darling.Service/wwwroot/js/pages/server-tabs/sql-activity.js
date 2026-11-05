@@ -333,7 +333,7 @@ export const INDEX_COLUMNS = [
   { key: "index_name", label: "Index" },
   { key: "index_type", label: "Type" },
   { key: "classification", label: "Classification" },
-  { key: "reserved_mb", label: "Reserved", format: "mb" },
+  { key: "reserved_mb", label: "Reserved", format: "mbfit" },
   { key: "total_rows", label: "Rows", format: "int" },
   { key: "total_reads", label: "Reads", format: "int" },
   { key: "user_updates", label: "Updates", format: "int" },

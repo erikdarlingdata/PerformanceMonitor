@@ -17,11 +17,11 @@
  */
 
 import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
-import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
 /* Re-exported so every existing import of the gap rule from charts.js keeps working (it moved to chart-gaps.js, #6291). */
-export { gapThresholdMs, splitAtGaps };
+export { gapThresholdMs, splitAtGaps, bucketMsOf };
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -242,12 +242,15 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *                domain, byte-for-byte. Data times stay naive-UTC-parsed and tick labels stay browser-local.
  *   gapSeamMs  — optional UTC-epoch ms (#7508): where a series joins two grains (hourly points, then per-interval points).
  *                The collection-gap rule judges each side against its own spacing. Absent => one rule for the series, as before.
+ *   bucketMs   — optional ms (#7572): the width of one bucket of a trend whose reply states it (`bucket_minutes`). A step longer than
+ *                one bucket breaks the line, so a quiet series thinned to its buckets with readings still shows its silences, and a
+ *                lone reading is a dot. Absent => the cadence the series shows for itself, as before.
  *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
  *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
  *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -311,7 +314,7 @@ export function renderLineChart(spec) {
   const tMax = hasWindow ? windowEnd : dataTMax;
   const spanMs = tMax - tMin;
   const rowTimes = rows.map((p) => p.t.getTime());
-  const gapMs = gapThresholdMs(rowTimes, gapSeamMs);
+  const gapMs = gapThresholdMs(rowTimes, gapSeamMs, bucketMs);
 
   /* A numeric reader: null/NaN reads as null for line/area (a gap), or 0 for a stacked mode (a continuous baseline). */
   const readVal = (r, key) => {
@@ -576,7 +579,7 @@ export function renderLineChart(spec) {
         /* One run per stretch with samples (#5644 W7): a collection gap ends a run, so no line or fill crosses it. The
            threshold comes from THIS series' own spacing: a 15-minute series on a chart of 1-minute buckets is not a
            run of gaps. */
-        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i]), gapSeamMs))) {
+        for (const run of splitAtGaps(plottable, rowTimes, gapThresholdMs(plottable.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
           const linePts = run.map((i) => xs[i] + "," + plotY(readVal(rows[i].r, s.key)));
           /* A lone plottable point has no segment to stroke, so draw it as a dot — one bucket still shows its
              reading. (Its resting marker matches the hover dot; static class so it does not vanish on mouseout.) */
@@ -615,7 +618,7 @@ export function renderLineChart(spec) {
       }
       /* Broken at collection gaps like a primary line (#5644 W7), by its own spacing (a 15-minute overlay over
          1-minute buckets draws one line, not a dot per sample). */
-      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i]), gapSeamMs))) {
+      for (const run of splitAtGaps(plottable2, rowTimes, gapThresholdMs(plottable2.map((i) => rowTimes[i]), gapSeamMs, bucketMs))) {
         const pts2 = run.map((i) => xs[i] + "," + Math.max(M.t, Math.min(M.t + PLOT_H, scaleY2(Number(rows[i].r[series2.key])))));
         if (pts2.length === 1) {
           /* Same single-bucket rule as the primary series: a lone overlay reading draws as a dot, not a dropped

@@ -106,6 +106,8 @@ public sealed class WebNoticesAndRangeStripBehaviourTests
         Assert.Equal(1, Result.Value.GetProperty("singleSample").GetProperty("dots").GetInt32());
         Assert.Equal(2, Result.Value.GetProperty("singleSample").GetProperty("stem").GetInt32());
         Assert.Equal(0, Result.Value.GetProperty("multiSample").GetProperty("dots").GetInt32());
+        // stripOf gives the blocking strip a one minute step: reports five minutes apart are four dots, not the line their steady cadence would draw.
+        Assert.Equal(4, Result.Value.GetProperty("sparseSample").GetProperty("dots").GetInt32());
 
         // A read that answered "empty" draws no strip, and nor does a window where every read is empty.
         Assert.True(Result.Value.GetProperty("emptyStrip").GetProperty("hidden").GetBoolean());

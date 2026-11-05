@@ -13,7 +13,7 @@ import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } 
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
 import { findingTitle, severityLabel, mergeBySentence, chainLine } from "../analysis-findings.js";
-import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams } from "../../time-slicer.js";
+import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams, stripValue, stripGap } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
@@ -528,10 +528,10 @@ function stripOf(kind, server, ctx) {
   }
   if (kind === "blocking" || kind === "deadlocks") {
     const blocking = kind === "blocking";
-    return { title: blocking ? "Blocked process reports" : "Deadlocks", tool: blocking ? "get_blocking_trend" : "get_deadlock_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "count" };
+    return { title: blocking ? "Blocked process reports" : "Deadlocks", tool: blocking ? "get_blocking_trend" : "get_deadlock_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "count", stepMs: 60000 };
   }
   if (kind === "querystore") {
-    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
+    return { title: "Query Store duration", tool: "get_query_store_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value", seam: (d) => d && d.routing && d.routing.raw_from };
   }
   const queries = kind === "queries";
   return { title: queries ? "Query duration" : "Procedure duration", tool: queries ? "get_query_duration_trend" : "get_procedure_duration_trend", params: { server, hours: ctx.hours }, rows: (d) => d.trend, time: "time", value: "value" };
@@ -618,9 +618,9 @@ function rankedSlicer(kind, cmp) {
     if (res.kind === "empty") return hideEmpty();
     if (res.kind !== "data" || !res.data) return;
     const rows = strip.rows(res.data);
-    const samples = (Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: Number(r[strip.value]) }));
+    const samples = (Array.isArray(rows) ? rows : []).map((r) => ({ t: timeOf(r[strip.time]), v: stripValue(r[strip.value]) }));
     if (!samples.some((p) => Number.isFinite(p.t) && Number.isFinite(p.v))) return hideEmpty();
-    slicer.setPoints(samples);
+    slicer.setPoints(samples, stripGap(strip, res.data));
     /* The Active strip reads the newest snapshots only: say so when the list was cut, so a blank stretch of a long range is not read as quiet. */
     if (strip.note) slicer.setNote(strip.note(res.data));
   });

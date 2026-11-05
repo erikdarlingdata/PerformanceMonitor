@@ -62,7 +62,10 @@ const answerFor = (name, params) => {
   if (name === "get_blocking_trend" || name === "get_deadlock_trend") {
     if (server === "single") return name === "get_blocking_trend" ? { trend: [{ time: iso(END - 6 * HOUR), count: 3 }] } : { status: "empty", message: "No deadlocks in this window." };
     if (server === "none") return { status: "empty", message: "No rows in this window." };
-    return { trend: [1, 7, 13, 19].map((h, i) => ({ time: iso(START + h * HOUR), count: 2 + i })) };
+    /* #7544: reports every 5 minutes. The strip's own step is one minute, so each is a lone dot; a line drawn from the samples' own steady cadence would join them. */
+    if (server === "sparse") return { trend: [0, 1, 2, 3].map((m) => ({ time: iso(START + 7 * HOUR + m * 5 * 60000), count: 2 })) };
+    /* #7544: these trends are per-minute counts, and a step longer than a minute breaks the line into dots, so several samples are consecutive minutes. */
+    return { trend: [0, 1, 2, 3].map((m, i) => ({ time: iso(START + 7 * HOUR + m * 60000), count: 2 + i })) };
   }
   if (name === "get_query_trend") {
     /* #7416 item 21: the head of the history is later than the window's start. "late" has the start inside the tier's retention; "old" does not. */
@@ -156,6 +159,7 @@ const sliceOf = (root, title) => byClass(root, "slicer").find((n) => n.attrs["da
 const reports = sliceOf(single, "Blocked process reports");
 out.singleSample = { dots: byClass(reports, "slicer-dot").length, stem: (byClass(reports, "slicer-line")[0].attrs.d || "").split("L").length };
 out.multiSample = { dots: byClass(sliceOf(await draw("blocking", "many"), "Blocked process reports"), "slicer-dot").length };
+out.sparseSample = { dots: byClass(sliceOf(await draw("blocking", "sparse"), "Blocked process reports"), "slicer-dot").length };
 const deadlocks = sliceOf(single, "Deadlocks");
 out.emptyStrip = { hidden: deadlocks.parentNode.style.display === "none" };
 const none = await draw("blocking", "none");

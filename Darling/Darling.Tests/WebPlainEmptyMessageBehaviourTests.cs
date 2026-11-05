@@ -289,10 +289,11 @@ public sealed class WebPlainEmptyMessageBehaviourTests
     public void ASmallSizeInMegabytes_IsWrittenInTheUnitThatFitsIt()
     {
         var fit = Run().GetProperty("fit");
-        Assert.Equal("143.4 KB", fit.GetProperty("small").GetString());
+        // #7564: 0.14 MB stays in MB. Turned into KB it printed 143.4 KB, digits the rounded input never held.
+        Assert.Equal("0.14 MB", fit.GetProperty("small").GetString());
         Assert.Equal("2.0 MB", fit.GetProperty("whole").GetString());
         Assert.Equal("4.0 GB", fit.GetProperty("large").GetString());
-        Assert.Equal("0 B", fit.GetProperty("zero").GetString());
+        Assert.Equal("0 MB", fit.GetProperty("zero").GetString());
         Assert.Equal("—", fit.GetProperty("none").GetString());
     }
 }
