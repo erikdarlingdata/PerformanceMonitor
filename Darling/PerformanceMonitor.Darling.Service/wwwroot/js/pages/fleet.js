@@ -78,6 +78,13 @@ export function cardNeedsAttention(c) {
   return c.band !== "Healthy" || c.has_advisory_tile === true;
 }
 
+/* #7561: how many servers the overview's problem list holds: the rows it lists plus the ones past its cap. The "All N servers healthy" line shows only when
+   this is 0. It is the server's own problem list (band not Healthy, or a tile no band reads), not the band counts alone, which leave out a Healthy-banded
+   server with a warning tile. */
+export function problemServerCount(d) {
+  return ((d && d.worst_servers) || []).length + ((d && d.additional_problem_count) || 0);
+}
+
 /* What the filter did, shown beside the cards it left. Word-for-word the desktop viewer's
    FleetRollup.AttentionFilterCountText (#2424), because the point of doing all three surfaces at once is
    that a reader moving between them meets one vocabulary rather than three. The all-clear arms matter as
@@ -360,9 +367,7 @@ export async function renderFleet(main, opts) {
     return;
   }
 
-  /* #7561: the server's own problem list (band not Healthy, or a tile no band reads), not the band counts alone. */
-  const problems = (d.worst_servers || []).length + (d.additional_problem_count || 0);
-  if (problems === 0) {
+  if (problemServerCount(d) === 0) {
     nodes.push(
       el("div", { class: "all-healthy" }, [
         el("span", { class: "dot band-Healthy" }),

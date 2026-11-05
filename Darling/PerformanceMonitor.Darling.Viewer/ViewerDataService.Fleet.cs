@@ -71,7 +71,7 @@ public sealed partial class ViewerDataService
     /// alerts, the web card and <c>get_database_protection</c> use, over the newest capture inside <see cref="DatabaseProtectionBands.CaptureFreshness"/>.
     /// A store older than V223 has no table: that is no chip, not an error on the card.
     /// </summary>
-    internal async Task<(string? Value, string? Detail)> GetDatabaseProtectionChipAsync(
+    internal async Task<(string? Value, string? Detail, int Count)> GetDatabaseProtectionChipAsync(
         int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         try
@@ -80,17 +80,17 @@ public sealed partial class ViewerDataService
                 _dataSource, serverId, nowUtc - DatabaseProtectionBands.CaptureFreshness, nowUtc, cancellationToken: cancellationToken);
             if (read.NewestCapture is null)
             {
-                return (null, null);
+                return (null, null, 0);
             }
 
             var overdue = DatabaseProtectionBands.OverdueFacts(read.Databases, DateTime.SpecifyKind(read.NewestCapture.Value, DateTimeKind.Utc));
             return overdue.Count == 0
-                ? (null, null)
-                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue));
+                ? (null, null, 0)
+                : (DatabaseProtectionBands.ChipValue(overdue), DatabaseProtectionBands.ChipDetail(overdue), overdue.Count);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return (null, null);
+            return (null, null, 0);
         }
     }
 
@@ -848,15 +848,11 @@ public sealed class FleetRollup
         {
             parts.Add("collection stale");
         }
-        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity && identity.WorstBand == PerformanceMonitor.Collectors.IdentityCapacityMath.BandCritical)
+        if (s.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
         {
-            /* #7561: the critical identity tile bands the card, so the reason names it, in the service's words. */
-            parts.Add($"Identity capacity critical ({identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the bar)");
-        }
-        else if (s.IdentityCapacity is { ColumnsAtBar: > 0 } warnIdentity)
-        {
-            /* #7561: the tiles no band reads are named too, in the service's words, so a Healthy server in Needs attention says why. */
-            parts.Add($"Identity capacity {warnIdentity.ColumnsAtBar} column{(warnIdentity.ColumnsAtBar == 1 ? "" : "s")} at the warning bar");
+            /* #7561: a critical identity tile bands the card and a warning one only lists it. Either way the reason names it, in the service's words
+               (ServerHealthClassifier.IdentityCapacityReason), so a Healthy server in Needs attention says why. */
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
         }
 
         if (s.AgentAlertGaps.Count > 0)
@@ -866,7 +862,7 @@ public sealed class FleetRollup
 
         if (s.HasDatabaseProtectionOverdue)
         {
-            parts.Add($"Protection {s.DatabaseProtectionChipValue}");
+            parts.Add(ServerHealthClassifier.ProtectionReason(s.DatabaseProtectionOverdueCount));
         }
 
         if (s.MetricCount > 0 && s.MeasuredMetricCount == 0)

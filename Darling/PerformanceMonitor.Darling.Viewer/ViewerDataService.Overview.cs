@@ -283,7 +283,7 @@ LIMIT 1";
             .OrderByDescending(c => c.PercentUsed ?? 0).FirstOrDefault();
         return bands.Count == 0
             ? null
-            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, worst);
+            : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
     }
 
     /// <summary>
@@ -619,6 +619,7 @@ LIMIT 1";
             LastCollectionTime = lastCollection,
             AgentAlertGaps = await GetAgentAlertGapsAsync(serverId, nowUtc, cancellationToken),
             DatabaseProtectionChipValue = protectionChip.Value,
+            DatabaseProtectionOverdueCount = protectionChip.Count,
             DatabaseProtectionChipDetail = protectionChip.Detail,
         };
     }
@@ -992,6 +993,9 @@ public sealed class ServerSummaryItem
 
     /// <summary>#6873: "3 overdue" when a full backup, a log backup or a CHECKDB is overdue on this server, else null. Not a band: nothing reads it for the card's band.</summary>
     public string? DatabaseProtectionChipValue { get; set; }
+
+    /// <summary>#7561: how many facts are overdue, for the Needs attention reason ("Protection 3 overdue items"). 0 with <see cref="DatabaseProtectionChipValue"/> null.</summary>
+    public int DatabaseProtectionOverdueCount { get; set; }
 
     /// <summary>#6873: the overdue facts in words, for the chip's detail. Null with <see cref="DatabaseProtectionChipValue"/>.</summary>
     public string? DatabaseProtectionChipDetail { get; set; }
@@ -1613,7 +1617,7 @@ public sealed class ServerTagPill
 }
 
 /// <summary>The identity columns at a bar on one server, as the Overview card carries them (#6875): the worst band and how many columns are at warning or critical.</summary>
-public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, IdentityColumnFact? Worst = null)
+public sealed record IdentityCapacityCard(string WorstBand, int ColumnsAtBar, int CriticalColumns, IdentityColumnFact? Worst = null)
 {
     /// <summary>The tile's second line (#7416): the fullest column and its figures, as the web tile says them, and where the rest are listed. The generic
     /// sentence when no column is known.</summary>

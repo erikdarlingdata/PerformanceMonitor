@@ -1084,7 +1084,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
-        var counts = new Dictionary<int, (int Columns, bool Critical, IdentityColumnFact? Worst, double WorstPercent)>();
+        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent)>();
         var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
         await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
@@ -1119,13 +1119,13 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
             counts.TryGetValue(serverId, out var seen);
             /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
             var isWorst = seen.Worst is null || percent > seen.WorstPercent;
-            counts[serverId] = (seen.Columns + 1, seen.Critical || band == IdentityCapacityMath.BandCritical,
+            counts[serverId] = (seen.Columns + 1, seen.CriticalColumns + (band == IdentityCapacityMath.BandCritical ? 1 : 0),
                 isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent);
         }
 
         return counts.ToDictionary(
             c => c.Key,
-            c => FleetIdentityCapacity.Of(c.Value.Critical ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.Worst));
+            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst));
     }
 
     private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
@@ -1517,7 +1517,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     /// <para>Internal so the prose can be asserted against the card it describes. The clause a flag produces
     /// is the plainest statement of what that flag means, and #3098 is a field whose name and whose clause
     /// said different things for long enough that four readings of the name were wrong.</para></summary>
-    internal static string BuildReason(FleetServerCard c)
+    internal static string BuildReason(FleetServerCard c, bool includeProtection = true)
     {
         if (c.IsOnline == false)
         {
@@ -1601,9 +1601,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         /* #7561: the identity tile's own words. A critical column bands the server; a warning one and the two setup tiles only list it. */
         if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
         {
-            parts.Add(FleetServerCard.IsIdentityCritical(identity)
-                ? $"Identity capacity critical ({identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the bar)"
-                : $"Identity capacity {identity.ColumnsAtBar} column{(identity.ColumnsAtBar == 1 ? "" : "s")} at the warning bar");
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
         }
 
         if (c.AgentAlertGaps is { Count: > 0 } gaps)
@@ -1613,7 +1611,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
         if (c.DatabaseProtectionOverdue is { Count: > 0 } overdue)
         {
-            parts.Add($"Protection {overdue.Count} overdue item{(overdue.Count == 1 ? "" : "s")}");
+            /* #7561: the daily email prints the same items in its own Protection section, so it leaves this clause out of its reason line. */
+            if (includeProtection)
+            {
+                parts.Add(ServerHealthClassifier.ProtectionReason(overdue.Count));
+            }
         }
 
         if (c.MetricCount > 0 && c.MeasuredMetricCount == 0)
@@ -3292,6 +3294,8 @@ public sealed class FleetServerCard
 public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_band")] string WorstBand,
     [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
+    /* #7561: how many of those are at the critical bar, so the reason can say "1 at its limit, 4 near it" rather than call all five critical. */
+    [property: JsonPropertyName("critical_columns")] int CriticalColumns,
     /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
        does not fit a JSON number) and null when the collector did not store the value. */
     [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
@@ -3300,11 +3304,11 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("worst_percent_used")] double? WorstPercentUsed = null,
     [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null)
 {
-    internal static FleetIdentityCapacity Of(string band, int columns, IdentityColumnFact? worst) =>
+    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst) =>
         worst is null
-            ? new FleetIdentityCapacity(band, columns)
+            ? new FleetIdentityCapacity(band, columns, criticalColumns)
             : new FleetIdentityCapacity(
-                band, columns, worst.DatabaseName,
+                band, columns, criticalColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
                 worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture));

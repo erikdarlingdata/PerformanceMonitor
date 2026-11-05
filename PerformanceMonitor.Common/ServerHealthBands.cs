@@ -1431,6 +1431,26 @@ namespace PerformanceMonitor.Common
             return tiles;
         }
 
+        /// <summary>#7561: the Needs attention reason clause for the identity tile, said the same on the web, the Viewer, the MCP tool and the email. A column at the
+        /// critical bar is at its limit and a column at the warning bar is near it, and each count is its own, so one critical and four warning columns read
+        /// "1 column at its limit, 4 near it" and not "5 columns at the bar". <paramref name="columnsAtBar"/> counts both kinds.</summary>
+        public static string IdentityCapacityReason(int columnsAtBar, int criticalColumns)
+        {
+            var critical = Math.Clamp(criticalColumns, 0, columnsAtBar);
+            var warning = columnsAtBar - critical;
+            if (critical == 0)
+            {
+                return string.Create(CultureInfo.InvariantCulture, $"Identity capacity {warning} column{(warning == 1 ? "" : "s")} at the warning bar");
+            }
+
+            var text = string.Create(CultureInfo.InvariantCulture, $"Identity capacity critical ({critical} column{(critical == 1 ? " at its" : "s at their")} limit");
+            return warning == 0 ? text + ")" : string.Create(CultureInfo.InvariantCulture, $"{text}, {warning} near it)");
+        }
+
+        /// <summary>#7561: the Needs attention reason clause for overdue backups and CHECKDBs, the service's words on every surface that prints it.</summary>
+        public static string ProtectionReason(int overdueCount) =>
+            string.Create(CultureInfo.InvariantCulture, $"Protection {overdueCount} overdue item{(overdueCount == 1 ? "" : "s")}");
+
         /// <summary>
         /// How many of the six card metrics carry a real reading (#3528): measured = severities that are
         /// not <see cref="HealthSeverity.Unknown"/>, out of the per-metric total. The worst-of fold above

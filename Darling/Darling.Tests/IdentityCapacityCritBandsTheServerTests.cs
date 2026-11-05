@@ -59,8 +59,8 @@ public sealed class IdentityCapacityCritBandsTheServerTests
             databaseProtectionOverdue: overdue,
             identityCapacity: identity);
 
-    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
-    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2);
+    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
+    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2, 0);
     private static readonly IReadOnlyList<FleetAgentAlertGap> OneGap = new[] { new FleetAgentAlertGap("x", "Agent alert 823 is missing.") };
 
     [Fact]
@@ -109,13 +109,13 @@ public sealed class IdentityCapacityCritBandsTheServerTests
             DeadlockWindow = TimeSpan.FromHours(1),
             BlockingWindow = TimeSpan.FromHours(1),
             LastCollectionTime = Now.AddSeconds(-30),
-            IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 1),
+            IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 1, 1),
         };
         card.ApplyFreshness(Now);
         Assert.Equal(HealthSeverity.Critical, card.OverallMetricSeverity);
         Assert.Equal(FleetHealthBand.Critical, FleetRollup.ClassifyBand(card));
 
-        card.IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 1);
+        card.IdentityCapacity = new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 1, 0);
         Assert.NotEqual(HealthSeverity.Critical, card.OverallMetricSeverity);
     }
 
@@ -178,7 +178,7 @@ public sealed class IdentityCapacityCritBandsTheServerTests
 
         var plain = Item(1, "a-plain");
         var agent = Item(2, "b-agent", gaps: new[] { new AgentAlertGap("x", "Agent alert 823 is missing.", Array.Empty<string>(), Array.Empty<int>()) });
-        var warnIdentity = Item(3, "c-warn-identity", identity: new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 2));
+        var warnIdentity = Item(3, "c-warn-identity", identity: new IdentityCapacityCard(IdentityCapacityMath.BandWarning, 2, 0));
         var all = new[] { plain, agent, warnIdentity };
 
         /* The band and the dot stay Healthy: nothing here re-bands the server. */
@@ -202,6 +202,60 @@ public sealed class IdentityCapacityCritBandsTheServerTests
         Assert.Contains("Identity capacity 2 columns at the warning bar", rollup.WorstServers[1].Reason, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void TheIdentityReason_SaysEachCountTruthfully_OnEverySurface()
+    {
+        /* One column at its limit and four near it: not "5 columns at the bar". */
+        var mixed = new FleetIdentityCapacity(IdentityCapacityMath.BandCritical, 5, 1);
+        var service = DarlingFleetReader.BuildReason(Card(1, "mixed", identity: mixed));
+        Assert.Contains("Identity capacity critical (1 column at its limit, 4 near it)", service, StringComparison.Ordinal);
+        Assert.DoesNotContain("at the bar", service, StringComparison.Ordinal);
+
+        var viewer = ViewerCard(identity: new IdentityCapacityCard(IdentityCapacityMath.BandCritical, 5, 1));
+        Assert.Equal(service, FleetRollup.BuildReason(viewer));
+
+        Assert.Equal("Identity capacity critical (2 columns at their limit)", ServerHealthClassifier.IdentityCapacityReason(2, 2));
+        Assert.Equal("Identity capacity critical (1 column at its limit)", ServerHealthClassifier.IdentityCapacityReason(1, 1));
+        Assert.Equal("Identity capacity 1 column at the warning bar", ServerHealthClassifier.IdentityCapacityReason(1, 0));
+    }
+
+    [Fact]
+    public void TheProtectionReason_IsTheServicesWords_OnTheServiceAndTheViewer()
+    {
+        var overdue = new[]
+        {
+            new FleetDatabaseProtectionOverdue("full", "Sales", "overdue", 90000, "Sales full backup overdue"),
+            new FleetDatabaseProtectionOverdue("full", "Hr", "overdue", 90000, "Hr full backup overdue"),
+            new FleetDatabaseProtectionOverdue("checkdb", "Hr", "overdue", 90000, "Hr CHECKDB overdue"),
+        };
+        var service = DarlingFleetReader.BuildReason(Card(1, "p", overdue: overdue));
+        Assert.Equal("Protection 3 overdue items", service);
+
+        /* The Viewer's chip says "3 items on 2 databases"; its Needs attention reason must not. */
+        var viewer = ViewerCard();
+        viewer.DatabaseProtectionChipValue = "3 items on 2 databases";
+        viewer.DatabaseProtectionOverdueCount = 3;
+        Assert.Equal("Protection 3 overdue items", FleetRollup.BuildReason(viewer));
+    }
+
+    private static ServerSummaryItem ViewerCard(IdentityCapacityCard? identity = null)
+    {
+        var item = new ServerSummaryItem
+        {
+            ServerName = "v",
+            DisplayName = "v",
+            ServerId = 1,
+            HealthyCollectorCount = 40,
+            CollectorCount = 40,
+            DeadlockWindow = TimeSpan.FromHours(1),
+            BlockingWindow = TimeSpan.FromHours(1),
+            LastCollectionTime = Now.AddSeconds(-30),
+            IdentityCapacity = identity,
+        };
+        item.ApplyFreshness(Now);
+        return item;
+    }
+
     private const string FleetJsPath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/fleet.js";
 
     /* Reads the shipped sort table and the needs-attention predicate out of fleet.js (no DOM is involved in either), then sorts a three-card
@@ -214,27 +268,23 @@ public sealed class IdentityCapacityCritBandsTheServerTests
         "const c = src.indexOf('function cardNeedsAttention(');" +
         "const d = src.indexOf('\\n}', c) + 2;" +
         "const code = (src.slice(a, b) + src.slice(c, d)).replace(/export /g, '');" +
-        "const f = new Function(code + '\\nreturn { SORTS, cardNeedsAttention };')();" +
+        "const p = src.indexOf('function problemServerCount(');" +
+        "const q = src.indexOf('\\n}', p) + 2;" +
+        "const f = new Function(code + src.slice(p, q).replace(/export /g, '') + '\\nreturn { SORTS, cardNeedsAttention, problemServerCount };')();" +
         "const cards = JSON.parse(process.argv[2]);" +
-        "console.log(JSON.stringify({ order: cards.slice().sort(f.SORTS.severity).map(x => x.display_name), attention: cards.filter(f.cardNeedsAttention).map(x => x.display_name) }));";
+        "console.log(JSON.stringify({ order: cards.slice().sort(f.SORTS.severity).map(x => x.display_name), attention: cards.filter(f.cardNeedsAttention).map(x => x.display_name), problems: f.problemServerCount(JSON.parse(process.argv[3])) }));";
 
-    [Fact]
-    public async System.Threading.Tasks.Task TheFleetPage_ListsAndSortsAnAdvisoryServerAboveAHealthyOne_WithoutChangingItsBand()
+    /* Runs the shipped page script over the cards of one fleet: the sort order, the Needs attention filter and the problem count the all-clear line reads.
+       Null when Node is not installed. */
+    private static async System.Threading.Tasks.Task<JsonDocument?> RunFleetScriptAsync(IReadOnlyList<FleetServerCard> cards)
     {
-        var cards = new[]
-        {
-            Card(1, "a-healthy"),
-            Card(2, "b-agent-alerts-warn", gaps: OneGap),
-            Card(3, "c-identity-crit", identity: Crit),
-        };
         var rollup = DarlingFleetReader.BuildRollup(cards, Now, Now.AddHours(-1), Now);
-        var json = JsonSerializer.Serialize(rollup.Cards, DarlingFleetReader.JsonOptions);
-
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add("-e");
         psi.ArgumentList.Add(NodeScript);
         psi.ArgumentList.Add(PathTo(FleetJsPath));
-        psi.ArgumentList.Add(json);
+        psi.ArgumentList.Add(JsonSerializer.Serialize(rollup.Cards, DarlingFleetReader.JsonOptions));
+        psi.ArgumentList.Add(JsonSerializer.Serialize(rollup, DarlingFleetReader.JsonOptions));
 
         Process proc;
         try
@@ -243,8 +293,7 @@ public sealed class IdentityCapacityCritBandsTheServerTests
         }
         catch (Win32Exception)
         {
-            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
-            return;
+            return null;
         }
 
         using (proc)
@@ -258,14 +307,51 @@ public sealed class IdentityCapacityCritBandsTheServerTests
             }
 
             Assert.True(proc.ExitCode == 0, "the fleet script failed: " + await error);
-            using var doc = JsonDocument.Parse(output);
-            var order = doc.RootElement.GetProperty("order").EnumerateArray().Select(e => e.GetString()).ToArray();
-            var attention = doc.RootElement.GetProperty("attention").EnumerateArray().Select(e => e.GetString()).ToArray();
-
-            /* Critical first, then the Healthy-banded server with a tile, then the plain one (which sorts first by name alone). */
-            Assert.Equal(new[] { "c-identity-crit", "b-agent-alerts-warn", "a-healthy" }, order);
-            Assert.Equal(new[] { "b-agent-alerts-warn", "c-identity-crit" }, attention);
-            Assert.Equal(FleetHealthBand.Healthy, cards[1].Band);
+            return JsonDocument.Parse(output);
         }
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task TheFleetPage_ListsAndSortsAnAdvisoryServerAboveAHealthyOne_WithoutChangingItsBand()
+    {
+        var cards = new[]
+        {
+            Card(1, "a-healthy"),
+            Card(2, "b-agent-alerts-warn", gaps: OneGap),
+            Card(3, "c-identity-crit", identity: Crit),
+        };
+        using var doc = await RunFleetScriptAsync(cards);
+        if (doc is null)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return;
+        }
+
+        var order = doc.RootElement.GetProperty("order").EnumerateArray().Select(e => e.GetString()).ToArray();
+        var attention = doc.RootElement.GetProperty("attention").EnumerateArray().Select(e => e.GetString()).ToArray();
+
+        /* Critical first, then the Healthy-banded server with a tile, then the plain one (which sorts first by name alone). */
+        Assert.Equal(new[] { "c-identity-crit", "b-agent-alerts-warn", "a-healthy" }, order);
+        Assert.Equal(new[] { "b-agent-alerts-warn", "c-identity-crit" }, attention);
+        Assert.Equal(FleetHealthBand.Healthy, cards[1].Band);
+        Assert.Equal(2, doc.RootElement.GetProperty("problems").GetInt32());
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task TheFleetPageAllClear_ShowsOnlyWhenNoServerIsListed_NotWhenAHealthyServerHasAWarnTile()
+    {
+        /* The all-clear line shows when the page's problem count is 0. One Healthy-banded server with a WARN tile leaves the band counts at
+           0 Critical / 0 Warning / 0 Offline, and the page must still not say everything is healthy. */
+        using var warnOnly = await RunFleetScriptAsync(new[] { Card(1, "a-healthy"), Card(2, "b-warn-identity", identity: Warn) });
+        if (warnOnly is null)
+        {
+            Assert.Skip("Node is not installed, so the shipped page script cannot be run.");
+            return;
+        }
+
+        Assert.Equal(1, warnOnly.RootElement.GetProperty("problems").GetInt32());
+
+        using var clear = await RunFleetScriptAsync(new[] { Card(1, "a-healthy"), Card(2, "b-healthy") });
+        Assert.Equal(0, clear!.RootElement.GetProperty("problems").GetInt32());
     }
 }
