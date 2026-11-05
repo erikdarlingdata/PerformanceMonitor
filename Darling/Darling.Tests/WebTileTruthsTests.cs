@@ -249,6 +249,22 @@ public sealed class WebTileTruthsTests
         Assert.Contains("Small query", newest);
     }
 
+    /// <summary>#7578: the date-time columns of Resource Semaphore Pressure wrap with the narrow flow-cell floor, so First and Last are not pushed past the panel.</summary>
+    [Fact]
+    public void TheSemaphorePressureGrid_WrapsItsDateTimeColumns()
+    {
+        var classes = Run().GetProperty("windowCellClasses");
+        foreach (var header in new[] { "Peak waiters at", "Peak granted at", "First", "Last" })
+        {
+            var cls = classes.GetProperty(header).GetString()!.Split(' ');
+            Assert.Contains("wrap", cls);
+            Assert.Contains("flow-cell", cls);
+            Assert.Contains("flow-narrow", cls);
+        }
+        // A number column keeps its single line.
+        Assert.DoesNotContain("wrap", classes.GetProperty("Snapshots").GetString()!.Split(' '));
+    }
+
     /// <summary>#7578: the File I/O Stats latency columns carry their unit, as the charts on the same tab do.</summary>
     [Fact]
     public void TheFileIoLatencyColumns_NameTheirUnit()

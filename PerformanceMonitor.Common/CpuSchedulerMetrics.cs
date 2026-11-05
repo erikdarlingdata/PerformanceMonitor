@@ -63,7 +63,7 @@ public static class CpuSchedulerMetrics
             new("Active Parallel Threads", FormatLong(s.TotalActiveParallelThreadCount), false),
             new("Runnable Requests", FormatNullableInt(s.RunnableRequestCount), false),
             new("Total Requests", FormatNullableInt(s.TotalRequestCount), false),
-            new("Runnable %", s.RunnablePercent.HasValue ? s.RunnablePercent.Value.ToString("F2") : "N/A", false),
+            new("Runnable %", s.RunnablePercent.HasValue ? s.RunnablePercent.Value.ToString("F2") : "0.00", false, RunnablePercentHint),
             new("Total Physical Memory", FormatKbAsGb(s.TotalPhysicalMemoryKb), false),
             new("Available Physical Memory", FormatKbAsGb(s.AvailablePhysicalMemoryKb), s.PhysicalMemoryPressureWarning),
             new("System Memory State", string.IsNullOrEmpty(s.SystemMemoryStateDesc) ? "N/A" : s.SystemMemoryStateDesc, s.PhysicalMemoryPressureWarning),
@@ -109,6 +109,12 @@ public static class CpuSchedulerMetrics
 
     private static string FormatLong(long value) => value.ToString("N0");
 
+    /// <summary>
+    /// #7578: the collector stores no Runnable % when no other request was running, so a missing share is 0.00 and not "N/A".
+    /// The words match the web UI's tooltip on the same tile.
+    /// </summary>
+    public const string RunnablePercentHint = "The share of the other requests running at that moment that were waiting for a CPU. 0.0 means no other request was running.";
+
     private static string FormatNullableInt(int? value) => value.HasValue ? value.Value.ToString("N0") : "N/A";
 
     private static string FormatKbAsGb(long kb)
@@ -122,7 +128,7 @@ public static class CpuSchedulerMetrics
 /// cpu_scheduler_stats row, plus whether the collector flagged it as pressure (drives the row highlight). A
 /// single-row point-in-time collector has no natural top-N, so its "latest snapshot" is presented as this
 /// metric/value list.</summary>
-public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning);
+public sealed record CpuSchedulerMetricRow(string Metric, string Value, bool IsWarning, string? Hint = null);
 
 /// <summary>The rolled-up CPU-scheduler pressure classification for the metric grid's headline rows: the
 /// banded pressure level plus its paired recommendation, mirroring install/47's

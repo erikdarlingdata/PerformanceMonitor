@@ -70,18 +70,21 @@ export function semaphoreName(id) {
 }
 const SEMAPHORE_COLUMN = { key: "resource_semaphore_id", label: "Semaphore", display: (r) => semaphoreName(r.resource_semaphore_id), sortValue: (r) => r.resource_semaphore_id };
 
+/* #7578: the four date-time columns of the window grid wrap at their space ("11/5/2026," over "3:16:21 PM") with the narrow flow-cell floor, the rule the Logging Settings Audit grid uses (#7410), so First and Last stay inside the panel at 1280 and 1536 px and no width is set for one screen. */
+const WRAPPING_TIME = { wrap: true, cellClass: () => "flow-cell flow-narrow" };
+
 export const GRANT_WINDOW_COLUMNS = [
   POOL_COLUMN,
   { key: "snapshots_in_window", label: "Snapshots", format: "int" },
   { key: "peak_waiter_count", label: "Peak waiters", format: "int" },
-  { key: "peak_waiters_at", label: "Peak waiters at", format: "time" },
+  { key: "peak_waiters_at", label: "Peak waiters at", format: "time", ...WRAPPING_TIME },
   { key: "peak_granted_memory_mb", label: "Peak granted", format: "mbfit" },
-  { key: "peak_granted_at", label: "Peak granted at", format: "time" },
+  { key: "peak_granted_at", label: "Peak granted at", format: "time", ...WRAPPING_TIME },
   { key: "min_available_memory_mb", label: "Min available", format: "mbfit" },
   { key: "timeout_errors_in_window", label: "Timeouts", format: "int" },
   { key: "forced_grants_in_window", label: "Forced grants", format: "int" },
-  { key: "first_snapshot_at", label: "First", format: "time", small: true },
-  { key: "last_snapshot_at", label: "Last", format: "time", small: true },
+  { key: "first_snapshot_at", label: "First", format: "time", small: true, ...WRAPPING_TIME },
+  { key: "last_snapshot_at", label: "Last", format: "time", small: true, ...WRAPPING_TIME },
 ];
 
 /* The semaphore lens carries the same window shape keyed one level finer; the pool lens's rows carry a null

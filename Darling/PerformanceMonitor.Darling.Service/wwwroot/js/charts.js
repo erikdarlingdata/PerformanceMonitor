@@ -16,7 +16,9 @@
  * this string. pages/deadlock-graph.js keeps its own copy for the same reason (it does not import this file).
  */
 
-import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer } from "./util.js";
+import { storeHash, el, mount, parseUtc, axisTime, emptyStrip, setQueryWaitFilter, waitIsLinked, xStartMs, chartDataStart, sizeAxisPer, ticksCarryUnit } from "./util.js";
+/* #7578: the rule lives in util.js, where the page code that words a heading reaches it without the chart module; charts.js keeps exporting it. */
+export { ticksCarryUnit };
 import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 import { focusSnapshotAt } from "./snapshot-pick.js";
 
@@ -1342,14 +1344,6 @@ function niceNum(range, round) {
   return nf * Math.pow(10, exp);
 }
 
-/**
- * #7578: whether an axis's tick labels already print the unit (400 MB, 200 ms, 0.3 MB/s: a number, a space and a unit word). The unit is
- * then not printed again as a caption over the axis, so every chart says its unit once, on the ticks or in the caption, never both.
- * A bare number ("150") or a compact one ("1.5K") carries no unit, so its axis keeps the caption.
- */
-export function ticksCarryUnit(labels) {
-  return labels.some((l) => /\d\s+[A-Za-z%][A-Za-z%/]*$/.test(String(l).trim()));
-}
 
 /**
  * The labels for one axis's ticks (#6158): each tick formatted with its step (so a small range prints the decimals it
