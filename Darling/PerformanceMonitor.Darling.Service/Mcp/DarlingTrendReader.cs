@@ -103,7 +103,7 @@ internal static class DarlingTrendReader
     public sealed record QueryHistoryPoint(
         DateTime CollectionTime, long DeltaExecutions, long DeltaCpuUs, long DeltaElapsedUs,
         long DeltaLogicalReads, long DeltaLogicalWrites, long DeltaPhysicalReads, long DeltaRows,
-        long DeltaSpills, int MinDop, int MaxDop, string QueryPlanHash);
+        long DeltaSpills, int? MinDop, int? MaxDop, string? QueryPlanHash, int? PlanCount = null);
 
     /// <summary>
     /// Which physical tier answered a query-history read, and over what window (#2353).
@@ -124,14 +124,21 @@ internal static class DarlingTrendReader
     /// <summary>
     /// The aggregate twin of <see cref="QueryHistorySql"/>, reading the hourly continuous aggregate (#2353).
     ///
-    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The eight columns
-    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair and the plan hash —
+    /// <para>Shaped to the SAME reader ordinals as the raw query so one mapper serves both. The nine columns
+    /// the rollup does not carry — reads, writes, physical reads, rows, spills, the DOP pair, the plan hash and the plan count —
     /// are selected as typed NULLs and surface as NULL in the payload. That is the honest answer: an hour bucket
     /// has no single plan hash and no single DOP, and inventing a zero would read as "none observed".</para>
     ///
     /// <para>What survives the rollup is exactly what a trend is usually asked for: executions, CPU and elapsed
     /// time. <c>bucket</c> is projected as <c>collection_time</c> so the series column name does not change
     /// underneath a caller that got a raw answer last time.</para>
+    ///
+    /// <para><b>One point per hour (#7608).</b> The rollup keeps one row per <c>sql_handle</c> per hour, so a
+    /// statement with many handles gave many rows under one <c>collection_time</c>, with nothing to tell them
+    /// apart. The three measures are summed per <c>bucket</c>, so a window of N hours gives at most N points.
+    /// A stitched relation (<see cref="RollupCoverage.StitchedRelationSql"/>) splits at one bucket boundary
+    /// (<c>bucket &lt; F</c> / <c>bucket &gt;= F</c>), so each hour comes from one relation and the sum never
+    /// counts an hour twice.</para>
     /// </summary>
     public static readonly string QueryHistoryHourlySql = QueryHistoryHourlySqlFor(TimescaleSupport.QueryStatsHourlyView);
 
@@ -142,33 +149,8 @@ internal static class DarlingTrendReader
     /// caller resolves which through <see cref="RollupCoverage.HourlyRelationFor"/>; the constant above is this
     /// builder over the legacy name, which is what every pre-#3653 pin reads.
     /// </summary>
-    public static string QueryHistoryHourlySqlFor(string hourlyRelation)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
-
-        return $"""
-        SELECT
-            bucket AS collection_time,
-            execution_count_sum AS delta_execution_count,
-            worker_time_sum AS delta_worker_time,
-            elapsed_time_sum AS delta_elapsed_time,
-            CAST(NULL AS bigint) AS delta_logical_reads,
-            CAST(NULL AS bigint) AS delta_logical_writes,
-            CAST(NULL AS bigint) AS delta_physical_reads,
-            CAST(NULL AS bigint) AS delta_rows,
-            CAST(NULL AS bigint) AS delta_spills,
-            CAST(NULL AS int) AS min_dop,
-            CAST(NULL AS int) AS max_dop,
-            CAST(NULL AS text) AS query_plan_hash
-        FROM {hourlyRelation}
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   bucket >= $4
-        AND   bucket < $5
-        ORDER BY bucket
-        """;
-    }
+    public static string QueryHistoryHourlySqlFor(string hourlyRelation) =>
+        DurationTrendRouting.BuildQueryHistoryHourlySql(hourlyRelation);
 
     /* ─────────────────────────── memory trend ─────────────────────────── */
 
@@ -1503,27 +1485,47 @@ internal static class DarlingTrendReader
     /// it projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
     /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. $1 server_id, $2 database_name,
     /// $3 query_hash, $4/$5 window (naive UTC).
+    ///
+    /// <para><b>One point per collection (#7608).</b> One <c>query_hash</c> can run under several
+    /// <c>sql_handle</c>s or plans, and the collector writes one row per handle per collection, so the rows are
+    /// grouped by <c>collection_time</c>: the deltas are summed. The DOP pair (<c>MIN</c> of the minimums,
+    /// <c>MAX</c> of the maximums), <c>query_plan_hash</c> and <c>plan_count</c> (distinct hashes) come only from
+    /// the rows that ran in the interval (<c>delta_execution_count &gt; 0</c>), so a stale plan's lifetime DOP
+    /// does not ride along. When no row at that time ran, the point still shows its plan from all its rows, but
+    /// the DOP pair is NULL: the DOP describes an execution and there was none. The hash is the one every such
+    /// row carries, and NULL when they differ or one has none.</para>
     /// </summary>
     public const string QueryHistorySql = """
         SELECT
             collection_time,
-            delta_execution_count,
-            delta_worker_time,
-            delta_elapsed_time,
-            delta_logical_reads,
-            delta_logical_writes,
-            delta_physical_reads,
-            delta_rows,
-            delta_spills,
-            min_dop,
-            max_dop,
-            query_plan_hash
-        FROM query_stats
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   query_hash = $3
-        AND   collection_time >= $4
-        AND   collection_time <= $5
+            CAST(SUM(delta_execution_count) AS bigint) AS delta_execution_count,
+            CAST(SUM(delta_worker_time) AS bigint) AS delta_worker_time,
+            CAST(SUM(delta_elapsed_time) AS bigint) AS delta_elapsed_time,
+            CAST(SUM(delta_logical_reads) AS bigint) AS delta_logical_reads,
+            CAST(SUM(delta_logical_writes) AS bigint) AS delta_logical_writes,
+            CAST(SUM(delta_physical_reads) AS bigint) AS delta_physical_reads,
+            CAST(SUM(delta_rows) AS bigint) AS delta_rows,
+            CAST(SUM(delta_spills) AS bigint) AS delta_spills,
+            MIN(min_dop) FILTER (WHERE delta_execution_count > 0) AS min_dop,
+            MAX(max_dop) FILTER (WHERE delta_execution_count > 0) AS max_dop,
+            CASE WHEN MIN(query_plan_hash) FILTER (WHERE ran) = MAX(query_plan_hash) FILTER (WHERE ran)
+                  AND COUNT(query_plan_hash) FILTER (WHERE ran) = COUNT(*) FILTER (WHERE ran)
+                 THEN MIN(query_plan_hash) FILTER (WHERE ran) END AS query_plan_hash,
+            CAST(COUNT(DISTINCT query_plan_hash) FILTER (WHERE ran) AS int) AS plan_count
+        FROM
+        (
+            SELECT
+                qs.*,
+                COALESCE(qs.delta_execution_count, 0) > 0
+                OR NOT bool_or(COALESCE(qs.delta_execution_count, 0) > 0) OVER (PARTITION BY qs.collection_time) AS ran
+            FROM query_stats AS qs
+            WHERE qs.server_id = $1
+            AND   qs.database_name = $2
+            AND   qs.query_hash = $3
+            AND   qs.collection_time >= $4
+            AND   qs.collection_time <= $5
+        ) AS q
+        GROUP BY collection_time
         ORDER BY collection_time
         """;
 
@@ -1659,9 +1661,10 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : Convert.ToInt32(reader.GetValue(9)),
-                reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10)),
-                reader.IsDBNull(11) ? "" : reader.GetString(11)));
+                reader.IsDBNull(9) ? null : Convert.ToInt32(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : Convert.ToInt32(reader.GetValue(10)),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : Convert.ToInt32(reader.GetValue(12))));
         }
 
         return items;

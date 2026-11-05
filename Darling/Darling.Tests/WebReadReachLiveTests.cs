@@ -45,6 +45,8 @@ public sealed class WebReadReachLiveTests
             new("server_name", ServerName),
             new("hours_back", hours.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             new("counter_name", "Batch Requests/sec"),
+            new("query_hash", "0xQREACH"),
+            new("database_name", Db),
         });
         return await DarlingWebEndpoints.BuildReadDispatch()[read](context, postgres, null!);
     }
@@ -87,6 +89,15 @@ public sealed class WebReadReachLiveTests
                       delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
                   VALUES ($1, $2, $3, $4, $5, '0xQREACH', '0xSQLHREACH', 10, 3600000, 3600000, 100, 1000, 3600)",
                 CollectionIdGenerator.Next(), at, ServerId, ServerName, Db);
+            /* #7608: the same statement under two more sql_handles in the same hour. The rollup keeps one row per handle per hour. */
+            foreach (var (handle, executions) in new[] { ("0xSQLHREACH2", 5), ("0xSQLHREACH3", 7) })
+            {
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+                          delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
+                      VALUES ($1, $2, $3, $4, $5, '0xQREACH', $6, $7, 3600000, 3600000, 100, 1000, 3600)",
+                    CollectionIdGenerator.Next(), at, ServerId, ServerName, Db, handle, executions);
+            }
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 @"INSERT INTO collect.procedure_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_name, sql_handle,
                       delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
@@ -125,6 +136,21 @@ public sealed class WebReadReachLiveTests
                 var refused = McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, read, WebReadReach.RollupTrendHours + 1));
                 Assert.Contains("exceeds maximum of 2160 hours (90 days)", refused);
             }
+
+            /* #7608: get_query_trend takes the same ceiling, and the rollup's three handle rows for the one hour are ONE point with the summed measures. */
+            var one = await WebReadAsync(postgres, "get_query_trend", WebReadReach.RollupTrendHours);
+            using (var oneDoc = JsonDocument.Parse(one))
+            {
+                Assert.False(oneDoc.RootElement.TryGetProperty("error", out _), $"get_query_trend refused its own declared reach: {one}");
+                Assert.Equal("hourly", oneDoc.RootElement.GetProperty("source").GetString());
+                var trend = oneDoc.RootElement.GetProperty("trend").EnumerateArray().ToArray();
+                var point = Assert.Single(trend);
+                Assert.Equal(22, point.GetProperty("execution_count").GetInt64());
+                Assert.Equal(10800.0, point.GetProperty("cpu_ms").GetDouble());
+            }
+
+            Assert.Contains("exceeds maximum of 2160 hours (90 days)",
+                McpHelpers.ErrorMessageOf(await WebReadAsync(postgres, "get_query_trend", WebReadReach.RollupTrendHours + 1)));
 
             /* Query Store's trend takes the same ceiling: 2160 is answered (an empty status is an answer), 2161 is refused. */
             var qs = await WebReadAsync(postgres, "get_query_store_duration_trend", WebReadReach.RollupTrendHours);

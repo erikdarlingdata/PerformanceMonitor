@@ -112,7 +112,7 @@ public class DarlingQueryTrendTieringTests
         var raw = Columns(DarlingTrendReader.QueryHistorySql);
         var hourly = Columns(DarlingTrendReader.QueryHistoryHourlySql);
 
-        Assert.Equal(12, raw.Length);
+        Assert.Equal(13, raw.Length);
         Assert.Equal(raw.Length, hourly.Length);
         Assert.Equal(raw, hourly);
     }

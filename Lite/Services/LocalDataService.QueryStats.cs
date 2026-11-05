@@ -2314,8 +2314,10 @@ public class QueryStatsHistoryRow
     public long DeltaPhysicalReads { get; set; }
     public long DeltaRows { get; set; }
     public long DeltaSpills { get; set; }
-    public int MinDop { get; set; }
-    public int MaxDop { get; set; }
+    public int? MinDop { get; set; }
+    public int? MaxDop { get; set; }
+    /// <summary>How many distinct plan hashes the point's rows carry (#7608). Set by get_query_trend's fold.</summary>
+    public int PlanCount { get; set; }
     public long MinCpuUs { get; set; }
     public long MaxCpuUs { get; set; }
     public long MinElapsedUs { get; set; }
