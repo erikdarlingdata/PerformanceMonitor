@@ -159,13 +159,13 @@ export function pgDatabaseTrendSpecs(ctx) {
 
 export const PG_DEADLOCK_GRAPH_COLUMNS = [
   { key: "occurred_at", label: "When", format: "time" },
-  { key: "victim_pid", label: "Victim PID", format: "int" },
+  { key: "victim_pid", label: "Victim PID", format: "id" },
   { key: "graph", label: "Graph" },
 ];
 
 export const PG_DEADLOCK_COLUMNS = [
   { key: "occurred_at", label: "When", format: "time" },
-  { key: "victim_pid", label: "Victim PID", format: "int" },
+  { key: "victim_pid", label: "Victim PID", format: "id" },
   { key: "participant_count", label: "Sessions", format: "int" },
   { key: "lock_modes", label: "Lock Modes" },
   { key: "resources", label: "Resources" },
@@ -183,7 +183,7 @@ export const PG_LOG_EVENT_COLUMNS = [
   { key: "database_name", label: "Database" },
   { key: "user_name", label: "User" },
   { key: "application_name", label: "App" },
-  { key: "pid", label: "PID", format: "int", small: true },
+  { key: "pid", label: "PID", format: "id", small: true },
   { key: "message", label: "Message" },
   { key: "detail", label: "Detail" },
   { key: "context", label: "Context" },
@@ -353,7 +353,7 @@ export const PG_TOP_QUERY_COLUMNS = [
 
 export const PG_BLOCKING_CHAIN_COLUMNS = [
   { key: "captured_at", label: "When", format: "time" },
-  { key: "root_pid", label: "Root PID", format: "int" },
+  { key: "root_pid", label: "Root PID", format: "id" },
   { key: "databases", label: "Databases", render: (row) => listCell(row.databases) },
   { key: "root_username", label: "User" },
   { key: "root_application", label: "App", wrap: true },

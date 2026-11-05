@@ -21,6 +21,7 @@
  * entry remembers the window it was read for, and a rebuild under a different window reads it again. Every string is drawn as text.
  */
 import { el, readTool, fmtMs, fmtInt, tickDecimals, wholeWindowFromHours, widenedWindowNote, activeRangeStamp, chartNoteText, trendHeadNote } from "../util.js";
+import { estimatedPlotPx } from "../trend-points.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../charts.js";
 import { dockPanelUnderRow, undockPanel } from "../plan-row.js";
 import { historyWindow } from "../time-slicer.js";
@@ -75,7 +76,7 @@ async function load(kind, key, server, target, w, stamp) {
   try {
     res =
       kind === "procedures"
-        ? await readTool("get_procedure_duration_trend", { server, hours, ...extra, ...target }, undefined, { wholeWindow: true })
+        ? await readTool("get_procedure_duration_trend", { server, hours, ...extra, ...target }, undefined, { wholeWindow: true, plotPx: estimatedPlotPx() })
         : await readTool("get_query_trend", { server, hours, ...extra, ...target }, undefined, { wholeWindow: true });
   } catch (e) {
     res = { kind: "error", message: e && e.message ? e.message : String(e) };

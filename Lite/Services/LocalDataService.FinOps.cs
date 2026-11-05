@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -762,6 +763,15 @@ public class HighImpactQueryRow
 {
     public string QueryHash { get; set; } = "";
     public string DatabaseName { get; set; } = "";
+
+    /// <summary>How many databases the row's figures are summed across (#7695). <see cref="DatabaseName"/> is the one with the most CPU.</summary>
+    public int DatabaseCount { get; set; } = 1;
+
+    /// <summary>The Database cell: the name, then "+ N more" when the figures span several databases.</summary>
+    public string DatabaseDisplay => HighImpactDatabaseText.Cell(DatabaseName, DatabaseCount);
+
+    /// <summary>The cell's tooltip, null when one database is in the total.</summary>
+    public string? DatabaseTooltip => HighImpactDatabaseText.Tooltip(DatabaseCount);
     public long TotalExecutions { get; set; }
     public decimal TotalCpuMs { get; set; }
     public decimal TotalDurationMs { get; set; }
