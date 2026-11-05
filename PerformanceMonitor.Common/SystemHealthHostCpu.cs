@@ -52,4 +52,34 @@ public static class SystemHealthHostCpu
 
         return rows.Select(r => r with { SystemCpuUtilization = null }).ToList();
     }
+
+    /// <summary>#7688: the scheduler-monitor sample with the two figures derived from the host's idle CPU cleared when
+    /// <paramref name="hostOsVersion"/> says that idle reads 0 whatever the host is doing. <c>OtherProcessCpu</c> is
+    /// <c>100 - SQL CPU - idle</c>, so with idle stuck at 0 it reads 100 minus the SQL figure on every minute and the
+    /// significance gate (<c>OtherProcessCpu &gt;= 50</c>) passes every sample. A null fails that test, so a sample then
+    /// qualifies only on SQL CPU or memory. The record is returned unchanged for a platform that can report it.</summary>
+    public static SchedulerIssueRecord Apply(SchedulerIssueRecord record, string? hostOsVersion)
+    {
+        if (!IsHostCpuUnreported(hostOsVersion))
+            return record;
+
+        return record with { OtherProcessCpu = null, SystemIdle = null };
+    }
+
+    /// <summary>#7688: <paramref name="answerJson"/> (an envelope another helper built, such as an empty answer) with
+    /// <c>system_cpu_note</c> beside it when <paramref name="hostOsVersion"/> says the host CPU cannot be known. Null in,
+    /// null out. The envelope is returned unchanged for a platform that can report it, when it is not a JSON object, or
+    /// when it already carries the key.</summary>
+    public static string? WithNote(string? answerJson, string? hostOsVersion)
+    {
+        var note = NoteFor(hostOsVersion);
+        if (answerJson is null || note is null)
+            return answerJson;
+
+        if (System.Text.Json.Nodes.JsonNode.Parse(answerJson) is not System.Text.Json.Nodes.JsonObject node || node.ContainsKey("system_cpu_note"))
+            return answerJson;
+
+        node["system_cpu_note"] = note;
+        return node.ToJsonString(McpHelpers.JsonOptions);
+    }
 }

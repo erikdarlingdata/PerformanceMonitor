@@ -86,6 +86,98 @@ VALUES ($1, $2, $3, $4, 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 1638
 
     private LocalDataService Service() => new(_duckDb);
 
+    /// <summary>#7688: one scheduler-monitor sample 2 hours before the anchor with the given SQL CPU and idle (memory healthy at 100).</summary>
+    private async Task SeedSchedulerSampleAsync(string? hostOsVersion, int sqlCpu, int idle)
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var eventTime = Anchor.AddHours(-2);
+        var xml = $@"<event name=""scheduler_monitor_system_health_ring_buffer_recorded"" package=""sqlos"" timestamp=""{eventTime:yyyy-MM-dd'T'HH:mm:ss.fff}Z"">
+  <data name=""process_utilization""><type name=""uint32"" package=""package0""/><value>{sqlCpu}</value></data>
+  <data name=""system_idle""><type name=""uint32"" package=""package0""/><value>{idle}</value></data>
+  <data name=""page_faults""><type name=""uint32"" package=""package0""/><value>505</value></data>
+  <data name=""working_set_delta""><type name=""int64"" package=""package0""/><value>4096</value></data>
+  <data name=""memory_utilization""><type name=""uint32"" package=""package0""/><value>100</value></data>
+</event>";
+        await _seed.ExecuteAsync(@"
+INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            new object?[] { 1L, Naive(eventTime), _serverId, ServerName, Naive(eventTime), SystemHealthParser.SchedulerMonitorEvent, xml });
+        if (hostOsVersion is not null)
+        {
+            await _seed.ExecuteAsync(@"
+INSERT INTO server_properties
+    (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition,
+     cpu_count, hyperthread_ratio, physical_memory_mb, host_os_version)
+VALUES ($1, $2, $3, $4, 'Developer Edition', '16.0.4150.1', 'RTM', 3, 8, 1, 16384, $5)",
+                new object?[] { 1L, Naive(eventTime), _serverId, ServerName, hostOsVersion });
+        }
+
+        _seed.Flush();
+    }
+
+    /* #7688: SQL Server on Linux reports idle as 0 on some builds, so "100 - SQL CPU - idle" read 100 minus the SQL figure on
+       every quiet minute and every sample was listed as a scheduler issue. */
+    [Fact]
+    public async Task OnLinux_QuietSchedulerSamplesAreNotIssues_AndTheAnswerSaysWhy()
+    {
+        await SeedSchedulerSampleAsync("Ubuntu", sqlCpu: 0, idle: 0);
+
+        var root = JsonDocument.Parse(await McpHealthParserTools.GetSchedulerIssues(Service(), _serverManager, ServerName, 24, 50, AsOf)).RootElement;
+
+        Assert.False(root.TryGetProperty("issues", out _));
+        Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OnLinux_ABusySqlSampleIsStillAnIssue_WithNoOtherProcessOrIdleFigure()
+    {
+        await SeedSchedulerSampleAsync("Ubuntu", sqlCpu: 94, idle: 0);
+
+        var root = JsonDocument.Parse(await McpHealthParserTools.GetSchedulerIssues(Service(), _serverManager, ServerName, 24, 50, AsOf)).RootElement;
+
+        var issue = Assert.Single(root.GetProperty("issues").EnumerateArray());
+        Assert.Equal(94, issue.GetProperty("sql_cpu_utilization").GetInt64());
+        Assert.Equal(JsonValueKind.Null, issue.GetProperty("other_process_cpu").ValueKind);
+        Assert.Equal(JsonValueKind.Null, issue.GetProperty("system_idle").ValueKind);
+        Assert.Contains("Linux", root.GetProperty("system_cpu_note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Windows")]
+    [InlineData(null)]
+    public async Task OnWindowsOrAnUnknownPlatform_AHighOtherProcessSampleIsStillAnIssue(string? hostOs)
+    {
+        await SeedSchedulerSampleAsync(hostOs, sqlCpu: 5, idle: 0);
+
+        var root = JsonDocument.Parse(await McpHealthParserTools.GetSchedulerIssues(Service(), _serverManager, ServerName, 24, 50, AsOf)).RootElement;
+
+        var issue = Assert.Single(root.GetProperty("issues").EnumerateArray());
+        Assert.Equal(95, issue.GetProperty("other_process_cpu").GetInt64());
+        Assert.Equal(0, issue.GetProperty("system_idle").GetInt64());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("system_cpu_note").ValueKind);
+    }
+
+    [Fact]
+    public async Task OnLinux_TheDesktopSchedulerGridRead_ListsNoQuietMinute()
+    {
+        await SeedSchedulerSampleAsync("Ubuntu", sqlCpu: 0, idle: 0);
+
+        Assert.Empty(await Service().GetSchedulerIssuesAsync(_serverId, 24, asOfUtc: Anchor));
+    }
+
+    [Fact]
+    public async Task OnLinux_TheDesktopSchedulerGridRead_CarriesNoOtherProcessOrIdle()
+    {
+        await SeedSchedulerSampleAsync("Ubuntu", sqlCpu: 94, idle: 0);
+
+        var rows = await Service().GetSchedulerIssuesAsync(_serverId, 24, asOfUtc: Anchor);
+
+        var row = Assert.Single(rows);
+        Assert.Null(row.OtherProcessCpu);
+        Assert.Null(row.SystemIdle);
+        Assert.Equal(94, row.SqlCpuUtilization);
+    }
+
     [Theory]
     [InlineData("Ubuntu")]
     [InlineData("Red Hat Enterprise Linux")]
