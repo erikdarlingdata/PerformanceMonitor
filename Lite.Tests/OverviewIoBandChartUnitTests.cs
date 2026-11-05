@@ -16,6 +16,7 @@ using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -98,6 +99,36 @@ CROSS JOIN range(0, 2) AS ff(f)";
         Assert.Equal(90, chart.SampleCount); // three Wednesdays of 30 collections: one sample per collection, never one per file (180)
         // The spread is a fraction of a millisecond, so the 2.5 ms floor decides the band's width.
         Assert.True(chart.EffectiveStdDev >= 2.5, $"EffectiveStdDev {chart.EffectiveStdDev} is under the 2.5 ms floor");
+    }
+
+    /// <summary>
+    /// #7644: Lite computes a lane's steps at now, as the Viewer and the web page do, whatever window the page shows. A window a week
+    /// back used to key its history to the window's own start, so a baseline day that lies after that start never counted. The window's
+    /// own day is seeded at 21 ms (the other three same-weekday days at about 1 ms): the band for that hour has to include it.
+    /// </summary>
+    [Fact]
+    public async Task AWindowAWeekBack_StepsFromTheSameThirtyDaysAsARequestAtNow()
+    {
+        const int serverId = -8702;
+        var today = DateTime.UtcNow.Date;
+        var windowStart = DateTime.SpecifyKind(today.AddDays(-7).AddHours(10), DateTimeKind.Unspecified);
+        const string sql = @"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type, physical_name, size_mb,
+     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes, delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+SELECT -8800000 - (d * 1000 + i), $1 - to_days(d) + to_hours(10) + to_minutes(2 * i + 1), $2, 'IoServer', 'AppDb',
+       'AppDb_busy', 'ROWS', 'D:\AppDb.mdf', 100, 10000, 0, 81920, 0,
+       CASE WHEN d = 7 THEN 210000 + (i % 5) * 500 ELSE 9000 + (i % 5) * 500 END, 0, 60
+FROM (VALUES (7), (14), (21), (28)) AS dd(d)
+CROSS JOIN range(0, 30) AS ii(i)";
+        await ExecuteSeedAsync(sql, today, serverId);
+
+        var steps = await new LocalDataService(_duckDb)
+            .GetBaselineStepsForLaneAsync(serverId, MetricNames.IoLatencyChart, windowStart, windowStart.AddHours(1));
+
+        var step = Assert.Single(steps);
+        // 90 samples near 1 ms and 30 near 21 ms average about 6 ms. History that ended at the window's start would read about 1 ms.
+        Assert.InRange(step.Mean, 5.0, 7.0);
     }
 
     private static BaselineProvider.CachedBaseline EntryAtFiveThirty(DateTime windowEndUtc)
