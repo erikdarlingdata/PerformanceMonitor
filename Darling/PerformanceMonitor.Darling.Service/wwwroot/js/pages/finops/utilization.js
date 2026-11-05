@@ -30,7 +30,7 @@ const SUMMARY_SUBTITLE = "Last 24 hours";
 const VERDICT_SEV = { RIGHT_SIZED: "Healthy", OVER_PROVISIONED: "Warning", UNDER_PROVISIONED: "Critical" };
 const BAND_SEV = { good: "Healthy", fair: "Warning", poor: "Critical" };
 
-/* #7562: the sentence under the tiles names two colors, amber from 60% and red from 85%. The service sends that sentence only from 60%, so the tile is
+/* #7562: the sentence under the tiles names two colors, amber from 60% and red above 85%. The service sends that sentence only from 60%, so the tile is
    colored when the sentence is there: amber, and red above 85%, the same line both desktop bars use. */
 const STOLEN_RED_PCT = 85;
 function stolenSev(memory) {

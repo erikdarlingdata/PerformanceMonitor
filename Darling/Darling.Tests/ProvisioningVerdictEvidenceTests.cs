@@ -65,7 +65,20 @@ public sealed class ProvisioningVerdictEvidenceTests
         // 84.8 rounded to a whole number reads "85%", the red line, while the figure is under it (#7562).
         var note = ProvisioningVerdict.StolenMemoryNote(84.8);
         Assert.StartsWith("84.8% of the memory", note, System.StringComparison.Ordinal);
-        Assert.Contains("red from 85%", note, System.StringComparison.Ordinal);
+        Assert.Contains("red above 85%", note, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("red from 85%", note, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StolenMemoryNote_AtExactlyTheRedLine_DoesNotPromiseRed_BecauseRedIsStrictlyAbove()
+    {
+        // Both desktop bars and the web tile turn red strictly above 85, so a host at exactly 85.0 is amber (#7562).
+        // The note must say "above 85%", never "from 85%", or it would tell the reader a red figure sits on an amber bar.
+        var atLine = ProvisioningVerdict.StolenMemoryNote(85.0);
+        Assert.StartsWith("85% of the memory", atLine, System.StringComparison.Ordinal);
+        Assert.Contains("red above 85%", atLine, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("from 85", atLine, System.StringComparison.Ordinal);
+        Assert.Contains("Amber from 60%", atLine, System.StringComparison.Ordinal);
     }
 
     [Fact]
