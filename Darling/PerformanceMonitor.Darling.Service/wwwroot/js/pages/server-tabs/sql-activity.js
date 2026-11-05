@@ -54,9 +54,12 @@ export function perfmonPanel(server, ctx) {
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
-    /* #7550: no sort here. The reply is already in the store's name order (without case), and a plain .sort() put every
-       capitalized counter above every lower-case one, a second order for the same list. */
-    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))];
+    /* #7550: the store sends these in its name order without case, but the picker must not depend on reply order, so the page
+       sorts the same way: names folded to lower case (A-Z only, as the store's lower() does), then the raw name. A plain .sort()
+       put every capitalized counter above every lower-case one. */
+    const fold = (n) => n.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+    const byName = (a, b) => { const x = fold(a), y = fold(b); return x < y ? -1 : x > y ? 1 : a < b ? -1 : a > b ? 1 : 0; };
+    const names = [...new Set((res.data.counters || []).map((c) => c.counter_name).filter(Boolean))].sort(byName);
     if (!names.length) return mount(body, emptyStrip("The latest snapshot holds no perfmon counters."));
 
     /* The snapshot table lives HERE rather than in its own descriptor: this composite has already fetched the

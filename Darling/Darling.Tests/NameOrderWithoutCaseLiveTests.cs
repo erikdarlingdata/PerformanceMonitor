@@ -180,4 +180,29 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
 
     }
 
+    [Fact]
+    public async Task IdentityScannedDatabases_OrderNamesWithoutCase_AgainstLivePostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live name-order test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, cCollation: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var now = DateTime.UtcNow;
+        foreach (var database in new[] { "beta", "Alpha", "gamma", "Delta" })
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.identity_capacity (collection_id, collection_time, server_id, server_name, database_name) VALUES ($1,$2,$3,$4,$5)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-5)), ServerId, ServerName, database);
+        }
+
+        var read = await DarlingIdentityCapacityReader.ReadAsync(postgres, ServerId, DatabaseFilter.All, now.AddHours(-168), now, 30, cancellationToken: ct);
+        Assert.Equal(["Alpha", "beta", "Delta", "gamma"], read.Databases.Select(d => d.DatabaseName));
+    }
+
 }
