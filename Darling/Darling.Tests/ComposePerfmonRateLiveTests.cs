@@ -102,6 +102,84 @@ public sealed class ComposePerfmonRateLiveTests
         Assert.Empty(memory);
     }
 
+    /// <summary>
+    /// The rate is SUM(delta) / SUM(interval seconds), and every instance row of a counter repeats the interval, so two instances that
+    /// each rose by 600 over 60 seconds chart 1200 / 120 = 10 per second for the pair, not the 20 per second they add up to. A
+    /// panel is exact only per instance, so the validator refuses the unpinned panel, and the panel grouped by instance charts 10
+    /// per second for each.
+    /// </summary>
+    [Fact]
+    public async Task TheRate_IsExactPerInstance_AndAnUnpinnedInstancePanelIsRefused_AgainstDevPostgres()
+    {
+        var baseCs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #7565 compose live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+        long id = 1;
+        foreach (var instance in new[] { "db_one", "db_two" })
+        {
+            await using var command = new NpgsqlCommand(
+                """
+                INSERT INTO collect.perfmon_stats
+                    (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name,
+                     cntr_value, delta_cntr_value, sample_interval_seconds)
+                VALUES ($1, $2, $3, $4, 'SQLServer:Test', 'Transactions/sec', $5, 1000600, 600, 60)
+                """, connection);
+            command.Parameters.AddWithValue(id++);
+            command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, WindowStart.AddMinutes(2));
+            command.Parameters.AddWithValue(ServerId);
+            command.Parameters.AddWithValue(ServerName);
+            command.Parameters.AddWithValue(instance);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        const string Rate = "\"ratio\":\"perfmon_value_per_second\"";
+        string Dashboard(string extra) =>
+            "{\"panels\":[{\"source\":\"perfmon_stats\"," + Rate + ",\"timeBucket\":\"hour\",\"viz\":\"line\"," +
+            "\"filters\":[{\"dimension\":\"counter_name\",\"op\":\"eq\",\"value\":\"Transactions/sec\"}," +
+            "{\"dimension\":\"server\",\"op\":\"eq\",\"value\":\"" + ServerName + "\"}]" + extra + "}]}";
+
+        /* No instance pin: the panel would read 10 per second where the instances add up to 20, so the validator refuses it. */
+        var unpinned = DarlingWebEndpoints.ValidateDefinition(Dashboard(""));
+        Assert.False(unpinned.IsValid, "a two-instance panel with no instance pin validated clean");
+        Assert.Contains("filter instance_name eq", unpinned.Error, StringComparison.Ordinal);
+
+        /* Grouped by instance it validates, and each instance charts its own 600 / 60 = 10 per second. */
+        var grouped = Dashboard(",\"groupBy\":[\"instance_name\"]");
+        Assert.True(DarlingWebEndpoints.ValidateDefinition(grouped).IsValid);
+        var (plan, error) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(grouped)!["panels"]![0]!.DeepClone(), Array.Empty<string>());
+        Assert.True(error is null, error);
+        var context = new ComposeRunContext(new[] { ServerName }, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.None, WindowEnd, RollupCoverage.Unknown);
+        var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
+        Assert.True(compileError is null, compileError);
+
+        var byInstance = new Dictionary<string, double>();
+        await using (var command = new NpgsqlCommand(compiled!.Sql, connection))
+        {
+            foreach (var p in compiled.Parameters)
+            {
+                command.Parameters.Add(p);
+            }
+
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                byInstance[reader.GetString(reader.GetOrdinal("instance_name"))] =
+                    Convert.ToDouble(reader.GetValue(reader.GetOrdinal("value")), CultureInfo.InvariantCulture);
+            }
+        }
+
+        Assert.Equal(2, byInstance.Count);
+        Assert.True(Math.Abs(byInstance["db_one"] - 10.0) < 0.0001, $"db_one rate = {byInstance["db_one"]}, expected 10 per second");
+        Assert.True(Math.Abs(byInstance["db_two"] - 10.0) < 0.0001, $"db_two rate = {byInstance["db_two"]}, expected 10 per second");
+    }
+
     private static PanelPlan Panel(string measureProperty, string counter)
     {
         var json = "{\"source\":\"perfmon_stats\"," + measureProperty + ",\"timeBucket\":\"hour\",\"viz\":\"line\"," +

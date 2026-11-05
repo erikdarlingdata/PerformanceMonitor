@@ -134,6 +134,12 @@ public sealed partial class ViewerDataService
         return validation.IsValid ? null : validation.Error;
     }
 
+    /// <summary>#7565: the validator's warnings for a definition that is valid but will not draw what it means (for example perfmon_value on a
+    /// /sec counter). Empty when it has none or the definition is refused. The window shows them on its status line, as the web strip does.</summary>
+    public static IReadOnlyList<string> CustomViewDefinitionWarnings(string? definitionJson) =>
+        CustomViewValidation.ValidateDefinition(definitionJson is null ? null : CustomViewsEditorModel.CompactDefinition(definitionJson)).Warnings
+        ?? Array.Empty<string>();
+
     /// <summary>Creates a shared view at version 1. A definition the validator refuses comes back as <see cref="CustomViewResult.Invalid"/> with the
     /// web's sentence; nothing is written.</summary>
     public async Task<CustomViewResult> CreateCustomViewAsync(

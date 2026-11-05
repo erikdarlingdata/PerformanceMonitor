@@ -124,9 +124,19 @@ public sealed class DarlingCustomViewsTests
 
     /* ── #7565: perfmon_value on a counter ending in /sec is a running total, not a rate ── */
 
-    private static string PerfmonPanel(string measureProperty, string? filters) =>
+    private static string PerfmonPanel(string measureProperty, string? filters, string? groupBy = null) =>
         "{\"source\":\"perfmon_stats\"," + measureProperty + ",\"timeBucket\":\"hour\",\"viz\":\"line\"" +
-        (filters is null ? "" : ",\"filters\":[" + filters + "]") + "}";
+        (filters is null ? "" : ",\"filters\":[" + filters + "]") +
+        (groupBy is null ? "" : ",\"groupBy\":[" + groupBy + "]") + "}";
+
+    private static string DimensionFilter(string dimension, string value) =>
+        "{\"dimension\":\"" + dimension + "\",\"op\":\"eq\",\"value\":\"" + value + "\"}";
+
+    private const string PerfmonRate = "\"ratio\":\"perfmon_value_per_second\"";
+
+    private static readonly string s_counterPin = DimensionFilter("counter_name", "Transactions/sec");
+    private static readonly string s_instancePin = DimensionFilter("instance_name", "_Total");
+    private static readonly string s_serverPin = DimensionFilter("server", "SQL01");
 
     private static string CounterFilter(string op, string value) =>
         "{\"dimension\":\"counter_name\",\"op\":\"" + op + "\",\"value\":\"" + value + "\"}";
@@ -160,7 +170,7 @@ public sealed class DarlingCustomViewsTests
 
         Assert.True(result.IsValid, result.Error);
         var warning = Assert.Single(result.Warnings!);
-        Assert.Contains("no counter_name filter", warning, StringComparison.Ordinal);
+        Assert.Contains("pins no counter", warning, StringComparison.Ordinal);
         Assert.Contains("perfmon_value_per_second", warning, StringComparison.Ordinal);
     }
 
@@ -175,15 +185,97 @@ public sealed class DarlingCustomViewsTests
     }
 
     [Theory]
-    [InlineData("\"ratio\":\"perfmon_value_per_second\"", "Transactions/sec")]
     [InlineData("\"measure\":\"perfmon_value_delta\",\"aggregate\":\"sum\"", "Transactions/sec")]
     [InlineData("\"measure\":\"perfmon_value\",\"aggregate\":\"avg\"", "Total Server Memory (KB)")]
-    public void ValidateDefinition_DoesNotWarn_ForTheRateMeasureOrAPointInTimeCounter(string measureProperty, string counter)
+    public void ValidateDefinition_DoesNotWarn_ForTheDeltaMeasureOrAPointInTimeCounter(string measureProperty, string counter)
     {
         var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(measureProperty, CounterFilter("eq", counter))));
 
         Assert.True(result.IsValid, result.Error);
         Assert.Null(result.Warnings);
+    }
+
+    [Fact]
+    public void ValidateDefinition_WordsAnNeqOnlyCounterFilter_AsNoCounterPinned()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonValue, CounterFilter("neq", "Batch Requests/sec"))));
+
+        Assert.True(result.IsValid, result.Error);
+        var warning = Assert.Single(result.Warnings!);
+        Assert.Contains("pins no counter", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("has no counter_name filter", warning, StringComparison.Ordinal);
+    }
+
+    /* The rate is SUM(delta) / SUM(interval): every instance and server in a bucket repeats the interval, so it reads that many times
+       too low unless each series is one counter, one instance and one server. The validator refuses anything wider. */
+
+    [Theory]
+    [InlineData("instance_name", "counter_name, server")]
+    [InlineData("server", "counter_name, instance_name")]
+    [InlineData("counter_name", "instance_name, server")]
+    public void ValidateDefinition_RefusesThePerfmonRate_WhenADimensionIsNotPinned(string leftOpen, string pinned)
+    {
+        var filters = string.Join(",", pinned.Split(", ").Select(d => d switch
+        {
+            "counter_name" => s_counterPin,
+            "instance_name" => s_instancePin,
+            _ => s_serverPin,
+        }));
+
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonRate, filters)));
+
+        Assert.False(result.IsValid);
+        Assert.StartsWith("panel 0:", result.Error, StringComparison.Ordinal);
+        Assert.Contains("perfmon_value_per_second", result.Error, StringComparison.Ordinal);
+        Assert.Contains("filter " + leftOpen + " eq", result.Error, StringComparison.Ordinal);
+        foreach (var other in new[] { "counter_name", "instance_name", "server" }.Where(d => d != leftOpen))
+        {
+            Assert.DoesNotContain("filter " + other + " eq", result.Error, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ValidateDefinition_RefusesThePerfmonRate_WithNoPins_NamingAllThree_AndOnTheNotebookCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonRate, null)));
+        Assert.False(result.IsValid);
+        Assert.Contains("filter counter_name eq", result.Error, StringComparison.Ordinal);
+        Assert.Contains("filter instance_name eq '_Total'", result.Error, StringComparison.Ordinal);
+        Assert.Contains("filter server eq", result.Error, StringComparison.Ordinal);
+
+        var cell = PerfmonPanel(PerfmonRate, null).Replace("{\"source\"", "{\"type\":\"panel\",\"source\"", StringComparison.Ordinal);
+        var notebook = DarlingWebEndpoints.ValidateDefinition("{\"kind\":\"notebook\",\"cells\":[" + cell + "]}");
+        Assert.False(notebook.IsValid);
+        Assert.StartsWith("cell 0:", notebook.Error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("pinned by eq filters")]
+    [InlineData("instance and server in groupBy")]
+    [InlineData("server variable")]
+    public void ValidateDefinition_AcceptsThePerfmonRate_WhenOneCounterInstanceAndServerArePinned(string form)
+    {
+        var json = form switch
+        {
+            "pinned by eq filters" => Dashboard(PerfmonPanel(PerfmonRate, string.Join(",", s_counterPin, s_instancePin, s_serverPin))),
+            "instance and server in groupBy" => Dashboard(PerfmonPanel(PerfmonRate, s_counterPin, "\"instance_name\",\"server\"")),
+            _ => "{\"variables\":[{\"name\":\"srv\",\"dimension\":\"server\"}],\"panels\":[" + PerfmonPanel(PerfmonRate, string.Join(",", s_counterPin, s_instancePin)) + "]}",
+        };
+
+        var result = DarlingWebEndpoints.ValidateDefinition(json);
+
+        Assert.True(result.IsValid, result.Error);
+        Assert.Null(result.Warnings);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RefusesAMultiValueEq_AsNotPinned()
+    {
+        var two = "{\"dimension\":\"instance_name\",\"op\":\"eq\",\"value\":[\"_Total\",\"tempdb\"]}";
+        var result = DarlingWebEndpoints.ValidateDefinition(Dashboard(PerfmonPanel(PerfmonRate, string.Join(",", s_counterPin, two, s_serverPin))));
+
+        Assert.False(result.IsValid);
+        Assert.Contains("filter instance_name eq", result.Error, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -198,6 +290,27 @@ public sealed class DarlingCustomViewsTests
         var clean = JsonNode.Parse(await DarlingMcpCustomViewTools.ValidateCustomView(CleanDashboard))!;
         Assert.True(clean["valid"]!.GetValue<bool>());
         Assert.Null(clean["warnings"]);
+    }
+
+    [Fact]
+    public void TheMcpCreateAndUpdateReplies_CarryTheValidatorsWarnings_TheShapeValidateCustomViewUses()
+    {
+        var warnedDefinition = Dashboard(PerfmonPanel(PerfmonValue, CounterFilter("eq", "Transactions/sec")));
+        var warned = DarlingWebEndpoints.ValidateDefinition(warnedDefinition);
+        var clean = DarlingWebEndpoints.ValidateDefinition(CleanDashboard);
+        var before = new CustomView(7, "v", CleanDashboard, null, 1, DateTime.UtcNow, DateTime.UtcNow, "mcp", null, false, "mcp", false);
+        var after = before with { DefinitionJson = warnedDefinition, Version = 2 };
+
+        var created = JsonNode.Parse(DarlingMcpCustomViewTools.CreateAnswer(after, warned))!;
+        var updated = JsonNode.Parse(DarlingMcpCustomViewTools.UpdateAnswer(before, after, warned))!;
+        foreach (var reply in new[] { created, updated })
+        {
+            Assert.Equal(warned.Warnings![0], reply["warnings"]![0]!.GetValue<string>());
+            Assert.Equal(7, reply["id"]!.GetValue<long>());
+        }
+
+        Assert.Null(JsonNode.Parse(DarlingMcpCustomViewTools.CreateAnswer(before, clean))!["warnings"]);
+        Assert.Null(JsonNode.Parse(DarlingMcpCustomViewTools.UpdateAnswer(before, before, clean))!["warnings"]);
     }
 
     [Fact]
@@ -222,8 +335,10 @@ public sealed class DarlingCustomViewsTests
         Assert.Contains("running total", note, StringComparison.Ordinal);
         Assert.Contains("/sec", note, StringComparison.Ordinal);
         Assert.Contains("perfmon_value_per_second", note, StringComparison.Ordinal);
+        Assert.Contains("one counter, one instance and one server per series", note, StringComparison.Ordinal);
 
         var rate = measures["perfmon_value_per_second"];
+        Assert.Contains("one counter, one instance and one server per series", rate["note"]!.GetValue<string>(), StringComparison.Ordinal);
         Assert.Equal("ratio", rate["kind"]!.GetValue<string>());
         Assert.Contains("per second", rate["displayName"]!.GetValue<string>(), StringComparison.Ordinal);
         Assert.Contains("not a rate", measures["perfmon_value_delta"]["displayName"]!.GetValue<string>(), StringComparison.Ordinal);

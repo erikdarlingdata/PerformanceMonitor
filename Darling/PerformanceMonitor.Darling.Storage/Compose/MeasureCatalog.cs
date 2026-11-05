@@ -648,7 +648,7 @@ public static class MeasureCatalog
     /// <summary>The note on <c>perfmon_value</c> (#7565); the validator's warning names the same measure.</summary>
     internal const string PerfmonValueNote =
         "SQL Server's own number. For a /sec counter (such as Transactions/sec) it is the running total since startup and only climbs: " +
-        "chart those with the ratio perfmon_value_per_second. Fine for a point-in-time counter such as Total Server Memory (KB).";
+        "chart those with the ratio perfmon_value_per_second (one counter, one instance and one server per series). Fine for a point-in-time counter such as Total Server Memory (KB).";
 
     private static readonly string[] PerfmonDims = { "object_name", "counter_name", "instance_name" };
     private static readonly string[] QueryStoreDims = { "database_name", "module_name", "query_hash" };
@@ -1263,7 +1263,7 @@ public static class MeasureCatalog
         {
             Key = "perfmon_value_per_second", DisplayName = "Perfmon counter (per second)", Category = CatPerfmon, SourceTable = "perfmon_stats",
             Kind = MeasureKind.Ratio, NumeratorKey = "perfmon_value_delta", DenominatorKey = "perfmon_interval_s",
-            Note = "Rate of a /sec counter: the change in the counter over the seconds between collections. Empty for a point-in-time counter.",
+            Note = "Rate of a /sec counter: the change in the counter over the seconds between collections. Exact only for one counter, one instance and one server per series: filter or group by counter_name, instance_name and server, or the validator refuses the panel. Empty for a point-in-time counter.",
             NativeUnit = "count", DefaultUnit = "count", UnitFamily = FamilyCount,
             ValidAggs = NoAggs, AllowedDimensions = PerfmonDims,
         },
