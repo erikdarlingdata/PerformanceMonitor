@@ -33,14 +33,35 @@ public partial class ExcludedDatabasesDialog : Window
     /// fallback (#1631).</summary>
     private bool _masterUnreachableFellBackToConnectedDb;
 
+    /// <summary>
+    /// #7639: true when the dialog edits <see cref="ServerConnection.XeSessionDatabases"/> (the databases that get Extended
+    /// Events sessions on Azure SQL Database) instead of the excluded databases. Same picker, same checkboxes: a checked
+    /// database is on the list. An empty list means every database.
+    /// </summary>
+    private readonly bool _xeSessionsMode;
+
     public bool ExclusionsModified { get; private set; }
 
-    public ExcludedDatabasesDialog(ServerManager serverManager, ServerConnection server)
+    public ExcludedDatabasesDialog(ServerManager serverManager, ServerConnection server, bool xeSessionsMode = false)
     {
         InitializeComponent();
         _serverManager = serverManager;
         _server = server;
-        HeaderText.Text = $"Excluded Databases — {server.DisplayNameWithIntent}";
+        _xeSessionsMode = xeSessionsMode;
+        if (xeSessionsMode)
+        {
+            Title = "Databases for Extended Events Sessions";
+            HeaderText.Text = $"Databases for Extended Events Sessions — {server.DisplayNameWithIntent}";
+            DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Lite makes up to four per database "
+                + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. "
+                + "Leave every box clear to give every database a session. Excluded Databases still apply and win. "
+                + "Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them.";
+        }
+        else
+        {
+            HeaderText.Text = $"Excluded Databases — {server.DisplayNameWithIntent}";
+        }
+
         Loaded += async (_, _) => await LoadAsync();
     }
 
@@ -53,7 +74,7 @@ public partial class ExcludedDatabasesDialog : Window
         try
         {
             var liveDatabases = await GetUserDatabasesAsync();
-            var existingExclusions = _server.ExcludedDatabases ?? new List<string>();
+            var existingExclusions = (_xeSessionsMode ? _server.XeSessionDatabases : _server.ExcludedDatabases) ?? new List<string>();
 
             var liveSet = new HashSet<string>(liveDatabases, StringComparer.OrdinalIgnoreCase);
 
@@ -89,7 +110,9 @@ public partial class ExcludedDatabasesDialog : Window
             DatabasesItemsControl.ItemsSource = _items;
             StatusText.Text = _masterUnreachableFellBackToConnectedDb
                 ? "Server firewall blocks reading the full list from master (Azure database-level rule); showing only the connected database."
-                : $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
+                : _xeSessionsMode
+                    ? $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} on the list (none = every database)."
+                    : $"{liveDatabases.Count} database(s) on this server, {existingExclusions.Count} currently excluded.";
         }
         catch (Exception ex)
         {
@@ -151,10 +174,18 @@ ORDER BY d.name;", connection);
     {
         try
         {
-            _server.ExcludedDatabases = _items
+            var checkedNames = _items
                 .Where(i => i.IsExcluded)
                 .Select(i => i.Name)
                 .ToList();
+            if (_xeSessionsMode)
+            {
+                _server.XeSessionDatabases = checkedNames;
+            }
+            else
+            {
+                _server.ExcludedDatabases = checkedNames;
+            }
 
             _serverManager.UpdateServer(_server);
             ExclusionsModified = true;

@@ -265,4 +265,45 @@ public sealed class LongQueryTraceAzureLimitsLiteTests : IDisposable
         Assert.Contains("The create was refused in beta.", run.Message, StringComparison.Ordinal);
         Assert.Contains("ALTER ANY DATABASE EVENT SESSION", run.Message, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #7639: with "Databases that get Extended Events sessions" set to two of three databases, the long query trace creates in those
+    /// two only. Empty creates in all three, which is how it worked before the setting.
+    /// </summary>
+    [Fact]
+    public async Task TheXeSessionDatabaseList_NarrowsTheLongQueryCreates_AndEmptyMeansEveryDatabase()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = new List<string> { "gamma", "ALPHA" };
+
+        await ReconcileAsync(rig);
+        Assert.Equal(new[] { "alpha", "gamma" }, rig.Calls);
+
+        /* Cleared, the reconcile runs again (the list is part of its state key) and gives beta its session too. */
+        rig.Calls.Clear();
+        rig.Server.XeSessionDatabases = new List<string>();
+        await ReconcileAsync(rig);
+        Assert.Contains("beta", rig.Calls);
+    }
+
+    /// <summary>
+    /// #7639: a database left off the list is not refused, so it is not in the run's note. A database on the list that Azure refuses
+    /// is still named.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseOffTheList_IsNotInTheRunNote_AndARefusedOneOnTheListStillIs()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.XeSessionDatabases = new List<string> { "alpha", "beta" };
+        rig.Refuse["beta"] = 1105;
+
+        await ReconcileAsync(rig);
+        await rig.Service.RunCollectorAsync(rig.Server, Collector, CancellationToken.None);
+
+        var run = await LastRunAsync(rig);
+        Assert.Equal("SUCCESS", run.Status);
+        Assert.Contains("The create was refused in beta.", run.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("gamma", run.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(rig.Calls, call => call == "gamma");
+    }
 }

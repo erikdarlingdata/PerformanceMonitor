@@ -493,6 +493,10 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;", c
                 {
                     databases = await GetAzureDatabaseListAsync(server, cancellationToken);
                 }
+
+                /* #7639: the server's "Databases that get Extended Events sessions" list narrows the always-on creates (deadlock,
+                   blocked process, client timeout). After the excluded databases, which win. Empty = every database. */
+                databases = XeSessionDatabaseList.Apply(databases, server.XeSessionDatabases);
             }
             catch (SqlException ex)
             {

@@ -135,6 +135,21 @@ public partial class ManageServersWindow : Window
         }
     }
 
+    private void XeSessionDatabases_Click(object sender, RoutedEventArgs e)
+    {
+        if (ServersGrid.SelectedItem is not ServerConnection selected)
+        {
+            return;
+        }
+
+        var dialog = new ExcludedDatabasesDialog(_serverManager, selected, xeSessionsMode: true) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.ExclusionsModified)
+        {
+            ServersChanged = true;
+            RefreshGrid();
+        }
+    }
+
     private async void DeleteButton_Click(object sender, RoutedEventArgs e)
     {
         if (ServersGrid.SelectedItem is not ServerConnection selected)

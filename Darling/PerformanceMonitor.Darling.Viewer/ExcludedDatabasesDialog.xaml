@@ -23,7 +23,7 @@
         <!-- The viewer never connects to the monitored server, but the Darling store HAS the databases the
              service collected — so the list below is the collected user databases (not a free-text editor).
              A not-yet-collected database can still be added by hand at the bottom. -->
-        <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
+        <TextBlock Grid.Row="1" x:Name="DescriptionText" TextWrapping="Wrap" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,8"
                    Text="User databases to skip in per-database collectors. Checked databases are excluded. The list is the databases the Darling service has collected for this server; system databases (master/model/msdb/tempdb) are always excluded. Add a not-yet-collected database by name below."/>
 
         <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4">

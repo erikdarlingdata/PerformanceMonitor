@@ -40,18 +40,49 @@ public partial class ExcludedDatabasesDialog : Window
     /// <param name="dataService">The store this reads the collected-database list from and writes the exclusions to.</param>
     /// <param name="row">The store row being edited (its <c>ExcludedDatabases</c> is updated in place on save).</param>
     /// <param name="displayName">The header label (the server's display name with its read-only-intent suffix).</param>
-    public ExcludedDatabasesDialog(ViewerDataService dataService, MonitoredServerRow row, string displayName)
+    /// <param name="xeSessionsMode">#7639: true to edit the databases that get Extended Events sessions on Azure SQL Database (V247) instead of the
+    /// excluded databases. Same picker: a checked database is on the list, and an empty list means every database.</param>
+    public ExcludedDatabasesDialog(ViewerDataService dataService, MonitoredServerRow row, string displayName, bool xeSessionsMode = false)
     {
         InitializeComponent();
         _dataService = dataService ?? throw new ArgumentNullException(nameof(dataService));
         _row = row ?? throw new ArgumentNullException(nameof(row));
-        HeaderText.Text = $"Excluded Databases — {displayName}";
+        _xeSessionsMode = xeSessionsMode;
+        if (xeSessionsMode)
+        {
+            Title = "Databases for Extended Events Sessions";
+            HeaderText.Text = $"Databases for Extended Events Sessions — {displayName}";
+            DescriptionText.Text = "Applies to Azure SQL Database only. Azure caps database-scoped Extended Events sessions per pool, and Darling makes up to four per database "
+                + "(deadlock, blocked process, client timeout, long query completions). Check the databases that should get sessions. Leave every box clear to give every "
+                + "database a session. Excluded Databases still apply and win. Sessions that already exist in unchecked databases are left in place; drop them yourself if you no longer need them.";
+        }
+        else
+        {
+            HeaderText.Text = $"Excluded Databases — {displayName}";
+        }
+
         Loaded += async (_, _) => await LoadAsync();
     }
+
+    /// <summary>#7639: true when the dialog edits the Extended Events session databases instead of the excluded databases.</summary>
+    private readonly bool _xeSessionsMode;
 
     private async Task LoadAsync()
     {
         var existing = _row.ExcludedDatabases ?? new List<string>();
+        if (_xeSessionsMode)
+        {
+            try
+            {
+                existing = await _dataService.GetMonitoredServerXeSessionDatabasesAsync(_row.ServerId);
+            }
+            catch (Exception ex)
+            {
+                existing = new List<string>();
+                ViewerLogger.Warn("ExcludedDatabasesDialog", $"Could not read the Extended Events session databases: {ex.Message}");
+            }
+        }
+
         StatusText.Text = "Loading collected databases…";
 
         List<string> collected = new();
@@ -181,8 +212,16 @@ public partial class ExcludedDatabasesDialog : Window
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            await _dataService.SetMonitoredServerExcludedDatabasesAsync(_row.ServerId, names);
-            _row.ExcludedDatabases = names;
+            if (_xeSessionsMode)
+            {
+                await _dataService.SetMonitoredServerXeSessionDatabasesAsync(_row.ServerId, names);
+            }
+            else
+            {
+                await _dataService.SetMonitoredServerExcludedDatabasesAsync(_row.ServerId, names);
+                _row.ExcludedDatabases = names;
+            }
+
             ExclusionsModified = true;
             DialogResult = true;
         }

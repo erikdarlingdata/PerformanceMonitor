@@ -157,7 +157,8 @@ public partial class RemoteCollectorService
                 databaseScope: null,
                 server.ExcludedDatabases,
                 separatelyMonitored,
-                LongQueryTraceDatabases.CoOwners(server.Id, server.ServerName, registrations, serverSeparatelyMonitored))
+                LongQueryTraceDatabases.CoOwners(server.Id, server.ServerName, registrations, serverSeparatelyMonitored),
+                server.XeSessionDatabases)
             : string.Empty;
 
         /* After the cap, the cleanup runs once an hour, on this clock. That attempt logs its failures at Debug, so
@@ -427,7 +428,11 @@ public partial class RemoteCollectorService
                kept, and the create still runs. */
             await RunLegacyLongQuerySessionAsync(server, pass, isAzureSqlDatabase: true, afterTheCap, cancellationToken);
 
-            var create = LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create;
+            /* #7639: the server's "Databases that get Extended Events sessions" list narrows the creates only. The set returned for the
+               drop stays the monitored one, so a session already in a database left off the list is kept, not dropped. */
+            var create = XeSessionDatabaseList.Apply(
+                LongQueryTraceDatabases.Plan(enabled: true, Array.Empty<string>(), monitored, separatelyMonitored, keptElsewhere: Array.Empty<string>()).Create,
+                server.XeSessionDatabases);
 
             /* A test replaces the work in each database (LongQueryTraceDatabaseOverrideForTests), and the shared ensure
                still drives it: the same per-database isolation, log lines and all-refused throw as in production. Below

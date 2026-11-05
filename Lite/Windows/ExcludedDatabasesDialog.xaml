@@ -19,7 +19,7 @@
         <TextBlock Grid.Row="0" x:Name="HeaderText" FontWeight="Bold" FontSize="14"
                    Foreground="{DynamicResource ForegroundBrush}" Margin="0,0,0,8"/>
 
-        <TextBlock Grid.Row="1" TextWrapping="Wrap" FontSize="11"
+        <TextBlock Grid.Row="1" x:Name="DescriptionText" TextWrapping="Wrap" FontSize="11"
                    Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,0,0,12"
                    Text="Databases marked here are skipped by per-database collectors (query_store, file_io_stats, etc.) on this server. System databases (master/tempdb/model/msdb) are always excluded."/>
 

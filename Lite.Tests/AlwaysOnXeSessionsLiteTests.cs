@@ -452,6 +452,72 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         Assert.True(rig.Beta.Started[shared]);
     }
 
+    /// <summary>
+    /// #7639: with "Databases that get Extended Events sessions" set to one of the two databases, the deadlock, blocked process and
+    /// client timeout ensures create there and send nothing to the other. Empty ensures both.
+    /// </summary>
+    [Theory]
+    [InlineData(AlwaysOnXeSessionKind.Deadlock)]
+    [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
+    [InlineData(AlwaysOnXeSessionKind.Attention)]
+    public async Task TheXeSessionDatabaseList_NarrowsTheEnsure_AndEmptyMeansEveryDatabase(AlwaysOnXeSessionKind kind)
+    {
+        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
+        Task EnsureAsync(Rig rig) => kind switch
+        {
+            AlwaysOnXeSessionKind.Deadlock => rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None),
+            AlwaysOnXeSessionKind.BlockedProcess => rig.Service.EnsureBlockedProcessXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None),
+            _ => rig.Service.EnsureAttentionXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None),
+        };
+
+        var listed = await BuildRigAsync();
+        listed.Server.XeSessionDatabases = new List<string> { "ALPHA" };
+        await EnsureAsync(listed);
+        Assert.True(listed.Alpha.Started[shared]);
+        Assert.Empty(listed.Beta.Statements);
+        Assert.False(listed.Beta.Started.ContainsKey(shared));
+
+        /* Cleared, the same server gives every database a session. */
+        listed.Server.XeSessionDatabases = new List<string>();
+        await EnsureAsync(listed);
+        Assert.True(listed.Alpha.Started[shared]);
+        Assert.True(listed.Beta.Started[shared]);
+    }
+
+    /// <summary>
+    /// #7639: a database on both lists gets no session. The list the ensure narrows is already without the excluded databases, so the
+    /// exclusion wins; this stands the real listing's exclusion in for the test's listing.
+    /// </summary>
+    [Fact]
+    public async Task ADatabaseOnBothTheExcludedAndTheXeSessionList_GetsNoSession()
+    {
+        var rig = await BuildRigAsync();
+        rig.Server.ExcludedDatabases = new List<string> { "beta" };
+        rig.Server.XeSessionDatabases = new List<string> { "alpha", "beta" };
+        rig.Service.XeSessionDatabaseListOverrideForTests = (server, _) => Task.FromResult(
+            new List<string> { "master", "alpha", "beta" }
+                .Where(name => !server.ExcludedDatabases.Contains(name, StringComparer.OrdinalIgnoreCase)).ToList());
+        var shared = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+
+        await rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None);
+
+        Assert.True(rig.Alpha.Started[shared]);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    /// <summary>#7639: a servers.json written before the setting has no field, and loads as an empty list (every database).</summary>
+    [Fact]
+    public void AnOlderServersFileWithoutTheXeSessionDatabases_LoadsAsEmpty()
+    {
+        var back = System.Text.Json.JsonSerializer.Deserialize<ServerConnection>("{\"ServerName\":\"S1\",\"DisplayName\":\"S1\"}");
+        Assert.NotNull(back);
+        Assert.Empty(back!.XeSessionDatabases);
+
+        var roundTrip = new ServerConnection { ServerName = "S1", XeSessionDatabases = new List<string> { "alpha" } };
+        var again = System.Text.Json.JsonSerializer.Deserialize<ServerConnection>(System.Text.Json.JsonSerializer.Serialize(roundTrip));
+        Assert.Equal(new[] { "alpha" }, again!.XeSessionDatabases);
+    }
+
     [Fact]
     public async Task TheEnsureThatFailsToCreateInEveryDatabase_RaisesAnErrorThatCarriesTheCapsSentence()
     {

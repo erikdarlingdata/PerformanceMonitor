@@ -182,6 +182,55 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     private static Task EnsureAsync(Rig rig) =>
         DarlingXeSessions.EnsureAllAsync(rig.Runtime, rig.Runner, NullLogger.Instance, CancellationToken.None);
 
+    /* #7639: with "Databases that get Extended Events sessions" set to one of the two databases, the ensure creates the deadlock and
+       blocked process sessions there and sends nothing to the other. */
+    [Fact]
+    public async Task TheXeSessionDatabaseList_NarrowsTheEnsure_ToTheListedDatabases()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "ALPHA" };
+
+        await EnsureAsync(rig);
+
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock)]);
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.BlockedProcess)]);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
+    /* #7639: an empty list is how it worked before the setting: every database gets its sessions. */
+    [Fact]
+    public async Task AnEmptyXeSessionDatabaseList_EnsuresEveryDatabase()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+
+        await EnsureAsync(rig);
+
+        var deadlock = AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock);
+        Assert.True(rig.Alpha.Started[deadlock]);
+        Assert.True(rig.Beta.Started[deadlock]);
+    }
+
+    /* #7639: a database on both the excluded list and the XE list gets none. The test's listing stands in for the real one, which leaves the
+       excluded databases out before the XE list narrows what is left. */
+    [Fact]
+    public async Task ADatabaseOnBothTheExcludedAndTheXeSessionList_GetsNoSession()
+    {
+        var rig = BuildRig();
+        rig.Runner.XeEnsureOverrideForTests = null;
+        rig.Runtime.Config.ExcludedDatabases = new List<string> { "beta" };
+        rig.Runtime.Config.XeSessionDatabases = new List<string> { "alpha", "beta" };
+        rig.Runner.AzureDatabaseListOverrideForTests = (server, _) => Task.FromResult(
+            new List<string> { "master", "alpha", "beta" }
+                .Where(name => !server.Config.ExcludedDatabases.Contains(name, StringComparer.OrdinalIgnoreCase)).ToList());
+
+        await EnsureAsync(rig);
+
+        Assert.True(rig.Alpha.Started[AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Deadlock)]);
+        Assert.Empty(rig.Beta.Statements);
+    }
+
     /* Test 16: a stopped shared session gets a START by name and no fallback. */
     [Fact]
     public async Task AStoppedSharedSession_GetsAStartByName_AndNoFallback()
@@ -664,8 +713,7 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
             "deadlocks", isAzureSqlDb: true, fault, () => { order.Add("read"); return Task.CompletedTask; }, NullLogger.Instance, "azure"));
 
         Assert.Equal(new[] { "read" }, order);
-        Assert.Equal(permission, raised is DarlingXeSessionDeniedException);
-        Assert.Equal(!permission, raised is DarlingXeSessionMissingException);
+        Assert.Equal(permission ? "DarlingXeSessionDeniedException" : "DarlingXeSessionMissingException", raised.GetType().Name);
         Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
     }
 
@@ -675,9 +723,10 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
     {
         var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
 
-        var raised = await Assert.ThrowsAsync<DarlingXeSessionMissingException>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
             "deadlocks", isAzureSqlDb: true, fault, () => throw new InvalidOperationException("The read failed."), NullLogger.Instance, "azure"));
 
+        Assert.Equal("DarlingXeSessionMissingException", raised.GetType().Name);
         Assert.Contains("The create was refused.", raised.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("The read failed.", raised.Message, StringComparison.Ordinal);
     }
@@ -691,9 +740,10 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         var read = false;
         var fault = new DarlingXeSessions.XeEnsureFailure("The create was refused.", IsPermission: false);
 
-        await Assert.ThrowsAsync<DarlingXeSessionMissingException>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
+        var raised = await Assert.ThrowsAnyAsync<Exception>(() => DarlingWorker.RaiseCaptureEnsureFaultAsync(
             collector, isAzureSqlDb, fault, () => { read = true; return Task.CompletedTask; }, NullLogger.Instance, "azure"));
 
+        Assert.Equal("DarlingXeSessionMissingException", raised.GetType().Name);
         Assert.False(read);
     }
 
