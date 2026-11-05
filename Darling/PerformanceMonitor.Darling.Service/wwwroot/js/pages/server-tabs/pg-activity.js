@@ -308,9 +308,9 @@ export const PG_LOGGING_AUDIT_COLUMNS = [
   /* #7539: Recommended and Unlocks show their first sentence and open the whole text on a click, as Cost and remedy does, and all three run the text
      through plainText: the service words these for an MCP client ("through get_pg_top_queries"), and a web reader has no tool to call. */
   detailColumn("recommended", "Recommended", (text) => firstSentence(plainText(text), 70) || null,
-    "The first sentence of what to set. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell" }),
+    "The first sentence of what to set. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell flow-narrow" }),
   detailColumn("unlocks", "Unlocks", (text) => firstSentence(plainText(text), 70) || null,
-    "The first sentence of what this setting makes visible. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell" }),
+    "The first sentence of what this setting makes visible. Click for the full text.", { wrap: true, detailMax: 70, cellClass: () => "flow-cell flow-narrow" }),
   {
     key: "remedy",
     label: "Cost and remedy",
