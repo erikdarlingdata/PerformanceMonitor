@@ -1345,8 +1345,10 @@ function niceNum(range, round) {
  */
 export function axisTickLabels(ticks, step, format) {
   const seen = new Set();
+  /* #7555: the largest tick goes with each one, so a size formatter prints the whole axis in one unit (0 GB, 0.5 GB, 1.0 GB, 1.5 GB). */
+  const axisMax = Math.max(0, ...ticks.map((t) => Math.abs(Number(t)) || 0));
   return ticks.map((t) => {
-    const text = String(format(t, { step }));
+    const text = String(format(t, { step, axisMax }));
     if (seen.has(text)) return "";
     seen.add(text);
     return text;

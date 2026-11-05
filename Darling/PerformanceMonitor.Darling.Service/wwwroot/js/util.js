@@ -1028,7 +1028,15 @@ export function fmtMb(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  return n >= 1024 ? fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB" : fmtInt(n, stepArg(o)) + " MB";
+  /* #7555: an axis tick is printed in the unit of the axis's largest tick (o.axisMax), so one axis never reads "512 MB, 1.0 GB". */
+  const top = axisTopOf(o);
+  if ((top == null ? n : top) < 1024) return fmtInt(n, stepArg(o)) + " MB";
+  return top != null && n === 0 ? "0 GB" : fmtNum(n / 1024, placesFor(o, wholeStepMin(o, 1024), 1024)) + " GB";
+}
+/* #7555: the largest tick of the axis a label belongs to, which axisTickLabels hands each formatter as o.axisMax. Null for a tooltip or a
+   grid cell (no options, or the index `array.map` passes), which keep choosing a unit by their own value. */
+function axisTopOf(o) {
+  return o && typeof o === "object" && isFinite(o.axisMax) ? Math.abs(Number(o.axisMax)) : null;
 }
 /* #7488: the decimals a stepped-up axis label keeps at least. A tick step that is a whole number of the larger unit (20 GB) prints "20 GB";
    a step that is not (a 10,000 MB step is 9.77 GB) keeps one decimal, as a tooltip or table cell does. */
@@ -1045,14 +1053,18 @@ export function fmtSize(v, unit, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  let value = n;
+  /* #7555: on an axis the unit comes from the largest tick, so every label reads in one unit; otherwise from the value itself. */
+  const top = axisTopOf(o);
+  let basis = top == null ? Math.abs(n) : top;
   let i = at;
   let per = 1;
-  while (Math.abs(value) >= 1024 && i < SIZE_UNITS.length - 1) {
-    value /= 1024;
+  while (basis >= 1024 && i < SIZE_UNITS.length - 1) {
+    basis /= 1024;
     per *= 1024;
     i++;
   }
+  if (top != null && n === 0 && i > at) return "0 " + SIZE_UNITS[i];
+  const value = n / per;
   /* A tooltip or table cell keeps one decimal, as every composed value does; an axis tick prints as many as its step needs. */
   const places = stepOf(o) == null ? 1 : placesFor(o, i > at ? wholeStepMin(o, per) : 0, per);
   return fixed(value, places) + " " + SIZE_UNITS[i];
@@ -1062,6 +1074,13 @@ export function fmtSize(v, unit, o) {
    same ladder fmtSize and fmtMb climb. The chart picks its ticks in that larger unit so the labels land on round numbers there
    (20 GB, 40 GB) and not on round numbers of the smaller one (58.6 GB). 1 for a unit that is not a size. */
 export function sizeAxisPer(unit, max) {
+  /* #7555: "bytes" is a count of bytes, whose labels (fmtBytes) climb B, KB, MB, GB and stop there. */
+  if (String(unit == null ? "" : unit).toLowerCase() === "bytes") {
+    const t = Math.abs(Number(max));
+    let p = 1;
+    while (isFinite(t) && t / p >= 1024 && p < 1024 * 1024 * 1024) p *= 1024;
+    return p;
+  }
   let i = SIZE_UNITS.indexOf(String(unit == null ? "" : unit).toUpperCase());
   const top = Math.abs(Number(max));
   if (i < 0 || !isFinite(top)) return 1;
@@ -1074,15 +1093,20 @@ export function sizeAxisPer(unit, max) {
 }
 /* A byte count in human units (B, KB, MB, GB; 1024-based). A null is the dash, never 0 bytes: 0 is a real answer. The table sorts
    a column on the raw number, so "900 KB" sorts below "2.0 MB" whatever the text says. */
-export function fmtBytes(v) {
+export function fmtBytes(v, o) {
   if (v == null) return "—";
   const n = Number(v);
   if (!isFinite(n)) return "—";
-  const abs = Math.abs(n);
-  if (abs < 1024) return fmtInt(n) + " B";
-  if (abs < 1024 * 1024) return fmtNum(n / 1024, 1) + " KB";
-  if (abs < 1024 * 1024 * 1024) return fmtNum(n / (1024 * 1024), 1) + " MB";
-  return fmtNum(n / (1024 * 1024 * 1024), 1) + " GB";
+  /* #7555: an axis tick (o.axisMax, the largest tick) prints in the axis's one unit, with the decimals its step needs. A cell or tooltip,
+     called without options, keeps one decimal in the unit that fits its own value. */
+  const top = axisTopOf(o);
+  const basis = top == null ? Math.abs(n) : top;
+  if (basis < 1024) return fmtInt(n, stepArg(o)) + " B";
+  const at = basis < 1024 * 1024 ? 1 : basis < 1024 * 1024 * 1024 ? 2 : 3;
+  const per = Math.pow(1024, at);
+  const unit = ["B", "KB", "MB", "GB"][at];
+  if (top != null && n === 0) return "0 " + unit;
+  return (stepOf(o) == null ? fmtNum(n / per, 1) : fixed(n / per, placesFor(o, wholeStepMin(o, per), per))) + " " + unit;
 }
 /* A size given in megabytes, written in the unit that fits it (#7410): a table that holds 140 KB read "0 MB" under fmtMb, which prints whole
    megabytes. Null is the dash and 0 is a real 0 B, as fmtBytes. */

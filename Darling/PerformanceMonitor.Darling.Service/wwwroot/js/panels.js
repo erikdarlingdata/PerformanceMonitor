@@ -1577,8 +1577,8 @@ function vizLine(data, desc) {
     integerTicks: desc.format === "int",
     /* #7571: "stacked-bar" draws a grouped read as one bar per time, one segment per group. Absent: the chart's default line. */
     mode: desc.mode || undefined,
-    /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). */
-    sizeUnit: desc.format === "mb" ? "mb" : null,
+    /* #7488: a size chart picks its ticks in the unit its labels step up to (fmtMb prints GB from 1,024). #7555: a bytes chart likewise. */
+    sizeUnit: desc.format === "mb" ? "mb" : desc.format === "bytes" ? "bytes" : null,
     unit: desc.unit ?? null,
     title: desc.title || null,
     atTime: desc.atTime || null,

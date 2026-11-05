@@ -174,7 +174,7 @@ const composedBoth = axes({
 });
 out.sizeAxis = {
   big: sized([42000, 51000, 60000, 58000]).leftLabels,
-  bigExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
+  bigExpected: [GB(0), GB(20), GB(40), GB(60)],
   bigWithout: unsized([42000, 51000, 60000, 58000]).leftLabels,
   small: sized([120, 340, 500, 410]).leftLabels,
   smallWithout: unsized([120, 340, 500, 410]).leftLabels,
@@ -182,8 +182,8 @@ out.sizeAxis = {
   edgeWithout: unsized([300, 900, 1023]).leftLabels,
   composedLeft: composedBoth.leftLabels,
   composedRight: composedBoth.rightLabels,
-  composedLeftExpected: [util.fmtMb(0), GB(20), GB(40), GB(60)],
-  composedRightExpected: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+  composedLeftExpected: [GB(0), GB(20), GB(40), GB(60)],
+  composedRightExpected: [GB(0), GB(10), GB(20), GB(30)],
 };
 
 /* #7515: the same axes, drawn the way the pages draw them. A composed panel goes through renderComposedResult (the left axis and the
@@ -211,8 +211,36 @@ out.panelAxis = {
   mbPanel: mbPanel([42000, 51000, 60000, 58000]).leftLabels,
   mbPanelSmall: mbPanel([120, 340, 500, 410]).leftLabels,
   mbPanelSmallWithout: unsized([120, 340, 500, 410]).leftLabels,
-  expectedLeft: [util.fmtMb(0), GB(20), GB(40), GB(60)],
-  expectedRight: [util.fmtMb(0), GB(10), GB(20), GB(30)],
+  expectedLeft: [GB(0), GB(20), GB(40), GB(60)],
+  expectedRight: [GB(0), GB(10), GB(20), GB(30)],
+};
+
+/* #7555: a "format: bytes" chart picks its ticks in the unit its labels print (20, 40, 60 KB, not 19.5, 39.1, 58.6), drawn through the public
+   way into a panel (VIZ.line), and every tick of a size axis prints in the unit of its largest tick (a 2 GB Memory Trend reads 0 GB,
+   0.5 GB, 1.0 GB, 1.5 GB, not 0 MB, 512 MB, 1.0 GB). Expected words are built with the page's own formatters, so the test holds in any locale. */
+const sizePanel = (values, format) => {
+  const holder = new FakeNode("div");
+  holder.appendChild(panels.VIZ.line({ trend: rows(values) }, { rowsKey: "trend", xKey: "t", series: [{ key: "a", label: "A" }], format, unit: format === "bytes" ? "/s" : undefined }));
+  return axesOf(holder);
+};
+const KB = (n) => util.fmtInt(n) + " KB";
+const MBw = (n) => util.fmtInt(n) + " MB";
+const unitsOf = (labels) => [...new Set(labels.filter((l) => l !== "").map((l) => l.split(" ").pop()))];
+const memory = sizePanel([300, 900, 1500, 1900, 1700], "mb");
+out.byteAxis = {
+  kb: sizePanel([20000, 41000, 60000, 52000], "bytes").leftLabels,
+  kbExpected: ["0 KB", KB(20), KB(40), KB(60)],
+  mb: sizePanel([20000000, 41000000, 60000000, 52000000], "bytes").leftLabels,
+  mbExpected: ["0 MB", MBw(20), MBw(40), MBw(60)],
+  small: sizePanel([120, 340, 500, 410], "bytes").leftLabels,
+  cell: [0, 900, 1536, 2 * 1024 * 1024, 3 * 1024 * 1024 * 1024].map((v) => util.fmtBytes(v)),
+  mapIndex: [900, 2048].map(util.fmtBytes),
+};
+out.memoryAxis = {
+  labels: memory.leftLabels,
+  units: unitsOf(memory.leftLabels),
+  expected: ["0 GB", util.fmtNum(0.5, 1) + " GB", util.fmtNum(1, 1) + " GB", util.fmtNum(1.5, 1) + " GB"],
+  tooltipCell: [512, 1536].map((v) => util.fmtMb(v)),
 };
 
 /* A chart of counts keeps every tick on a whole number (integerTicks), where the same range without it steps by 0.2. */
