@@ -574,7 +574,11 @@ table.data tbody tr:nth-child(even) { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* #7392: a number column's header sits over its right-aligned values, not beside the next column's header. */
 table.data th.num { text-align: right; }
-table.data td.wrap { white-space: normal; max-width: 620px; }
+/* #7541: a wrapping column keeps a floor of 14rem, a little over the flow-cell floor of 12rem, so the auto layout cannot squeeze a 55 character Reason into 87px and five lines. Two lines hold it at 1280. */
+table.data td.wrap { white-space: normal; max-width: 620px; min-width: 14rem; }
+/* #7607: a long statement column follows the window, 28% of it between 14rem and the old 620px. At 1280 the Active Queries grid kept its Query column at the full 620px and pushed SPID and Status off the card. */
+table.data td.wrap.wrap-follow { min-width: 14rem; max-width: clamp(14rem, 28vw, 620px); }
+table.data td.wrap.wrap-follow > .disclosure { max-width: clamp(12rem, 24vw, 640px); }
 /* #7428: a statement preview in a grid (Sampled Waits, OS CPU by Query) closed to one line no longer claims its full 640px. At 1280px
    wide that pushed a grid to scroll sideways with the preview cut off at the edge, so the width follows the window: 15% of it, never
    under 12rem and never over the old 640px, which only a very wide window reaches. Open, the text wraps in that width. */
@@ -582,6 +586,10 @@ table.data td.wrap > .disclosure { max-width: clamp(12rem, 15vw, 640px); }
 table.data td.wrap > .disclosure[open] > .disc-body .code { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A long text cell on one line, the rest on demand (#5644 W11). The full text stays in the node; the clip is only paint. */
 table.data td.clamp { max-width: 28rem; }
+/* #7533: a name column (Database, File, Path, Job, Instance) is one line with a cap that follows the window, 16% of it between 12rem and 26rem, and an ellipsis; the cell's title and Copy cell carry the whole name.
+   A 118 character database name took 673px and pushed every number off screen. A name under about 28 characters at 1280 looks as before. */
+table.data td.name-cell { max-width: clamp(12rem, 16vw, 26rem); }
+table.data td.name-cell > .clamp-text { max-width: 100%; }
 .clamp-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .clamp-text[role="button"] { cursor: pointer; }
 .clamp-text.open { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -609,7 +617,8 @@ table.data tbody tr.band-Offline { background: rgba(168, 174, 186, 0.16); }
 
 /* Copy and CSV strip above a data table (#4843). */
 .grid-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
-.grid-tools .grid-tool { font-size: 12px; padding: 2px 8px; }
+/* #7540: a grid-tool button outside a .grid-tools row (the Plan button in a cell, Copy and Download in an open plan) carries btn too, and takes the same small size, so a row does not get taller. */
+.grid-tools .grid-tool, .btn.grid-tool { font-size: 12px; padding: 2px 8px; }
 .grid-tools-status { font-size: 12px; opacity: 0.8; margin-left: 6px; }
 
 /* Column-group toggles above a wide table (#4843). */

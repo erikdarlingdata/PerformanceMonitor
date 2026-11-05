@@ -157,7 +157,7 @@ export const WAITING_TASK_COLUMNS = [
   /* #7571: the read rolls a session's threads on one wait type into one row; this is how many, so a parallel query's chart total can be matched. */
   { key: "thread_count", label: "Threads", format: "int" },
   { key: "blocking_session_id", label: "Blocked by", format: "int" },
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
 ];
 
 export const LATCH_COLUMNS = [

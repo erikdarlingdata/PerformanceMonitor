@@ -1336,6 +1336,8 @@ function cell(row, c) {
     if (isNumericCol(c)) rcls.push("num");
     if (c.clamp) rcls.push("clamp");
     else if (c.wrap) rcls.push("wrap");
+    /* #7607: `follow: true` on a wrap column makes its width follow the window (`wrap-follow`). A column flag, not a cellClass function, because a stored dashboard template spreads these column lists and reads only literals. */
+    if (c.follow) rcls.push("wrap-follow");
     if (c.mono) rcls.push("mono");
     if (c.pre) rcls.push("pre");
     if (c.sevKey) rcls.push(sevClass(getPath(row, c.sevKey)));
@@ -1345,8 +1347,10 @@ function cell(row, c) {
   const raw = getPath(row, c.key);
   const cls = [];
   if (isNumericCol(c)) cls.push("num");
-  if (c.clamp) cls.push("clamp");
+  if (c.name) cls.push("name-cell");
+  else if (c.clamp) cls.push("clamp");
   else if (c.wrap) cls.push("wrap");
+  if (c.follow) cls.push("wrap-follow");
   if (c.mono) cls.push("mono");
   if (c.pre) cls.push("pre");
   if (c.sevKey) cls.push(sevClass(getPath(row, c.sevKey)));
@@ -1381,6 +1385,9 @@ function cell(row, c) {
   const text = c.localizeAlertDetail && !c.format
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
     : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
+  /* #7533: `name: true` is a name column (Database, File, Path, Job, Instance): one line under the stylesheet's window-following cap, an ellipsis, and the whole name in the cell's title.
+     It does not open on a click, because a name is read and copied, not expanded. Copy cell and the CSV read the row, so they carry the whole name too. */
+  if (c.name) return el("td", { class: cls.join(" ") || null }, [clampText(text, { expandable: false })]);
   if (c.clamp) return el("td", { class: cls.join(" ") || null }, [clampText(text)]);
   /* #6154: `detailKey` names a field of the same row that holds the long explanation. The cell shows only its short value and the
      explanation opens under it on a click (a <details>, so the keyboard works), so a row stays one line tall. Text that is the same

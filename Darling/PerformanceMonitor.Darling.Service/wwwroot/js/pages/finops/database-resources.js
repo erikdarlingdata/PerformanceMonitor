@@ -18,7 +18,7 @@ import { finopsWindowControl } from "./window.js";
 const HOURS = 24;
 
 const COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "cpu_time_ms", label: "CPU", format: "ms" },
   { key: "cpu_share_pct", label: "CPU %", format: "num2" },
   { key: "logical_reads", label: "Logical reads", format: "int" },

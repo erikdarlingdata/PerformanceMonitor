@@ -72,6 +72,24 @@ public sealed class WebClampCellBehaviourTests
     }
 
     [Fact]
+    public void ANameColumn_IsOneCappedLine_WithTheWholeNameOnHover_AndNotClickToOpen()
+    {
+        // #7533: a 118 character database name took 673px and pushed every number off screen. The cell gets the name-cell class the stylesheet caps
+        // (its own class, not clamp's 28rem), keeps the whole name in its title and text (so hover, Copy cell and the CSV carry it), and does not open on a click.
+        var n = Run().GetProperty("nameCol");
+        Assert.Equal("name-cell", n.GetProperty("tdClass").GetString());
+        Assert.True(n.GetProperty("longTitle").GetBoolean());
+        Assert.True(n.GetProperty("longText").GetBoolean());
+        Assert.True(n.GetProperty("tdText").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, n.GetProperty("longRole").ValueKind);
+        Assert.Equal("master", n.GetProperty("shortTitle").GetString());
+        Assert.Equal("wrap", n.GetProperty("wrapTdClass").GetString());
+        // #7607: follow: true on a wrap column (Active Queries' Query) adds the class that makes its width follow the window, for a plain and a custom-render cell.
+        Assert.Equal("wrap wrap-follow", n.GetProperty("followTdClass").GetString());
+        Assert.Equal("wrap wrap-follow", n.GetProperty("followRenderTdClass").GetString());
+    }
+
+    [Fact]
     public void ALongCell_OpensAndClosesOnAClick_WithoutActivatingTheRow()
     {
         var r = Run();

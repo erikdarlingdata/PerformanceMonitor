@@ -173,4 +173,31 @@ const pmr = pm.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent
 const pmt = pmr.children.map((c) => c.textContent);
 out.plainModes = { raw: modeNote, counts: pmt[0], full: pmt[1], named: pmt[2], asStored: pmt[3] };
 
+/* #7533: a name column (`name: true`) draws one clamped line carrying the whole name in its title, under the cell class the stylesheet caps; it is not click-to-open.
+   A short name draws the same cell, so the cap only bites on a long one. */
+const longName = "Database_" + "x".repeat(109);
+const nm = VIZ.table({ rows: [{ database_name: longName, note: "short reason", reads: 5 }, { database_name: "master", note: "short reason", reads: 6 }] }, {
+  rowsKey: "rows", title: "Names", tools: false,
+  columns: [
+    { key: "database_name", label: "Database", name: true },
+    { key: "note", label: "Reason", wrap: true },
+    { key: "reads", label: "Reads", format: "int" },
+    { key: "note", label: "Followed", wrap: true, follow: true },
+    { key: "note", label: "Rendered", wrap: true, follow: true, render: (r) => r.note },
+  ],
+});
+const nmr = nm.findAll((n) => n.tag === "tr").filter((n) => n.parent && n.parent.tag === "tbody");
+const nameSpan = (r) => r.children[0].findAll((n) => String(n.className).includes("clamp-text"))[0];
+out.nameCol = {
+  tdClass: nmr[0].children[0].className,
+  longTitle: nameSpan(nmr[0]).attrs.title === longName,
+  longText: nameSpan(nmr[0]).textContent === longName,
+  longRole: nameSpan(nmr[0]).attrs.role || null,
+  shortTitle: nameSpan(nmr[1]).attrs.title,
+  tdText: nmr[0].children[0].textContent === longName,
+  wrapTdClass: nmr[0].children[1].className,
+  followTdClass: nmr[0].children[3].className,
+  followRenderTdClass: nmr[0].children[4].className,
+};
+
 console.log(JSON.stringify(out));
