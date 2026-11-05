@@ -305,6 +305,61 @@ with tempfile.TemporaryDirectory() as hroot:
 
 # The real file table: a class file maps to its classes, a helper and a missing map do not narrow.
 real_cat = cp.load_catalog()
+# --- a draft narrows the scope (#7727) -------------------------------------------------------------------------
+def draft_run(files, draft=True, event="pull_request", base="dev", **kw):
+    """The plan of a draft (or, with draft=False, of a pull request that is ready). A plan that has no draft input answers a draft
+    with nothing, so its checks fail."""
+    try:
+        return cp.plan(event, base, "feature/x", [], files, rules, kw.get("cat", cc_cat), draft=draft)
+    except TypeError:  # a plan with no draft input: a ready pull request still plans as before, a draft has no answer
+        return {} if draft else cp.plan(event, base, "feature/x", [], files, rules, kw.get("cat", cc_cat))
+
+
+LITE_SRC = "Lite/Services/X.cs"
+r = draft_run([SERVICE, DT + "D3Tests.cs"])
+check("draft: product file + changed test file: areas", r.get("areas"), "classes")
+check("draft: product file + changed test file: scope", (r.get("darling_scope"), r.get("lite_scope")), ("classes", "none"))
+check("draft: product file + changed test file: the class and the Guard classes", r.get("darling_classes"), "D3,D4,D1")
+check("draft: product file + changed test file: minutes and legs", (r.get("test_minutes"), r.get("legs")), ("3.0", "1"))
+check("draft: the why line names the rule", "a draft runs only its own test classes and the Guard classes" in r.get("why", ""), True)
+r = draft_run([SERVICE])
+check("draft: product file only: Guard classes only", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("classes", "classes", "D1"))
+check("draft: product file only: no Lite", (r.get("lite_scope"), r.get("lite_classes"), r.get("build")), ("none", "", "true"))
+r = draft_run([SERVICE, DT + "D1Tests.cs"])
+check("draft: a changed Guard class is picked once", r.get("darling_classes"), "D1")
+r = draft_run([SERVICE, LITE_SRC, DT + "D3Tests.cs", LT + "L2Tests.cs"])
+check("draft: both suites: classes", (r.get("darling_classes"), r.get("lite_classes")), ("D3,D4,D1", "L2"))
+check("draft: both suites: scope", (r.get("areas"), r.get("darling_scope"), r.get("lite_scope")), ("classes", "classes", "classes"))
+r = draft_run([LITE_SRC])
+check("draft: a Lite-only product file: Darling Guard, no Lite", (r.get("areas"), r.get("darling_classes"), r.get("lite_scope")), ("classes", "D1", "none"))
+r = draft_run([LITE_SRC, LT + "L1Tests.cs"])
+check("draft: a Lite product file + Lite test: both", (r.get("darling_classes"), r.get("lite_classes")), ("D1", "L1"))
+# A changed test file that is not safe: the whole pull request runs as it does today, and the why line says so.
+r = draft_run([SERVICE, DT + "Helpers.cs"])
+check("draft: an unsafe test file: full", (r.get("areas"), r.get("darling_scope")), ("darling", "full"))
+check("draft: an unsafe test file: the why line", "Helpers.cs is not a plain test class file" in r.get("why", ""), True)
+r = draft_run([SERVICE, DT + "NoSuchTests.cs"])
+check("draft: a test file the map does not know: full", r.get("darling_scope"), "full")
+r = draft_run([SERVICE, DT + "Probe.csproj"])
+check("draft: a .csproj in the test tree: full", r.get("darling_scope"), "full")
+# The same files on a pull request that is ready for review: as today.
+for files in ([SERVICE, DT + "D3Tests.cs"], [SERVICE]):
+    r = draft_run(files, draft=False)
+    check(f"ready: {len(files)} file(s): full", (r.get("areas"), r.get("darling_scope"), r.get("darling_classes")), ("darling", "full", ""))
+check("ready: the why line has no draft rule", "draft runs only" in draft_run([SERVICE], draft=False).get("why", ""), False)
+# Docs-only, test-only, a dev push and a base other than dev: as today, draft or not.
+for flag in (True, False):
+    check(f"draft={flag}: docs-only", draft_run(["README.md"], draft=flag).get("areas"), "docs-only")
+    r = draft_run(["README.md", DT + "D3Tests.cs"], draft=flag)
+    check(f"draft={flag}: test-only has no Guard classes", (r.get("areas"), r.get("darling_classes")), ("classes", "D3,D4"))
+    check(f"draft={flag}: a dev push is every area", draft_run([SERVICE], draft=flag, event="push").get("darling_scope"), "full")
+    check(f"draft={flag}: a base other than dev is every area",
+          draft_run([SERVICE], draft=flag, base="main").get("areas"), "all")
+    check(f"draft={flag}: a path no area knows is every area",
+          draft_run([SERVICE, "no-such-area/odd.bin"], draft=flag).get("areas"), "all")
+check("draft: parse_bool", [cp.parse_bool(x) for x in ("true", "True", "false", "", "no")] if hasattr(cp, "parse_bool") else None,
+      [True, True, False, False, False])
+
 tbl = real_cat["files"]
 one = next(f for f, e in sorted(tbl.items()) if e["suite"] == "darling" and e["safe"] and len(e["classes"]) == 1)
 r = cp.plan("pull_request", "dev", "x", [], ["README.md", one], live_rules := cs.Rules(), real_cat)

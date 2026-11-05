@@ -7,8 +7,11 @@ name: PR CI
 # verdict sets it, so a run that is cancelled or dies early never passes.
 #
 # Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
-# pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag is not an
-# input to the plan. Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
+# pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag does not
+# gate the run, it narrows the scope (#7727): a draft that changes product files runs the build, the test classes of the test
+# files it changed and the Darling Stage=Guard classes, not the full suite. The full suite runs when the pull request is
+# marked ready for review (`ready_for_review` starts a run), so every merge has a full green run behind it.
+# Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 
 on:
@@ -62,10 +65,25 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref || github.ref_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          IS_DRAFT: ${{ github.event.pull_request.draft || 'false' }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+
+          # The payload's draft flag is as old as the event. A push to a draft and `gh pr ready` seconds apart start the push run
+          # last: it cancels the ready run and its payload still says draft, so it would run the narrow draft scope and the ready
+          # head would get a `CI result` without the full suite. Read the live state instead; if the call fails, keep the payload's value.
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            if live_draft=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null) && [[ "${live_draft}" =~ ^(true|false)$ ]]; then
+              if [ "${live_draft}" != "${IS_DRAFT}" ]; then
+                echo "::notice title=Draft state read live::The pull request is draft=${live_draft} now, but the event payload said draft=${IS_DRAFT}. Using the live state."
+              fi
+              IS_DRAFT="${live_draft}"
+            else
+              echo "::notice title=Draft state read from the payload::The pull request API call failed, so the event payload's draft=${IS_DRAFT} is used."
+            fi
+          fi
 
           # A push runs every area whatever it changed, so it needs no file list.
           : > changed.txt
@@ -86,7 +104,7 @@ jobs:
           echo "$(wc -l < changed.txt) changed file(s)"
 
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
-            --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
 
       # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
       # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
