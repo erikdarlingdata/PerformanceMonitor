@@ -62,7 +62,8 @@ const answerFor = (name, params) => {
   if (name === "get_blocking_trend" || name === "get_deadlock_trend") {
     if (server === "single") return name === "get_blocking_trend" ? { trend: [{ time: iso(END - 6 * HOUR), count: 3 }] } : { status: "empty", message: "No deadlocks in this window." };
     if (server === "none") return { status: "empty", message: "No rows in this window." };
-    return { trend: [1, 7, 13, 19].map((h, i) => ({ time: iso(START + h * HOUR), count: 2 + i })) };
+    /* #7544: these trends are per-minute counts, and a step longer than a minute breaks the line into dots, so several samples are consecutive minutes. */
+    return { trend: [0, 1, 2, 3].map((m, i) => ({ time: iso(START + 7 * HOUR + m * 60000), count: 2 + i })) };
   }
   if (name === "get_query_trend") {
     /* #7416 item 21: the head of the history is later than the window's start. "late" has the start inside the tier's retention; "old" does not. */

@@ -8,7 +8,8 @@
 
 import { routeHash, el, readToolWithinKeptHistory, keptWindowStrip, mount, readErrorStrip, emptyStrip, noticeStrip, fmtInt, windowFromHours, getActiveDatabaseFilter, parseUtc } from "../../util.js";
 import { getPanelSignal } from "../../panels.js";
-import { zoomableLineChart, chartZoomScope, SERIES_COLORS, bucketMsOf } from "../../charts.js";
+import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
+import { bucketMsOf } from "../../chart-gaps.js";
 import { READ_FIELDS } from "../../read-fields.js";
 import { panelShell, discontinuityStrip, linePanel } from "./shared.js";
 
