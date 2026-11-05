@@ -150,7 +150,7 @@ public sealed class WebQueryHeatmapBehaviourTests
         Assert.Equal(columns, r.GetProperty("cellsInRow").GetInt32());
         Assert.Equal(columns, r.GetProperty("labelColumns").GetInt32());
         Assert.False(r.GetProperty("fixedCellWidth").GetBoolean());
-        Assert.Equal($"calc(5rem + {columns * 7 + 1}px)", r.GetProperty("minWidth").GetString());
+        Assert.Equal($"calc(var(--qh-head) + {columns * 7 + 2}px)", r.GetProperty("minWidth").GetString());
     }
 
     /// <summary>An answer with no cells draws no grid and no empty cells: the table's own empty text shows, never a grid of blanks.</summary>
