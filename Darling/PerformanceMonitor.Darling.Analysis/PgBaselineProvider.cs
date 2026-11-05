@@ -362,14 +362,26 @@ public class PgBaselineProvider
     {
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
+        return await GetOrComputeUnsharedAsync(
+            serverId, cacheKey, roundedHour, () => BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken));
+    }
 
+    /// <summary>The cache half of <see cref="GetOrComputeBaselinesAsync"/>, with the compute passed in. A faulted entry is answered
+    /// to the caller and not stored (#7644, as on the shared read): stored, a command timeout or a connection fault would read as
+    /// "no baseline" for the whole <see cref="CacheTtl"/>. A genuine "no data" entry is stored.</summary>
+    internal async Task<CachedBaseline> GetOrComputeUnsharedAsync(
+        int serverId, string cacheKey, DateTime roundedHour, Func<Task<CachedBaseline>> build)
+    {
         if (TryGetFresh(serverId, cacheKey, roundedHour, out var cached))
         {
             return cached;
         }
 
-        var entry = await BuildEntryAsync(serverId, metricName, analysisTime, roundedHour, cancellationToken);
-        Store(serverId, cacheKey, entry);
+        var entry = await build();
+        if (!entry.Faulted)
+        {
+            Store(serverId, cacheKey, entry);
+        }
 
         return entry;
     }
@@ -540,8 +552,19 @@ public class PgBaselineProvider
     /// with its compute's clock and time, so the next call for any one key is a hit on its own entry exactly as a
     /// per-member compute's was.
     /// </summary>
-    private async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+    private Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
         int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken)
+        => GetOrComputeKeyedBaselinesAsync(
+            serverId, metricName, keys, analysisTime,
+            set => ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken));
+
+    /// <summary>One chunk's compute result, the shape <see cref="ComputeBaselinesAsync"/> returns.</summary>
+    internal delegate Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> KeyedChunkCompute(string[] set);
+
+    /// <summary>The keyed read with the chunk compute passed in. A member of a faulted chunk is answered and not stored (#7644), so the
+    /// next call computes it again; a member of a chunk that answered with no rows is stored.</summary>
+    internal async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+        int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, KeyedChunkCompute computeChunk)
     {
         var roundedHour = RoundedKeyTime(metricName, analysisTime);
         var entries = new Dictionary<string, CachedBaseline>(StringComparer.Ordinal);
@@ -575,7 +598,7 @@ public class PgBaselineProvider
 
         foreach (var set in misses.Chunk(KeyedSetWidth))
         {
-            var (byMember, clock, utcOffsetMinutes, timeZoneId, _) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
+            var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await computeChunk(set);
 
             var computedAt = DateTime.UtcNow;
             for (var member = 1; member <= set.Length; member++)
@@ -591,9 +614,14 @@ public class PgBaselineProvider
                     Clock = clock,
                     UtcOffsetMinutes = utcOffsetMinutes,
                     TimeZoneId = timeZoneId,
-                    Key = key
+                    Key = key,
+                    Faulted = faulted
                 };
-                Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
+                if (!faulted)
+                {
+                    Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
+                }
+
                 entries[key] = entry;
             }
         }

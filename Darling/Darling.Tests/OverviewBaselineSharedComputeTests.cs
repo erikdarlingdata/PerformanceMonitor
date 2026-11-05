@@ -272,6 +272,93 @@ public sealed class OverviewBaselineSharedComputeTests
     }
 
     [Fact]
+    public async Task OnTheUnsharedPath_AFaultedEntry_IsNotCached_AndTheNextRequestComputesAgain()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<PgBaselineProvider.CachedBaseline> Build()
+            => Task.FromResult(Interlocked.Increment(ref computes) == 1 ? Faulted(key) : Computed(key));
+
+        var first = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+
+        Assert.True(first.Faulted);
+        Assert.NotNull(second.Buckets);
+        Assert.Equal(2, computes);
+    }
+
+    [Fact]
+    public async Task OnTheUnsharedPath_AnEntryThatFoundNoData_IsStillCached()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<PgBaselineProvider.CachedBaseline> Build()
+        {
+            Interlocked.Increment(ref computes);
+            return Task.FromResult(NoData(key));
+        }
+
+        var first = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeUnsharedAsync(ServerId, "k", key, Build).WaitAsync(TestLimit);
+
+        Assert.Same(first, second);
+        Assert.Equal(1, computes);
+    }
+
+    private static readonly string[] Members = ["a"];
+
+    /// <summary>One keyed chunk's answer: a fault (no rows, <c>Faulted</c> set), rows for member 1, or a store that answered with none.</summary>
+    private static Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> Chunk(
+        DateTime key, bool faulted, bool rows)
+        => Task.FromResult<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>?, LocalClockWindow, int?, string?, bool)>((
+            faulted ? null : rows ? new() { [1] = EntryAt(key, mean: 10).Buckets! } : new(),
+            LocalClockWindow.Utc(key), null, null, faulted));
+
+    [Fact]
+    public async Task OnTheKeyedPath_AFaultedChunk_IsNotCached_AndTheNextRequestComputesAgain()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> Compute(string[] set)
+            => Chunk(key, faulted: Interlocked.Increment(ref computes) == 1, rows: true);
+
+        var first = await provider.GetOrComputeKeyedBaselinesAsync(ServerId, MetricNames.IoLatency, Members, Now, Compute).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeKeyedBaselinesAsync(ServerId, MetricNames.IoLatency, Members, Now, Compute).WaitAsync(TestLimit);
+
+        Assert.True(first["a"].Faulted);
+        Assert.Null(first["a"].Buckets);
+        Assert.NotNull(second["a"].Buckets);
+        Assert.False(second["a"].Faulted);
+        Assert.Equal(2, computes);
+    }
+
+    [Fact]
+    public async Task OnTheKeyedPath_AChunkThatFoundNoData_IsStillCached()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> Compute(string[] set)
+        {
+            Interlocked.Increment(ref computes);
+            return Chunk(key, faulted: false, rows: false);
+        }
+
+        var first = await provider.GetOrComputeKeyedBaselinesAsync(ServerId, MetricNames.IoLatency, Members, Now, Compute).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeKeyedBaselinesAsync(ServerId, MetricNames.IoLatency, Members, Now, Compute).WaitAsync(TestLimit);
+
+        Assert.Same(first["a"], second["a"]);
+        Assert.Equal(1, computes);
+    }
+
+    [Fact]
     public async Task ConcurrentRequestsDuringOneFaultedCompute_ShareItsAnswer()
     {
         await using var postgres = Unreachable();
