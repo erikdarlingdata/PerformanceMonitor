@@ -192,6 +192,47 @@ public sealed class WebQueryHeatmapBehaviourTests
         Assert.Equal(19, cut.GetProperty("columns").GetInt32());
     }
 
+    /// <summary>
+    /// #7683: 145 ten minute columns end in a last label with one column under it, too narrow for its text, so that label is blank and the
+    /// one before it still shows its time.
+    /// </summary>
+    [Theory]
+    [InlineData("one")]
+    [InlineData("lastHour")]
+    public void ALastTickLabelWithOneColumnUnderIt_IsBlank_AndTheOneBeforeItIsNot(string draw)
+    {
+        var d = Run("window").GetProperty(draw);
+
+        Assert.Equal(1, d.GetProperty("lastTickSpan").GetInt32());
+        Assert.Equal("", d.GetProperty("lastTickText").GetString());
+        Assert.NotEqual("", d.GetProperty("tickBeforeLastText").GetString());
+    }
+
+    /// <summary>
+    /// #7683: a 7 day window whose oldest 4 days are past retention (window_truncated, effective_start 4 days in) starts its grid at
+    /// effective_start's bin, so no column before the data is drawn as "no query". The same reply without window_truncated still starts at
+    /// window_start.
+    /// </summary>
+    [Fact]
+    public void AWindowCutByRetention_StartsAtTheEffectiveStartBin_AndOneThatIsNotStartsAtTheWindowStart()
+    {
+        var r = Run("retention");
+        var cut = r.GetProperty("retentionCut");
+
+        Assert.Equal(r.GetProperty("effectiveStartBinMs").GetInt64(), cut.GetProperty("startMs").GetInt64());
+        Assert.Equal(62, cut.GetProperty("columns").GetInt32());
+        Assert.Equal(62, cut.GetProperty("cellsInRow").GetInt32());
+        Assert.Equal(new[] { 0, 10, 61 }, cut.GetProperty("filledColumns").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+
+        foreach (var name in new[] { "notTruncated", "noFlag" })
+        {
+            var full = r.GetProperty(name);
+            Assert.Equal(r.GetProperty("windowStartBinMs").GetInt64(), full.GetProperty("startMs").GetInt64());
+            Assert.Equal(145, full.GetProperty("columns").GetInt32());
+            Assert.Equal(new[] { 83, 93, 144 }, full.GetProperty("filledColumns").EnumerateArray().Select(e => e.GetInt32()).ToArray());
+        }
+    }
+
     /// <summary>An answer with no cells draws no grid and no empty cells: the table's own empty text shows, never a grid of blanks.</summary>
     [Fact]
     public void TheCaptionSaysWhatIsAtTheTop_ForTheMetricPicked()
