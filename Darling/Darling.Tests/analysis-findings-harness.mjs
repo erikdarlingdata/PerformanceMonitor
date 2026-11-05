@@ -182,6 +182,31 @@ try {
       const root = await run("srv-a", { findings: [warn, crit, other] });
       return { headers: groupsOf(root).map(sum), text: root.textContent };
     },
+    sameRootOtherFigure: async () => {
+      /* #7696: one root fact on two incidents whose headlines differ only in the figure is one card: Critical, the newest figure, the occurrences added up. */
+      const wl = (over) => finding({ root_fact: { key: "ANOMALY_WRITE_LATENCY", value: 1 }, story_path: "ANOMALY_WRITE_LATENCY", ...over });
+      const older = wl({ finding_id: 1, incident_id: "inc-1", severity: 1.6, peak_severity: 1.6, occurrences: 25, first_seen: "2026-01-01T01:00:00Z", last_seen: "2026-01-01T08:50:00Z", time_range: { start: "2026-01-01T01:41:00Z", end: "2026-01-01T08:50:00Z" }, advice: { headline: "Write latency spiked to 2300 ms", investigation: "i", remediation: "r" } });
+      const newer = wl({ finding_id: 2, incident_id: "inc-2", severity: 1.3, peak_severity: 1.3, occurrences: 5, first_seen: "2026-01-01T00:11:00Z", last_seen: "2026-01-01T09:20:00Z", time_range: { start: "2026-01-01T00:11:00Z", end: "2026-01-01T09:20:00Z" }, advice: { headline: "Write latency spiked to 4935.5 ms", investigation: "i", remediation: "r" } });
+      const root = await run("srv-a", { findings: [older, newer] });
+      const merged = mod.mergeBySentence([older, newer]);
+      return { headers: groupsOf(root).map(sum), text: root.textContent, rows: merged.length, title: merged[0].finding_title, start: merged[0].time_range.start, end: merged[0].time_range.end, label: mod.severityLabel(merged[0].severity) };
+    },
+    noRootStillMergesByTitle: async () => {
+      /* #7696: a row with no root fact keeps the old key, its headline. */
+      const row = (over) => finding({ root_fact: null, story_path: "", advice: { headline: "Same words", investigation: "i", remediation: "r" }, ...over });
+      const other = row({ finding_id: 3, incident_id: "inc-3", advice: { headline: "Other words", investigation: "i", remediation: "r" } });
+      const merged = mod.mergeBySentence([row({ finding_id: 1, incident_id: "inc-1", occurrences: 2 }), row({ finding_id: 2, incident_id: "inc-2", occurrences: 4 }), other]);
+      return { rows: merged.length, occurrences: merged.map((m) => m.occurrences) };
+    },
+    objectAnomalyTwoTables: async () => {
+      /* #7696: ANOMALY_OBJECT_GROWTH names its table only in the headline, so two tables stay two cards. */
+      const grow = (over) => finding({ root_fact: { key: "ANOMALY_OBJECT_GROWTH", value: 1 }, story_path: "ANOMALY_OBJECT_GROWTH", ...over });
+      const merged = mod.mergeBySentence([
+        grow({ finding_id: 1, incident_id: "inc-1", advice: { headline: "dbo.Orders grew 900 MB day-over-day", investigation: "i", remediation: "r" } }),
+        grow({ finding_id: 2, incident_id: "inc-2", advice: { headline: "dbo.Events grew 700 MB day-over-day", investigation: "i", remediation: "r" } }),
+      ]);
+      return { titles: merged.map((m) => m.finding_title) };
+    },
     peakSeverity: async () => {
       /* #7582: the newest occurrence scored 0.62 but the peak was 1.3, so the card reads Warning. */
       const root = await run("srv-a", { findings: [finding({ finding_id: 1, severity: 0.62, peak_severity: 1.3, incident_id: "inc-1", advice: { headline: "Wait profile shifted", investigation: "i", remediation: "r" } })] });

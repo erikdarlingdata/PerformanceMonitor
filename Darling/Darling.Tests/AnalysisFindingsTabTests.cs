@@ -157,9 +157,9 @@ public sealed class AnalysisFindingsTabTests
         var r = Run("sameRootOtherSentence");
         var text = r.GetProperty("text").GetString()!;
         Assert.Equal(1, r.GetProperty("cards").GetInt32());
-        Assert.Contains("Seen 5×", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("Seen 2×", text, StringComparison.Ordinal);
-        Assert.Contains("also seen as: Latch ex, then Tempdb usage (Info, last seen", text, StringComparison.Ordinal);
+        /* #7696: one root fact is one row whatever its headlines say, so the two chains' occurrences add up and both chains are named in words. */
+        Assert.Contains("Seen 7×", text, StringComparison.Ordinal);
+        Assert.Contains("Seen as 2 chains: Latch ex, then Cxpacket · Warning · 5 occurrences; Latch ex, then Tempdb usage · Info · 2 occurrences", text, StringComparison.Ordinal);
         Assert.DoesNotContain("→", text, StringComparison.Ordinal);
         Assert.DoesNotContain("TEMPDB_USAGE", text, StringComparison.Ordinal);
     }
@@ -187,6 +187,36 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
+    public void OneRootFactOnTwoIncidents_WithADifferentFigureInTheHeadline_IsOneCard_AtTheNewestFigure()
+    {
+        var r = Run("sameRootOtherFigure");
+        var text = r.GetProperty("text").GetString()!;
+        Assert.Equal(1, r.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { "Write latency spiked to 4935.5 ms · CRITICAL" }, Strings(r.GetProperty("headers")));
+        Assert.Equal("Write latency spiked to 4935.5 ms", r.GetProperty("title").GetString());
+        Assert.Equal("Critical", r.GetProperty("label").GetString());
+        Assert.Equal("2026-01-01T00:11:00Z", r.GetProperty("start").GetString());
+        Assert.Equal("2026-01-01T09:20:00Z", r.GetProperty("end").GetString());
+        Assert.Contains("Seen 30×", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("2300", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARowWithNoRootFact_StillMergesByItsHeadline()
+    {
+        var r = Run("noRootStillMergesByTitle");
+        Assert.Equal(2, r.GetProperty("rows").GetInt32());
+        Assert.Equal(new[] { 6, 3 }, r.GetProperty("occurrences").EnumerateArray().Select(x => x.GetInt32()).ToArray());
+    }
+
+    [Fact]
+    public void TwoTablesGrowing_UnderOneRootFact_StayTwoRows_BecauseOnlyTheHeadlineNamesTheTable()
+    {
+        var r = Run("objectAnomalyTwoTables");
+        Assert.Equal(new[] { "dbo.Orders grew 900 MB day-over-day", "dbo.Events grew 700 MB day-over-day" }, Strings(r.GetProperty("titles")));
+    }
+
+    [Fact]
     public void TwoPileupsOnDifferentStatements_WithOneHeadline_AreTwoCards_EachWithItsOwnRemediation_AndNoHash()
     {
         var r = Run("pileupTwoStatements");
@@ -206,12 +236,14 @@ public sealed class AnalysisFindingsTabTests
     }
 
     [Fact]
-    public void ThePileupsAlsoSeenLine_NamesTheChainInWords_WithNoHash()
+    public void ThePileupReadBackUnderTwoHeadlines_IsOneCardAtTheNewestHeadline_WithNoHash()
     {
         var r = Run("pileupAlsoSeen");
         var text = r.GetProperty("text").GetString()!;
         Assert.Equal(1, r.GetProperty("cards").GetInt32());
-        Assert.Contains("also seen as: Same statement pileup (", text, StringComparison.Ordinal);
+        /* #7696: the two headlines differ only in the figures, so they are one row at the newest headline and the older one is not printed. */
+        Assert.Contains("4 sessions ran one statement for 30 s", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("3 sessions ran one statement for 20 s", text, StringComparison.Ordinal);
         Assert.DoesNotContain("0x", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("→", text, StringComparison.Ordinal);
     }
