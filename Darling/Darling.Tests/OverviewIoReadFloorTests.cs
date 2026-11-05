@@ -30,7 +30,8 @@ public sealed class OverviewIoReadFloorTests
 
     private static readonly DateTime T0 = new(2026, 11, 3, 0, 0, 0, DateTimeKind.Unspecified);
 
-    private static BaselineBucket Band() => new() { Mean = 1, StdDev = 0.5, SampleCount = 500 }; // band 0..2 ms
+    // band 0..2 ms, in one step that covers the whole series (#7644: the band is a step per local hour)
+    private static IReadOnlyList<BaselineBand.HourStep> Band() => [BaselineBand.MakeStep(T0.ToOADate() - 1, T0.ToOADate() + 1, 1, 0.5)];
 
     private static List<(double Time, double Value)> Slow(int count, double ms = 5) =>
         Enumerable.Range(0, count).Select(i => (T0.AddMinutes(i).ToOADate(), ms)).ToList();
