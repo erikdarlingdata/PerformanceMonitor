@@ -105,7 +105,9 @@ public sealed partial class ViewerDataService
         /* #7028 (V230): the two snapshot wait tiers, APPENDED under the same connect-time store gate. */
         "blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds, " +
         /* #7041 (V232): the Daily Health Report's switch, send time (a time of day), zone and title, APPENDED for the same reason and under the same connect-time store gate. */
-        "daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title";
+        "daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title, " +
+        /* #7611 (V245): the three Database Protection ages, APPENDED for the same reason and under the same connect-time store gate. */
+        "backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours";
 
     /// <summary>The single global alert-settings row (id=1), for the Settings window prefill + the migrate-in
     /// defaults check. Column order matches <see cref="AlertSettingsColumns"/>.</summary>
@@ -122,7 +124,7 @@ INSERT INTO config_alert_settings (id, " + AlertSettingsColumns + @", modified_a
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
         $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43,
         $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62,
-        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96,
+        $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99,
         (now() AT TIME ZONE 'UTC'))
 ON CONFLICT (id) DO UPDATE SET
     enabled = EXCLUDED.enabled,
@@ -221,6 +223,9 @@ ON CONFLICT (id) DO UPDATE SET
     daily_report_send_at = EXCLUDED.daily_report_send_at,
     daily_report_time_zone = EXCLUDED.daily_report_time_zone,
     daily_report_title = EXCLUDED.daily_report_title,
+    backup_overdue_threshold_hours = EXCLUDED.backup_overdue_threshold_hours,
+    log_backup_overdue_threshold_minutes = EXCLUDED.log_backup_overdue_threshold_minutes,
+    checkdb_overdue_threshold_hours = EXCLUDED.checkdb_overdue_threshold_hours,
     modified_at = (now() AT TIME ZONE 'UTC')";
 
     /// <summary>The two <c>cpu_mode</c> values the service honors (it compares case-insensitively against
@@ -372,6 +377,9 @@ ON CONFLICT (id) DO UPDATE SET
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Time, Value = ViewerDailyReportRules.ResolveSendAt(r.DailyReportSendAt).ToTimeSpan() }); // $94 (#7041, V232)
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTimeZone) });            // $95 (#7041, V232)
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = ViewerDailyReportRules.TextOrNull(r.DailyReportTitle) });               // $96 (#7041, V232)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.BackupOverdueThresholdHours, DatabaseProtectionThresholdSettings.BackupHoursKey) });           // $97 (#7611, V245)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.LogBackupOverdueThresholdMinutes, DatabaseProtectionThresholdSettings.LogBackupMinutesKey) }); // $98 (#7611, V245)
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = DatabaseProtectionThresholdSettings.Clamp(r.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey) });        // $99 (#7611, V245)
     }
 
     private static AlertSettingsRow ReadAlertSettingsRow(NpgsqlDataReader reader) => new()
@@ -498,6 +506,9 @@ ON CONFLICT (id) DO UPDATE SET
         DailyReportSendAt = ViewerDailyReportRules.FormatSendAt(TimeOnly.FromTimeSpan(reader.GetTimeSpan(93))),
         DailyReportTimeZone = reader.IsDBNull(94) ? null : reader.GetString(94),
         DailyReportTitle = reader.IsDBNull(95) ? null : reader.GetString(95),
+        BackupOverdueThresholdHours = reader.GetInt32(96),
+        LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
+        CheckDbOverdueThresholdHours = reader.GetInt32(98),
     };
 
     /// <summary>Maps the Settings window's CPU-mode combo tag ("Total"/"SqlOnly") to the store value.</summary>
@@ -671,6 +682,10 @@ public sealed class AlertSettingsRow
     public string? DailyReportTimeZone { get; set; }
     /// <summary>#7041 (V232): the report's title; null means "Daily Health Report".</summary>
     public string? DailyReportTitle { get; set; }
+    /// <summary>#7611 (V245): the Database Protection ages. A full backup older than this many hours (default 168), a log backup older than this many minutes (default 60) or a good CHECKDB older than this many hours (default 336) is overdue; a threshold override replaces each for a server or a database.</summary>
+    public int BackupOverdueThresholdHours { get; set; } = 168;
+    public int LogBackupOverdueThresholdMinutes { get; set; } = 60;
+    public int CheckDbOverdueThresholdHours { get; set; } = 336;
     public bool LongRunningQueryEnabled { get; set; } = true;
     public int LongRunningQueryThresholdMinutes { get; set; } = 30;
     public bool TempDbSpaceEnabled { get; set; } = true;
@@ -869,6 +884,9 @@ public sealed class AlertSettingsRow
             && DailyReportEnabled == other.DailyReportEnabled
             && string.Equals(DailyReportSendAt, other.DailyReportSendAt, StringComparison.Ordinal)
             && string.Equals(DailyReportTimeZone, other.DailyReportTimeZone, StringComparison.Ordinal)
-            && string.Equals(DailyReportTitle, other.DailyReportTitle, StringComparison.Ordinal);
+            && string.Equals(DailyReportTitle, other.DailyReportTitle, StringComparison.Ordinal)
+            && BackupOverdueThresholdHours == other.BackupOverdueThresholdHours
+            && LogBackupOverdueThresholdMinutes == other.LogBackupOverdueThresholdMinutes
+            && CheckDbOverdueThresholdHours == other.CheckDbOverdueThresholdHours;
     }
 }

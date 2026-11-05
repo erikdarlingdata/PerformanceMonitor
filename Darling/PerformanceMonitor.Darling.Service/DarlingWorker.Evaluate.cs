@@ -39,6 +39,11 @@ namespace PerformanceMonitor.Darling.Service;
 
 public sealed partial class DarlingWorker
 {
+    /// <summary>The three global Database Protection ages (#7611) the self-alert evaluator judges against: the stored full backup hours, log backup minutes
+    /// and CHECKDB hours, in that order. A named method so a test can drive the seam the evaluator's <c>protectionThresholds</c> lambda calls.</summary>
+    internal static DatabaseProtectionGlobalThresholds ProtectionThresholdsOf(DarlingAlertSettings settings) =>
+        new(settings.BackupOverdueThresholdHours, settings.LogBackupOverdueThresholdMinutes, settings.CheckDbOverdueThresholdHours);
+
     /// <summary>
     /// Assembles the Phase-5 shared alert engine over Darling's third-party implementations:
     /// darling.json thresholds/SMTP/webhooks (<see cref="DarlingAlertSettings"/>), the Postgres
