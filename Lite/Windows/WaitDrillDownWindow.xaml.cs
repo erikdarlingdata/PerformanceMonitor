@@ -176,9 +176,9 @@ public partial class WaitDrillDownWindow : Window
             return;
         }
 
-        // Get all snapshots in range for chain walking
+        // Get all snapshots in range for chain walking (#7573: monitor sessions included, so a chain headed by one reaches its head)
         var allSnapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetAllQuerySnapshotsInRangeAsync(
-            _serverId, _hoursBack, _fromDate, _toDate));
+            _serverId, _hoursBack, _fromDate, _toDate, includeMonitor: true));
 
         // Map to SnapshotInfo for the chain walker
         var waiterInfos = waiters.Select(ToSnapshotInfo).ToList();

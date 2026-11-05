@@ -83,7 +83,8 @@ public partial class ServerTab : UserControl
                 queryTo = toDate.Value.AddHours(1);
             }
 
-            var data = await Task.Run(() => _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, queryFrom, queryTo, SelectedDatabaseFilter));
+            var includeMonitorStrip = ActiveQueriesIncludeMonitor;
+            var data = await Task.Run(() => _dataService.GetActiveQuerySlicerDataAsync(_serverId, hoursBack, queryFrom, queryTo, SelectedDatabaseFilter, includeMonitorStrip));
             _activeQueriesSlicerData = data;
             _activeQueriesSlicerMetric = "Sessions";
             var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, queryFrom, queryTo, DateTime.UtcNow);
@@ -105,7 +106,8 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
+            var includeMonitor = ActiveQueriesIncludeMonitor;
+            var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter, includeMonitor: includeMonitor));
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LiveSnapshotIndicator.Text = "";
             /* The banner takes e.StartUtc/e.EndUtc, the UTC pair the grid read above takes (same as the three Queries grids). */

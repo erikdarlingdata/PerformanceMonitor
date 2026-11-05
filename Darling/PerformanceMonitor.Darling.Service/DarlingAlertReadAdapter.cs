@@ -1139,6 +1139,9 @@ LIMIT $3";
     public const string MiscWaitsFilter = "AND r.wait_type NOT IN ('XE_LIVE_TARGET_TVF')";
     public const string CdcFilter = "AND COALESCE(r.is_cdc_capture, FALSE) = FALSE";
 
+    /// <summary>#7573: the collector stores the monitor's own sessions again, so Active Queries can show them behind its switch. This alert read leaves them out itself, as it did when the collector dropped them (#7416). Always on: a monitor query is never the operator's long-running query to act on.</summary>
+    public static readonly string MonitorSessionFilter = "AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramPredicate("r.program_name");
+
     public Task<LongRunningQueryReadResult> GetLongRunningQueriesAsync(
         string serverKey,
         int thresholdMinutes,
@@ -1191,7 +1194,8 @@ LIMIT $3";
             excludeWaitFor ? WaitForFilter : "",
             excludeBackups ? BackupsFilter : "",
             excludeMiscWaits ? MiscWaitsFilter : "",
-            excludeCdc ? CdcFilter : ""
+            excludeCdc ? CdcFilter : "",
+            MonitorSessionFilter
         }.Where(f => f.Length > 0));
 
         /* #3653 (A5, Q5): the opt-out knob's two arms, operands binding as $5 onward after the four fixed

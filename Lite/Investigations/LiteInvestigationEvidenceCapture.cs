@@ -138,7 +138,7 @@ WHERE server_id = $1
   AND sample_interval_seconds IS DISTINCT FROM 0
 GROUP BY database_name, query_hash, query_plan_hash";
 
-    internal const string ActiveRequestsSql = @"
+    internal const string ActiveRequestsSql = $@"
 WITH snaps AS (
     SELECT host_name, program_name, login_name, session_id, COALESCE(request_id, 0) AS request_id, collection_time, cpu_time_ms,
            collection_time - to_milliseconds(CAST(COALESCE(total_elapsed_time_ms, 0) AS BIGINT)) AS started_at
@@ -146,6 +146,7 @@ WITH snaps AS (
     WHERE server_id = $1
       AND collection_time >= $2
       AND collection_time <= $3
+      AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ), marked AS (
     SELECT s.*,
            CASE WHEN LAG(s.collection_time) OVER w IS NULL THEN 1
