@@ -333,10 +333,13 @@ a:hover { text-decoration: underline; }
 /* Custom-views renderer grid (#1563): stored panels tile responsively, capped at two columns on wide screens so a
    dense view no longer crams 4-across; a span-2 panel spans the full width via .panel.span-2 { grid-column: 1 / -1 }
    below. The min track is >=45% of the row so at most two columns ever fit; a lone or span-2 panel takes the full
-   width. The grid gap owns spacing, so the panel's stacked-page bottom margin is reset inside the grid. */
+   width. The grid gap owns spacing, so the panel's stacked-page bottom margin is reset inside the grid.
+   #7534: the track minimum had a 700 px ceiling, which let a third column fit once the grid passed about 2150 px (a 2560 px window),
+   so a fourth half-width panel sat alone in a row of three tracks. panel-layout.js pairs panels for two columns, so the minimum
+   has no ceiling: 45% of the row means a third track never fits at any width. */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(clamp(320px, 45%, 700px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(max(320px, 45%), 1fr));
   gap: 1.25rem;
 }
 .panel-grid .panel { margin-bottom: 0; }
