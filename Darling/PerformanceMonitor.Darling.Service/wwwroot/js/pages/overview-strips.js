@@ -184,7 +184,7 @@ const ANOMALY_FLOOR = { cpu: 10, waits: 100, io: 2 };
  *  is noise (one read at 80 ms is a dot for the whole bucket). 250 per 15 minutes is the bar the PostgreSQL I/O baseline puts on a bucket
  *  (PgTargetScorer.IoBaselineBucketMinimumReads). It is not Analysis's IoVolumeFloor.MinimumReads, which counts 250 reads over a window of an hour or more
  *  (a looser bar per minute). The bucket varies with the window (1 to 30 minutes), so the floor is scaled to the span a row's reads were counted over: the
- *  bucket width, or the collection step when the collector is slower than the bucket. The desktop lanes apply no read floor. */
+ *  bucket width, or the collection step when the collector is slower than the bucket. The desktop lanes apply the same rule (OverviewIoReadFloor, #7624). */
 const ANOMALY_MIN_READS_PER_15_MIN = { io: 250 };
 /** The reads a row counted over `widthMs` needs (a span the reply did not state counts as 15 minutes). */
 export function minReadsFor(key, widthMs) {
