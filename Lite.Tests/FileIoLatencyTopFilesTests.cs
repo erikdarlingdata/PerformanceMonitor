@@ -227,6 +227,24 @@ public sealed class FileIoLatencyTopFilesTests : IClassFixture<SharedDuckDbFixtu
         Assert.True(actual.Count < perFile.Count, "the overview read returns fewer rows than the per-file read");
     }
 
+    /// <summary>
+    /// #7624: each point carries the reads its latency averages over, summed across the ranked files, and the bucket width the
+    /// read used, so the lane can hold an anomaly marker to the web strip's read floor. A log file's zero reads add nothing.
+    /// </summary>
+    [Fact]
+    public async Task OverviewRead_CarriesTheSummedReadsAndTheBucketWidth()
+    {
+        await SeedAsync("Db0", "Db0_data", "ROWS", 10, 500, 20, 4_000, 60);
+        await SeedAsync("Db1", "Db1_data", "ROWS", 10, 310, 10, 1_500, 30);
+        await SeedAsync("Db0", "Db0_log", "LOG", 10, 0, 50_000, 0, 100_000);
+        await SeedAsync("Db0", "Db0_data", "ROWS", 5, 7, 20, 70, 60);
+
+        var actual = await _service.GetFileIoOverviewLatencyTrendAsync(ServerId, 1);
+
+        Assert.Equal(new long[] { 810, 7 }, actual.Select(a => a.Reads).ToArray());
+        Assert.All(actual, a => Assert.Equal(1, a.BucketMinutes));
+    }
+
     /// <summary>#6970: a server with no reads at all draws a 0 line, and one with no rows draws nothing, as the per-file path did.</summary>
     [Fact]
     public async Task OverviewRead_NoReads_DrawsZero_AndNoRows_DrawsNothing()

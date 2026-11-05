@@ -281,7 +281,12 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .Select(d => (d.CollectionTime.ToOADate(), d.ReadLatencyMs))
                     .ToList();
-                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
+                /* #7624: the lane marks a point only when its reads reach the web strip's bar for the span they were counted over. */
+                var ioPoints = fileIoTask.Result;
+                var ioMinReads = OverviewIoReadFloor.MinReadsFor(
+                    ioPoints.Count > 0 ? ioPoints[0].BucketMinutes : 0, ioPoints.Select(d => d.CollectionTime));
+                UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
+                    pointReads: ioPoints.Select(d => d.Reads).ToList(), minPointReads: ioMinReads);
             }
             else
                 ShowEmpty(FileIoChart, "I/O ms");
@@ -602,7 +607,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     internal void UpdateLane(ScottPlot.WPF.WpfPlot chart, string title,
         List<(double Time, double Value)> data, string colorHex,
         double? yMin = null, double? yMax = null, BaselineBucket? baseline = null,
-        double minAnomalyValue = 0)
+        double minAnomalyValue = 0, IReadOnlyList<long>? pointReads = null, long minPointReads = 0)
     {
         ClearChart(chart);
         ApplyTheme(chart);
@@ -635,7 +640,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var anomalyIndices = new List<int>();
             for (int i = 0; i < values.Length; i++)
             {
-                if ((values[i] > upper && values[i] >= minAnomalyValue) || values[i] < lower)
+                /* #7624: a lane with a read floor (I/O) marks only a point whose reads reach it, as the web strip does. */
+                var reads = pointReads != null && i < pointReads.Count ? pointReads[i] : 0;
+                if (OverviewIoReadFloor.IsAnomaly(values[i], upper, lower, minAnomalyValue, reads, pointReads == null ? 0 : minPointReads))
                     anomalyIndices.Add(i);
             }
 
@@ -658,7 +665,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         scatter.LegendText = title;
         scatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
 
-        _crosshairManager?.SetLaneData(chart, times, values);
+        _crosshairManager?.SetLaneData(chart, times, values,
+            reads: pointReads?.ToArray(), minReads: pointReads == null ? 0 : minPointReads);
 
         chart.Plot.Axes.DateTimeTicksBottomUtc(_displayZone);
         // Hide bottom tick labels on all lanes except the last (File I/O)
