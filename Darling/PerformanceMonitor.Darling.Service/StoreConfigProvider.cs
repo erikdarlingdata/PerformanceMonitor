@@ -776,7 +776,7 @@ public sealed class StoreConfigProvider
         using var command = new NpgsqlCommand(@"
 SELECT server_id, name, host, database, auth, username, encrypt_mode, trust_server_certificate,
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd,
-       alert_delivery_mode_override, engine, port, is_enabled, aws_role_arn, query_store_replica
+       alert_delivery_mode_override, engine, port, is_enabled, aws_role_arn, query_store_replica, xe_session_databases
 FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -805,6 +805,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
                     AwsRoleArn = reader.IsDBNull(16) ? null : reader.GetString(16),
                     /* V213 (#6254): compared, because it decides where Query Store is read and which saved password opens. */
                     QueryStoreReplica = reader.IsDBNull(17) ? null : reader.GetString(17),
+                    /* V247 (#7639): compared, so a darling.json list that differs from the store's is reported. */
+                    XeSessionDatabases = ReadTextArray(reader, 18),
                 },
                 /* NOT NULL DEFAULT TRUE in the table, so the guard is for a store mid-migration; an unknown
                    enablement reads as ENABLED, which is the direction that keeps the drift visible. */
@@ -1167,6 +1169,15 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             NormalizeExcludedDatabases(file.ExcludedDatabases, storeIsPostgres),
             NormalizeExcludedDatabases(store.ExcludedDatabases, storeIsPostgres),
             nameComparison,
+            false);
+
+        /* #7639: the databases that get Extended Events sessions. SQL Server compares names without case, so the set is compared that way on both engines. */
+        AddDrift(
+            drift,
+            "xeSessionDatabases",
+            NormalizeExcludedDatabases(file.XeSessionDatabases, false),
+            NormalizeExcludedDatabases(store.XeSessionDatabases, false),
+            StringComparison.OrdinalIgnoreCase,
             false);
 
         if (file.MonthlyCostUsd != store.MonthlyCostUsd)
@@ -1883,8 +1894,8 @@ INSERT INTO config_monitored_servers (
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, plan_force_bot_enabled,
     remediation_username, remediation_encrypted_password, aws_role_arn, aws_external_id,
-    hypothetical_index_username, hypothetical_index_encrypted_password, query_store_replica, created_at, modified_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $20, $21, $22, $23, $24, $15, $15)
+    hypothetical_index_username, hypothetical_index_encrypted_password, query_store_replica, xe_session_databases, created_at, modified_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, $14, $16, $17, TRUE, FALSE, $18, $19, $20, $21, $22, $23, $24, $25, $15, $15)
 ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             /* THE ALLOCATION SITE. A darling.json entry has no StoredServerId, so this is the derivation —
                and this is where it is minted and made permanent. When new rows stop being hash-keyed
@@ -1937,6 +1948,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             /* V213 (#6254): the Query Store replica, trimmed with blank as NULL. NULL is every server nobody set one on: Query Store is then read
                from the server itself. A password sealed for this entry was sealed for this setting (PasswordBinding.ForServer). */
             AddNullableText(command, QueryStoreReplicaSetting.Normalize(server.QueryStoreReplica));
+            /* V247 (#7639): the databases that get Extended Events sessions; an empty list is every database. */
+            AddTextArray(command, server.XeSessionDatabases);
             await command.ExecuteNonQueryAsync(ct);
         }
 

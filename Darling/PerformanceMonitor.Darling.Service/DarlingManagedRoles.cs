@@ -185,6 +185,8 @@ public static class DarlingManagedRoles
                 "server_id", "name", "host", "database", "auth", "username", "encrypt_mode",
                 "trust_server_certificate", "read_only_intent", "multi_subnet_failover",
                 "excluded_databases", "monthly_cost_usd", "capture_plans", "is_enabled",
+                /* V247 (#7639): database names, non-secret like excluded_databases. */
+                "xe_session_databases",
                 "created_at", "modified_at", "alert_delivery_mode_override",
                 /* V68. Non-secret: which engine a target is, and its port, are exactly as sensitive as its
                    host — which is already readable. The fail-closed design is why they have to be named at
@@ -3822,7 +3824,7 @@ REVOKE ALL ON FUNCTION {config}.request_mcp_command(text, integer, integer, text
     // would skip the edit core.
     /// <summary>The columns of <c>config.config_monitored_servers</c> the <c>mcp</c> login may UPDATE directly (#5452): every column except the AWS role, the external ID, the generated external-ID flag and <c>query_store_replica</c> (#6254), which change only through <c>config.edit_monitored_server</c>. <c>tools/provision-roles.sql</c> carries the same list.</summary>
     internal const string McpMonitoredServerUpdateColumns =
-        "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password";
+        "server_id, name, host, database, auth, username, encrypted_password, encrypt_mode, trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, capture_plans, is_enabled, created_at, modified_at, alert_delivery_mode_override, engine, port, plan_force_bot_enabled, remediation_username, remediation_encrypted_password, xe_session_databases";
 
     /// <summary>The argument types of <c>config.edit_monitored_server</c> (#5240, 18 since #6254), in order. The one place the signature is
     /// spelled for the <c>GRANT EXECUTE</c>, so a changed parameter list cannot leave the grant naming another function.</summary>
