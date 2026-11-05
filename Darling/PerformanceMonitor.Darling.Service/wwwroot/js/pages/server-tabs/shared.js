@@ -6,7 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
+import { el, ticksCarryUnit, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, windowFloorStrip, markPartialSubtitle, applyDataSubtitle, mount, clear, tagPill, truncate, loadingStrip, errorStrip, readErrorStrip, emptyStrip, disclosure, noticeStrip, captionStrip, chartNote, getPath, localTime, parseUtc, windowFromHours, dbScopeChip, sourceSpan, applySourceSubtitle, setQueryWaitFilter, waitIsLinked, fmtPlain } from "../../util.js";
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
@@ -1294,15 +1294,19 @@ export function seriesTrendPanel(server, ctx, kind) {
         .map((s, i) => ({ index: i, label: s[spec.seriesKey], rows: (s.trend || []).map((r) => ({ time: r.time, v: chart.value(r) })).filter((r) => r.v != null) }))
         .filter((d) => d.rows.length >= (spec.minPoints || 1))
         .map((d) => ({ ...d, key: "s" + d.index, color: SERIES_COLORS[d.index % SERIES_COLORS.length] }));
+      /* #7578: a unit prints once. These axes print it on every tick ("0.3 MB/s"), so the heading drops its "(MB/s)": the same rule as the caption over an axis (`ticksCarryUnit`). A chart with nothing drawn has no ticks and keeps the unit in its heading. */
+      const tick = (v, o) => fmtPlain(v, o) + " " + chart.unit;
+      const unitSuffix = " (" + chart.unit + ")";
+      const heading = ticksCarryUnit([tick(1)]) && chart.title.endsWith(unitSuffix) ? chart.title.slice(0, -unitSuffix.length) : chart.title;
       return drawn.length
         ? [
-            el("h4", { text: chart.title }),
+            el("h4", { text: heading }),
             zoomableLineChart({
               atTime: { server },
               points: mergeSeriesRows(drawn, "time", "v"),
               xKey: "time",
               series: drawn.map((d) => ({ key: d.key, label: d.label, color: d.color })),
-              formatValue: (v, o) => fmtPlain(v, o) + " " + chart.unit,
+              formatValue: tick,
               unit: chart.unit,
               ...windowFromHours(res.keptHours || ctx.hours),
             }, "series-trend|" + server + "|" + kind + "|" + chart.unit, chartZoomScope(ctx.hours)),

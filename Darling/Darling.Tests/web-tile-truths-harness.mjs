@@ -275,6 +275,33 @@ try {
   /* #7416: the Pool column of the Memory Grants grids reads the pool's name. */
   const poolRow = (id) => ({ pool_id: id, resource_semaphore_id: 0, snapshots_in_window: 9 });
   const poolCells = (columns) => cellsOf(panels.VIZ.table({ rows: [poolRow(1), poolRow(2), poolRow(7)] }, { rowsKey: "rows", columns }));
+  /* #7578: the Semaphore column prints the semaphore's name, and the scheduler's Runnable % tile prints 0.0 when the read answered with no share. */
+  const semaphoreRow = (id) => ({ pool_id: 1, resource_semaphore_id: id });
+  const semaphoreWords = {
+    window: cellsOf(panels.VIZ.table({ rows: [semaphoreRow(0), semaphoreRow(1), semaphoreRow(5)] }, { rowsKey: "rows", columns: memory.SEMAPHORE_WINDOW_COLUMNS })),
+    newest: cellsOf(panels.VIZ.table({ rows: [semaphoreRow(0), semaphoreRow(1)] }, { rowsKey: "rows", columns: memory.SEMAPHORE_COLUMNS })),
+    /* The Resource Semaphore read of the Memory page's table (read-fields.js) names them too. */
+    read: cellsOf(panels.VIZ.table({ grants: [semaphoreRow(0), semaphoreRow(1)] }, (await imp("read-fields.js")).READ_FIELDS.get_resource_semaphore.table)),
+  };
+  /* #7578: the date-time columns of the window grid wrap (class "wrap" and the narrow flow-cell floor), so the grid's last columns stay in the panel. */
+  const stamp = "2026-11-05T10:00:00Z";
+  const windowGrid = panels.VIZ.table({ rows: [{ pool_id: 1, resource_semaphore_id: 0, peak_waiters_at: stamp, peak_granted_at: stamp, first_snapshot_at: stamp, last_snapshot_at: stamp, snapshots_in_window: 9 }] }, { rowsKey: "rows", columns: memory.SEMAPHORE_WINDOW_COLUMNS });
+  const windowCellClasses = Object.fromEntries(headersOf(windowGrid).map((h, i) => [h, findAll(windowGrid, (n) => n.tag === "td")[i].className || ""]));
+  const windowHeaderClasses = Object.fromEntries(findAll(windowGrid, (n) => n.tag === "th").map((n) => [n.textContent, n.className || ""]));
+  /* #7578: choosing a sort refreshes every header's class name, and that refresh must keep the wrap-head class. */
+  const sortedGrid = panels.VIZ.table({ rows: [{ pool_id: 1, resource_semaphore_id: 0, peak_waiters_at: stamp }, { pool_id: 2, resource_semaphore_id: 0, peak_waiters_at: "2026-11-05T11:00:00Z" }] }, { rowsKey: "rows", columns: memory.SEMAPHORE_WINDOW_COLUMNS });
+  const sortHeads = findAll(sortedGrid, (n) => n.tag === "th");
+  const sortHead = sortHeads.find((n) => n.textContent.startsWith("Peak waiters at"));
+  (sortHead.listeners.click || []).forEach((fn) => fn({}));
+  const windowHeaderClassesAfterSort = Object.fromEntries(sortHeads.map((n) => [n.textContent.replace(/[ ▲▼]+$/, ""), n.className || ""]));
+  const sortedState = sortHead.attrs["aria-sort"];
+  const fileIo = (await imp("read-fields.js")).READ_FIELDS.get_file_io_stats.table;
+  const fileIoHeaders = headersOf(panels.VIZ.table({ rows: [{}] }, { ...fileIo, rowsKey: "rows" }));
+  const runnable = {
+    nullPercent: tiles(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: null }, { stats: cpu.SCHEDULER_STATS }))["Runnable %"],
+    value: tiles(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: 12.34 }, { stats: cpu.SCHEDULER_STATS }))["Runnable %"],
+    tooltip: findAll(panels.VIZ.stat({ pressure_level: "Low", schedulers: 4, runnable_percent: null }, { stats: cpu.SCHEDULER_STATS }), (n) => hasClass(n, "stat") && n.children[1].textContent === "Runnable %").map((n) => n.attrs.title),
+  };
   const pools = {
     grants: poolCells(memory.GRANT_COLUMNS),
     semaphores: poolCells(memory.SEMAPHORE_COLUMNS),
@@ -300,7 +327,7 @@ try {
   };
 
   console.log(JSON.stringify({
-    alertSetup, quietChips, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, platform, unrateable,
+    alertSetup, quietChips, engineChips, blockingTile, windowChips, sweepTiles, skippedCycles, recommendations, pools, semaphoreWords, windowCellClasses, windowHeaderClasses, windowHeaderClassesAfterSort, sortedState, fileIoHeaders, runnable, platform, unrateable,
     protectionChip: chipText("Protection"),
     identityChip: chipText("Identity capacity"),
     bigIdentityChip: bigChip ? bigChip.textContent : null,

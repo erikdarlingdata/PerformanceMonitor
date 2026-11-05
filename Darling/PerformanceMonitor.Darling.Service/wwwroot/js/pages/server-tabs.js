@@ -300,10 +300,16 @@ export const SERVER_TABS = [
         },
       ]),
       ...fanout("get_plan_cache_bloat", { server, hours: ctx.hours }, [
-        { title: "Plan Cache", subtitle: ctx.label, viz: "stat", stats: PLAN_CACHE_STATS },
+        {
+          title: "Plan Cache",
+          subtitle: "newest snapshot in " + ctx.label + " - a moment, not the window",
+          viz: "stat",
+          stats: PLAN_CACHE_STATS,
+        },
         {
           title: "Plan Cache by Type",
-          subtitle: ctx.label,
+          subtitle: "newest snapshot in " + ctx.label + " - a moment, not the window",
+          windowNote: false,
           viz: "table",
           rowsKey: "cache_types",
           columns: CACHE_TYPE_COLUMNS,

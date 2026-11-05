@@ -73,7 +73,8 @@ public sealed class WebTrendSeriesBehaviourTests
     public void Throughput_DrawsAReadChartAndAWriteChart_OneLinePerFile()
     {
         var card = Card(Run("data"), "throughput");
-        Assert.Equal(["Read throughput (MB/s)", "Write throughput (MB/s)"], card.GetProperty("headings").EnumerateArray().Select(e => e.GetString()!));
+        // #7578: the ticks say "15 MB/s", so the headings do not say the unit a second time.
+        Assert.Equal(["Read throughput", "Write throughput"], card.GetProperty("headings").EnumerateArray().Select(e => e.GetString()!));
         var charts = card.GetProperty("charts").EnumerateArray().ToList();
         Assert.Equal(2, charts.Count);
         Assert.Equal(["SalesDb.sales_data", "SalesDb.sales_log"], Labels(charts[0]));
