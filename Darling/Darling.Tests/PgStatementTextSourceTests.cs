@@ -242,6 +242,7 @@ public sealed class PgStatementTextUpsertLivePostgresTests
         upsert.Parameters.AddWithValue(queryIds.Select(id => "select " + id).ToArray());
         upsert.Parameters.AddWithValue(Enumerable.Repeat(stamp, queryIds.Length).ToArray());
         upsert.Parameters.AddWithValue(new string?[queryIds.Length]);
+        upsert.Parameters.AddWithValue(new string?[queryIds.Length]);
         await upsert.ExecuteNonQueryAsync(ct);
     }
 

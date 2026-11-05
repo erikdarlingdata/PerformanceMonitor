@@ -10,6 +10,7 @@ import { el, noteStrip, readTool, readToolWithinKeptHistory, keptWindowStrip, wi
 import { renderPanel, panelEmptyStrip, emptyHeadline, setPanelSignal, getPanelSignal, VIZ } from "../../panels.js";
 import { estimatedPlotPx } from "../../trend-points.js";
 import { SNAPSHOT_LIST_CAP, snapshotTruncatedNote } from "../active-snapshots.js";
+import { skippedCycleCause, skippedCyclesNote } from "./skipped-cycles.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS, CATEGORICAL_COLORS } from "../../charts.js";
 import { historyTarget, procedurePoints } from "../stats-history.js";
 import { mergeSeriesRows } from "../../multi-picker.js";
@@ -180,7 +181,9 @@ export function fanout(read, params, specs, intro = null) {
         markPartialSubtitle(shells[i].panel, res.data, spec);
         /* #5244, #7543: the collector that answered goes in the heading beside the window label, not in a row above the chart. */
         applySourceSubtitle(shells[i].panel, res.data, spec);
-        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered]);
+        /* #7660: a note the page composes from the answer and draws under the panel's picture (the Skipped Cycles sentence). */
+        const below = typeof spec.noteBelowFrom === "function" ? spec.noteBelowFrom(res.data) : null;
+        mount(body, [keptWindowStrip(res), windowFloorStrip(res.data, spec), typeof note === "string" && note.trim() ? noteStrip(spec, note, res.data) : null, rendered, typeof below === "string" && below.trim() ? noteStrip(null, below) : null]);
       } catch (e) {
         mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
       }
@@ -977,10 +980,14 @@ export const SKIPPED_CYCLES_STATS = [
   { key: "skipped_cycles.count_24h", label: "Late cycles", format: "int" },
   { key: "skipped_cycles.slots_skipped_24h", label: "Slots skipped", format: "int" },
   { key: "skipped_cycles.last_at", label: "Last", format: "reltime", small: true },
-  { key: "skipped_cycles.last_slowest_step", label: "Cause", format: "text", small: true },
+  /* #7660: the tile says the cause in the words the sentence uses. */
+  { key: "skipped_cycles.last_slowest_step", label: "Cause", format: "text", small: true, display: (d) => skippedCycleCause(d && d.skipped_cycles ? d.skipped_cycles.last_slowest_step : null, d && d.skipped_cycles ? d.skipped_cycles.last_slowest_step_ms : null) },
   { key: "skipped_cycles.last_slowest_step_ms", label: "Cause ran for", format: "ms" },
-  { key: "skipped_cycles.last_message", label: "Last message", format: "text", small: true, hideWhenEmpty: true },
 ];
+
+/* #7660: the Skipped Cycles panel. The last skip's sentence is a full-width note under the tiles (`noteBelowFrom`), not a tile: a tile that long made all
+   seven tiles 361 px tall. Both server tabs use this one descriptor. */
+export const SKIPPED_CYCLES_PANEL = { title: "Skipped Cycles", subtitle: "trailing 24 hours", viz: "stat", stats: SKIPPED_CYCLES_STATS, noteBelowFrom: skippedCyclesNote };
 
 /* ───────────────────────── wait links (#5235) ───────────────────────── */
 

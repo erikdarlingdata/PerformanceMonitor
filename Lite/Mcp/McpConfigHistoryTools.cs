@@ -87,6 +87,8 @@ public sealed class McpConfigHistoryTools
                     requires_restart = r.RequiresRestartDisplay,
                     is_dynamic = r.DynamicDisplay,
                     is_advanced = r.AdvancedDisplay,
+                    /* #7662: change_time is the first capture that held the new value; the change happened after this one. */
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o"),
                     change_description = r.ChangeDescription
                 })
             }, McpHelpers.JsonOptions);
@@ -150,6 +152,7 @@ public sealed class McpConfigHistoryTools
                     setting_name = r.SettingName,
                     old_value = r.OldValue,
                     new_value = r.NewValue,
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o"),
                     change_description = r.ChangeDescription
                 }),
                 status_change_count = statusRows.Count,
@@ -159,7 +162,8 @@ public sealed class McpConfigHistoryTools
                     database_name = r.DatabaseName,
                     setting_name = r.SettingName,
                     old_value = r.OldValue,
-                    new_value = r.NewValue
+                    new_value = r.NewValue,
+                    previous_capture_time = r.PreviousCaptureTime?.ToString("o")
                 })
             }, McpHelpers.JsonOptions);
         }

@@ -341,6 +341,8 @@ namespace PerformanceMonitor.Common
                     or "Log Backup Overdue"
                     or "CHECKDB Overdue"
                     or "Agent Alert Gaps"
+                    /* #7646: state-only. The current value is "{database}: {state}" against the expected state; the fire site passes the 0 sentinel. */
+                    or "Database State"
 
                     /* #1881, the metrics that stored a NONZERO number that was not a measurement:
 

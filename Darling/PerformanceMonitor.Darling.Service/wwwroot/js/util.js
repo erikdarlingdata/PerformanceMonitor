@@ -699,13 +699,32 @@ export function markPartialSubtitle(panel, data, desc) {
 }
 
 /**
+ * #7662: "latest snapshot, captured 11/5/2026, 6:50:45 AM (17h ago)" for a panel whose subtitle is exactly "latest snapshot" and whose
+ * answer carries `captured_at`. Null for any other subtitle or an answer with no readable `captured_at`. The time is in the browser's zone.
+ */
+export function snapshotAgeSubtitle(subtitle, data) {
+  if (subtitle !== "latest snapshot" || !data || typeof data !== "object") return null;
+  const at = parseUtc(data.captured_at);
+  if (!at) return null;
+  return subtitle + ", captured " + localTime(data.captured_at) + " (" + relTime(data.captured_at) + ")";
+}
+
+/**
  * A subtitle that depends on the answer (#7428). A panel's subtitle is written before its read, so it cannot name what the
  * read chose (the wait event, the backend and context, the statement, the database a trend follows). A descriptor that
  * carries `subtitleFrom(data)` gets its heading's `.panel-sub` span replaced with the string that returns once the answer is
  * in. A function that returns anything but a non-empty string leaves the static subtitle as it was.
  */
 export function applyDataSubtitle(panel, data, desc) {
-  if (!desc || typeof desc.subtitleFrom !== "function") return;
+  if (desc && typeof desc.subtitleFrom !== "function") {
+    /* #7662: a "latest snapshot" panel says how old the snapshot is. The Configuration tab's snapshots are captured on connect and once a
+       day, so "latest" can be most of a day back and the heading used to give no time at all. */
+    const aged = snapshotAgeSubtitle(desc.subtitle, data);
+    const node = aged ? panelSubNode(panel) : null;
+    if (node) node.textContent = " " + aged;
+    return;
+  }
+  if (!desc) return;
   const text = desc.subtitleFrom(data);
   if (typeof text !== "string" || !text.trim()) return;
   const sub = panelSubNode(panel);
@@ -1176,6 +1195,15 @@ export function fmtMbFit(v) {
 export function fmtText(v) {
   return v == null || v === "" ? "—" : String(v);
 }
+/* #7676: sys.dm_exec_query_resource_semaphores keeps two semaphores per pool: id 0 serves ordinary grants and id 1 serves
+   small queries (RESOURCE_SEMAPHORE_SMALL_QUERY waits). The Memory tab's semaphore panels show the name, not the bare id. */
+export function fmtSemaphore(v) {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  if (n === 0) return "Regular";
+  if (n === 1) return "Small query";
+  return String(v);
+}
 /** #7416: one casing for one status word. The services write some status words in lowercase for an MCP client ("ok", "gaps", "unavailable")
     and others in capitals ("OK"), so two tiles side by side spelled the same word two ways. "ok" is "OK", any other lowercase word
     starts with a capital, and a word the service already capitalised is left as it is. */
@@ -1205,6 +1233,7 @@ export const FORMATTERS = {
   time: localTime,
   reltime: relTime,
   bool: fmtBool,
+  semaphore: fmtSemaphore,
   text: fmtText,
   status: fmtStatusWord,
 };

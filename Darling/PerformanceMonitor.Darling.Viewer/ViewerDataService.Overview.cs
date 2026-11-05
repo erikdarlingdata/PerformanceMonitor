@@ -107,8 +107,8 @@ LIMIT 1";
     /// <c>get_resource_semaphore</c> / <c>ServerHealthStatus.MemorySeverity</c> reads: grant waiters,
     /// timeout-error and forced-grant deltas, and total granted MB, summed across every pool at the newest
     /// collection instant. The Dashboard live-sums <c>sys.dm_exec_query_resource_semaphores.waiter_count</c>
-    /// (WHERE max_target_memory_kb IS NOT NULL, which the <c>memory_grant_stats</c> collector already
-    /// applies at capture); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
+    /// (WHERE max_target_memory_kb IS NOT NULL, which is the regular semaphore: this read filters
+    /// <c>resource_semaphore_id = 0</c> because the <c>memory_grant_stats</c> collector now keeps the small-query row too, #7676); the viewer sums the collected per-pool rows at MAX(collection_time). $1 server_id.
     /// </summary>
     public const string ServerSummaryMemoryPressureSql = @"
 SELECT
@@ -118,6 +118,7 @@ SELECT
     CAST(COALESCE(SUM(granted_memory_mb), 0) AS double precision)
 FROM v_memory_grant_stats
 WHERE server_id = $1
+AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: the small-query semaphore (id 1) is collected too; the Dashboard's filter now lives here */
 AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_grant_stats WHERE server_id = $1)";
 
     /// <summary>
@@ -284,6 +285,17 @@ LIMIT 1";
         return bands.Count == 0
             ? null
             : new IdentityCapacityCard(bands.Contains(IdentityCapacityMath.BandCritical) ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, bands.Count, bands.Count(b => b == IdentityCapacityMath.BandCritical), worst);
+    }
+
+    /// <summary>
+    /// One server's database states for its Overview card (#7647), through <see cref="DarlingDatabaseStateDeviations.ReadAsync"/>, the Database State alert's own statement
+    /// the service's fleet card reads too. <see cref="DatabaseStateRead.Collected"/> false is "not collected" (no snapshot that fresh), which is neither healthy nor zero.
+    /// </summary>
+    public async Task<DatabaseStateRead> GetDatabaseStatesAsync(int serverId, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        return await DarlingDatabaseStateDeviations.ReadAsync(
+            connection, serverId, nowUtc, ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
     }
 
     /// <summary>
@@ -575,9 +587,11 @@ LIMIT 1";
         var protectionChip = await GetDatabaseProtectionChipAsync(serverId, nowUtc, cancellationToken);
 
         var identityCapacity = await GetIdentityCapacityCardAsync(serverId, nowUtc, cancellationToken);
+        var databaseStates = await GetDatabaseStatesAsync(serverId, nowUtc, cancellationToken);
         return new ServerSummaryItem
         {
             IdentityCapacity = identityCapacity,
+            DatabaseStates = databaseStates,
             DisplayName = displayName,
             ServerId = serverId,
             CpuPercent = cpuPercent,
@@ -745,6 +759,28 @@ public sealed class ServerSummaryItem
     /// <summary>The identity columns at the warning bar or past it (#6875), the same worst band and count the web fleet card's "Identity capacity" chip
     /// carries. Null when none is, and on a server that never scans. Shown as its own row and never changes the card's band.</summary>
     public IdentityCapacityCard? IdentityCapacity { get; set; }
+
+    /// <summary>#7647: the databases whose state deviates, from the Database State alert's own read. Null before it is read. <see cref="DatabaseStateRead.Collected"/> false
+    /// is not collected: no reading, and no claim either way. A Critical state (SUSPECT, RECOVERY_PENDING, EMERGENCY) bands the card Critical, as the service's fleet card does.</summary>
+    public DatabaseStateRead? DatabaseStates { get; set; }
+
+    /// <summary>The deviating databases the alert grades Critical.</summary>
+    public int DatabaseStateCriticalCount => DatabaseStates is { Collected: true } ? DarlingDatabaseStateDeviations.Critical(DatabaseStates.Deviations).Count : 0;
+
+    /// <summary>The Needs attention clause for the databases whose state deviates, or empty when none does or the state is not collected.</summary>
+    public string DatabaseStateReason => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? DarlingDatabaseStateDeviations.Reason(DatabaseStates.Deviations) : "";
+
+    /// <summary>True when the Database state row shows: collected, and at least one database deviates (#7647).</summary>
+    public bool HasDatabaseStateDeviations => DatabaseStates is { Collected: true, Deviations.Count: > 0 };
+
+    /// <summary>Database state value, "1 database" or "N databases" (the web chip's words).</summary>
+    public string DatabaseStateDisplay => DatabaseStates is { Collected: true, Deviations.Count: > 0 } ? (DatabaseStates.Deviations.Count == 1 ? "1 database" : $"{DatabaseStates.Deviations.Count} databases") : "";
+
+    /// <summary>Database state detail: the databases named, Critical first, at most <see cref="DarlingDatabaseStateDeviations.NamesShown"/> then "and N more".</summary>
+    public string DatabaseStateDetail => DatabaseStateReason;
+
+    /// <summary>The row's dot and value brush: the card's critical red when a Critical state bands the card, else its warning amber.</summary>
+    public SolidColorBrush DatabaseStateBrush => DatabaseStateCriticalCount > 0 ? s_criticalBrush : s_warningBrush;
 
     /// <summary>True when the Identity capacity row shows.</summary>
     public bool HasIdentityCapacity => IdentityCapacity is { ColumnsAtBar: > 0 };
@@ -1009,7 +1045,9 @@ public sealed class ServerSummaryItem
         AgentAlertGaps.Count,
         HasDatabaseProtectionOverdue ? 1 : 0,
         IdentityCapacity?.ColumnsAtBar ?? 0,
-        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical);
+        IdentityCapacity?.WorstBand == IdentityCapacityMath.BandCritical,
+        DatabaseStates is { Collected: true } ? DatabaseStates.Deviations.Count : 0,
+        DatabaseStateCriticalCount > 0);
 
     /// <summary>#7561: true when <see cref="AdvisoryTiles"/> names any. The band stays what the metrics say; the fleet's Needs attention list and ranking count the server.</summary>
     public bool HasAdvisoryTile => AdvisoryTiles.Count > 0;
@@ -1497,6 +1535,8 @@ public sealed class ServerSummaryItem
         CollectorCount = CollectorCount,
         /* #7561: a column at its critical bar is a failing insert, so the card bands Critical, as the service's fleet card does. */
         IdentityCapacityCritical = IdentityCapacity is { ColumnsAtBar: > 0 } && IdentityCapacity.WorstBand == IdentityCapacityMath.BandCritical,
+        /* #7647: a database in a state the alert grades Critical bands the card, as the service's fleet card does. Not collected leaves it false. */
+        DatabaseStateCritical = DatabaseStateCriticalCount > 0,
     };
 
     // ── Per-metric dot / value brushes ───────────────────────────────────────────────────────────────

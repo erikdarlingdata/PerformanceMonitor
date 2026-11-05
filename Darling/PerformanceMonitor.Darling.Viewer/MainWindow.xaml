@@ -1127,6 +1127,7 @@
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
                                                         <RowDefinition Height="Auto"/>
+                                                        <RowDefinition Height="Auto"/>
                                                     </Grid.RowDefinitions>
 
                                                     <!-- CPU -->
@@ -1196,8 +1197,18 @@
                                                                Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
                                                     <TextBlock Grid.Row="7" Grid.Column="3" Text="{Binding DatabaseProtectionChipDetail}" ToolTip="{Binding DatabaseProtectionChipDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                                                                Visibility="{Binding HasDatabaseProtectionOverdue, Converter={StaticResource BoolToVisibility}}"/>
-                                                    <TextBlock Grid.Row="9" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
-                                                    <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
+                                                    <!-- Database state (#7647): shown only when a database's state deviates from its expected state in both of the two newest
+                                                         snapshots, the way the web fleet card's chip is. A Critical state (SUSPECT, RECOVERY_PENDING, EMERGENCY) also bands the card. -->
+                                                    <Ellipse Grid.Row="9" Grid.Column="0" Width="9" Height="9" Fill="{Binding DatabaseStateBrush}" VerticalAlignment="Center" Margin="0,2,6,2"
+                                                             Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="9" Grid.Column="1" Text="Database state:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding DatabaseStateDisplay}" FontSize="11" Foreground="{Binding DatabaseStateBrush}" FontWeight="SemiBold" Margin="0,2,8,2"
+                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="9" Grid.Column="3" Text="{Binding DatabaseStateDetail}" ToolTip="{Binding DatabaseStateDetail}" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,2"
+                                                               Visibility="{Binding HasDatabaseStateDeviations, Converter={StaticResource BoolToVisibility}}"/>
+                                                    <TextBlock Grid.Row="10" Grid.Column="1" Text="Last Collect:" FontSize="11" Foreground="{DynamicResource ForegroundMutedBrush}" Margin="0,2,8,2"/>
+                                                    <TextBlock Grid.Row="10" Grid.Column="2" Text="{Binding LastCollectionDisplay}" FontSize="11" Foreground="{DynamicResource ForegroundBrush}" FontWeight="SemiBold" Margin="0,2,8,2"/>
                                                 </Grid>
                                             </StackPanel>
                                             <!-- Offline overlay -->

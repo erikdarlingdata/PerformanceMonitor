@@ -934,7 +934,7 @@ public sealed partial class DarlingWorker
                 }
             }
 
-            var (queryIds, texts, ownEntries) = await ReadPgStatementTextAsync(runtime, cancellationToken);
+            var (queryIds, texts, ownEntries, candidates) = await ReadPgStatementTextAsync(runtime, cancellationToken);
             if (queryIds.Count == 0)
             {
                 return;
@@ -950,6 +950,7 @@ public sealed partial class DarlingWorker
             upsert.Parameters.AddWithValue(texts.ToArray());
             upsert.Parameters.AddWithValue(stamps);
             upsert.Parameters.AddWithValue(ownEntries.ToArray());
+            upsert.Parameters.AddWithValue(candidates.ToArray());
             await upsert.ExecuteNonQueryAsync(cancellationToken);
 
             _logger.LogInformation(
@@ -997,13 +998,16 @@ public sealed partial class DarlingWorker
     /// forever, and made test_hypothetical_index (#2612) unable to resolve a statement on the one platform
     /// it can be tested against.</para>
     /// </summary>
-    internal static async Task<(List<long> QueryIds, List<string> Texts, List<string?> OwnEntries)> ReadPgStatementTextAsync(
+    internal static async Task<(List<long> QueryIds, List<string> Texts, List<string?> OwnEntries, List<string?> Candidates)> ReadPgStatementTextAsync(
         ServerRuntime runtime, CancellationToken cancellationToken)
     {
         var queryIds = new List<long>();
         var texts = new List<string>();
-        /* #7567: per queryid, the JSON list of [userid, dbid] entries whose text carries the service's marker, or null. */
+        /* #7567: per queryid, the JSON list of {"u", "d"} entries whose text carries the service's marker or has the shape of its statements (#7681), or null. */
         var ownEntries = new List<string?>();
+        /* #7681: per queryid, the {"u", "d"} pairs of the login's entries that are still unmarked in pg_stat_statements, so the upsert keeps a
+           pair an earlier fetch learned while its entry is still there (the shape registry is empty after a restart). */
+        var candidates = new List<string?>();
 
         /* The upsert keys on (server_id, queryid) and a batch carrying one queryid twice does not lose one
            row - PostgreSQL aborts the whole statement with 21000, so the non-duplicate rows are lost with
@@ -1053,10 +1057,14 @@ public sealed partial class DarlingWorker
 
             queryIds.Add(queryId);
             texts.Add(reader.GetString(1));
-            ownEntries.Add(reader.IsDBNull(2) ? null : reader.GetString(2));
+            /* #7681: an entry the old, unmarked statement created has no marker in its stored text; the fetch also returns the
+               service's login's unmarked entries, and the ones whose text has the shape of a statement this process sends join. */
+            var candidateEntries = reader.IsDBNull(3) ? null : reader.GetString(3);
+            ownEntries.Add(PgStatementText.WithMatchedEntries(reader.IsDBNull(2) ? null : reader.GetString(2), candidateEntries));
+            candidates.Add(PgStatementText.CandidatePairs(candidateEntries));
         }
 
-        return (queryIds, texts, ownEntries);
+        return (queryIds, texts, ownEntries, candidates);
     }
 
     /// <summary>#2219: the row cap for one text fetch — comfortably above PostgreSQL's default

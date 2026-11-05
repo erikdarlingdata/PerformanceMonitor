@@ -19,6 +19,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -2038,92 +2039,11 @@ AND   (e.expected_state = '(ignore)'
            AND   (CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END) = e.expected_state
        ))";
 
-    /// <summary>
-    /// The databases whose state deviates from their expected state in BOTH of the two most recent
-    /// collections (a two-sample rule that absorbs restart transients — RECOVERY_PENDING / RECOVERING — and
-    /// a standby secondary's per-restore RESTORING flicker), plus databases with no baseline yet whose
-    /// effective state is critical in both samples (a pending critical first observation). Uses the
-    /// effective state (STANDBY for a log-shipping secondary, else state_desc). Skips the "(ignore)"
-    /// sentinel; each row carries current + expected (expected is empty for a pending row). Lite's DuckDB
-    /// read ported to Postgres. $1 server_id.
-    /// </summary>
-    public const string DatabaseStateDeviationsSql = $@"
-WITH newest AS (
-    SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1
-),
-prev AS (
-    SELECT MAX(collection_time) AS t FROM database_states
-    WHERE server_id = $1 AND collection_time < (SELECT t FROM newest)
-),
-latest AS (
-    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
-    FROM database_states ds
-    WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM newest)
-),
-previous AS (
-    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
-    FROM database_states ds
-    WHERE ds.server_id = $1 AND ds.collection_time = (SELECT t FROM prev)
-),{DatabaseStateDeviationsTail}";
+    /// <summary>The database-state deviation read (see <see cref="DarlingDatabaseStateDeviations.Sql"/>, #7647: the one copy the fleet reads too). $1 server_id.</summary>
+    public const string DatabaseStateDeviationsSql = DarlingDatabaseStateDeviations.Sql;
 
-    /// <summary>
-    /// #7017: <see cref="DatabaseStateDeviationsSql"/> bounded below by <c>collection_time</c> $2. The floor is the PREVIOUS
-    /// collection's time (<see cref="NewestRowFloor"/>), one collection back from the newest, never the newest itself: the
-    /// two-sample rule reads the newest collection AND the one before it, so a floor at the newest row would hide the row that
-    /// holds the previous state and turn every deviation into "no deviation". With the floor at the previous collection both
-    /// samples stay visible whether or not a new collection arrived since the last read: a new one makes the old newest the
-    /// previous, which is above the floor, and none leaves the same pair. Same rows, same order.
-    /// </summary>
-    public const string DatabaseStateDeviationsSinceSql = $@"
-WITH newest AS (
-    SELECT MAX(collection_time) AS t FROM database_states WHERE server_id = $1 AND collection_time >= $2
-),
-prev AS (
-    SELECT MAX(collection_time) AS t FROM database_states
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < (SELECT t FROM newest)
-),
-latest AS (
-    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
-    FROM database_states ds
-    WHERE ds.server_id = $1 AND ds.collection_time >= $2 AND ds.collection_time = (SELECT t FROM newest)
-),
-previous AS (
-    SELECT ds.database_name, CASE WHEN ds.is_in_standby THEN 'STANDBY' ELSE ds.state_desc END AS eff
-    FROM database_states ds
-    WHERE ds.server_id = $1 AND ds.collection_time >= $2 AND ds.collection_time = (SELECT t FROM prev)
-),{DatabaseStateDeviationsTail}";
-
-    /// <summary>
-    /// The deviation rows and the final select the two reads above share. #7017: the read now ALWAYS returns at least one row
-    /// (a row whose <c>database_name</c> is NULL when nothing deviates), carrying the previous and newest collection times, because
-    /// the floor for the next read comes from those times and a tick with no deviation, the usual one, would otherwise leave it
-    /// nothing to take a floor from. A deviation row never has a NULL name (the join on the name drops those), so the reader treats
-    /// a NULL name as "no deviation" and skips it.
-    /// </summary>
-    private const string DatabaseStateDeviationsTail = $@"
-dev AS (
-    SELECT l.database_name, l.eff,
-           COALESCE(e.expected_state, '') AS expected_state,
-           COALESCE(e.last_alerted_state, '') AS last_alerted_state
-    FROM latest l
-    JOIN previous p
-      ON p.database_name = l.database_name
-    LEFT JOIN config.database_state_expected e
-      ON  e.server_id = $1
-      AND e.database_name = l.database_name
-    WHERE (e.expected_state IS NULL
-            AND l.eff IN ({DatabaseStateTokens.CriticalSqlList})
-            AND p.eff IN ({DatabaseStateTokens.CriticalSqlList}))
-       OR (e.expected_state IS NOT NULL AND e.expected_state <> '(ignore)'
-            AND l.eff IS DISTINCT FROM e.expected_state
-            AND p.eff IS DISTINCT FROM e.expected_state)
-)
-SELECT d.database_name, d.eff, d.expected_state, d.last_alerted_state,
-       (SELECT t FROM prev) AS previous_collection_time,
-       (SELECT t FROM newest) AS newest_collection_time
-FROM (SELECT 1) AS one
-LEFT JOIN dev AS d ON true
-ORDER BY d.database_name";
+    /// <summary>#7017: the same read bounded below by <c>collection_time</c> $2 (see <see cref="DarlingDatabaseStateDeviations.SinceSql"/>).</summary>
+    public const string DatabaseStateDeviationsSinceSql = DarlingDatabaseStateDeviations.SinceSql;
 
     /// <summary>Where each server's next database-state read starts (#7017): the previous collection, not the newest.</summary>
     private readonly NewestRowFloor _databaseStateFloor = new();

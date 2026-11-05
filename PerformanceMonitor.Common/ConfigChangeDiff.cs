@@ -70,10 +70,12 @@ public static class ConfigChangeDiff
 
     /// <summary>One server-configuration change. <see cref="RequiresRestart"/> and <see cref="ChangeDescription"/>
     /// are DERIVED from the collected values, matching the Dashboard's <c>report.server_configuration_changes</c>
-    /// view definitions. Timezone rendering of <see cref="ChangeTime"/> is per-app (not here).</summary>
+    /// view definitions. Timezone rendering of <see cref="ChangeTime"/> is per-app (not here). <see cref="ChangeTime"/> is the first
+    /// capture that holds the new value (#3740), not when the setting changed; <see cref="PreviousCaptureTime"/> is the capture
+    /// before it, so the change happened between the two (#7662).</summary>
     public sealed record ServerConfigChange(
         DateTime ChangeTime, string ConfigurationName, long? OldValueConfigured, long? NewValueConfigured,
-        long? OldValueInUse, long? NewValueInUse, bool? IsDynamic, bool? IsAdvanced)
+        long? OldValueInUse, long? NewValueInUse, bool? IsDynamic, bool? IsAdvanced, DateTime? PreviousCaptureTime = null)
     {
         public string DynamicDisplay => IsDynamic == true ? "Yes" : "No";
         public string AdvancedDisplay => IsAdvanced == true ? "Yes" : "No";
@@ -97,7 +99,7 @@ public static class ConfigChangeDiff
     /// WIDE store has no setting_type — <see cref="SettingName"/> is the literal column name);
     /// <see cref="ChangeDescription"/> is DERIVED, matching the Dashboard view.</summary>
     public sealed record DatabaseConfigChange(
-        DateTime ChangeTime, string DatabaseName, string SettingName, string? OldValue, string? NewValue)
+        DateTime ChangeTime, string DatabaseName, string SettingName, string? OldValue, string? NewValue, DateTime? PreviousCaptureTime = null)
     {
         /* Derived narrative matching report.database_configuration_changes.change_description wording. */
         public string ChangeDescription =>
@@ -170,7 +172,7 @@ public static class ConfigChangeDiff
                 {
                     changes.Add(new ServerConfigChange(
                         cur.CaptureTime, cur.ConfigurationName, prev.ValueConfigured, cur.ValueConfigured,
-                        prev.ValueInUse, cur.ValueInUse, cur.IsDynamic, cur.IsAdvanced));
+                        prev.ValueInUse, cur.ValueInUse, cur.IsDynamic, cur.IsAdvanced, prev.CaptureTime));
                 }
 
                 prev = cur;
@@ -211,7 +213,7 @@ public static class ConfigChangeDiff
                                 continue;
 
                             changes.Add(new DatabaseConfigChange(
-                                cur.CaptureTime, cur.DatabaseName, DatabaseConfigChangeSettingNames[i], oldVal, newVal));
+                                cur.CaptureTime, cur.DatabaseName, DatabaseConfigChangeSettingNames[i], oldVal, newVal, prev.CaptureTime));
                         }
                     }
                 }
@@ -221,6 +223,59 @@ public static class ConfigChangeDiff
         }
 
         return changes
+            .OrderByDescending(c => c.ChangeTime)
+            .ThenBy(c => c.DatabaseName, StringComparer.Ordinal)
+            .ThenBy(c => c.SettingName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>One database_states reading: the database was in <paramref name="State"/> at <paramref name="Time"/>.</summary>
+    public sealed record DatabaseStateObservation(DateTime Time, string DatabaseName, string? State);
+
+    /// <summary>
+    /// #7662: a <c>state_desc</c> change is stamped with the config snapshot that first held the new state, which can be a day after
+    /// the state moved (the config snapshots run on connect and once a day). database_states is collected every minute, so the
+    /// first reading of the new state after the previous snapshot is the time the state was seen. A <c>state_desc</c> row with
+    /// such a reading takes that time and loses its span (the minute is already exact); every other row, and a state row with no
+    /// reading to match, stays as it was. The diff kept a row for its snapshot's time, so a re-dated row is judged again on its
+    /// final time: one that now falls before <paramref name="startUtc"/> is dropped, since the state moved before the window.
+    /// Newest first, as the diff returns them.
+    /// </summary>
+    public static List<DatabaseConfigChange> ApplyDatabaseStateTimes(
+        IReadOnlyList<DatabaseConfigChange> changes, IReadOnlyList<DatabaseStateObservation> observations,
+        DateTime startUtc, DateTime endUtc)
+    {
+        if (observations.Count == 0)
+        {
+            return changes.ToList();
+        }
+
+        var byDatabase = observations
+            .Where(o => o.State is not null)
+            .GroupBy(o => o.DatabaseName, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.OrderBy(o => o.Time).ToList(), StringComparer.Ordinal);
+        var result = new List<DatabaseConfigChange>(changes.Count);
+        foreach (var change in changes)
+        {
+            if (string.Equals(change.SettingName, "state_desc", StringComparison.Ordinal)
+                && change.NewValue is not null
+                && byDatabase.TryGetValue(change.DatabaseName, out var seen))
+            {
+                var after = change.PreviousCaptureTime ?? DateTime.MinValue;
+                var first = seen.FirstOrDefault(o =>
+                    o.Time > after && o.Time <= change.ChangeTime && string.Equals(o.State, change.NewValue, StringComparison.Ordinal));
+                if (first is not null)
+                {
+                    result.Add(change with { ChangeTime = first.Time, PreviousCaptureTime = null });
+                    continue;
+                }
+            }
+
+            result.Add(change);
+        }
+
+        return result
+            .Where(c => c.ChangeTime >= startUtc && c.ChangeTime <= endUtc)
             .OrderByDescending(c => c.ChangeTime)
             .ThenBy(c => c.DatabaseName, StringComparer.Ordinal)
             .ThenBy(c => c.SettingName, StringComparer.Ordinal)
