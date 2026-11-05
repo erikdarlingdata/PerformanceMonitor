@@ -1134,20 +1134,20 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
     /// <summary>#7647: each SQL Server target's database states, through the Database State alert's own statement
     /// (<see cref="DarlingDatabaseStateDeviations.ReadAsync"/>), one bounded probe per server on one connection. A PostgreSQL target has no such snapshot and is
     /// left out of the map. A server whose read finds no snapshot inside <see cref="DarlingDatabaseStateDeviations.Freshness"/> maps to "not collected".</summary>
+    internal static Task<Dictionary<int, FleetDatabaseStates>> ReadDatabaseStatesAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<FleetServerRow> servers, DateTime nowUtc, CancellationToken cancellationToken) =>
+        ReadDatabaseStatesAsync(postgres, servers.Where(s => !MonitoredEngineKind.IsPostgres(s.EngineKind)).Select(s => s.ServerId), nowUtc, cancellationToken);
+
+    /// <summary>The same read for a list of server ids (the sweep has no engine kind to hand). An id with no snapshot, a PostgreSQL target included, maps to "not collected".</summary>
     internal static async Task<Dictionary<int, FleetDatabaseStates>> ReadDatabaseStatesAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<FleetServerRow> servers, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, IEnumerable<int> serverIds, DateTime nowUtc, CancellationToken cancellationToken)
     {
         var map = new Dictionary<int, FleetDatabaseStates>();
         await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-        foreach (var server in servers)
+        foreach (var serverId in serverIds)
         {
-            if (MonitoredEngineKind.IsPostgres(server.EngineKind))
-            {
-                continue;
-            }
-
-            var read = await DarlingDatabaseStateDeviations.ReadAsync(connection, server.ServerId, nowUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
-            map[server.ServerId] = FleetDatabaseStates.Of(read);
+            var read = await DarlingDatabaseStateDeviations.ReadAsync(connection, serverId, nowUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            map[serverId] = FleetDatabaseStates.Of(read);
         }
 
         return map;
