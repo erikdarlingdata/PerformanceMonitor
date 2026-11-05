@@ -36,19 +36,23 @@ public sealed class OverviewBaselineBandTests
     private static BaselineBucket Bucket(double mean, double sd) =>
         new() { Mean = mean, StdDev = sd, SampleCount = 500 };
 
+    /// <summary>The bucket as one band over the day the series sits in (#7644: the lanes take bands per local hour).</summary>
+    private static IReadOnlyList<PerformanceMonitor.Ui.BaselineBand.HourStep>? Bands(BaselineBucket? bucket) =>
+        bucket == null ? null : [PerformanceMonitor.Ui.BaselineBand.MakeStep(T0, T0 + 1, bucket.Mean, bucket.EffectiveStdDev)];
+
     /// <summary>Draws the lane (with or without a baseline) and returns the plot it drew on.</summary>
     private static WpfPlot Draw(CorrelatedTimelineLanesControl control, Lane lane, BaselineBucket? baseline)
     {
         switch (lane)
         {
             case Lane.Cpu:
-                control.UpdateCpuLane(Series(5, 90), Series(8, 95), baseline);
+                control.UpdateCpuLane(Series(5, 90), Series(8, 95), Bands(baseline));
                 return control.CpuChart;
             case Lane.Blocking:
-                control.UpdateBlockingLane(Series(1, 6), Series(0, 2).Take(5).ToList(), baseline, windowSpanDays: 1);
+                control.UpdateBlockingLane(Series(1, 6), Series(0, 2).Take(5).ToList(), Bands(baseline), windowSpanDays: 1);
                 return control.BlockingChart;
             default:
-                control.UpdateLane(control.WaitStatsChart, "Wait", Series(150, 900), "#FFB74D", baseline: baseline, minAnomalyValue: 100);
+                control.UpdateLane(control.WaitStatsChart, "Wait", Series(150, 900), "#FFB74D", bands: Bands(baseline), minAnomalyValue: 100);
                 return control.WaitStatsChart;
         }
     }
@@ -78,15 +82,15 @@ public sealed class OverviewBaselineBandTests
             var baseline = Bucket(mean, sd);
             var plot = Draw(control, lane, baseline).Plot;
 
-            var spans = plot.GetPlottables<VerticalSpan>().ToList();
-            var span = Assert.Single(spans);
+            var span = Assert.Single(plot.GetPlottables<Rectangle>());
             Assert.Empty(plot.GetPlottables<HorizontalSpan>());
 
-            // The span's limits are on Y: the band's own edges, and nothing on X (a HorizontalSpan reports the reverse).
+            // The band's Y limits are its own edges (#7433: the range is on Y, never on X), and its X limits the hour it covers.
             var limits = span.GetAxisLimits();
             Assert.Equal(Math.Max(0, mean - 2 * baseline.EffectiveStdDev), limits.Bottom, 6);
             Assert.Equal(mean + 2 * baseline.EffectiveStdDev, limits.Top, 6);
-            Assert.True(double.IsNaN(limits.Left) && double.IsNaN(limits.Right), $"the band reports X limits [{limits.Left}, {limits.Right}]");
+            Assert.Equal(T0, limits.Left, 6);
+            Assert.Equal(T0 + 1, limits.Right, 6);
 
             // Painted first, so behind the bars, the lines and the anomaly dots.
             Assert.Same(span, plot.PlottableList[0]);
