@@ -57,9 +57,6 @@ public static class DarlingPgIndexUsageReader
     /// </summary>
     public const int MinimumSamplesForADisuseClaim = 2;
 
-    /// <summary>The same number as <see cref="MinimumSamplesForADisuseClaim"/>, for splicing into SQL (an interpolated constant cannot take an int).</summary>
-    public const string MinimumSamplesForADisuseClaimSql = "2";
-
     /// <summary>
     /// The two per-index sets both the page and the whole-window tally read (#7575): the latest sample, and the earliest sample with the
     /// sample count and its counter-fell flag, over the same server and window. $1 server_id, $2/$3 window (naive UTC).
@@ -141,14 +138,15 @@ public static class DarlingPgIndexUsageReader
     /// <summary>
     /// The unscanned rule as SQL, the one copy the page's classing and the whole-window tiles both splice in (#7575; the pattern of
     /// <see cref="DarlingPgTableBloatReader.UnpublishableConditionSql"/>): no scans in the window, no reset, valid, nothing structural
-    /// holding it, and enough samples to claim disuse. A NULL maps the way the row reader maps it: valid when NULL, a blocker when
+    /// holding it, and enough samples to claim disuse. $4 is <see cref="MinimumSamplesForADisuseClaim"/>, bound by every reader that runs this
+    /// condition so the floor has one definition. A NULL maps the way the row reader maps it: valid when NULL, a blocker when
     /// <c>supports_constraint</c> is NULL, not a blocker for the other flags.
     /// </summary>
     public const string UnscannedConditionSql =
         "(GREATEST(l.index_scans - e.first_scans, 0) = 0 AND NOT " + StatsResetConditionSql
         + " AND COALESCE(l.is_valid, TRUE) AND NOT COALESCE(l.is_primary_key, FALSE) AND NOT COALESCE(l.supports_constraint, TRUE)"
         + " AND NOT COALESCE(l.is_unique, FALSE) AND NOT COALESCE(l.is_replica_identity, FALSE)"
-        + " AND e.sample_count >= " + MinimumSamplesForADisuseClaimSql + ")";
+        + " AND e.sample_count >= $4)";
 
     /// <summary>The invalid rule as SQL: an index whose <c>is_valid</c> is false. A NULL reads as valid, as the row reader does.</summary>
     public const string InvalidConditionSql = "NOT COALESCE(l.is_valid, TRUE)";
@@ -184,7 +182,7 @@ public static class DarlingPgIndexUsageReader
     /// interesting in proportion to its size, not its name. Indexes that WERE scanned sort below all of
     /// them regardless of size.</para>
     ///
-    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 row limit.</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 the disuse sample floor (<see cref="MinimumSamplesForADisuseClaim"/>), $5 row limit.</para>
     /// </summary>
     public const string PgIndexUsageSql = $"""
         {WindowCtesSql}
@@ -231,7 +229,7 @@ public static class DarlingPgIndexUsageReader
             l.is_valid ASC,
             CASE WHEN GREATEST(l.index_scans - e.first_scans, 0) = 0 THEN l.index_bytes ELSE -1 END DESC,
             l.index_bytes DESC
-        LIMIT $4
+        LIMIT $5
         """;
 
     public static async Task<List<PgIndexUsageRow>> GetPgIndexUsageAsync(
@@ -248,6 +246,7 @@ public static class DarlingPgIndexUsageReader
            row falls out of the window and the read silently returns nothing. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(MinimumSamplesForADisuseClaim);
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -341,7 +340,7 @@ public static class DarlingPgIndexUsageReader
     /// the bytes those indexes hold, the invalid count, and whether any index saw a reset. It splices in the same
     /// <see cref="UnscannedConditionSql"/> and <see cref="InvalidConditionSql"/> the page selects, over the same latest and
     /// earliest sets, so the two cannot disagree. An unmeasured size (NULL) adds nothing, as the page's -1 did.
-    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 the disuse sample floor (<see cref="MinimumSamplesForADisuseClaim"/>).</para>
     /// </summary>
     public const string PgIndexUsageTotalsSql = $"""
         {WindowCtesSql}
@@ -366,6 +365,7 @@ public static class DarlingPgIndexUsageReader
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(MinimumSamplesForADisuseClaim);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))
         {
@@ -373,32 +373,5 @@ public static class DarlingPgIndexUsageReader
         }
 
         return new PgIndexUsageTotals(0, 0, 0, 0, false);
-    }
-
-    /// <summary>
-    /// How many distinct indexes the window held (#7551): the denominator the page's cut is stated against. The main read joins its
-    /// latest and earliest sets one to one, so this is the number of rows it would return with no limit.
-    /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
-    /// </summary>
-    public const string PgIndexUsageCountSql = """
-        SELECT count(*) FROM (
-            SELECT DISTINCT database_name, schema_name, table_name, index_name
-            FROM pg_index_usage_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-        ) AS indexes
-        """;
-
-    public static async Task<long> CountPgIndexesInWindowAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(PgIndexUsageCountSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
-        return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture);
     }
 }

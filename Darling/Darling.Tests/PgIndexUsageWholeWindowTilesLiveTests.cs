@@ -132,11 +132,99 @@ VALUES ($1,$2,$3,$4,'postgres','public','widget',$5, $6, 0,0,0,0, $7, 20000000, 
         }
     }
 
-    [Fact]
-    public void TheSqlSampleFloorIsTheSameNumberAsTheCSharpOne()
+    /* is_unique, is_valid and supports_constraint are spliced as the literals true, false or NULL: they are test constants, and an
+       untyped NULL parameter has no type to bind. */
+    private static async Task SeedFlagsAsync(
+        NpgsqlConnection store, DateTime at, string index, long bytes, string isUnique, string isValid, string supportsConstraint, CancellationToken ct)
     {
-        Assert.Equal("2", DarlingPgIndexUsageReader.MinimumSamplesForADisuseClaimSql);
-        Assert.Equal("2", DarlingPgIndexUsageReader.MinimumSamplesForADisuseClaim.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Assert.Equal(DarlingPgIndexUsageReader.MinimumSamplesForADisuseClaim, DarlingMcpPgIndexUsageTools.MinimumSamplesForADisuseClaim);
+        await DarlingMcpTestData.ExecAsync(store, ct,
+            $@"INSERT INTO pg_index_usage_stats
+    (collection_id, collection_time, server_id, server_name, database_name, schema_name, table_name, index_name, index_scans,
+     tuples_read, tuples_fetched, blocks_read, blocks_hit, index_bytes, table_bytes, is_unique, is_primary_key, is_valid, is_ready,
+     is_replica_identity, is_partial, is_expression, supports_constraint, index_method, column_count, index_definition, stats_reset)
+VALUES ($1,$2,$3,$4,'postgres','public','widget',$5, 0, 0,0,0,0, $6, 20000000, {isUnique},false,{isValid},true, false,false,false,{supportsConstraint}, 'btree', 1,
+        'CREATE INDEX x ON public.widget USING btree (grp)', NULL)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), ServerId, ServerName, index, bytes);
+    }
+
+    /// <summary>
+    /// A NULL flag is read the way the row reader reads it, in the tiles and in each row (#7575): is_valid NULL is valid, is_unique NULL is
+    /// not a blocker, and supports_constraint NULL IS a blocker, so that index is not an unscanned drop candidate.
+    /// </summary>
+    [Fact]
+    public async Task ANullFlagIsReadTheWayTheRowReaderReadsIt_InTheTilesAndInEachRow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var storeConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(storeConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
+
+        await using var scratch = await ScratchPostgres.CreateAsync(storeConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = new NpgsqlConnection(scratch.ConnectionString);
+            await store.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(store, ct);
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await DarlingMcpTestData.RegisterServerAsync(store, ServerId, ServerName, ct);
+
+            var later = DateTime.UtcNow.AddHours(-1);
+            var earlier = later.AddHours(-1);
+
+            /* Two samples each, no scans. plain, null_is_valid and null_is_unique are candidates; null_supports_constraint is a blocker. */
+            var indexes = new (string Name, long Bytes, string Unique, string Valid, string Supports)[]
+            {
+                ("plain", 4_000_000, "false", "true", "false"),
+                ("null_is_valid", 3_000_000, "false", "NULL", "false"),
+                ("null_is_unique", 2_000_000, "NULL", "true", "false"),
+                ("null_supports_constraint", 1_000_000, "false", "true", "NULL"),
+            };
+            foreach (var (name, bytes, unique, valid, supports) in indexes)
+            {
+                await SeedFlagsAsync(store, earlier, name, bytes, unique, valid, supports, ct);
+                await SeedFlagsAsync(store, later, name, bytes, unique, valid, supports, ct);
+            }
+
+            const long candidateBytes = 4_000_000 + 3_000_000 + 2_000_000;
+
+            /* Cut at 2 so the tiles come from the whole-window read, then uncut so they come from the rows: both must say the same. */
+            using var cut = JsonDocument.Parse(await DarlingMcpPgIndexUsageTools.GetPgIndexUsage(dataSource, ServerName, 24, 2, null, null, ct));
+            Assert.True(cut.RootElement.GetProperty("truncated").GetBoolean());
+            Assert.Equal(3, cut.RootElement.GetProperty("unscanned_without_a_structural_blocker").GetInt32());
+            Assert.Equal(candidateBytes, cut.RootElement.GetProperty("bytes_held_by_those_indexes").GetInt64());
+            Assert.Equal(0, cut.RootElement.GetProperty("invalid_index_count").GetInt32());
+            Assert.Equal(4, cut.RootElement.GetProperty("indexes_in_window").GetInt64());
+
+            using var whole = JsonDocument.Parse(await DarlingMcpPgIndexUsageTools.GetPgIndexUsage(dataSource, ServerName, 24, 100, null, null, ct));
+            var all = whole.RootElement;
+            Assert.False(all.GetProperty("truncated").GetBoolean());
+            Assert.Equal(3, all.GetProperty("unscanned_without_a_structural_blocker").GetInt32());
+            Assert.Equal(candidateBytes, all.GetProperty("bytes_held_by_those_indexes").GetInt64());
+            Assert.Equal(0, all.GetProperty("invalid_index_count").GetInt32());
+
+            var byName = all.GetProperty("indexes").EnumerateArray().ToDictionary(e => e.GetProperty("index").GetString()!);
+            Assert.Equal("Warning", byName["plain"].GetProperty("severity").GetString());
+            Assert.Equal("Warning", byName["null_is_valid"].GetProperty("severity").GetString());
+            Assert.True(byName["null_is_valid"].GetProperty("is_valid").GetBoolean());
+            Assert.Equal("Warning", byName["null_is_unique"].GetProperty("severity").GetString());
+            Assert.False(byName["null_is_unique"].GetProperty("is_unique").GetBoolean());
+            var blocked = byName["null_supports_constraint"];
+            Assert.Equal("Healthy", blocked.GetProperty("severity").GetString());
+            Assert.True(blocked.GetProperty("supports_constraint").GetBoolean());
+            Assert.Contains("Backs a UNIQUE or EXCLUSION constraint", blocked.GetProperty("droppability_finding").GetString(), StringComparison.Ordinal);
+
+            /* The SQL class of each row agrees with the findings above. */
+            var end = DateTime.UtcNow;
+            var rows = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(dataSource, ServerId, end.AddHours(-24), end, 100, ct);
+            Assert.Equal(
+                new[] { "null_is_unique", "null_is_valid", "plain" },
+                rows.Where(r => r.IsUnscannedCandidate).Select(r => r.IndexName!).Order(StringComparer.Ordinal).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
     }
 }

@@ -46,7 +46,7 @@ public class DarlingPgIndexUsageReaderTests
         Assert.Contains("server_id = $1", Sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", Sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", Sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", Sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $5", Sql, StringComparison.Ordinal);
 
         /* No literal limit anywhere: the caller's limit has to be the only one. */
         Assert.DoesNotContain("LIMIT 50", Sql, StringComparison.Ordinal);

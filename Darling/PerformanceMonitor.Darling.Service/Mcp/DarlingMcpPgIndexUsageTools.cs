@@ -307,7 +307,8 @@ public sealed class DarlingMcpPgIndexUsageTools
 
             /* #7575: the tiles are the whole window's, from one aggregate read that splices in the same unscanned and invalid
                conditions the page selects, so a server with more indexes than the limit no longer undercounts them. Read only when
-               the page was cut: an uncut page IS the window, and its rows carry the same SQL-classed flag. */
+               the page was cut: an uncut page IS the window, and its rows carry the same SQL-classed flag. A cut page runs two reads, the page
+               and this one, and indexes_in_window below comes from this one too, so the tiles and the count are one snapshot. */
             var totals = truncated
                 ? await DarlingPgIndexUsageReader.GetPgIndexUsageTotalsAsync(postgres, resolved.ServerId, start, end, cancellationToken)
                 : new DarlingPgIndexUsageReader.PgIndexUsageTotals(
@@ -389,10 +390,8 @@ public sealed class DarlingMcpPgIndexUsageTools
                 status = "index_usage",
                 /* The page's count under the page's name (#3594). */
                 indexes_returned = indexes.Count,
-                /* Every index the window held (#7551), so a cut page can say how much of the server it shows. Read only when the page was cut. */
-                indexes_in_window = truncated
-                    ? await DarlingPgIndexUsageReader.CountPgIndexesInWindowAsync(postgres, resolved.ServerId, start, end, cancellationToken)
-                    : indexes.Count,
+                /* Every index the window held (#7551), so a cut page can say how much of the server it shows: the totals read's count on a cut page. */
+                indexes_in_window = truncated ? totals.IndexCount : indexes.Count,
                 /* Deliberately NOT called "droppable". These are the indexes with no scans in the window
                    and no structural blocker - which is a shortlist to investigate, not a work queue. The
                    field name has to survive being read by something that will act on it. */
