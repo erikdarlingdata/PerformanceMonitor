@@ -281,7 +281,7 @@ SELECT
         var sizeRelation = await HotFirstRelationAsync(connection, knownIds, "database_size_stats", "v_database_size_stats",
             "server_id, collection_time, database_name, total_size_mb, used_size_mb");
         var propertiesRelation = await HotFirstRelationAsync(connection, knownIds, "server_properties", "v_server_properties",
-            "server_id, collection_time, engine_edition, edition");
+            "server_id, collection_time, engine_edition, edition, ag_replica_role");
 
         command.CommandText = @"
 WITH known_servers AS (
