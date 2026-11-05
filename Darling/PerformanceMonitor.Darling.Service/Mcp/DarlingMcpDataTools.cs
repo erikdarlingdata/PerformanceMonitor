@@ -1731,7 +1731,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
@@ -1809,6 +1809,13 @@ public sealed class DarlingMcpDataTools
             if (tagFilter.Named is { } storeTagName)
             {
                 storePayload["tag_filter"] = storeTagName;
+            }
+
+            /* #7675: rows read from a Query Store in the ERROR state are old and nothing says so; the answer names the database. */
+            if (await DarlingRuntimePrecondition.QueryStoreErrorNoteAsync(postgres, resolved.ServerId, databases,
+                    rows.Select(r => r.DatabaseName).Where(n => n is not null).Select(n => n!), cancellationToken) is { } storeErrorNote)
+            {
+                storePayload[DarlingRuntimePrecondition.QueryStoreErrorNoteKey] = storeErrorNote;
             }
 
             /* #6131: the page is capped under the shared response budget, as the other read tools' pages are. top 200 measured

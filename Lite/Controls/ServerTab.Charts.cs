@@ -126,6 +126,9 @@ public partial class ServerTab : UserControl
         return plain == null ? null : plain.Contains;
     }
 
+    /// <summary>The line under the CPU chart when no sample carries other-process CPU (#7682).</summary>
+    internal const string CpuHostUnknownNote = "This server cannot report host CPU (SQL Server on Linux before 2025 CU1), so only SQL Server CPU is drawn.";
+
     private void UpdateCpuChart(List<CpuUtilizationRow> data, int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         ClearChart(CpuChart);
@@ -150,7 +153,10 @@ public partial class ServerTab : UserControl
            display zone. SampleTime is the server's wall clock and is not what a chart plots. */
         var times = data.Select(d => d.SampleTimeUtc.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
-        var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
+        var otherCpu = data.Select(d => d.OtherProcessCpu.HasValue ? (double)d.OtherProcessCpu.Value : double.NaN).ToArray();
+        /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so the store holds NULL for other-process
+           CPU. A flat line at 0 would claim the host is idle; draw the SQL line alone and say why under the chart. */
+        var hostCpuKnown = data.Any(d => d.OtherProcessCpu.HasValue);
 
         var sqlPlot = CpuChart.Plot.Add.TimeSeries(times, sqlCpu);
         sqlPlot.LegendText = "SQL Server";
@@ -158,11 +164,14 @@ public partial class ServerTab : UserControl
         ChartStyle.StyleScatter(sqlPlot);
         _cpuHover?.Add(sqlPlot, "SQL Server");
 
-        var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
-        otherPlot.LegendText = "Other";
-        otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
-        ChartStyle.StyleScatter(otherPlot);
-        _cpuHover?.Add(otherPlot, "Other");
+        if (hostCpuKnown)
+        {
+            var otherPlot = CpuChart.Plot.Add.TimeSeries(times, otherCpu);
+            otherPlot.LegendText = "Other";
+            otherPlot.Color = ScottPlot.Color.FromHex(ChartPalette.SeriesColor("OtherCpu"));
+            ChartStyle.StyleScatter(otherPlot);
+            _cpuHover?.Add(otherPlot, "Other");
+        }
 
         /* A point whose stored wall time names two instants sits at the first of them, so the hover words it
            without the repeated-hour offset (#4766). Set after Clear() emptied it above. */
@@ -175,6 +184,10 @@ public partial class ServerTab : UserControl
         CpuChart.Plot.Axes.SetLimitsX(ChartXStart(CpuChart.Plot, xMin, xMax), xMax);
         ReapplyAxisColors(CpuChart);
         CpuChart.Plot.YLabel("CPU %");
+        if (!hostCpuKnown)
+        {
+            CpuChart.Plot.XLabel(CpuHostUnknownNote);
+        }
         CpuChart.Plot.Axes.SetLimitsY(0, 105);
 
         ShowChartLegend(CpuChart);

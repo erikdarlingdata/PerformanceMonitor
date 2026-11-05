@@ -400,10 +400,12 @@ public class QueryStoreHealthRow
     /// (pre-rung row, or a 2016 engine that has no such option — not <c>OFF</c>).</summary>
     public string WaitStatsCaptureModeDisplay => WaitStatsCaptureMode ?? "—";
 
+    /// <summary>#7675: an <c>ERROR</c> store reads "! ERROR", so the row is marked in the cell and not only in the reason column.</summary>
     public string StateDisplay =>
-        string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
+        (PerformanceMonitor.Common.QueryStoreReadonlyReason.IsErrorState(ActualState) ? "! " : "")
+        + (string.Equals(ActualState, DesiredState, StringComparison.OrdinalIgnoreCase)
             ? ActualState
-            : $"{ActualState} (wanted {DesiredState})";
+            : $"{ActualState} (wanted {DesiredState})");
 
     /// <summary>Percent of the storage cap in use; blank when the cap is 0 (unlimited/unknown).</summary>
     public double? PercentOfCap => MaxStorageMb > 0 ? 100.0 * CurrentStorageMb / MaxStorageMb : null;
@@ -413,7 +415,7 @@ public class QueryStoreHealthRow
         MaxStorageMb > 0 ? $"{100.0 * CurrentStorageMb / MaxStorageMb:F0}%" : "";
 
     /// <summary>The shared bit-by-bit decode — one label table for every surface that shows this value.</summary>
-    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.Decode(ReadonlyReason);
+    public string ReadonlyReasonDisplay => PerformanceMonitor.Common.QueryStoreReadonlyReason.DecodeWithState(ActualState, ReadonlyReason);
 }
 
 public class DatabaseScopedConfigRow
