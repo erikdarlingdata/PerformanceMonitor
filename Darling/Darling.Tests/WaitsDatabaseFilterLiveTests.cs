@@ -137,7 +137,7 @@ public sealed class WaitsDatabaseFilterLiveTests
             Assert.Equal(DbC, one.GetProperty("database_name").GetString());
             Assert.Equal(2, one.GetProperty("tasks_returned").GetInt32());
             Assert.False(one.GetProperty("truncated").GetBoolean());
-            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, null, logger: null, cancellationToken: ct)).RootElement;
+            var plain = JsonDocument.Parse(await DarlingMcpSessionTools.GetWaitingTasks(postgres, ServerName, 1, 30, asOf, logger: null, cancellationToken: ct)).RootElement;
             Assert.Equal(JsonValueKind.Null, plain.GetProperty("database_name").ValueKind);
             Assert.Equal(5, plain.GetProperty("tasks_returned").GetInt32());
 

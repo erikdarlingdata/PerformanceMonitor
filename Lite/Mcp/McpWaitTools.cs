@@ -217,8 +217,8 @@ public sealed class McpWaitTools
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        [Description(McpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false)
+        [Description(McpLongQueryTools.IncludeMonitorDescription)] bool include_monitor = false,
+        [Description("Limit to one database. Omit for all databases.")] string? database_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
