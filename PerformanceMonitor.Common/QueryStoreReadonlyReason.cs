@@ -45,6 +45,33 @@ namespace PerformanceMonitor.Common
         /// <summary>True when a capacity bit is set, whatever else is: the capacity bit decides.</summary>
         public static bool HasCapacityBit(int readonlyReason) => (readonlyReason & CapacityBits) != 0;
 
+        /// <summary>The <c>actual_state_desc</c> token for a store that stopped on an internal error (#7675).</summary>
+        public const string ErrorState = "ERROR";
+
+        /// <summary>One plain line for a store whose actual state is <c>ERROR</c> (#7675). The state carries no readonly_reason
+        /// bit, so the bitmask decode is empty for it and the row read like any other.</summary>
+        public const string ErrorStateNote =
+            "Query Store stopped on an internal error. Its newest rows are old. Turn it off and on again, or run sp_query_store_consistency_check.";
+
+        /// <summary>True when <paramref name="actualState"/> is the <c>ERROR</c> state, whatever its case.</summary>
+        public static bool IsErrorState(string? actualState) =>
+            actualState is not null && actualState.Trim().Equals(ErrorState, System.StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The reason cell of a Query Store health row (#7675): the bitmask decode, and for an <c>ERROR</c> store the
+        /// <see cref="ErrorStateNote"/> in front of it. Empty when the store is not read-only and not in error.
+        /// </summary>
+        public static string DecodeWithState(string? actualState, int readonlyReason)
+        {
+            var decoded = Decode(readonlyReason);
+            if (!IsErrorState(actualState))
+            {
+                return decoded;
+            }
+
+            return decoded.Length == 0 ? ErrorStateNote : ErrorStateNote + " (" + decoded + ")";
+        }
+
         /// <summary>Human-readable decode of the bitmask; empty string when 0 (not read-only).</summary>
         public static string Decode(int readonlyReason)
         {
