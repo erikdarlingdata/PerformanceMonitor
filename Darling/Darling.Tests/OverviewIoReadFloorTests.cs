@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Ui;
 using ScottPlot.Plottables;
 using Xunit;
@@ -25,6 +26,8 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class OverviewIoReadFloorTests
 {
+    private const double Bar = PgTargetScorer.IoBaselineBucketMinimumReads;
+
     private static readonly DateTime T0 = new(2026, 11, 3, 0, 0, 0, DateTimeKind.Unspecified);
 
     private static BaselineBucket Band() => new() { Mean = 1, StdDev = 0.5, SampleCount = 500 }; // band 0..2 ms
@@ -56,7 +59,7 @@ public sealed class OverviewIoReadFloorTests
         var data = Slow(10);
         var fewReads = Enumerable.Repeat(3L, 10).ToList();
 
-        Assert.Equal(0, DrawIo(data, fewReads, OverviewIoReadFloor.MinReadsFor(1)));
+        Assert.Equal(0, DrawIo(data, fewReads, OverviewIoReadFloor.MinReadsFor(1, Bar)));
     }
 
     [Fact]
@@ -65,7 +68,7 @@ public sealed class OverviewIoReadFloorTests
         var data = Slow(10);
         var manyReads = Enumerable.Repeat(5_000L, 10).ToList();
 
-        Assert.Equal(10, DrawIo(data, manyReads, OverviewIoReadFloor.MinReadsFor(1)));
+        Assert.Equal(10, DrawIo(data, manyReads, OverviewIoReadFloor.MinReadsFor(1, Bar)));
     }
 
     [Fact]
@@ -74,17 +77,17 @@ public sealed class OverviewIoReadFloorTests
         var data = Slow(10);
         var reads = Enumerable.Range(0, 10).Select(i => i % 2 == 0 ? 5_000L : 3L).ToList();
 
-        Assert.Equal(5, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1)));
+        Assert.Equal(5, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1, Bar)));
     }
 
     [Fact]
     public void TheTwoMillisecondFloorStillApplies_WhateverTheReads()
     {
         var manyReads = Enumerable.Repeat(5_000L, 10).ToList();
-        Assert.Equal(0, DrawIo(Slow(10, ms: 1.5), manyReads, OverviewIoReadFloor.MinReadsFor(1))); // inside the band
+        Assert.Equal(0, DrawIo(Slow(10, ms: 1.5), manyReads, OverviewIoReadFloor.MinReadsFor(1, Bar))); // inside the band
 
         // Above the band (upper is 2) but under a 3 ms floor: no marker even with plenty of reads.
-        Assert.Equal(0, DrawIo(Slow(10, ms: 2.5), manyReads, OverviewIoReadFloor.MinReadsFor(1), minAnomalyValue: 3));
+        Assert.Equal(0, DrawIo(Slow(10, ms: 2.5), manyReads, OverviewIoReadFloor.MinReadsFor(1, Bar), minAnomalyValue: 3));
     }
 
     [Fact]
@@ -102,7 +105,7 @@ public sealed class OverviewIoReadFloorTests
     public void TheFloor_ScalesWithTheBucketWidth(int bucketMinutes, long expected)
     {
         var times = new[] { T0, T0.AddMinutes(bucketMinutes) };
-        Assert.Equal(expected, OverviewIoReadFloor.MinReadsFor(bucketMinutes, times));
+        Assert.Equal(expected, OverviewIoReadFloor.MinReadsFor(bucketMinutes, times, Bar));
     }
 
     [Fact]
@@ -110,14 +113,14 @@ public sealed class OverviewIoReadFloorTests
     {
         // One-minute buckets, but the collector runs every five minutes: each point holds five minutes of reads.
         var times = Enumerable.Range(0, 12).Select(i => T0.AddMinutes(5 * i)).ToList();
-        Assert.Equal(84, OverviewIoReadFloor.MinReadsFor(5, times));
-        Assert.Equal(84, OverviewIoReadFloor.MinReadsFor(1, times));
+        Assert.Equal(84, OverviewIoReadFloor.MinReadsFor(5, times, Bar));
+        Assert.Equal(84, OverviewIoReadFloor.MinReadsFor(1, times, Bar));
 
         // A point of 60 reads clears a one-minute floor (17) but not the five-minute floor (84).
         var data = times.Select(t => (t.ToOADate(), 5.0)).ToList();
         var reads = Enumerable.Repeat(60L, 12).ToList();
-        Assert.Equal(12, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1, new[] { T0, T0.AddMinutes(1) })));
-        Assert.Equal(0, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1, times)));
+        Assert.Equal(12, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1, new[] { T0, T0.AddMinutes(1) }, Bar)));
+        Assert.Equal(0, DrawIo(data, reads, OverviewIoReadFloor.MinReadsFor(1, times, Bar)));
     }
 
     [Fact]
@@ -125,7 +128,7 @@ public sealed class OverviewIoReadFloorTests
     {
         // 30-minute buckets over a one-minute collector: the step (1) is under the bucket (30), so the bucket is the span.
         var times = Enumerable.Range(0, 12).Select(i => T0.AddMinutes(30 * i)).ToList();
-        Assert.Equal(500, OverviewIoReadFloor.MinReadsFor(30, times));
+        Assert.Equal(500, OverviewIoReadFloor.MinReadsFor(30, times, Bar));
     }
 
     [Fact]
@@ -137,5 +140,33 @@ public sealed class OverviewIoReadFloorTests
         Assert.False(OverviewIoReadFloor.IsAnomaly(1, 2, 1.5, 2, reads: 10, minReads: 250));
         Assert.True(OverviewIoReadFloor.IsAnomaly(1, 2, 1.5, 2, reads: 1_000, minReads: 250));
         Assert.True(OverviewIoReadFloor.IsAnomaly(5, 2, 0, 2, reads: 0, minReads: 0));
+    }
+
+    private static readonly List<(DateTime Time, long Reads, int BucketMinutes)> TwoMinutePoints = new()
+    {
+        (T0, 900, 1), (T0.AddMinutes(1), 10, 1), (T0.AddMinutes(2), 400, 1)
+    };
+
+    [Fact]
+    public void LaneInputs_GiveTheReadsInPointOrder_AndTheFloorFromTheBucketWidth()
+    {
+        var (reads, minReads) = OverviewIoReadFloor.LaneInputs(TwoMinutePoints, Bar);
+        Assert.Equal(new long[] { 900, 10, 400 }, reads);
+        Assert.Equal(17, minReads); // one-minute bucket, one-minute step: 250 / 15 rounded up
+    }
+
+    [Fact]
+    public void LaneInputs_TakeTheFloorFromTheStep_WhenTheCollectorIsSlowerThanTheBucket()
+    {
+        var points = Enumerable.Range(0, 4).Select(i => (T0.AddMinutes(5 * i), (long)i, 1)).ToList();
+        Assert.Equal(84, OverviewIoReadFloor.LaneInputs(points, Bar).MinReads);
+    }
+
+    [Fact]
+    public void LaneInputs_OfNoPoints_HaveNoReadsAndTheFifteenMinuteFloor()
+    {
+        var (reads, minReads) = OverviewIoReadFloor.LaneInputs(new List<(DateTime, long, int)>(), Bar);
+        Assert.Empty(reads);
+        Assert.Equal(250, minReads);
     }
 }

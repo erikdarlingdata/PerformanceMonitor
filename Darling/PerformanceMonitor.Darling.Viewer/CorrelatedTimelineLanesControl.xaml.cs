@@ -39,6 +39,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -255,10 +256,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     .ToList();
                 /* #7624: the lane marks a point only when its reads reach the web strip's bar for the span they were counted over. */
                 var ioPoints = fileIoTask.Result;
-                var ioMinReads = OverviewIoReadFloor.MinReadsFor(
-                    ioPoints.Count > 0 ? ioPoints[0].BucketMinutes : 0, ioPoints.Select(d => d.CollectionTime));
+                var (ioReads, ioMinReads) = OverviewIoReadFloor.LaneInputs(
+                    ioPoints.Select(d => (d.CollectionTime, d.Reads, d.BucketMinutes)).ToList(),
+                    PgTargetScorer.IoBaselineBucketMinimumReads);
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2,
-                    pointReads: ioPoints.Select(d => d.Reads).ToList(), minPointReads: ioMinReads);
+                    pointReads: ioReads, minPointReads: ioMinReads);
             }
             else
                 ShowEmpty(FileIoChart, "I/O ms");

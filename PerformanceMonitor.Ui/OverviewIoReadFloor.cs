@@ -17,21 +17,19 @@ namespace PerformanceMonitor.Ui;
 /// handful of reads is noise (one read at 80 ms is a red dot for the whole bucket). This is the web strip's rule
 /// (<c>minReadsFor</c> and <c>ANOMALY_MIN_READS_PER_15_MIN</c> in <c>wwwroot/js/pages/overview-strips.js</c>, #7621): 250 reads per fifteen minutes
 /// of the span the point's reads were counted over, the bar the PostgreSQL I/O baseline puts on a bucket
-/// (<c>PgTargetScorer.IoBaselineBucketMinimumReads</c>, which Lite and this project cannot reach, hence the constant here).
+/// (<c>PgTargetScorer.IoBaselineBucketMinimumReads</c>). This project does not reference <c>PerformanceMonitor.Analysis</c>, but Lite and the
+/// Darling Viewer do, so each passes that constant in as <c>minReadsPer15Minutes</c> and the bar has one definition.
 /// </summary>
 public static class OverviewIoReadFloor
 {
-    /// <summary>The reads a bucket needs per fifteen minutes of the span its reads were counted over.</summary>
-    public const double MinReadsPer15Minutes = 250;
-
     /// <summary>
-    /// The reads a point counted over <paramref name="spanMinutes"/> needs; a span not stated (zero or less) counts as fifteen minutes,
-    /// as the web strip does. Never below one.
+    /// The reads a point counted over <paramref name="spanMinutes"/> needs at <paramref name="minReadsPer15Minutes"/> per fifteen minutes; a span
+    /// not stated (zero or less) counts as fifteen minutes, as the web strip does. Never below one.
     /// </summary>
-    public static long MinReadsFor(double spanMinutes)
+    public static long MinReadsFor(double spanMinutes, double minReadsPer15Minutes)
     {
         var span = spanMinutes > 0 ? spanMinutes : 15;
-        return Math.Max(1, (long)Math.Ceiling(MinReadsPer15Minutes * span / 15));
+        return Math.Max(1, (long)Math.Ceiling(minReadsPer15Minutes * span / 15));
     }
 
     /// <summary>
@@ -39,7 +37,7 @@ public static class OverviewIoReadFloor
     /// between the points' own times). A collector scheduled slower than the bucket leaves one point per collection, and that point
     /// holds the reads of the whole step, not of one bucket.
     /// </summary>
-    public static long MinReadsFor(int bucketMinutes, IEnumerable<DateTime> pointTimes)
+    public static long MinReadsFor(int bucketMinutes, IEnumerable<DateTime> pointTimes, double minReadsPer15Minutes)
     {
         var times = pointTimes.Distinct().OrderBy(t => t).ToList();
         var span = (double)bucketMinutes;
@@ -54,8 +52,17 @@ public static class OverviewIoReadFloor
             if (median > span) span = median;
         }
 
-        return MinReadsFor(span);
+        return MinReadsFor(span, minReadsPer15Minutes);
     }
+
+    /// <summary>
+    /// What the I/O lane needs from the read's points (both desktop apps call this, so the wiring is one tested method): each point's reads,
+    /// in point order, and the floor from the first point's bucket width and the points' own times.
+    /// </summary>
+    public static (List<long> Reads, long MinReads) LaneInputs(
+        IReadOnlyList<(DateTime Time, long Reads, int BucketMinutes)> points, double minReadsPer15Minutes)
+        => (points.Select(p => p.Reads).ToList(),
+            MinReadsFor(points.Count > 0 ? points[0].BucketMinutes : 0, points.Select(p => p.Time), minReadsPer15Minutes));
 
     /// <summary>
     /// Whether a point is an anomaly: outside the band, above it only at or past the lane's absolute floor, and backed by at least

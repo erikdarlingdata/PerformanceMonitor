@@ -34,8 +34,13 @@ public sealed class ChartAxisStartSyntheticTests
     private static T Private<T>(object target, string name) =>
         (T)target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(target)!;
 
-    private static void Call(object target, string name, params object?[] args) =>
-        target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(target, args);
+    /* Invoke needs every parameter: the optional ones the caller leaves off (UpdateLane's #7624 read arguments) are filled with their defaults. */
+    private static void Call(object target, string name, params object?[] args)
+    {
+        var method = target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var full = Enumerable.Range(0, method.GetParameters().Length).Select(i => i < args.Length ? args[i] : Type.Missing).ToArray();
+        method.Invoke(target, full);
+    }
 
     /// <summary>Draws the five Overview lanes the way a refresh leaves them: data three hours back, the baseline band and mean line on the
     /// lanes that have a baseline, the crosshair manager's hidden vertical lines attached just before the axes are synced.</summary>
