@@ -527,9 +527,11 @@ public class ServerSummaryItem
     /// <summary>The store's <c>collection_time</c> for the memory row <see cref="MemoryMb"/> came from (#3541
     /// A10) — get_server_summary's <c>memory_captured_at</c>.</summary>
     public DateTime? MemoryCollectionTime { get; set; }
-    /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.</summary>
+    /// <summary>Total non-idle CPU on the host = sql_server + other_process. Tracks closer to OS user+system counters.
+    /// Null when other-process CPU is unknown (SQL Server on Linux before 2025 CU1, #7682): a missing figure is not
+    /// zero, so the total is not known either, and <see cref="CpuPercentForAlert"/> falls back to the SQL figure.</summary>
     public double? TotalCpuPercent =>
-        CpuPercent.HasValue ? CpuPercent.Value + (OtherProcessCpuPercent ?? 0) : null;
+        CpuPercent.HasValue && OtherProcessCpuPercent.HasValue ? CpuPercent.Value + OtherProcessCpuPercent.Value : null;
     /// <summary>The CPU value the alert evaluator and headline display use. Driven by App.AlertCpuMode.</summary>
     public double? CpuPercentForAlert =>
         App.AlertCpuMode == CpuAlertMode.Total ? (TotalCpuPercent ?? CpuPercent) : CpuPercent;
@@ -547,7 +549,9 @@ public class ServerSummaryItem
         get
         {
             if (CpuIsStale || !CpuPercent.HasValue) return "--";
-            if (!OtherProcessCpuPercent.HasValue) return $"{CpuPercent:F0}%";
+            /* #7682: SQL Server on Linux before 2025 CU1 cannot report host CPU, so there is no total to show. The
+               figure is the SQL Server's own, and says so. */
+            if (!OtherProcessCpuPercent.HasValue) return $"SQL CPU {CpuPercent:F0}%";
             return $"{TotalCpuPercent:F0}% (SQL {CpuPercent:F0}%)";
         }
     }
@@ -800,7 +804,8 @@ public class ServerSummaryItem
 
             if (CpuIsElevated)
             {
-                parts.Add("CPU " + CpuDisplay);
+                /* #7682: "SQL CPU 12%" already names the metric, so it takes no second "CPU" in front. */
+                parts.Add(CpuDisplay.StartsWith("SQL CPU", StringComparison.Ordinal) ? CpuDisplay : "CPU " + CpuDisplay);
             }
 
             if (BlockingIsElevated)

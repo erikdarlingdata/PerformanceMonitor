@@ -551,6 +551,7 @@ public partial class FinOpsTab : UserControl
                 (decimal)stolenPct, data.EngineEdition),
             ProvisioningVerdict.NotEnoughData => ProvisioningVerdict.NotEnoughDataExplanation(data.CpuSamples),
             ProvisioningVerdict.NotApplicable => ProvisioningVerdict.NotApplicableExplanation,
+            ProvisioningVerdict.NotJudgedSecondary => ProvisioningVerdict.NotJudgedSecondaryExplanation,
             _ => ""
         };
 

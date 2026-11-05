@@ -101,10 +101,10 @@ public sealed class LiteOverviewCardExplainsItselfTests
     {
         var card = Busy();
 
-        Assert.Equal("96%", card.CpuDisplay);
+        Assert.Equal("SQL CPU 96%", card.CpuDisplay);
         Assert.Equal("2", card.DeadlockDisplay);
-        Assert.Equal("CPU 96%, Deadlocks 2", card.StatusReason);
-        Assert.Contains("Needs attention: CPU 96%, Deadlocks 2", card.StatusTooltip, StringComparison.Ordinal);
+        Assert.Equal("SQL CPU 96%, Deadlocks 2", card.StatusReason);
+        Assert.Contains("Needs attention: SQL CPU 96%, Deadlocks 2", card.StatusTooltip, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -126,7 +126,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
         var busy = Busy();
 
         Assert.Equal("Online", busy.StatusDisplay);
-        Assert.Contains("Needs attention: CPU 96%, Deadlocks 2", busy.StatusTooltip, StringComparison.Ordinal);
+        Assert.Contains("Needs attention: SQL CPU 96%, Deadlocks 2", busy.StatusTooltip, StringComparison.Ordinal);
         /* The border is already red for this card. The word never was, which is the whole point. */
         Assert.NotEqual(Healthy().CardBorderBrush.Color, busy.CardBorderBrush.Color);
     }
@@ -162,7 +162,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
 
         /* The reason itself is still computed — the omission is a tooltip decision, made in one place, not a
            hole in what the card knows. */
-        Assert.Equal("CPU 96%, Deadlocks 2", card.StatusReason);
+        Assert.Equal("SQL CPU 96%, Deadlocks 2", card.StatusReason);
     }
 
     /// <summary>"Unknown" is the one word with nothing behind it: no connection check has run. Not knowing
@@ -173,7 +173,7 @@ public sealed class LiteOverviewCardExplainsItselfTests
         var tooltip = NotYetChecked().StatusTooltip;
 
         Assert.Contains("Unknown — this server has not been connection-checked yet", tooltip, StringComparison.Ordinal);
-        Assert.Contains("Needs attention: CPU 62%", tooltip, StringComparison.Ordinal);
+        Assert.Contains("Needs attention: SQL CPU 62%", tooltip, StringComparison.Ordinal);
     }
 
     /// <summary>Every card gets a tooltip, every tooltip ends on the gesture that acts on it, and no tooltip is

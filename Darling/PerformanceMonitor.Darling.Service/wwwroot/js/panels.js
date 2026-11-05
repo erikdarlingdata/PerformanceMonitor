@@ -66,6 +66,7 @@ import {
 } from "./util.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "./charts.js";
 import { plainText, plainTextNamed, plainTextCounts, shortEmptyLine } from "./plain-text.js";
+import { withheldDisplayText } from "./mute-context.js";
 import { toTsv, toCsv, isListValue, csvFileName, copyText, downloadCsv } from "./grid-tools.js";
 import {
   VALUE_LIST_MAX_LEN,
@@ -1386,7 +1387,7 @@ function cell(row, c) {
      same body carries query and SQL lines that must print as written. Never use `localizeText` on a column that holds SQL. */
   const text = c.localizeAlertDetail && !c.format
     ? localizeAlertDetail(shown, getPath(row, "newest_sample"))
-    : c.localizeText && !c.format ? localizeIsoText(shown) : shown;
+    : c.localizeText && !c.format ? localizeIsoText(shown) : withheldDisplayText(shown); /* #7548: the stored marker reads as words, nothing else changes */
   /* #7533: `name: true` is a name column (Database, File, Path, Job, Instance): one line under the stylesheet's window-following cap, an ellipsis, and the whole name in the cell's title.
      `path: true` (a file path) cuts the START instead, so the file name at the end stays visible (#7533 review): see clampText.
      It does not open on a click, because a name is read and copied, not expanded. Copy cell and the CSV read the row, so they carry the whole name too. */
@@ -1581,7 +1582,10 @@ function vizLine(data, desc) {
   /* #7508: `seamKey` names the field of the reply holding the instant where the series changes grain (routing.raw_from on the Query
      Store Duration Trend), so the chart's gap rule judges each grain against its own spacing. Absent or unparseable: no seam. */
   const seam = desc.seamKey ? parseUtc(getPath(data, desc.seamKey)) : null;
-  return zoomableLineChart({
+  /* #7682: `footNoteKey` names a text field of the reply drawn as a notice under the chart, only when a series was left out for having no measured value
+     (get_cpu_utilization's host_cpu_note: this server cannot report host CPU, so Other and Total are not drawn). */
+  const footNote = desc.footNoteKey && seriesCfg.length < allSeriesCfg.length ? getPath(data, desc.footNoteKey) : null;
+  const chart = zoomableLineChart({
     points,
     xKey: desc.xKey,
     series,
@@ -1604,6 +1608,7 @@ function vizLine(data, desc) {
     windowStart: win ? win.windowStart : null,
     windowEnd: win ? win.windowEnd : null,
   }, zoomId, chartZoomScope(desc.windowHours != null ? desc.windowHours : desc.params && desc.params.hours));
+  return typeof footNote === "string" && footNote ? el("div", {}, [chart, noticeStrip(footNote)]) : chart;
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */

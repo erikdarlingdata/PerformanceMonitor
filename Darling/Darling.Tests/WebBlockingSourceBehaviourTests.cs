@@ -102,6 +102,26 @@ public sealed class WebBlockingSourceBehaviourTests
         Assert.All(r.GetProperty("panels").EnumerateArray(), p => Assert.DoesNotContain(p.GetProperty("subtitles").EnumerateArray(), s => s.GetString()!.Contains("Source:", System.StringComparison.Ordinal)));
     }
 
+    /// <summary>
+    /// #7682: the CPU tab's CPU Utilization chart on a server that cannot report host CPU (SQL Server on Linux before 2025 CU1) draws the SQL line
+    /// alone and says why under it. Other and Total are null on every sample there, and a line of nulls drawn as zeros or a legend entry with no line
+    /// would claim the host was measured. A server that does report it keeps all three lines and gets no note.
+    /// </summary>
+    [Theory]
+    [InlineData("cpuLinux", new[] { "SQL CPU %" }, 1)]
+    [InlineData("cpuMeasured", new[] { "SQL CPU %", "Other %", "Total %" }, 0)]
+    public void CpuUtilization_WithNoHostFigure_DrawsTheSqlLineAndSaysWhy(string scenario, string[] labels, int notes)
+    {
+        var r = Run(scenario);
+
+        var chart = Assert.Single(r.GetProperty("charts").EnumerateArray(), c => c.GetProperty("title").GetString() == "CPU Utilization");
+        Assert.Equal(labels, chart.GetProperty("labels").EnumerateArray().Select(l => l.GetString()!).ToArray());
+        var panel = Assert.Single(r.GetProperty("panels").EnumerateArray(), p => p.GetProperty("title").GetString() == "CPU Utilization");
+        var shown = panel.GetProperty("notices").EnumerateArray().Select(n => n.GetString()!).ToArray();
+        Assert.Equal(notes, shown.Length);
+        Assert.All(shown, n => Assert.Contains("cannot report host CPU", n, System.StringComparison.Ordinal));
+    }
+
     /// <summary>The empty sentences every panel of one tab drew, for the panels with that title.</summary>
     private static string[][] Empties(JsonElement r, string tab, string title) =>
         r.GetProperty("panels").EnumerateArray()
