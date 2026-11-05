@@ -61,8 +61,8 @@ public static class DarlingPgIndexUsageReader
     public const string MinimumSamplesForADisuseClaimSql = "2";
 
     /// <summary>
-    /// The three per-index sets both the page and the whole-window tally read (#7575): the latest sample, the earliest sample and the
-    /// sample count with its counter-fell flag, over the same server and window. $1 server_id, $2/$3 window (naive UTC).
+    /// The two per-index sets both the page and the whole-window tally read (#7575): the latest sample, and the earliest sample with the
+    /// sample count and its counter-fell flag, over the same server and window. $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
     public const string WindowCtesSql = """
         WITH latest AS (
@@ -79,29 +79,23 @@ public static class DarlingPgIndexUsageReader
             ORDER BY database_name, schema_name, table_name, index_name, collection_time DESC
         ),
         earliest AS (
+            /* The earliest reading per index AND the whole window's sample count and counter_fell (#7456), in ONE set, so the page
+               and the tally join two sets and not three (#7575). A third set joined on top of an under-estimated first join was run
+               once per index by the planner: 150 seconds for 3,000 indexes.
+
+               counter_fell: this index's scan counter was LOWER than the sample before it. Crash recovery and an immediate shutdown
+               discard every statistics counter without touching pg_stat_database.stats_reset (it stays NULL on a database never
+               reset by hand), so the timestamp comparison cannot see them; the counter itself can. LAG per index, so a fall in the
+               middle of the window shows even when the counter climbed back past its old value before the last sample. */
             SELECT DISTINCT ON (database_name, schema_name, table_name, index_name)
                 database_name, schema_name, table_name, index_name,
                 index_scans AS first_scans,
                 stats_reset AS first_stats_reset,
-                collection_time AS first_seen_at
-            FROM pg_index_usage_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            ORDER BY database_name, schema_name, table_name, index_name, collection_time ASC
-        ),
-        samples AS (
-            /* counter_fell (#7456): this index's scan counter was LOWER than the sample before it. Crash
-               recovery and an immediate shutdown discard every statistics counter without touching
-               pg_stat_database.stats_reset (it stays NULL on a database never reset by hand), so the
-               timestamp comparison below cannot see them; the counter itself can. LAG per index, so a
-               fall in the middle of the window shows even when the counter climbed back past its old value
-               before the last sample. */
-            SELECT database_name, schema_name, table_name, index_name,
-                   count(*) AS sample_count,
-                   COALESCE(bool_or(fell), false) AS counter_fell
+                collection_time AS first_seen_at,
+                count(*) OVER (PARTITION BY database_name, schema_name, table_name, index_name) AS sample_count,
+                COALESCE(bool_or(fell) OVER (PARTITION BY database_name, schema_name, table_name, index_name), false) AS counter_fell
             FROM (
-                SELECT database_name, schema_name, table_name, index_name,
+                SELECT database_name, schema_name, table_name, index_name, index_scans, stats_reset, collection_time,
                        index_scans < LAG(index_scans) OVER (
                            PARTITION BY database_name, schema_name, table_name, index_name
                            ORDER BY collection_time) AS fell
@@ -110,15 +104,18 @@ public static class DarlingPgIndexUsageReader
                 AND   collection_time >= $2
                 AND   collection_time <= $3
             ) AS ordered
-            GROUP BY database_name, schema_name, table_name, index_name
+            ORDER BY database_name, schema_name, table_name, index_name, collection_time ASC
         )
         """;
 
     /// <summary>
-    /// The join of the three sets, one row per index. Aliases <c>l</c>, <c>e</c>, <c>s</c>. The IS NOT DISTINCT FROM lines say what
+    /// The join of the two sets, one row per index. Aliases <c>l</c> and <c>e</c>. The IS NOT DISTINCT FROM lines say what
     /// matches (a NULL name matches a NULL name); the COALESCE equalities beside them change no row but give the planner a key it can
-    /// HASH (#7575). IS NOT DISTINCT FROM alone cannot be hashed or merged, so the planner ran a nested loop that re-ran the samples
-    /// aggregate once per index: 150 seconds for 3,000 indexes, past the read's deadline.
+    /// HASH or MERGE (#7575). IS NOT DISTINCT FROM alone cannot be hashed or merged, and the planner priced the join at one row, so a
+    /// third set joined after it ran as a nested loop that re-ran its aggregate once per index: 150 seconds for 3,000 indexes, past the
+    /// read's deadline. There are two sets now, joined once, so no plan can repeat a set per row. A real name is never the empty
+    /// string (PostgreSQL rejects a zero-length identifier), so the COALESCE default cannot equal a real value, and the IS NOT DISTINCT
+    /// FROM lines stay beside it: the two conditions together match exactly the rows the IS NOT DISTINCT FROM lines alone matched.
     /// </summary>
     public const string WindowJoinSql = """
         FROM latest AS l
@@ -131,24 +128,15 @@ public static class DarlingPgIndexUsageReader
           AND COALESCE(e.schema_name, '') = COALESCE(l.schema_name, '')
           AND COALESCE(e.table_name, '') = COALESCE(l.table_name, '')
           AND COALESCE(e.index_name, '') = COALESCE(l.index_name, '')
-        JOIN samples AS s
-          ON  s.database_name IS NOT DISTINCT FROM l.database_name
-          AND s.schema_name   IS NOT DISTINCT FROM l.schema_name
-          AND s.table_name    IS NOT DISTINCT FROM l.table_name
-          AND s.index_name    IS NOT DISTINCT FROM l.index_name
-          AND COALESCE(s.database_name, '') = COALESCE(l.database_name, '')
-          AND COALESCE(s.schema_name, '') = COALESCE(l.schema_name, '')
-          AND COALESCE(s.table_name, '') = COALESCE(l.table_name, '')
-          AND COALESCE(s.index_name, '') = COALESCE(l.index_name, '')
         """;
 
     /// <summary>
-    /// A reset inside the window, over the <c>l</c>, <c>e</c>, <c>s</c> aliases. IS DISTINCT FROM, not &lt;&gt;, because stats_reset is NULL
+    /// A reset inside the window, over the <c>l</c> and <c>e</c> aliases. IS DISTINCT FROM, not &lt;&gt;, because stats_reset is NULL
     /// until a database's statistics are reset for the first time: the first reset a database ever has moves the column NULL -> timestamp,
     /// and &lt;&gt; would evaluate to NULL and miss precisely the case the counters also cannot see. The flag is also set when the index's
     /// own counter fell between two samples (#7456).
     /// </summary>
-    public const string StatsResetConditionSql = "(l.stats_reset IS DISTINCT FROM e.first_stats_reset OR s.counter_fell)";
+    public const string StatsResetConditionSql = "(l.stats_reset IS DISTINCT FROM e.first_stats_reset OR e.counter_fell)";
 
     /// <summary>
     /// The unscanned rule as SQL, the one copy the page's classing and the whole-window tiles both splice in (#7575; the pattern of
@@ -160,7 +148,7 @@ public static class DarlingPgIndexUsageReader
         "(GREATEST(l.index_scans - e.first_scans, 0) = 0 AND NOT " + StatsResetConditionSql
         + " AND COALESCE(l.is_valid, TRUE) AND NOT COALESCE(l.is_primary_key, FALSE) AND NOT COALESCE(l.supports_constraint, TRUE)"
         + " AND NOT COALESCE(l.is_unique, FALSE) AND NOT COALESCE(l.is_replica_identity, FALSE)"
-        + " AND s.sample_count >= " + MinimumSamplesForADisuseClaimSql + ")";
+        + " AND e.sample_count >= " + MinimumSamplesForADisuseClaimSql + ")";
 
     /// <summary>The invalid rule as SQL: an index whose <c>is_valid</c> is false. A NULL reads as valid, as the row reader does.</summary>
     public const string InvalidConditionSql = "NOT COALESCE(l.is_valid, TRUE)";
@@ -230,7 +218,7 @@ public static class DarlingPgIndexUsageReader
             l.last_scan,
             l.stats_reset,
             e.first_seen_at,
-            s.sample_count,
+            e.sample_count,
             {StatsResetConditionSql} AS stats_were_reset_in_window,
             /* The page's own class of the row, from the one shared rule (#7575): the tiles tally the same condition over every index. */
             {UnscannedConditionSql} AS is_unscanned_candidate
@@ -351,8 +339,8 @@ public static class DarlingPgIndexUsageReader
     /// <summary>
     /// The whole window's tiles for the page (#7575), over every index the window held and not the listed page: the unscanned count and
     /// the bytes those indexes hold, the invalid count, and whether any index saw a reset. It splices in the same
-    /// <see cref="UnscannedConditionSql"/> and <see cref="InvalidConditionSql"/> the page selects, over the same latest, earliest and
-    /// samples sets, so the two cannot disagree. An unmeasured size (NULL) adds nothing, as the page's -1 did.
+    /// <see cref="UnscannedConditionSql"/> and <see cref="InvalidConditionSql"/> the page selects, over the same latest and
+    /// earliest sets, so the two cannot disagree. An unmeasured size (NULL) adds nothing, as the page's -1 did.
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string PgIndexUsageTotalsSql = $"""
@@ -389,7 +377,7 @@ public static class DarlingPgIndexUsageReader
 
     /// <summary>
     /// How many distinct indexes the window held (#7551): the denominator the page's cut is stated against. The main read joins its
-    /// latest, earliest and samples sets one to one, so this is the number of rows it would return with no limit.
+    /// latest and earliest sets one to one, so this is the number of rows it would return with no limit.
     /// <para>$1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string PgIndexUsageCountSql = """

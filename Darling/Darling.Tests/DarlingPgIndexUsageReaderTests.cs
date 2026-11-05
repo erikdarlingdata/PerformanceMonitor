@@ -71,7 +71,6 @@ public class DarlingPgIndexUsageReaderTests
         foreach (var column in new[] { "database_name", "schema_name", "table_name", "index_name" })
         {
             Assert.Contains($"e.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
-            Assert.Contains($"s.{column} IS NOT DISTINCT FROM l.{column}", Squeezed, StringComparison.Ordinal);
         }
     }
 
@@ -186,8 +185,8 @@ public class DarlingPgIndexUsageReaderTests
     public void CarriesHowLongItHasBeenWatched()
     {
         Assert.Contains("e.first_seen_at", Sql, StringComparison.Ordinal);
-        Assert.Contains("s.sample_count", Sql, StringComparison.Ordinal);
-        Assert.Contains("count(*) AS sample_count", Squeezed, StringComparison.Ordinal);
+        Assert.Contains("e.sample_count", Sql, StringComparison.Ordinal);
+        Assert.Contains("AS sample_count", Squeezed, StringComparison.Ordinal);
     }
 
     // ── The honest-empty denominator ─────────────────────────────────────────────────────────────
