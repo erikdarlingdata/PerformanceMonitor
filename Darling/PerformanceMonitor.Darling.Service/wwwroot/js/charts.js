@@ -361,7 +361,7 @@ export function renderLineChart(spec) {
      at 100 and never exceed it, so a 96% reading no longer rounds the axis up to a "120%" tick. */
   /* #7488: a size axis whose labels step up to the next unit (60,000 MB reads "GB") picks its ticks in that unit, so it reads 20, 40, 60 GB
      and not 19.5, 39.1, 58.6. Under 1,024 of its own unit (or with no sizeUnit) the ticks are exactly what they were. */
-  const scale = niceScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeAxisPer(sizeUnit, dataMax));
+  const scale = sizedScale(dataMin, dataMax, Y_TICKS, clampMax, integerTicks, sizeUnit);
   const yMin = scale.min;
   const yMax = scale.max;
 
@@ -386,7 +386,7 @@ export function renderLineChart(spec) {
     if (m2 === -Infinity) { m2 = 1; n2 = 0; }
     n2 = Math.min(0, n2);
     if (m2 === n2) m2 = n2 + 1;
-    scale2 = niceScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, sizeAxisPer(series2.sizeUnit, m2));
+    scale2 = sizedScale(n2, m2, Y_TICKS, null, series2.integerTicks === true, series2.sizeUnit);
     yLabels2 = axisTickLabels(scale2.ticks, scale2.step, series2.formatValue || ((v) => String(v)));
     rightGutter = axisGutterPx(yLabels2, 56);
   }
@@ -1348,8 +1348,10 @@ function niceNum(range, round) {
  */
 export function axisTickLabels(ticks, step, format) {
   const seen = new Set();
+  /* #7555: the largest tick goes with each one, so a size formatter prints the whole axis in one unit (0 GB, 0.5 GB, 1.0 GB, 1.5 GB). */
+  const axisMax = Math.max(0, ...ticks.map((t) => Math.abs(Number(t)) || 0));
   return ticks.map((t) => {
-    const text = String(format(t, { step }));
+    const text = String(format(t, { step, axisMax }));
     if (seen.has(text)) return "";
     seen.add(text);
     return text;
@@ -1359,6 +1361,19 @@ export function axisTickLabels(ticks, step, format) {
 /** The room in px an axis needs for its widest label, plus the gap to the plot and to the box edge. */
 export function axisGutterPx(labels, minPx) {
   return Math.max(minPx, Math.ceil(labelsPx(labels)) + 14);
+}
+
+/**
+ * #7555: a size axis's scale, with its ticks and its labels on one basis. The labels print in the unit of the TOP TICK (axisTickLabels), so the
+ * ticks have to be picked in that same unit. The data max alone is not enough: 1,023 MB of data rounds up to a 1,500 MB top tick, which labels in
+ * GB, so a grid picked in MB (500, 1000, 1500) would print 0.5, 1.0, 1.5 GB and the 1,000 MB line would read 1.0 GB (1,024 MB). So the axis is
+ * first scaled in its own unit, and when its top tick steps up a unit it is scaled again in that unit (0.2 ... 1.0 GB). A unit that is not a
+ * size, or a top tick under 1,024, keeps the first scale (#7488).
+ */
+function sizedScale(min, max, maxTicks, clampMax, integer, sizeUnit) {
+  const first = niceScale(min, max, maxTicks, clampMax, integer);
+  const per = sizeAxisPer(sizeUnit, first.max);
+  return per > 1 ? niceScale(min, max, maxTicks, clampMax, integer, per) : first;
 }
 
 /**

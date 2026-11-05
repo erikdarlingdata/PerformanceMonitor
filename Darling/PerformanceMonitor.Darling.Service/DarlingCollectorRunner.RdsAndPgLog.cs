@@ -406,7 +406,7 @@ public sealed partial class DarlingCollectorRunner
 
         using var command = connection.CreateCommand();
         command.CommandTimeout = 10;
-        command.CommandText = LogTimezoneReadSql;
+        command.CommandText = PerformanceMonitor.Collectors.PgOwnStatement.Mark(LogTimezoneReadSql);
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
@@ -893,7 +893,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         {
             using var command = targetConnection.CreateCommand();
             command.CommandTimeout = PgExtensionSchemasTimeoutSeconds;
-            command.CommandText = PgExtensionSchemasSql;
+            command.CommandText = PerformanceMonitor.Collectors.PgOwnStatement.Mark(PgExtensionSchemasSql);
             var parameter = command.CreateParameter();
             parameter.ParameterName = "functions";
             parameter.Value = readsFunctions ? CollectorContext.AuroraFunctionNames.ToArray() : Array.Empty<string>();

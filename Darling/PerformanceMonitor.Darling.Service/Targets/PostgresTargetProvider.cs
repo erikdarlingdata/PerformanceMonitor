@@ -77,12 +77,12 @@ public sealed class PostgresTargetProvider : ITargetProvider
             builder.UsePhysicalConnectionInitializer(
                 connection =>
                 {
-                    using var command = new NpgsqlCommand(SearchPathSql, connection);
+                    using var command = new NpgsqlCommand(PgOwnStatement.Mark(SearchPathSql), connection);
                     DarlingServerConnector.EnsureSearchPathPinned(command.ExecuteScalar() as string, label);
                 },
                 async connection =>
                 {
-                    await using var command = new NpgsqlCommand(SearchPathSql, connection);
+                    await using var command = new NpgsqlCommand(PgOwnStatement.Mark(SearchPathSql), connection);
                     DarlingServerConnector.EnsureSearchPathPinned(await command.ExecuteScalarAsync() as string, label);
                 });
         }
@@ -99,7 +99,7 @@ public sealed class PostgresTargetProvider : ITargetProvider
                 nameof(connection));
         }
 
-        var command = new NpgsqlCommand(query.Text, npgsqlConnection) { CommandTimeout = commandTimeoutSeconds };
+        var command = new NpgsqlCommand(PgOwnStatement.Mark(query.Text), npgsqlConnection) { CommandTimeout = commandTimeoutSeconds };
 
         foreach (var parameter in query.Parameters)
         {

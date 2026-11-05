@@ -235,7 +235,7 @@ export function queryStoreHistoryColumn(server, w) {
         const isOpen = openHistories.has(key);
         const button = el("button", {
           type: "button",
-          class: "grid-tool",
+          class: "btn grid-tool",
           text: isOpen ? "Hide history" : "History",
           "aria-expanded": isOpen ? "true" : "false",
           title: "Show this query's history, plan by plan",

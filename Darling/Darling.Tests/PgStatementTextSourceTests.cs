@@ -191,6 +191,11 @@ public sealed class PgStatementTextUpsertLivePostgresTests
             await ddl.ExecuteNonQueryAsync(ct);
         }
 
+        await using (var ddl = new NpgsqlCommand(PgStatementText.AddOwnEntriesColumnSql, connection))
+        {
+            await ddl.ExecuteNonQueryAsync(ct);
+        }
+
         var bodySucceeded = false;
         try
         {
@@ -236,6 +241,7 @@ public sealed class PgStatementTextUpsertLivePostgresTests
         upsert.Parameters.AddWithValue(queryIds);
         upsert.Parameters.AddWithValue(queryIds.Select(id => "select " + id).ToArray());
         upsert.Parameters.AddWithValue(Enumerable.Repeat(stamp, queryIds.Length).ToArray());
+        upsert.Parameters.AddWithValue(new string?[queryIds.Length]);
         await upsert.ExecuteNonQueryAsync(ct);
     }
 

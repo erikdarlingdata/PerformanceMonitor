@@ -625,7 +625,7 @@ public sealed class PgCollectorSearchPathLiveTests
             await ExecAsync(textAdmin.ConnectionString, "SELECT pg_catalog.setval('public.view_calls', 1, false)", ct);
 
             var runtime = await RuntimeAsync(admin, TextDatabase, admin.Username!, ct);
-            var (queryIds, _) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
+            var (queryIds, _, _) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
 
             Assert.DoesNotContain(6143L, queryIds);
             Assert.NotEmpty(queryIds);

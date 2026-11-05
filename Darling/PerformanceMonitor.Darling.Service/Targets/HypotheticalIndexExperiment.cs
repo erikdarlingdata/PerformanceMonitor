@@ -301,7 +301,7 @@ public static class HypotheticalIndexExperiment
                broken to run it is a connection the pool will discard. */
             try
             {
-                await using var reset = new NpgsqlCommand($"SELECT {hypopgSchema}.hypopg_reset()", connection)
+                await using var reset = new NpgsqlCommand(PgOwnStatement.Mark($"SELECT {hypopgSchema}.hypopg_reset()"), connection)
                 {
                     CommandTimeout = ResetCommandTimeoutSeconds,
                 };
@@ -314,10 +314,13 @@ public static class HypotheticalIndexExperiment
         }
     }
 
+    /* #7567: every statement this experiment sends to the monitored server is marked (PgOwnStatement), so the hypothetical-index
+       login's entries in pg_stat_statements are told apart from the application's. The marker trails: a DO block and a SET carry it
+       before their semicolon the same as a SELECT, and the statement text the experiment binds into a GUC is untouched. */
     private static async Task ExecuteAsync(
         NpgsqlConnection connection, DbTransaction transaction, string sql, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(sql, connection, (NpgsqlTransaction)transaction)
+        await using var command = new NpgsqlCommand(PgOwnStatement.Mark(sql), connection, (NpgsqlTransaction)transaction)
         {
             CommandTimeout = ForwardCommandTimeoutSeconds,
         };
@@ -362,7 +365,7 @@ public static class HypotheticalIndexExperiment
     private static async Task<(string HypopgSchema, string ApplicationSearchPath)> ReadExperimentNamesAsync(
         NpgsqlConnection connection, DbTransaction transaction, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(ExperimentNamesSql, connection, (NpgsqlTransaction)transaction)
+        await using var command = new NpgsqlCommand(PgOwnStatement.Mark(ExperimentNamesSql), connection, (NpgsqlTransaction)transaction)
         {
             CommandTimeout = ForwardCommandTimeoutSeconds,
         };
@@ -380,7 +383,7 @@ public static class HypotheticalIndexExperiment
     private static async Task<string?> ScalarTextAsync(
         NpgsqlConnection connection, DbTransaction transaction, string sql, string argument, CancellationToken cancellationToken)
     {
-        await using var command = new NpgsqlCommand(sql, connection, (NpgsqlTransaction)transaction)
+        await using var command = new NpgsqlCommand(PgOwnStatement.Mark(sql), connection, (NpgsqlTransaction)transaction)
         {
             CommandTimeout = ForwardCommandTimeoutSeconds,
         };
@@ -786,20 +789,20 @@ public static class HypotheticalIndexExperiment
 
         /* is_local = true on both: the settings die with the transaction that is rolled back below, so
            nothing survives into the next caller of this pooled session. */
-        await using (var stage = new NpgsqlCommand("SELECT pg_catalog.set_config('pm.stmt', $1, true)", connection, (NpgsqlTransaction)transaction)
+        await using (var stage = new NpgsqlCommand(PgOwnStatement.Mark("SELECT pg_catalog.set_config('pm.stmt', $1, true)"), connection, (NpgsqlTransaction)transaction)
                { CommandTimeout = ForwardCommandTimeoutSeconds })
         {
             stage.Parameters.AddWithValue(statementText);
             await stage.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var explain = new NpgsqlCommand(ExplainThroughGucSql, connection, (NpgsqlTransaction)transaction)
+        await using (var explain = new NpgsqlCommand(PgOwnStatement.Mark(ExplainThroughGucSql), connection, (NpgsqlTransaction)transaction)
                { CommandTimeout = ForwardCommandTimeoutSeconds })
         {
             await explain.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var read = new NpgsqlCommand("SELECT pg_catalog.current_setting('pm.plan', true)", connection, (NpgsqlTransaction)transaction)
+        await using var read = new NpgsqlCommand(PgOwnStatement.Mark("SELECT pg_catalog.current_setting('pm.plan', true)"), connection, (NpgsqlTransaction)transaction)
         {
             CommandTimeout = ForwardCommandTimeoutSeconds,
         };

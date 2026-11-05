@@ -28,7 +28,7 @@ const chosenHours = new Map();
 const LIMIT = 20;
 
 const IDLE_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "total_size_mb", label: "Total size (MB)", format: "num2" },
   { key: "file_count", label: "Files", format: "int" },
   { key: "last_execution_server_local", label: "Last execution (server time)" },
@@ -52,7 +52,7 @@ const WAIT_COLUMNS = [
 ];
 
 const QUERY_COLUMNS = [
-  { key: "database_name", label: "Database" },
+  { key: "database_name", label: "Database", name: true },
   { key: "query_preview", label: "Query preview", valueList: false },
   { key: "total_cpu_ms", label: "Total CPU", format: "ms" },
   { key: "avg_cpu_ms_per_exec", label: "Avg CPU/exec (ms)", format: "num2" },

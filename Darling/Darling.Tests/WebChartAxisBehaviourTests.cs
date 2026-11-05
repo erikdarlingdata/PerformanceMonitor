@@ -131,8 +131,31 @@ public sealed class WebChartAxisBehaviourTests
 
         // Under 1,024 MB the axis is exactly the one it drew without the size unit.
         Assert.Equal(Strings(a.GetProperty("smallWithout")), Strings(a.GetProperty("small")));
-        Assert.Equal(Strings(a.GetProperty("edgeWithout")), Strings(a.GetProperty("edge")));
         Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith("MB", l, StringComparison.Ordinal));
+    }
+
+    /// <summary>#7555: a gridline's label states the value the line is drawn at. A size axis whose data max sits just under a unit step (1,023 MB
+    /// rounds up to a 1,500 MB top tick, which labels in GB) used to pick its ticks in MB and print them in GB, so the 1,000 MB line read "1.0 GB"
+    /// (1,024 MB) while the 1,023 MB peak was drawn above it. Each gridline's value is read from where the line is drawn, scaled by a dot drawn at a
+    /// known value, and must equal its label's number times its unit. The ticks are round numbers of the unit they print in (0.2, 0.4 ... 1.0 GB), so a label is exact, and the
+    /// bound is only float noise: a 500 MB line labelled "0.5 GB" (512 MB) is off by 2% of the axis and fails. Left axis and right axis, in MB and in bytes.</summary>
+    [Fact]
+    public void ASizeAxis_JustUnderAUnitStep_LabelsEveryGridlineWithTheValueItIsDrawnAt()
+    {
+        var a = Run().GetProperty("gridAxis");
+        foreach (var name in new[] { "mb1023", "mb1010", "mb386", "bytes1030000", "right386", "right1023" })
+        {
+            var lines = a.GetProperty(name).EnumerateArray().ToArray();
+            Assert.True(lines.Length >= 3, name + " drew fewer than three labelled gridlines");
+            var top = lines.Max(x => Math.Abs(x.GetProperty("tick").GetDouble()));
+            foreach (var l in lines)
+            {
+                var tick = l.GetProperty("tick").GetDouble();
+                var said = l.GetProperty("said").GetDouble();
+                Assert.True(Math.Abs(tick - said) <= top * 1e-4,
+                    $"{name}: the gridline drawn at {tick} is labelled \"{l.GetProperty("label").GetString()}\", which says {said}");
+            }
+        }
     }
 
     /// <summary>#7515: the panels pass the size unit themselves. A composed panel (renderComposedResult, left axis and overlay axis) and a
@@ -151,6 +174,31 @@ public sealed class WebChartAxisBehaviourTests
         Assert.Equal(Strings(a.GetProperty("mbPanelSmallWithout")), Strings(a.GetProperty("mbPanelSmall")));
     }
 
+    /// <summary>#7555: a "format: bytes" panel (I/O Read Bytes per Second, Database Temp Bytes) picks its ticks in the unit its labels print, so a
+    /// series near 60,000 B reads 20, 40, 60 KB and not 19.5, 39.1, 58.6 KB; a series near 60 MB reads 20, 40, 60 MB. A small one stays in bytes.
+    /// A cell or tooltip (no axis) still picks a unit by its own value.</summary>
+    [Fact]
+    public void ABytesAxis_PicksItsTicksInThePrintedUnit()
+    {
+        var a = Run().GetProperty("byteAxis");
+        Assert.Equal(Strings(a.GetProperty("kbExpected")), Strings(a.GetProperty("kb")));
+        Assert.Equal(Strings(a.GetProperty("mbExpected")), Strings(a.GetProperty("mb")));
+        Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith(" B", l, StringComparison.Ordinal));
+        Assert.Equal(new[] { "0 B", "900 B", "1.5 KB", "2.0 MB", "3.0 GB" }, Strings(a.GetProperty("cell")));
+        Assert.Equal(new[] { "900 B", "2.0 KB" }, Strings(a.GetProperty("mapIndex")));
+    }
+
+    /// <summary>#7555: every tick of a size axis prints in the unit of its largest tick. A Memory Trend near 2 GB read 0 MB, 512 MB, 1.0 GB, 1.5 GB;
+    /// it now reads 0 GB, 0.5 GB, 1.0 GB, 1.5 GB, 2.0 GB. A tooltip or grid cell keeps the unit that fits its own value.</summary>
+    [Fact]
+    public void ASizeAxis_PrintsEveryTickInTheUnitOfItsLargest()
+    {
+        var a = Run().GetProperty("memoryAxis");
+        Assert.Equal(new[] { "GB" }, Strings(a.GetProperty("units")));
+        Assert.Equal(Strings(a.GetProperty("expected")), Strings(a.GetProperty("labels")).Take(4).ToArray());
+        Assert.Equal(new[] { "512 MB", "1.5 GB" }, Strings(a.GetProperty("tooltipCell")));
+    }
+
     /// <summary>The Custom View chart: 80,000 MB reads "78.1 GB" and the axis margins are as wide as the widest label, left and
     /// right, so no digit is cut. A chart with small numbers keeps its 58 px left margin and 56 px right gutter.</summary>
     [Fact]
@@ -158,7 +206,7 @@ public sealed class WebChartAxisBehaviourTests
     {
         var r = Run();
         var big = r.GetProperty("bigAxis");
-        Assert.Equal(new[] { "0 MB", "19.5 GB", "39.1 GB", "58.6 GB", "78.1 GB" }, Strings(big.GetProperty("left")));
+        Assert.Equal(new[] { "0 GB", "19.5 GB", "39.1 GB", "58.6 GB", "78.1 GB" }, Strings(big.GetProperty("left")));
         Assert.Equal("80,000.0", Strings(big.GetProperty("right")).Last());
         Assert.True(big.GetProperty("leftRoom").GetDouble() >= big.GetProperty("leftNeed").GetDouble());
         Assert.True(big.GetProperty("rightRoom").GetDouble() >= big.GetProperty("rightNeed").GetDouble());

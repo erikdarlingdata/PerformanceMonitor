@@ -835,7 +835,9 @@ internal static class PgDisplay
         WalWritten = row.WalBytes is { } wal ? Bytes(wal) : NotApplicableText,
         /* Null is "no text captured for this queryid yet" — text refreshes hourly, and a major-version
            upgrade re-keys every queryid — which is a different statement from an empty query. */
-        QueryText = row.QueryText ?? "(statement text not captured yet)",
+        QueryText = row.IsServiceStatement
+            ? "[Performance Monitor's own statement] " + row.QueryText
+            : row.QueryText ?? "(statement text not captured yet)",
         QueryIdSort = row.QueryId,
         DatabaseIdSort = row.DatabaseId,
         CallsSort = Raw(row.Calls),

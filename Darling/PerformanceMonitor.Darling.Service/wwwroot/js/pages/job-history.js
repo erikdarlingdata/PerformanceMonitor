@@ -48,7 +48,7 @@ export const LIMITS = [100, 250, 500, 1000];
 export const JOB_HISTORY_COLUMNS = [
   { key: "run_time", label: "Run Time", format: "time" },
   { key: "server", label: "Server" },
-  { key: "job_name", label: "Job" },
+  { key: "job_name", label: "Job", name: true },
   { key: "category", label: "Category" },
   { key: "step", label: "Step" },
   { key: "status", label: "Status" },
