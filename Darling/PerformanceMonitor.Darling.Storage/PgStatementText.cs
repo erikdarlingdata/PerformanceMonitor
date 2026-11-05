@@ -131,11 +131,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     /// is none. <c>pg_stat_statements</c> keeps the text of the call that created an entry, so an entry created by the service's
     /// old, unmarked statement never gets the marker; <see cref="WithMatchedEntries"/> matches these texts against the
     /// statements the service sends. The role test keeps the application's entries under other logins out of the array, and
-    /// out of the transfer when the service has a login of its own.
+    /// out of the transfer when the service has a login of its own. A sensitive statement (<see cref="PgSensitiveStatementFilter"/>)
+    /// is never one of the service's, so it is not a candidate either: its raw text would otherwise cross the wire outside the
+    /// filter that redacts <c>query_text</c> on the target.
     /// </summary>
     private static readonly string CandidateEntriesWindow =
         "jsonb_agg(jsonb_build_object('u', s.userid::bigint, 'd', s.dbid::bigint, 't', s.query)) FILTER (WHERE s.userid = "
         + "(SELECT r.oid FROM pg_catalog.pg_roles AS r WHERE r.rolname = current_user) AND NOT " + PgOwnStatement.IsOwnSql("s.query")
+        + " AND NOT (s.query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + ")"
         + ") OVER (PARTITION BY s.queryid) AS candidate_entries";
 
     /// <summary>
@@ -193,6 +196,32 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
         }
 
         return json.Append(']').ToString();
+    }
+
+    /// <summary>
+    /// The <c>{"u", "d"}</c> pairs of <paramref name="candidateEntries"/> (<see cref="CandidateEntriesWindow"/>), without their
+    /// text, as the JSON <see cref="UpsertSql"/> binds as <c>$6</c> (#7681): the entries of the login that are still in
+    /// <c>pg_stat_statements</c> unmarked, whether or not their text matched. NULL when there are none.
+    /// </summary>
+    public static string? CandidatePairs(string? candidateEntries)
+    {
+        if (string.IsNullOrEmpty(candidateEntries))
+        {
+            return null;
+        }
+
+        using var candidates = JsonDocument.Parse(candidateEntries);
+        var json = new StringBuilder("[");
+        var first = true;
+        foreach (var entry in candidates.RootElement.EnumerateArray())
+        {
+            json.Append(first ? "" : ",")
+                .Append("{\"u\":").Append(entry.GetProperty("u").GetInt64().ToString(CultureInfo.InvariantCulture))
+                .Append(",\"d\":").Append(entry.GetProperty("d").GetInt64().ToString(CultureInfo.InvariantCulture)).Append('}');
+            first = false;
+        }
+
+        return first ? null : json.Append(']').ToString();
     }
 
     /// <summary>
@@ -352,9 +381,11 @@ LIMIT $1";
     /// first seen on this server, which is the one fact that survives a major-version re-key and cannot be
     /// recovered afterwards; overwriting it would quietly turn every row's age into "since the last fetch".
     ///
-    /// <para><c>own_entries</c> (#7567) is the fetched list as it stands, NULL included: an entry that stopped being the
-    /// service's (a reset, then the application ran the statement first) drops out at the next fetch. <c>$5</c> is the
-    /// JSON text of the list, or NULL.</para>
+    /// <para><c>own_entries</c> (#7567) is the fetched list (<c>$5</c>, the JSON text of the list, or NULL) plus every pair already
+    /// stored that is still among this fetch's unmarked entries of the login (<c>$6</c>, <see cref="CandidatePairs"/>) (#7681). The
+    /// service's shape registry is in process memory, so the first fetch after a restart cannot match the statement of a collector
+    /// that has not run yet, and writing the fetched list alone would erase a pair an earlier fetch learned (and with it, past
+    /// windows' own-statement filtering). A pair whose entry is gone (a reset) drops out at the next fetch, as before.</para>
     ///
     /// <para><c>query_text</c> IS advanced on conflict. A <c>queryid</c> is derived from the parse tree so its
     /// text is stable in practice, but not by guarantee across versions — and if it ever differs, the newer text
@@ -366,9 +397,16 @@ LIMIT $1";
     /// </summary>
     public const string UpsertSql = @"INSERT INTO collect.pg_statement_text
     (server_id, queryid, query_text, first_seen, last_seen, own_entries)
-SELECT server_id, queryid, query_text, stamped, stamped, own_entries::jsonb
-FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[])
-     AS batch(server_id, queryid, query_text, stamped, own_entries)
+SELECT batch.server_id, batch.queryid, batch.query_text, batch.stamped, batch.stamped,
+       (SELECT jsonb_agg(DISTINCT e.entry)
+        FROM (SELECT jsonb_array_elements(batch.own_entries::jsonb) AS entry
+              UNION ALL
+              SELECT k.entry FROM jsonb_array_elements(stored.own_entries) AS k(entry)
+              WHERE batch.candidates::jsonb @> jsonb_build_array(k.entry)) AS e)
+FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[], $6::text[])
+     AS batch(server_id, queryid, query_text, stamped, own_entries, candidates)
+LEFT JOIN collect.pg_statement_text AS stored
+       ON stored.server_id = batch.server_id AND stored.queryid = batch.queryid
 ORDER BY server_id, queryid
 ON CONFLICT (server_id, queryid) DO UPDATE SET
     query_text = EXCLUDED.query_text,

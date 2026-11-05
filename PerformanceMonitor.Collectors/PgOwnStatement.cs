@@ -51,8 +51,11 @@ namespace PerformanceMonitor.Collectors;
 /// service statement's shape, its number of literals included, under the service's own login is one entry, and so is hidden.
 /// Below PostgreSQL 18 an <c>IN</c> list of a different length is a different entry but the same shape, so there it is matched
 /// too. Second, the store learns own entries hourly, so a statement is shown until its text is read. Third, the shape set starts
-/// empty with the process: a statement of a collector that has not run yet since the service started (a daily one, say) is
-/// learned at the first hourly fetch after it runs. Everything not known to be the service's is shown.</para>
+/// empty with the process, so the service registers every statement it can know at startup (<see cref="RegisterKnown"/>: each
+/// collector's text and the probes'). A statement whose text depends on the target (an extension's schema, the server version, a
+/// watermark) is registered when it is first sent, and until then its entry is learned only if an earlier fetch learned it: the
+/// store keeps a learned pair while that entry is still among the fetch's unmarked entries of the login, so a restart never
+/// forgets one. Everything not known to be the service's is shown.</para>
 /// </summary>
 public static class PgOwnStatement
 {
@@ -101,6 +104,41 @@ public static class PgOwnStatement
         {
             RegisteredTexts.TryAdd(statementWithoutMarker, 0);
         }
+    }
+
+    /// <summary>
+    /// Registers the shape of a statement the service sends, at startup (#7681), before any collector has run in this process.
+    /// A restart empties the set, and the first hourly text fetch rides the first statement-statistics run, so a statement of a
+    /// collector that has not run yet (a daily one) is otherwise unknown to that fetch. Takes the text without the marker, as the
+    /// collector's definition holds it.
+    /// </summary>
+    public static void RegisterKnown(string statementWithoutMarker)
+    {
+        ArgumentNullException.ThrowIfNull(statementWithoutMarker);
+        var body = statementWithoutMarker.TrimEnd();
+        if (body.EndsWith(';'))
+        {
+            body = body[..^1].TrimEnd();
+        }
+
+        Register(body);
+    }
+
+    /// <summary>
+    /// Whether every statement of <paramref name="statements"/> (one or several, as a collector sends them) has a registered shape.
+    /// A multi-statement text is stored by <c>pg_stat_statements</c> one statement at a time, so it is checked that way.
+    /// </summary>
+    internal static bool IsRegistered(string statements)
+    {
+        var keys = PgStatementShape.Keys(statements);
+        return keys.Count > 0 && keys.TrueForAll(key => ServiceShapes.ContainsKey(key));
+    }
+
+    /// <summary>Empties the registered shapes, as a service restart does. For tests.</summary>
+    internal static void ResetRegistryForTests()
+    {
+        ServiceShapes.Clear();
+        RegisteredTexts.Clear();
     }
 
     /// <summary>

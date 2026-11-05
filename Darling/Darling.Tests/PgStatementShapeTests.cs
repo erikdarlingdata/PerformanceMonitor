@@ -22,6 +22,7 @@ namespace Darling.Tests;
 /// OLD, unmarked statement. Every pair below is a statement as the C# source writes it and the text a real PostgreSQL 18.6
 /// <c>pg_stat_statements</c> stored for it (taken from the view, not written by hand).
 /// </summary>
+[Collection("pg-cluster-roles")]
 public sealed class PgStatementShapeTests
 {
     public static TheoryData<string, string> SourceAndStoredText => new()

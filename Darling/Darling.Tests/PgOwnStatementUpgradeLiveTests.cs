@@ -115,7 +115,7 @@ public sealed class PgOwnStatementUpgradeLiveTests
             }
 
             /* The real hourly fetch, then the real upsert. */
-            var (queryIds, texts, ownEntries) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
+            var (queryIds, texts, ownEntries, candidates) = await DarlingWorker.ReadPgStatementTextAsync(runtime, ct);
             var ownByQueryId = new Dictionary<long, string?>();
             for (var i = 0; i < queryIds.Count; i++)
             {
@@ -130,8 +130,10 @@ public sealed class PgOwnStatementUpgradeLiveTests
 
             /* The service's entries are learned though no stored text carries the marker; the shared queryid lists the service's
                pair only, never the application login's. */
-            Assert.Equal(new[] { (columnStatsService.UserId, columnStatsService.DatabaseId) }, Pairs(ownByQueryId[columnStatsService.QueryId]));
-            Assert.Equal(new[] { (bloat.UserId, bloat.DatabaseId) }, Pairs(ownByQueryId[bloat.QueryId]));
+            var learnedColumnStats = Pairs(ownByQueryId[columnStatsService.QueryId]);
+            Assert.Contains((columnStatsService.UserId, columnStatsService.DatabaseId), learnedColumnStats);
+            Assert.DoesNotContain((columnStatsApp.UserId, columnStatsApp.DatabaseId), learnedColumnStats);
+            Assert.Contains((bloat.UserId, bloat.DatabaseId), Pairs(ownByQueryId[bloat.QueryId]));
             /* The application's statements, under the same login or another, stay unknown. */
             Assert.Null(ownByQueryId[variant.QueryId]);
             Assert.Null(ownByQueryId[appOnly.QueryId]);
@@ -147,6 +149,7 @@ public sealed class PgOwnStatementUpgradeLiveTests
                 upsert.Parameters.AddWithValue(texts.ToArray());
                 upsert.Parameters.AddWithValue(stamp);
                 upsert.Parameters.AddWithValue(ownEntries.ToArray());
+                upsert.Parameters.AddWithValue(candidates.ToArray());
                 await upsert.ExecuteNonQueryAsync(ct);
             }
 
