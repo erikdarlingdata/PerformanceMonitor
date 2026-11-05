@@ -114,6 +114,22 @@ public sealed class PgStatementShapeTests
     }
 
     [Fact]
+    public void AnInSubquery_KeepsItsSelectListCommas_AndAConstantListInsideItStillCollapses()
+    {
+        var w = PgStatementShape.Wildcard;
+        Assert.Equal(new List<string> { "x", "in", "(", "select", w, ",", w, ")" }, PgStatementShape.Tokenize("x IN (SELECT 1, 2)"));
+        Assert.Equal(new List<string> { "x", "in", "(", w, ")" }, PgStatementShape.Tokenize("x IN (1, 2, 3)"));
+        Assert.Equal(
+            new List<string> { "x", "in", "(", "select", "a", "from", "t", "where", "b", "in", "(", w, ")", ")" },
+            PgStatementShape.Tokenize("x IN (SELECT a FROM t WHERE b IN (1, 2, 3))"));
+        Assert.Equal(
+            new List<string> { "x", "in", "(", "with", "c", "as", "(", "select", w, ")", "select", "*", "from", "c", ")" },
+            PgStatementShape.Tokenize("x IN (WITH c AS (SELECT 1) SELECT * FROM c)"));
+        Assert.Equal(new List<string> { "x", "in", "(", "values", "(", w, ",", w, ")", ")" }, PgStatementShape.Tokenize("x IN (/* c */ VALUES (1, 2))"));
+        Assert.Equal(new List<string> { "x", "in", "(", "table", "t", ")" }, PgStatementShape.Tokenize("x IN (TABLE t)"));
+    }
+
+    [Fact]
     public void TheRegistry_LearnsEachStatementTheServiceMarks_ByItsShape()
     {
         var sql = "SELECT pm7681_reg_a FROM pg_catalog.pg_class WHERE relkind IN ('r', 'm') AND relpages > 128";

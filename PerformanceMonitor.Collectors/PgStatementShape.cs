@@ -269,7 +269,7 @@ public static class PgStatementShape
             {
                 if (c is '(' or '[')
                 {
-                    lists.Add(tokens.Count > 0 && (c == '(' ? tokens[^1] == "in" : tokens[^1] == "array"));
+                    lists.Add(tokens.Count > 0 && (c == '(' ? tokens[^1] == "in" && !OpensSubquery(sql, i + 1) : tokens[^1] == "array"));
                 }
                 else if ((c is ')' or ']') && lists.Count > 0)
                 {
@@ -292,6 +292,45 @@ public static class PgStatementShape
         }
 
         return tokens;
+    }
+
+    /* x IN (SELECT 1, 2) is a subquery, not a constant list: PostgreSQL 18 squashes only the constants, so a subquery keeps its commas (#7681). */
+    private static bool OpensSubquery(string sql, int i)
+    {
+        while (i < sql.Length)
+        {
+            if (char.IsWhiteSpace(sql[i]))
+            {
+                i++;
+            }
+            else if (sql[i] == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
+            {
+                while (i < sql.Length && sql[i] != '\n')
+                {
+                    i++;
+                }
+            }
+            else if (sql[i] == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
+            {
+                i = SkipBlockComment(sql, i);
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        var start = i;
+        while (i < sql.Length && char.IsAsciiLetter(sql[i]))
+        {
+            i++;
+        }
+
+        var word = sql.AsSpan(start, i - start);
+        return word.Equals("select", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("with", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("values", StringComparison.OrdinalIgnoreCase)
+            || word.Equals("table", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AddWildcard(List<string> tokens, List<bool> lists)
