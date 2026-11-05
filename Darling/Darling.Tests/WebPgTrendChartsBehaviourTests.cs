@@ -75,6 +75,17 @@ public sealed class WebPgTrendChartsBehaviourTests
         Assert.Contains("No temp files were created and no deadlocks were recorded in this window.", empties);
     }
 
+    /// <summary>#7549: a quiet window that crossed a statistics reset says so in the one line, and one that did not leaves the line as it was.</summary>
+    [Fact]
+    public void AQuietWindowThatCrossedAStatsReset_SaysSoInTheOneLine()
+    {
+        var empties = Strings(Run("databaseQuietReset").GetProperty("empties"));
+        Assert.Contains("No temp bytes were written in this window. (statistics were reset in this window)", empties);
+        Assert.Contains("No temp files were created and no deadlocks were recorded in this window. (statistics were reset in this window)", empties);
+
+        Assert.DoesNotContain(Strings(Run("databaseQuiet").GetProperty("empties")), e => e.Contains("reset", StringComparison.Ordinal));
+    }
+
     /// <summary>#7549: one point above 0 in any series keeps the chart.</summary>
     [Fact]
     public void OnePointAboveZero_KeepsTheTempBytesChart_AndADeadlockKeepsTheCountsChart()

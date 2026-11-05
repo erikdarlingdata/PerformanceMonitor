@@ -161,6 +161,12 @@ const scenarios = {
     const root = await build("activity");
     return { titles: titles().filter((t) => t.startsWith("Database")), empties: texts(root, "strip empty") };
   },
+  /* A quiet window that crossed a statistics reset keeps the reset fact in its one line. */
+  databaseQuietReset: async () => {
+    bodies = { get_pg_database_trend: { points: dbPoints(true).map((p) => ({ ...p, temp_files: 0, temp_bytes: 0, deadlocks: 0 })) } };
+    const root = await build("activity");
+    return { titles: titles().filter((t) => t.startsWith("Database")), empties: texts(root, "strip empty") };
+  },
   /* One deadlock on a quiet server keeps the chart that holds both counts, and the one non-zero temp byte keeps its chart. */
   databaseOneDeadlock: async () => {
     bodies = { get_pg_database_trend: { points: dbPoints(false).map((p, i) => ({ ...p, temp_files: 0, temp_bytes: i === 2 ? 1 : 0, deadlocks: i === 1 ? 1 : 0 })) } };

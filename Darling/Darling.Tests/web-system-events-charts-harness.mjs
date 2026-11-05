@@ -116,6 +116,15 @@ const drewLine = (rows) => {
 };
 out.twoSeriesOneNonZero = drewLine([0, 1, 2].map((i) => ({ t: iso(T0 + i * 600000), a: 0, b: i === 2 ? 3 : 0 })));
 out.twoSeriesAllZero = drewLine([0, 1, 2].map((i) => ({ t: iso(T0 + i * 600000), a: 0, b: 0 })));
+/* Every counter chart, once with the counter 0 in every bucket and once with no bucket carrying it: each says its own sentence. */
+out.everyCounter = specs
+  .filter((s) => s.viz === "healthCounter")
+  .map((s) => {
+    const key = s.series[0].key;
+    const zero = drew(s, { entries: [0, 1, 2].map((i) => entry(i, { [key]: 0 })), sick_spinlock_types: [] });
+    const absent = drew(s, { entries: [0, 1, 2].map((i) => entry(i, { [key]: null })), sick_spinlock_types: [] });
+    return { title: s.title, zero: zero.text, zeroChart: zero.hasChart, absent: absent.text, absentChart: absent.hasChart };
+  });
 out.hasData = {
   zero: sec.counterHasData(zeros.entries, "bad_pages_detected"),
   absent: sec.counterHasData(zeros.entries, "latch_warnings"),

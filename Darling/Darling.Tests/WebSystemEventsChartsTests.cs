@@ -91,7 +91,7 @@ public sealed class WebSystemEventsChartsBehaviourTests
         var r = Run();
 
         Assert.False(r.GetProperty("zeroDrawn").GetProperty("hasChart").GetBoolean());
-        Assert.Equal("No bad pages were reported in this window.", r.GetProperty("zeroDrawn").GetProperty("text").GetString());
+        Assert.Equal("No bad pages were recorded in this window.", r.GetProperty("zeroDrawn").GetProperty("text").GetString());
         Assert.False(r.GetProperty("absent").GetProperty("hasChart").GetBoolean());
         Assert.Equal("No latch warning count was reported in this window.", r.GetProperty("absent").GetProperty("text").GetString());
         var has = r.GetProperty("hasData");
@@ -99,6 +99,27 @@ public sealed class WebSystemEventsChartsBehaviourTests
         Assert.False(has.GetProperty("absent").GetBoolean());
         Assert.False(has.GetProperty("missingField").GetBoolean());
         Assert.False(has.GetProperty("none").GetBoolean());
+    }
+
+    /// <summary>#7549: on every counter chart a collected 0 in every bucket and a counter no bucket carried each draw one line, and the two lines differ: "was not reported" is false for a collected 0.</summary>
+    [Fact]
+    public void EveryCounterChart_SaysACollectedZeroDifferentlyFromAnAbsentCounter()
+    {
+        var all = Run().GetProperty("everyCounter").EnumerateArray().ToList();
+
+        Assert.Equal(6, all.Count);
+        foreach (var c in all)
+        {
+            var title = c.GetProperty("title").GetString();
+            var zero = c.GetProperty("zero").GetString();
+            var absent = c.GetProperty("absent").GetString();
+            Assert.False(c.GetProperty("zeroChart").GetBoolean(), title);
+            Assert.False(c.GetProperty("absentChart").GetBoolean(), title);
+            Assert.NotEqual(absent, zero);
+            Assert.DoesNotContain("reported", zero, StringComparison.Ordinal);
+            Assert.EndsWith(" in this window.", zero, StringComparison.Ordinal);
+            Assert.Contains("reported", absent, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>#7549: one bucket above 0 draws the chart, and a chart of two series keeps it when either series is above 0.</summary>

@@ -1547,7 +1547,11 @@ function vizLine(data, desc) {
   if (points.length && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key])))) return emptyStrip(noValuesText(data));
   /* #7549: `allZeroText` is the one line drawn in place of a chart whose every measured value, in every series, is 0: a healthy server's counters are flat
      lines on a 0 to 1 axis, a full card each, that say less than a sentence. One value above 0, in any series, keeps the chart. */
-  if (desc.allZeroText && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key]) && Number(p[s.key]) > 0))) return emptyStrip(desc.allZeroText);
+  if (desc.allZeroText && !points.some((p) => seriesCfg.some((s) => drawable(p && p[s.key]) && Number(p[s.key]) > 0))) {
+    /* The line keeps the stats-reset fact the chart's marker would have carried: a window that crossed a reset differenced against a fresh baseline. */
+    const crossedReset = desc.resetKey && points.some((p) => p && p[desc.resetKey] === true);
+    return emptyStrip(crossedReset ? desc.allZeroText + " (statistics were reset in this window)" : desc.allZeroText);
+  }
   const series = seriesCfg.map((s, i) => ({
     key: s.key,
     label: s.label,
