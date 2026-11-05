@@ -66,7 +66,7 @@ export const MCP_ACTION_TOOL_NAMES = [
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
   "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
   "create_plan_guide", "drop_plan_guide", "recompile_module",
