@@ -143,6 +143,16 @@ namespace PerformanceMonitor.Ui
             chart.Plot.Axes.Left.MinimumSize = (float)ChartAxisTitle.LeftPanelMinWidth;
         }
 
+        /// <summary>
+        /// #7606: marks the chart's Y axis as a count (sessions, deadlocks, tasks, events): whole-number ticks only, with one above
+        /// zero (<see cref="CountTickGenerator"/>). Call it after <see cref="ApplyThemeToChart"/> or
+        /// <see cref="ApplyMinimalChartTheme"/>, which install the stock ticks, and after <c>ClearChart</c>, whose reset drops it.
+        /// </summary>
+        public static void UseCountAxis(WpfPlot chart) => UseCountAxis(chart.Plot);
+
+        /// <inheritdoc cref="UseCountAxis(WpfPlot)"/>
+        public static void UseCountAxis(ScottPlot.Plot plot) => plot.Axes.Left.TickGenerator = new CountTickGenerator();
+
         private static void HandleChartFirstLoaded(object sender, RoutedEventArgs e)
         {
             var chart = (WpfPlot)sender;

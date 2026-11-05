@@ -87,6 +87,15 @@ public sealed class DarlingPgReadSqlParsesLiveTests
         /* #7551: the suppression rule as one boolean expression, spliced into PgTableBloatSql and PgTableBloatTotalsSql (both in
            the parse-checked population). Not a statement, and verified where it is spliced. */
         "DarlingPgTableBloatReader.UnpublishableConditionSql",
+        /* #7575: the window's two sets, their join and the rule fragments that PgIndexUsageSql and PgIndexUsageTotalsSql both splice in.
+           WindowCtesSql is a WITH clause that ends before its SELECT, so it is not a statement alone, and it holds the word SELECT, so
+           QueryFields leaves out anything listed here. Both whole queries ARE in the parse-checked population, so every fragment is
+           verified where it is spliced. */
+        "DarlingPgIndexUsageReader.WindowCtesSql",
+        "DarlingPgIndexUsageReader.WindowJoinSql",
+        "DarlingPgIndexUsageReader.StatsResetConditionSql",
+        "DarlingPgIndexUsageReader.UnscannedConditionSql",
+        "DarlingPgIndexUsageReader.InvalidConditionSql",
         /* #6836: the window's WAL aggregate, one CASE expression spliced into PgTopQueriesSql (in the parse-checked
            population) and into the bad-actor detail read of PgTargetDrillDownCollector. Not a statement, and verified
            where it is spliced. */
@@ -176,6 +185,7 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static IEnumerable<FieldInfo> QueryFields(Type reader) =>
         reader.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
             .Where(f => f.FieldType == typeof(string) && (f.IsLiteral || f.IsInitOnly))
+            .Where(f => !NotQueryFields.Contains(reader.Name + "." + f.Name))
             .Where(f => FieldText(f).Contains("SELECT", StringComparison.OrdinalIgnoreCase));
 
     /// <summary><c>GetRawConstantValue</c> for a <c>const</c>, <c>GetValue</c> for a <c>static readonly</c>
