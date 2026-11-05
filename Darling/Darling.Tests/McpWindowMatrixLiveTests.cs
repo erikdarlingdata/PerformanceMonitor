@@ -393,6 +393,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_database_protection"] = SnapshotSearch,
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
+        /* #7609: a fleet read of one query_hash across every server (no server_name to probe a collector table for), so it is in the NoNotice group with the other fleet reads. */
+        ["get_query_fleet_summary"] = NoNotice,
         ["get_pg_blocking"] = UnavailableBare,
         ["get_pg_buffer_usage"] = SnapshotSearch,
         ["get_pg_column_stats"] = NewestPerKey,
@@ -436,6 +438,7 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
                 yield return new("query_id", 1000L);
                 yield return new("plan_id", 9L);
                 break;
+            case "get_query_fleet_summary": yield return new("query_hash", "0x0102030405060708"); break;
             case "get_query_store_query_history":
                 yield return new("database_name", "TenantDb00");
                 yield return new("query_id", 1000L);

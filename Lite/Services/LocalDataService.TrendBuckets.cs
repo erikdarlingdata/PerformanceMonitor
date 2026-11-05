@@ -559,8 +559,10 @@ ORDER BY 1";
     /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, and for a
     /// pre-v63 row with none its server-local stamp against the server-local bounds), averaged per bucket of the
     /// server-local <c>sample_time</c> the tool has always published and the MCP tool used to average to the
-    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages; a NULL reading counts as 0,
-    /// as that read always read it. Stamped at each bucket's start, unclamped, as Darling's twin
+    /// minute itself. The busiest sample's SQL and total CPU ride beside the averages. A NULL SQL reading counts as 0,
+    /// as that read always read it. A NULL other-process reading (SQL Server on Linux before 2025 CU1, #7682) is not
+    /// 0: it leaves the sample out of the other, total, idle and peak-total figures, so a bucket whose samples all
+    /// lack it returns null for them and a mixed bucket averages only the samples that have it. Stamped at each bucket's start, unclamped, as Darling's twin
     /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
     /// </summary>
     internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
@@ -579,11 +581,11 @@ ORDER BY 1";
 SELECT
     time_bucket(to_minutes(CAST($6 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
     AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
-    AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
-    AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
-    AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+    AVG(other_process_cpu_utilization) AS other_process_cpu,
+    AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS total_cpu,
+    AVG(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization)) END) AS idle_cpu,
     MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
-    MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+    MAX(CASE WHEN other_process_cpu_utilization IS NOT NULL THEN COALESCE(sqlserver_cpu_utilization, 0) + other_process_cpu_utilization END) AS peak_total_cpu,
     COUNT(*) AS samples
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
@@ -608,11 +610,11 @@ ORDER BY 1";
             items.Add(new CpuBucketPoint(
                 reader.GetDateTime(0),
                 ToDouble(reader.GetValue(1)),
-                ToDouble(reader.GetValue(2)),
-                ToDouble(reader.GetValue(3)),
-                ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(2) ? null : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : ToDouble(reader.GetValue(4)),
                 (int)ToInt64(reader.GetValue(5)),
-                (int)ToInt64(reader.GetValue(6)),
+                reader.IsDBNull(6) ? null : (int)ToInt64(reader.GetValue(6)),
                 ToInt64(reader.GetValue(7))));
         }
 

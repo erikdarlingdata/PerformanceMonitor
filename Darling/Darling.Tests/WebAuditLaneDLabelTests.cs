@@ -68,7 +68,7 @@ public sealed class WebAuditLaneDLabelTests
         Assert.Contains("label: \"Avg SQL Server CPU %\"", Js("pages", "finops", "server-inventory.js"), StringComparison.Ordinal);
 
         var fleet = Js("pages", "fleet.js");
-        Assert.Contains("chip(c.total_cpu_percent != null ? \"Total CPU\" : \"CPU\", cpuValue, sevOf(c.cpu_severity), known(cpuDetail))", fleet, StringComparison.Ordinal);
+        Assert.Contains("chip(c.total_cpu_percent != null ? \"Total CPU\" : c.cpu_percent != null && c.other_process_cpu_percent == null ? \"SQL CPU\" : \"CPU\", cpuValue, sevOf(c.cpu_severity), known(cpuDetail))", fleet, StringComparison.Ordinal);
         Assert.Contains("fmtInt(threadsInUse) + \" in use / \" + fmtInt(c.total_threads) + \" threads\"", fleet, StringComparison.Ordinal);
     }
 }

@@ -129,7 +129,8 @@ public class CountFamilyZeroHistoryTests
 
         Assert.StartsWith("291 blocking snapshot rows this window", dmv.Investigation, StringComparison.Ordinal);
         Assert.Contains("counts blocking snapshot rows", dmv.Investigation, StringComparison.Ordinal);
-        Assert.Contains("built from blocked process report rows, not snapshot rows", dmv.Investigation, StringComparison.Ordinal);
+        Assert.Contains("built from snapshot rows too", dmv.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("not measure the same thing", dmv.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("blocked process reports this window", dmv.Headline + dmv.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("is in report rows too", dmv.Investigation, StringComparison.Ordinal);
         if (shape == "trusted")
