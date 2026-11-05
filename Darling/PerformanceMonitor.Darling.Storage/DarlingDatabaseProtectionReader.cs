@@ -60,7 +60,7 @@ WHERE server_id = $1
 AND   collection_time = (
         SELECT MAX(collection_time) FROM collect.database_protection
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)
-ORDER BY database_name";
+ORDER BY lower(database_name), database_name";
 
     /// <summary>Reads the newest capture of one server in the window <paramref name="start"/> to <paramref name="end"/> (UTC).</summary>
     public static async Task<DatabaseProtectionRead> ReadAsync(

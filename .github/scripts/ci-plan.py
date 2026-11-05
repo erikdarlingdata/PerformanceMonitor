@@ -4,8 +4,8 @@
 Inputs: the event (pull_request or push), the base branch, the head branch, the draft flag, the labels and the
 changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT when --github-output is given):
 
-  run              true when the run does any work; false for a draft or a merge-train PR
-  outcome          run | skip-draft | train-blocked  (train-blocked: the verdict job must fail, see below)
+  run              true when the run does any work; false for a merge-train PR
+  outcome          run | train-blocked  (train-blocked: the verdict job must fail, see below)
   why              one plain sentence for the job log
   areas            docs-only | darling | lite | all | none | classes
   darling_scope    full | reads-lite | classes | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
@@ -28,16 +28,24 @@ scan_classes (Reads=Lite and Reads=Darling traits, derived from the test sources
 
 Rules, in order:
   1. Any event that is not a pull request always runs. (PR 1 of #6656 gated pull requests on a label; PR 2 removed it.)
-  2. A `train/` branch runs, draft or not (a merge-train pull request exists only to run CI).
+  2. A `train/` branch runs (a merge-train pull request exists only to run CI).
   3. A `merge-train` label does not run; the verdict job turns that into a failed `CI result` (today's rule: only an
      admin merges it, after the train covered it).
-  4. A draft does not run and gets no status; marking it ready starts the run.
+  4. A draft runs (#7717): agent pull requests open as drafts and need their first build and test run on CI, not on the
+     laptop. The draft flag does not gate the run. It narrows the scope (rule 7).
   5. Areas: base other than dev, a push, a path no area knows, an empty list, or a list the API may have cut: all.
      Only documentation: docs-only. Otherwise Darling files give the Darling suite, Lite files the Lite suite, and
      each side keeps its cross-reading classes of the other.
   6. Areas classes (#6734): every changed file is documentation or a .cs file under Darling/Darling.Tests or Lite.Tests
      whose every class holds tests and is no base class. Only those classes run. Any other file (a product file, a
      helper, a fixture, a .csproj, a lock file), a file the test map does not know, or a missing map: rule 5.
+  7. A draft that changes product files (#7727): rule 5 would give the full Darling suite (12 to 15 legs), so a draft
+     runs only the test classes in the test files it changed (the rule 6 file table) plus the Darling Stage=Guard
+     classes, as areas classes. A draft that changed no test file runs the build and the Guard classes only. When a
+     changed test file is not safe in the file table (a helper, a fixture, a base class, a .csproj, a file the map does
+     not know), the whole pull request runs as rule 5 says, and `why` says so. The full suite runs when the pull
+     request is marked ready for review (`ready_for_review` starts a run), so every merge still has a full green run
+     behind it. A pull request that is ready, a dev push, a docs-only change and a test-only change are as before.
 
 Standard library only. Run: python -I .github/scripts/ci-plan.py --event pull_request --base dev --files-file FILE
 """
@@ -60,8 +68,8 @@ TRAIN_BRANCH_PREFIX = "train/"
 # weighted minutes, from run 40001582504's per-class times) is 16 legs. A leg also pays about 1.3 minutes that are not tests,
 # measured on that run's 9 legs (checkout, build download, .NET and PostgreSQL start: 52 to 103 s, mean 70 s, plus about 7 s
 # of post steps), so a leg is about 8.5 + 1.3 = 9.8 minutes. A dev push uses the same estimate, at least DEV_PUSH_MIN_LEGS
-# legs (4 timed out) and at most DEV_PUSH_MAX_LEGS (the free plan runs about 20 jobs at once across the repo, so a
-# push must leave runners for open PRs). A full push was 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
+# legs (4 timed out) and at most DEV_PUSH_MAX_LEGS (GitHub Pro runs 40 jobs at once across the repo, and a busy hour
+# fills them, so a push must leave runners for open PRs). A full push was 8 legs: about 131 / 8 + 1.3 = 17.7 minutes a leg, under the
 # 25-minute step timeout, and 12 runners stay free for PRs.
 # By 2026-10-29 the suites had grown to about 152 weighted minutes (the refreshed tables), which made 8 legs 152 / 8 + 1.3 =
 # 20.3 minutes a leg even when perfectly balanced, and the stale tables left the slowest leg at 22.9 weighted minutes: leg 8
@@ -108,17 +116,15 @@ def _load_ci_select():
 # ---------------------------------------------------------------------------------------------------------
 # The gate: does this run do any work?
 # ---------------------------------------------------------------------------------------------------------
-def gate(event: str, head_ref: str, draft: bool, labels: "list[str]") -> "tuple[str, str]":
-    """(outcome, why). outcome is run, skip-draft or train-blocked."""
+def gate(event: str, head_ref: str, labels: "list[str]") -> "tuple[str, str]":
+    """(outcome, why). outcome is run or train-blocked."""
     if event != "pull_request":
         return "run", f"a {event} event always runs."
     if head_ref.startswith(TRAIN_BRANCH_PREFIX):
         return "run", "a merge-train pull request exists to run CI."
     if TRAIN_LABEL in labels:
         return "train-blocked", "the pull request carries the merge-train label, so its train run already covered it."
-    if draft:
-        return "skip-draft", "the pull request is a draft. Marking it ready for review starts the run."
-    return "run", "a pull request that is ready for review runs."
+    return "run", "a pull request runs, draft or ready for review."
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -160,8 +166,32 @@ def changed_test_classes(rules, files: "list[str]", catalog: "dict | None") -> "
     return picks if any(picks.values()) else None
 
 
-def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None) -> dict:
-    """The areas of one change: {areas, darling_scope, lite_scope, why}."""
+def draft_picks(files: "list[str]", catalog: "dict | None", darling_scope: str, lite_scope: str
+                ) -> "tuple[dict[str, list[str]] | None, str]":
+    """(picks, why) for a draft that changed product files (#7727): the test classes of the changed test files, plus the
+    Darling Stage=Guard classes. picks is None when a changed test file is not safe in the file table (its suite then
+    runs as today, and so does the whole pull request: areas classes cannot mix a narrowed suite with a full one)."""
+    table = (catalog or {}).get("files") or {}
+    classes = (catalog or {}).get("classes") or {}
+    if not table or not classes.get("darling"):
+        return None, "the test map is missing"
+    changed: "dict[str, list[str]]" = {"darling": [], "lite": []}
+    for f in files:
+        for suite, tree in TEST_TREES.items():
+            if not f.startswith(tree):
+                continue
+            row = table.get(f) if f.endswith(".cs") else None
+            if not row or row["suite"] != suite or not row["safe"]:
+                return None, f"{f} is not a plain test class file, so its suite runs in full"
+            changed[suite] += [c for c in row["tests"] if c not in changed[suite]]
+    guard = [c for c, t in classes["darling"].items() if "Stage=Guard" in t and _CS.NO_TESTS_TRAIT not in t]
+    picks = {"darling": (changed["darling"] + [c for c in guard if c not in changed["darling"]]) if darling_scope != "none" else [],
+             "lite": changed["lite"] if lite_scope != "none" else []}
+    return (picks, "") if any(picks.values()) else (None, "no class is selected")
+
+
+def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | None" = None, draft: bool = False) -> dict:
+    """The areas of one change: {areas, darling_scope, lite_scope, why}. draft: a pull request that is a draft (#7727)."""
     everything = {"areas": "all", "darling_scope": "full", "lite_scope": "full"}
     if event != "pull_request":
         return {**everything, "reason": f"a {event} runs every area."}
@@ -207,8 +237,17 @@ def classify(rules, event: str, base: str, files: "list[str]", catalog: "dict | 
     else:
         # Only a cross-reading subset on either side (a Lite XAML file a Darling parity pin reads, say).
         areas = "none" if darling_scope == "none" and lite_mode == "none" else "darling"
-    return {"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode,
-            "reason": f"Darling scope {darling_scope}, Lite scope {lite_mode}."}
+    reason = f"Darling scope {darling_scope}, Lite scope {lite_mode}."
+    if draft and areas != "none":
+        picks, why = draft_picks(files, catalog if catalog is not None else load_catalog(), darling_scope, lite_mode)
+        if picks:
+            return {"areas": "classes", "darling_scope": "classes" if picks["darling"] else "none",
+                    "lite_scope": "classes" if picks["lite"] else "none",
+                    "darling_classes": picks["darling"], "lite_classes": picks["lite"],
+                    "reason": "a draft runs only its own test classes and the Guard classes; "
+                              "the full suite runs when it is marked ready for review."}
+        reason += f" It is a draft, but {why}, so it runs as a pull request that is ready for review."
+    return {"areas": areas, "darling_scope": darling_scope, "lite_scope": lite_mode, "reason": reason}
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -309,9 +348,9 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
 # ---------------------------------------------------------------------------------------------------------
 # The plan.
 # ---------------------------------------------------------------------------------------------------------
-def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]", files: "list[str]",
-         rules, catalog: "dict | None" = None) -> "dict[str, str]":
-    outcome, why = gate(event, head_ref, draft, labels)
+def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
+         rules, catalog: "dict | None" = None, draft: bool = False) -> "dict[str, str]":
+    outcome, why = gate(event, head_ref, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
@@ -319,8 +358,8 @@ def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]",
     if outcome != "run":
         return out
 
-    catalog = catalog if catalog is not None else (load_catalog() if _may_narrow(files) else None)
-    c = classify(rules, event, base, files, catalog)
+    catalog = catalog if catalog is not None else (load_catalog() if draft or _may_narrow(files) else None)
+    c = classify(rules, event, base, files, catalog, draft and event == "pull_request")
     out.update(darling_classes=",".join(c.get("darling_classes", [])), lite_classes=",".join(c.get("lite_classes", [])))
     out.update(areas=c["areas"], darling_scope=c["darling_scope"], lite_scope=c["lite_scope"])
     out["why"] = f"{why} {c['reason']}"
@@ -375,7 +414,7 @@ def main(argv: "list[str]") -> int:
     ap.add_argument("--event", required=True, choices=["pull_request", "push"])
     ap.add_argument("--base", default="dev", help="the base branch of a pull request; the pushed branch for a push")
     ap.add_argument("--head-ref", default="", help="the head branch of a pull request")
-    ap.add_argument("--draft", default="false")
+    ap.add_argument("--draft", default="false", help="true when the pull request is a draft (it narrows the scope, #7727)")
     ap.add_argument("--labels", default="", help="a JSON array or a comma list")
     ap.add_argument("--files-file", help="changed files, one a line (default: stdin)")
     ap.add_argument("--github-output", help="also append the outputs to this file ($GITHUB_OUTPUT)")
@@ -388,8 +427,8 @@ def main(argv: "list[str]") -> int:
         text = sys.stdin.read()
     files = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    out = plan(args.event, args.base, args.head_ref, parse_bool(args.draft), parse_labels(args.labels), files,
-               _CS.Rules())
+    out = plan(args.event, args.base, args.head_ref, parse_labels(args.labels), files,
+               _CS.Rules(), draft=parse_bool(args.draft))
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))
     if out["legs"] != "0":

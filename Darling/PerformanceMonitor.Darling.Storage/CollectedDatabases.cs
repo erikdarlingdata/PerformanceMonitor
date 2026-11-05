@@ -28,7 +28,7 @@ public static class CollectedDatabases
     /// names before the union (0.26 s median, same rows). Bounding both arms to the retention window instead was
     /// measured and gains almost nothing at the worst case (3.4 s), because that window IS the table. #5245.</para>
     /// </summary>
-    public const string NamesSql = NamesBody + "\nORDER BY database_name";
+    public const string NamesSql = NamesBody + "\nORDER BY lower(database_name), database_name";
 
     /// <summary>
     /// The names query up to, and not including, its ORDER BY: the one copy <see cref="NamesSql"/> and
@@ -61,7 +61,7 @@ public static class CollectedDatabases
     /// </summary>
     public const string NamesSearchLimitedSql = NamesBody
         + "\nAND   database_name ILIKE $3 ESCAPE '\\'"
-        + "\nORDER BY database_name"
+        + "\nORDER BY lower(database_name), database_name"
         + "\nLIMIT $2";
 
     /// <summary>

@@ -142,7 +142,7 @@ SELECT database_name, file_name, file_type_desc, physical_name,
 FROM {sizeRelation}
 WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM {sizeRelation} WHERE server_id = $1){dbClause}
-ORDER BY database_name, file_type_desc, file_name";
+ORDER BY lower(database_name), database_name, file_type_desc, file_name";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         foreach (var db in dbValues)
