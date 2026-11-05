@@ -34,7 +34,8 @@ public sealed record FleetSweepServerReading(
     string? ReadFault,
     DateTime? LastCollectionUtc = null,
     DateTime? RegisteredUtc = null,
-    FleetIdentityCapacity? IdentityCapacity = null)
+    FleetIdentityCapacity? IdentityCapacity = null,
+    FleetDatabaseStates? DatabaseStates = null)
 {
     /// <summary>
     /// #7669: a column at its identity limit is a state that stays true until someone acts, so no count of events in the span carries it.
@@ -42,6 +43,12 @@ public sealed record FleetSweepServerReading(
     /// better than the card for it.
     /// </summary>
     public bool IdentityCapacityCritical => ReadFault is null && FleetServerCard.IsIdentityCritical(IdentityCapacity);
+
+    /// <summary>
+    /// #7647: a database in a state the Database State alert grades Critical (SUSPECT, RECOVERY_PENDING, EMERGENCY) is the same kind of state, and sets the
+    /// same floor. It reads through the card's own test, a Critical count in the read the card shows.
+    /// </summary>
+    public bool DatabaseStateCritical => ReadFault is null && DatabaseStates is { CriticalCount: > 0 };
 
     /// <summary>
     /// #6155: this server reported nothing in the span AND was already Offline, by <c>list_servers</c>'s rule, at the instant the service
@@ -256,7 +263,7 @@ public static class FleetSweepEngine
                 /* #7669: a state that stays true until someone acts sets a floor on the sweep's band (Fleet Overview's
                    OverallMetricSeverity does the same), so the sweep is never better than the card for it. */
                 var eventsBand = classified;
-                var floored = eventsBand != DailyHealthBand.NoData && reading.IdentityCapacityCritical;
+                var floored = eventsBand != DailyHealthBand.NoData && (reading.IdentityCapacityCritical || reading.DatabaseStateCritical);
                 if (floored)
                 {
                     /* A server with no data in the span stays No Data, as Fleet Overview bands it Offline: the identity read looks
@@ -280,12 +287,23 @@ public static class FleetSweepEngine
                     DailyHealthBand.NoData => "No collection inside the sweep span.",
                     _ => string.Join("; ", DailyHealthBandCalculator.BuildReasons(reading.Signals, reading.PeakBlockWaitMs)),
                 };
-                if (floored && reading.IdentityCapacity is { } identity)
+                if (floored)
                 {
-                    var identityReason = ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns);
-                    /* The events alone band it Healthy: BuildReasons would say "No issues detected.", which the clause contradicts,
-                       so the clause stands alone. With event reasons, they stay and the clause follows. */
-                    reason = eventsBand == DailyHealthBand.Healthy ? identityReason : reason + "; " + identityReason;
+                    /* The events alone band it Healthy: BuildReasons would say "No issues detected.", which a clause contradicts,
+                       so the clauses stand alone. With event reasons, they stay and the clauses follow. */
+                    var clauses = new List<string>();
+                    if (reading.IdentityCapacityCritical && reading.IdentityCapacity is { } identity)
+                    {
+                        clauses.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+                    }
+
+                    if (reading.DatabaseStateCritical && reading.DatabaseStates is { } databaseStates)
+                    {
+                        clauses.Add(databaseStates.Reason);
+                    }
+
+                    var clause = string.Join("; ", clauses);
+                    reason = eventsBand == DailyHealthBand.Healthy ? clause : reason + "; " + clause;
                 }
             }
 
@@ -975,6 +993,8 @@ public static class FleetSweepEngine
 
             /* #7669: the state Fleet Overview shows, read once through the card's own reader. An engine-seam read like the two above. */
             var identityCapacity = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, nowUtc, cancellationToken, logger).ConfigureAwait(false);
+            /* #7647: the database states the card shows, read through the Database State alert's own statement. */
+            var databaseStates = await DarlingFleetReader.ReadDatabaseStatesAsync(postgres, servers.Select(s => s.ServerId), nowUtc, cancellationToken).ConfigureAwait(false);
 
             /* Sequential, deliberately: 100+ aggregate reads against the loopback store are cheap one
                at a time and a herd all at once — and the sweep is a background errand racing nothing. */
@@ -986,7 +1006,11 @@ public static class FleetSweepEngine
                 separatelyMonitored?.TryGetValue(serverId, out separate);
                 var reading = await ReadServerSignalsAsync(
                     postgres, serverId, serverName, spanStartUtc, nowUtc, separate, logger, cancellationToken).ConfigureAwait(false);
-                readings.Add(identityCapacity.TryGetValue(serverId, out var identity) ? reading with { IdentityCapacity = identity } : reading);
+                readings.Add(reading with
+                {
+                    IdentityCapacity = identityCapacity.TryGetValue(serverId, out var identity) ? identity : null,
+                    DatabaseStates = databaseStates.TryGetValue(serverId, out var states) ? states : null,
+                });
             }
 
             var composition = Compose(
