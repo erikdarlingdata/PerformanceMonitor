@@ -244,6 +244,17 @@ public static partial class QueryModificationDetector
         return $"server {server}, database {database}";
     }
 
+    /// <summary>
+    /// The sentence a confirmation adds when the FinOps High Impact row's figures are summed across several databases
+    /// (#7695): the run goes to the one that did the most CPU, so the operator sees the others exist. Empty for one database.
+    /// </summary>
+    public static string BuildOtherDatabasesNote(int databaseCount)
+    {
+        if (databaseCount <= 1) return "";
+        var others = databaseCount - 1;
+        return others == 1 ? "This query also ran in 1 other database." : $"This query also ran in {others} other databases.";
+    }
+
     /// <summary>The most lines of query text a consent prompt shows (#5639), so a text of many lines cannot grow the box past the screen.</summary>
     public const int ConsentQueryTextLineLimit = 40;
 

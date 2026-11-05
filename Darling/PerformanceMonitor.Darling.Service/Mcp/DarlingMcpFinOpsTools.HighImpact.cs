@@ -25,7 +25,7 @@ public sealed partial class DarlingMcpFinOpsTools
         "high_impact: top query hashes on six measures, scored and banded.";
 
     internal const string HighImpactViewGuide =
-        "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures (CPU, duration, reads, writes, memory and executions), and ranks the union by impact_score 0-100 (the mean percent-rank across the six measures). impact_band is high at 80 and above, medium at 60 and above, else low. peak_memory_mb is the max_grant_kb reading of the hash's newest plan in the window (that plan's largest memory grant since it was cached, not a total and not necessarily a grant inside the window). The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured. No cost fields.";
+        "high_impact reads the query-stats window for the server, keeps the top limit query hashes on each of the six measures (CPU, duration, reads, writes, memory and executions), and ranks the union by impact_score 0-100 (the mean percent-rank across the six measures). impact_band is high at 80 and above, medium at 60 and above, else low. peak_memory_mb is the max_grant_kb reading of the hash's newest plan in the window (that plan's largest memory grant since it was cached, not a total and not necessarily a grant inside the window). The *_share_pct fields are each row's share of the kept set's total, rounded to 0.1. The figures are summed across every database that ran the hash: database_name is the one with the most CPU for it in the window and database_count is how many databases are in the total. sample_query_text is the first 200 characters of the hash's busiest statement; the full text and the plan are not returned, has_plan only says whether a plan was captured. No cost fields.";
 
     private static async Task<string> ReadHighImpactAsync(
         NpgsqlDataSource postgres, (int ServerId, string ServerName, string DisplayName) resolved, int hoursBack, int limit, CancellationToken ct)
@@ -69,6 +69,8 @@ public sealed partial class DarlingMcpFinOpsTools
     {
         query_hash = r.QueryHash,
         database_name = r.DatabaseName,
+        /* #7695: how many databases the figures are summed across; database_name is the one with the most CPU. */
+        database_count = r.DatabaseCount,
         total_executions = r.TotalExecutions,
         total_cpu_ms = FinOpsWireFigures.Ms(r.TotalCpuMs),
         total_duration_ms = FinOpsWireFigures.Ms(r.TotalDurationMs),

@@ -748,7 +748,8 @@ public partial class FinOpsTab
             onStarted: () => System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait,
             onFinished: () => System.Windows.Input.Mouse.OverrideCursor = null,
             System.Threading.CancellationToken.None,
-            queryStatsHash: hi.QueryHash);
+            queryStatsHash: hi.QueryHash,
+            databaseCount: hi.DatabaseCount);
 
         if (capture != null)
         {
