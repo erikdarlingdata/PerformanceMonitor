@@ -104,7 +104,7 @@ public sealed class WebReadReachTests
             {
                 "get_alert_history", "get_blocking_stats", "get_blocking_trend", "get_cpu_utilization", "get_deadlock_trend", "get_file_io_trend",
                 "get_lock_wait_trend", "get_memory_trend", "get_perfmon_trend", "get_pg_cpu_utilization", "get_pg_database_trend", "get_pg_io_trend",
-                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_store_duration_trend", "get_query_trend", "get_tempdb_trend",
+                "get_procedure_duration_trend", "get_query_duration_trend", "get_query_fleet_summary", "get_query_store_duration_trend", "get_query_trend", "get_tempdb_trend",
                 "get_wait_trend",
             },
             WebReadReach.All.Where(kv => kv.Value.MaxHours > McpHelpers.MaxHoursBack).Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal).ToArray());
