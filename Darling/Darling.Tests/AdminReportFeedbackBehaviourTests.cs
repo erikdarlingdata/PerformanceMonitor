@@ -79,7 +79,7 @@ public sealed class AdminReportFeedbackBehaviourTests
     }
 
     [Fact]
-    public void OnTheManagedStoreWithTheSwitchOff_TheListOnlyNote_NamesTheSwitch_InTheWordsOfThe403()
+    public void OnTheManagedStoreWithTheSwitchOff_TheSwitchIsNamedOnceOnThePage_AndTheRefusalNamesItInItsOwnWords()
     {
         var page = AdminServerEditBehaviourTests.Run("feedback:nostoreoff");
 
