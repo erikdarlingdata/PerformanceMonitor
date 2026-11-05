@@ -90,7 +90,8 @@ public sealed class WebMemoryPressureChartBehaviourTests
         Assert.InRange(points.GetArrayLength(), 6, 8);
         var zero = points.EnumerateArray().Count(p => p.EnumerateArray().Skip(1).All(v => v.GetInt32() == 0));
         Assert.True(zero >= 4, "empty hours must be present as 0");
-        var notice = Assert.Single(r.GetProperty("notices").EnumerateArray()).GetString()!;
+        // #7558: the note only explains what a 0 hour means, so it is the quiet caption, not the yellow notice.
+        var notice = Assert.Single(r.GetProperty("captions").EnumerateArray()).GetString()!;
         Assert.Contains("an hour with none draws no bar", notice, StringComparison.Ordinal);
         Assert.Contains("before collection began", notice, StringComparison.Ordinal);
     }

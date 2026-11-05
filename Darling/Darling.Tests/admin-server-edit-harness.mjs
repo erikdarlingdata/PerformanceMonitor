@@ -1410,6 +1410,25 @@ try {
         loudWithShort: draw({ noteShort: "Short." }),
       };
     },
+    /* #7558: a panel drawn through renderPanel (so loadPanelBody) whose read sends a main note and two more notes. Returns the class of each
+       strip the panel drew, main note first: a panel that names `noteQuiet` draws all three as captions, one that does not draws all three
+       yellow. */
+    panelNotes: async () => {
+      const panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+      state.responder = (method, url) => (url.startsWith("/api/read/get_panel_notes")
+        ? { status: 200, body: { rows: [{ a: 1 }], main_note: "Main note.", extra_one: "First extra note.", extra_two: "Second extra note." } }
+        : { status: 404, body: {} });
+      const draw = async (extra) => {
+        const holder = new FakeNode("div");
+        util.mount(holder, panels.renderPanel({
+          title: "Notes", read: "get_panel_notes", params: { server: "SRV1" }, viz: "table", rowsKey: "rows", columns: [{ key: "a", label: "A" }],
+          noteKey: "main_note", moreNoteKeys: ["extra_one", "extra_two"], ...extra,
+        }));
+        await settle();
+        return all(holder, (n) => n.classList.contains("strip")).map((n) => ({ className: n.className, text: n.textContent }));
+      };
+      return { quiet: await draw({ noteQuiet: true }), loud: await draw({}) };
+    },
     /* #7558: the Servers tab's summary line under a signed-in session. The param is "ok" (a quiet caption) or "probeFailed" (the sign-in
        probe failed: a real warning, the yellow strip). Returns the class of the strip that carries the server count. */
     serversSummary: async (param) => {

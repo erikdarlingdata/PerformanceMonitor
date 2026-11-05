@@ -151,14 +151,28 @@ public sealed class AdminReportFeedbackBehaviourTests
     [Fact]
     public void APanelThatNamesNoteQuiet_DrawsACaption_AndAPanelThatDoesNot_KeepsTheYellowStrip()
     {
-        // #7558: Memory Pressure Events per Hour, the System Events intro, Query Store Overhead, Query Store Memory Clerk, PostgreSQL Sampled
-        // Waits and Checkpoints and WAL name noteQuiet because their note only explains the table. Every other panel's note warns about data.
+        // #7558: four panels name noteQuiet because their note only explains the table: Query Store Overhead waits, Query Store Memory Clerk,
+        // PostgreSQL Sampled Waits and Checkpoints and WAL. Every other panel's note warns about data. (Memory Pressure Events per Hour and the
+        // System Events intro are captions too, but through captionStrip directly, not this flag.)
         var page = AdminServerEditBehaviourTests.Run("noteStrips");
 
         Assert.Equal("strip source", page.GetProperty("quiet").GetString());
         Assert.Equal("strip notice", page.GetProperty("loud").GetString());
         Assert.Equal("strip source plain-note", page.GetProperty("quietWithShort").GetString());
         Assert.Equal("strip notice plain-note", page.GetProperty("loudWithShort").GetString());
+    }
+
+    [Fact]
+    public void ANoteQuietPanel_DrawsItsMainNoteAndItsExtraNotesAsCaptions_AndAPanelWithoutTheFlagKeepsAllThreeYellow()
+    {
+        // #7558: loadPanelBody passes noteQuiet to the main note and to every moreNoteKeys note, so one panel never mixes a caption with a yellow strip.
+        var page = AdminServerEditBehaviourTests.Run("panelNotes");
+
+        var quiet = page.GetProperty("quiet").EnumerateArray().Select(s => s.GetProperty("className").GetString()).ToArray();
+        var loud = page.GetProperty("loud").EnumerateArray().Select(s => s.GetProperty("className").GetString()).ToArray();
+
+        Assert.Equal(new[] { "strip source", "strip source", "strip source" }, quiet);
+        Assert.Equal(new[] { "strip notice", "strip notice", "strip notice" }, loud);
     }
 
     [Theory]

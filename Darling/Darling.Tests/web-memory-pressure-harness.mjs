@@ -166,6 +166,8 @@ console.log(JSON.stringify({
   charts: calls.map((c) => ({ series: c.series, unit: c.unit, mode: c.mode, points: c.points.map((p) => [p.time, p.sql_medium, p.sql_severe, p.os_medium, p.os_severe]), windowStart: c.windowStart, windowEnd: c.windowEnd })),
   tableRows: table ? all(table, "tr").map((tr) => all(tr, "td").map((td) => td.textContent)).filter((cells) => cells.length).length : 0,
   notices: all(root, "div").filter((n) => n.className === "strip notice").map((n) => n.textContent),
+  /* #7558: the chart's note on what a 0 hour means only explains the chart, so it is the quiet caption, not the yellow notice. */
+  captions: all(root, "div").filter((n) => n.className === "strip source").map((n) => n.textContent),
   empties: all(root, "div").filter((n) => n.className === "strip empty").map((n) => n.textContent),
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),
   fetches,
