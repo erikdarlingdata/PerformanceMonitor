@@ -31,7 +31,7 @@ import { VIZ } from "../panels.js";
 import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, listOnlyNote, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
-import { dailyReportEditor } from "./admin-daily-report.js";
+import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
 import { databaseProtectionEditor } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
 import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
@@ -1357,6 +1357,8 @@ async function buildSettings(body, generation) {
     if (s.title === "Alert thresholds" && canEditSettings && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
       nodes.push(databaseProtectionEditor(res.data, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }
+    /* #7700: Preview only reads, so with writes off the Preview button is still drawn (no Save, no inputs). */
+    if (s.title === "Daily Health Report" && writesOff) nodes.push(dailyReportPreviewOnly());
     if (s.title === "Daily Health Report" && canEditSettings) {
       nodes.push(dailyReportEditor(res.data.daily_report, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }

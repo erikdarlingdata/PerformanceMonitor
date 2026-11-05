@@ -1331,7 +1331,8 @@ try {
     writesOff: async (param) => {
       const [tab, mode] = param.split("/");
       state.canEdit = true;
-      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: mode === "off" } });
+      /* "offSignedOut" is a can-edit seat that is NOT signed in, on the same store: the switch is checked before the sign-in. */
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: mode !== "offSignedOut", managed_store: true, admin_writes_off: mode === "off" || mode === "offSignedOut" } });
       const note = { note_id: 7, server_id: 1, server_name: "alpha", metric_name: "Blocking", family: "blocking", story_path_hash: "ABCDEF0123456789",
         note_text: "note 7", author: "agent:a", source_request_id: null, proposed_at_utc: "2026-10-01T00:00:00Z", expires_at_utc: "2026-12-30T00:00:00Z" };
       const settings = {
@@ -1355,6 +1356,39 @@ try {
         decideButtons: byAttr(main, "data-note-id").length,
         rows: all(main, (n) => n.tag === "td").map((n) => n.textContent).join(" | "),
         strips: all(main, (n) => n.classList.contains("strip")).map((n) => n.textContent),
+        text: main.textContent,
+      };
+    },
+    /* #7700: the Daily Health Report's Preview on the Settings tab of a can-edit seat. The param is "off" or "on" (web.allowAdminWrites).
+       Preview is a read, so it is drawn either way; Save only with the switch on. Preview is pressed and the box it drew is returned. */
+    writesOffPreview: async (param) => {
+      state.canEdit = true;
+      state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: true, admin_writes_off: param === "off" } });
+      const settings = {
+        alerts_enabled: true,
+        daily_report: { enabled: true, send_at: "07:30", time_zone: "UTC", title: "Daily" },
+      };
+      state.responder = (method, url) => {
+        if (method === "GET" && url === "/api/read/get_alert_settings") return { status: 200, body: settings };
+        if (method === "GET" && url === "/api/read/get_daily_health_report") return { status: 200, body: { subject: "Daily Health Report: alpha", text: "PREVIEW BODY 123" } };
+        return { status: 404, body: { error: "no such request " + url } };
+      };
+      await mountPage("settings");
+      const previewButtons = byAttr(main, "data-action", "preview-daily-report");
+      const saveButtons = byAttr(main, "data-action", "save-daily-report").length;
+      const inputs = all(main, (n) => n.attrs && typeof n.attrs["data-field"] === "string" && n.attrs["data-field"].startsWith("daily-report-") && (n.tag === "input" || n.tag === "select")).length;
+      if (previewButtons.length) {
+        await fire(previewButtons[0], "click");
+        await settle(30);
+      }
+      const box = byAttr(main, "data-field", "daily-report-preview-box")[0];
+      return {
+        previewButtons: previewButtons.length,
+        saveButtons,
+        inputs,
+        previewText: box ? box.textContent : null,
+        reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length,
+        writes: requests.filter((r) => r.method !== "GET").length,
       };
     },
     /* One call of an admin.js export, {"fn": "buildEditBody", "args": [...]} on stdin, printed as {"result": ...}; or

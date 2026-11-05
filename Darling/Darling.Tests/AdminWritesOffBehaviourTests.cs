@@ -66,6 +66,37 @@ public sealed class AdminWritesOffBehaviourTests
         Assert.Equal(1, on.GetProperty("practiceForm").GetInt32());
     }
 
+    /// <summary>The Daily Health Report's Preview only reads, so with the switch off it is still drawn and still works (Save and the
+    /// inputs that only feed Save are not); with the switch on the full editor is drawn.</summary>
+    [Fact]
+    public void DailyReportPreview_WithTheSwitchOff_StaysAndWorks_WithNoSaveAndNoInputs()
+    {
+        var off = AdminServerEditBehaviourTests.Run("writesOffPreview:off");
+        var on = AdminServerEditBehaviourTests.Run("writesOffPreview:on");
+
+        Assert.Equal(1, off.GetProperty("previewButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("saveButtons").GetInt32());
+        Assert.Equal(0, off.GetProperty("inputs").GetInt32());
+        Assert.Contains("PREVIEW BODY 123", off.GetProperty("previewText").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, off.GetProperty("reads").GetInt32());
+        Assert.Equal(0, off.GetProperty("writes").GetInt32());
+        Assert.Equal(1, on.GetProperty("previewButtons").GetInt32());
+        Assert.Equal(1, on.GetProperty("saveButtons").GetInt32());
+        Assert.True(on.GetProperty("inputs").GetInt32() > 0);
+    }
+
+    /// <summary>A seat that can edit but is not signed in, on a store with the switch off, gets the switch sentence and not the sign-in
+    /// one: signing in would not help.</summary>
+    [Fact]
+    public void PracticeScores_ASeatNotSignedIn_WithTheSwitchOff_GetsTheSwitchSentence_NotTheSignInSentence()
+    {
+        var page = AdminServerEditBehaviourTests.Run("writesOff:practice/offSignedOut");
+
+        Assert.Equal(0, page.GetProperty("practiceForm").GetInt32());
+        Assert.Contains(Strings(page.GetProperty("strips")), t => t.Contains(SwitchSentence, StringComparison.Ordinal));
+        Assert.DoesNotContain("Sign in to the web as an admin", page.GetProperty("text").GetString() ?? "", StringComparison.Ordinal);
+    }
+
     [Fact]
     public void PendingNotes_WithTheSwitchOff_ListTheNotesWithNoWriteFormAndNoDecisionButtons_AndNameTheSwitch()
     {
