@@ -49,7 +49,7 @@ public sealed class ResourceSemaphoreSmallQueryRowTests : IClassFixture<SharedDu
         var at = new DateTime(2026, 3, 10, 11, 5, 0);
 
         /* One pool, one collection: the regular semaphore (3 waiters, 100 MB granted) and the small-query semaphore (5 waiters,
-           7 MB granted, no max target: the DMV returns NULL and the collector stores 0). */
+           7 MB granted, no max target: the DMV returns NULL and the collector stores that NULL). */
         await SeedAsync(at, semaphoreId: 0, grantedMb: 100, availableMb: 50, waiters: 3, grantees: 2);
         await SeedAsync(at, semaphoreId: 1, grantedMb: 7, availableMb: 20, waiters: 5, grantees: 1);
 
@@ -71,6 +71,23 @@ public sealed class ResourceSemaphoreSmallQueryRowTests : IClassFixture<SharedDu
         Assert.Equal(8L, poolWindow.PeakWaiterCount);
         Assert.Equal(107.0, poolWindow.PeakGrantedMemoryMb, precision: 3);
         Assert.Equal(70.0, poolWindow.MinAvailableMemoryMb, precision: 3);
+    }
+
+    /// <summary>#7676: the FinOps memory-grant efficiency is the regular semaphore's own figure. With the small-query row (7 MB granted,
+    /// 5 waiters) beside it, the day still reports id 0 alone: 100 MB granted, 3 waiters. Deleting the read's id filter breaks this.</summary>
+    [Fact]
+    public async Task TheMemoryGrantEfficiencyRead_IgnoresTheSmallQuerySemaphoreRow()
+    {
+        var at = new DateTime(2026, 3, 10, 11, 5, 0);
+        await SeedAsync(at, semaphoreId: 0, grantedMb: 100, availableMb: 50, waiters: 3, grantees: 2);
+        await SeedAsync(at, semaphoreId: 1, grantedMb: 7, availableMb: 20, waiters: 5, grantees: 1);
+
+        var day = Assert.Single(await _dataService.GetMemoryGrantEfficiencyAsync(ServerId, hoursBack: 24 * 800));
+
+        Assert.Equal(100m, day.AvgGrantedMb);
+        Assert.Equal(100m, day.PeakGrantedMb);
+        Assert.Equal(3L, day.TotalWaiters);
+        Assert.Equal(2L, day.TotalGrantees);
     }
 
     private async Task SeedAsync(DateTime at, int semaphoreId, double grantedMb, double availableMb, int waiters, int grantees)

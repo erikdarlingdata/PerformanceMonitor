@@ -300,9 +300,10 @@ public static class ComposeCompiler
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
         {
-            /* #7676: memory_grant_stats keeps the small-query semaphore (id 1) beside the regular one (id 0). The grant
-               measures are pool-grain figures of the regular semaphore, so a panel reads id 0 only: AVG/MAX over both
-               rows would blend in the small semaphore's own 0 grants. */
+            /* #7676: memory_grant_stats keeps the small-query semaphore (id 1) beside the regular one (id 0), two rows per
+               pool and collection. Compose aggregates rows, so over both, AVG(granted_memory_mb) would average the two
+               semaphores and MAX(waiter_count) would take the larger where the pool's figure is the sum. A panel reads
+               id 0 only, the grain it had before id 1 was collected. */
             return string.Equals(sourceTable, "memory_grant_stats", StringComparison.Ordinal)
                 ? $"(SELECT * FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} WHERE COALESCE(resource_semaphore_id, 0) = 0)"
                 : $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";

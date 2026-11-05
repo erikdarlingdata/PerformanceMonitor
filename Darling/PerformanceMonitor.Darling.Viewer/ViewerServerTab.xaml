@@ -2430,7 +2430,7 @@
                                 <DataGridTextColumn Header="Pool" Binding="{Binding PoolName}" SortMemberPath="PoolId" Width="100"/>
                                 <DataGridTextColumn Header="Semaphore" Binding="{Binding SemaphoreName}" SortMemberPath="ResourceSemaphoreId" Width="85"/>
                                 <DataGridTextColumn Header="Target MB" Binding="{Binding TargetMemoryMb, StringFormat=N1}" Width="95"/>
-                                <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetOrNull, StringFormat=N1, TargetNullValue='-'}" Width="110"/>
+                                <DataGridTextColumn Header="Max Target MB" Binding="{Binding MaxTargetMemoryMb, StringFormat=N1, TargetNullValue='-'}" Width="110"/>
                                 <DataGridTextColumn Header="Total MB" Binding="{Binding TotalMemoryMb, StringFormat=N1}" Width="95"/>
                                 <DataGridTextColumn Header="Available MB" Binding="{Binding AvailableMemoryMb, StringFormat=N1}" Width="105"/>
                                 <DataGridTextColumn Header="Granted MB" Binding="{Binding GrantedMemoryMb, StringFormat=N1}" Width="100"/>

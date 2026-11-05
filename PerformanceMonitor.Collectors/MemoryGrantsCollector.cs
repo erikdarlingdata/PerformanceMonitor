@@ -32,7 +32,7 @@ public sealed class MemoryGrantsCollector : CollectorDefinitionBase<MemoryGrants
         short ResourceSemaphoreId,
         int PoolId,
         decimal TargetMb,
-        decimal MaxTargetMb,
+        decimal? MaxTargetMb,
         decimal TotalMb,
         decimal AvailableMb,
         decimal GrantedMb,
@@ -108,7 +108,9 @@ OPTION(RECOMPILE);";
                 Convert.ToInt16(reader.GetValue(0), CultureInfo.InvariantCulture),
                 Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
                 reader.IsDBNull(2) ? 0m : reader.GetDecimal(2),
-                reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
+                /* #7676: NULL stays NULL. The DMV has no max target for the small-query semaphore (id 1), and a stored 0 would
+                   read as a zero ceiling to every reader that does not know to skip that id. */
+                reader.IsDBNull(3) ? null : reader.GetDecimal(3),
                 reader.IsDBNull(4) ? 0m : reader.GetDecimal(4),
                 reader.IsDBNull(5) ? 0m : reader.GetDecimal(5),
                 reader.IsDBNull(6) ? 0m : reader.GetDecimal(6),
