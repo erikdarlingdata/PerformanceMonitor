@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
@@ -137,7 +138,7 @@ LIMIT 1";
         command.CommandText = $@"
 SELECT database_name, file_name, file_type_desc, physical_name,
        total_size_mb, used_size_mb, auto_growth_mb, max_size_mb,
-       volume_mount_point, volume_total_mb, volume_free_mb,
+       {VolumeKey.Sql} AS volume_mount_point, volume_total_mb, volume_free_mb,
        collection_time, file_id, is_percent_growth, growth_pct
 FROM {sizeRelation}
 WHERE server_id = $1

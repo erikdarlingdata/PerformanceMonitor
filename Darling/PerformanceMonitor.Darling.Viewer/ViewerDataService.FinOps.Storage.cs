@@ -70,7 +70,7 @@ SELECT
     file_name,
     total_size_mb,
     used_size_mb,
-    volume_mount_point,
+    " + VolumeKey.Sql + @" AS volume_mount_point,
     volume_total_mb,
     volume_free_mb,
     recovery_model_desc,
