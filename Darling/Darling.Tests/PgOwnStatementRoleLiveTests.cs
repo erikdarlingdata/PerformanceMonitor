@@ -183,6 +183,7 @@ public sealed class PgOwnStatementRoleLiveTests
                 top.Parameters.AddWithValue(naiveFrom);
                 top.Parameters.AddWithValue(naiveTo);
                 top.Parameters.AddWithValue(10);
+                top.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
                 await using var reader = await top.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {

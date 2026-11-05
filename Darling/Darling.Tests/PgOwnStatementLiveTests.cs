@@ -364,6 +364,7 @@ public sealed class PgOwnStatementLiveTests
                 top.Parameters.AddWithValue(naiveFrom);
                 top.Parameters.AddWithValue(naiveTo);
                 top.Parameters.AddWithValue(5);
+                top.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
                 await using var reader = await top.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.Equal(AppQueryId, reader.GetInt64(reader.GetOrdinal("queryid")));
@@ -454,6 +455,7 @@ VALUES ($1, $2, $3, $4, $4, $5::jsonb)",
                 top.Parameters.AddWithValue(naiveFrom);
                 top.Parameters.AddWithValue(naiveTo);
                 top.Parameters.AddWithValue(5);
+                top.Parameters.AddWithValue(CollectorDeltaCalculator.DefaultMaxGapSeconds);
                 await using var reader = await top.ExecuteReaderAsync(ct);
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.Equal(SharedQueryId, reader.GetInt64(reader.GetOrdinal("queryid")));
