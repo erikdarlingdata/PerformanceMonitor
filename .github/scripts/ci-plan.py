@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """The plan job of the pull-request workflow pr.yml (#6656): what a run does, from the event and the changed files.
 
-Inputs: the event (pull_request or push), the base branch, the head branch, the draft flag, the labels and the
+Inputs: the event (pull_request or push), the base branch, the head branch, the labels and the
 changed file list. Outputs, as `key=value` lines (stdout, and $GITHUB_OUTPUT when --github-output is given):
 
-  run              true when the run does any work; false for a draft or a merge-train PR
-  outcome          run | skip-draft | train-blocked  (train-blocked: the verdict job must fail, see below)
+  run              true when the run does any work; false for a merge-train PR
+  outcome          run | train-blocked  (train-blocked: the verdict job must fail, see below)
   why              one plain sentence for the job log
   areas            docs-only | darling | lite | all | none | classes
   darling_scope    full | reads-lite | classes | none   (reads-lite: the Stage=Guard classes plus the classes that read a Lite file)
@@ -28,10 +28,11 @@ scan_classes (Reads=Lite and Reads=Darling traits, derived from the test sources
 
 Rules, in order:
   1. Any event that is not a pull request always runs. (PR 1 of #6656 gated pull requests on a label; PR 2 removed it.)
-  2. A `train/` branch runs, draft or not (a merge-train pull request exists only to run CI).
+  2. A `train/` branch runs (a merge-train pull request exists only to run CI).
   3. A `merge-train` label does not run; the verdict job turns that into a failed `CI result` (today's rule: only an
      admin merges it, after the train covered it).
-  4. A draft does not run and gets no status; marking it ready starts the run.
+  4. A draft runs like a pull request that is ready for review (#7717): agent pull requests open as drafts and
+     need their first build and test run on CI, not on the laptop. The draft flag is not an input.
   5. Areas: base other than dev, a push, a path no area knows, an empty list, or a list the API may have cut: all.
      Only documentation: docs-only. Otherwise Darling files give the Darling suite, Lite files the Lite suite, and
      each side keeps its cross-reading classes of the other.
@@ -108,17 +109,15 @@ def _load_ci_select():
 # ---------------------------------------------------------------------------------------------------------
 # The gate: does this run do any work?
 # ---------------------------------------------------------------------------------------------------------
-def gate(event: str, head_ref: str, draft: bool, labels: "list[str]") -> "tuple[str, str]":
-    """(outcome, why). outcome is run, skip-draft or train-blocked."""
+def gate(event: str, head_ref: str, labels: "list[str]") -> "tuple[str, str]":
+    """(outcome, why). outcome is run or train-blocked."""
     if event != "pull_request":
         return "run", f"a {event} event always runs."
     if head_ref.startswith(TRAIN_BRANCH_PREFIX):
         return "run", "a merge-train pull request exists to run CI."
     if TRAIN_LABEL in labels:
         return "train-blocked", "the pull request carries the merge-train label, so its train run already covered it."
-    if draft:
-        return "skip-draft", "the pull request is a draft. Marking it ready for review starts the run."
-    return "run", "a pull request that is ready for review runs."
+    return "run", "a pull request runs, draft or ready for review."
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -309,9 +308,9 @@ def leg_count(test_minutes: float, event: str = "pull_request") -> int:
 # ---------------------------------------------------------------------------------------------------------
 # The plan.
 # ---------------------------------------------------------------------------------------------------------
-def plan(event: str, base: str, head_ref: str, draft: bool, labels: "list[str]", files: "list[str]",
+def plan(event: str, base: str, head_ref: str, labels: "list[str]", files: "list[str]",
          rules, catalog: "dict | None" = None) -> "dict[str, str]":
-    outcome, why = gate(event, head_ref, draft, labels)
+    outcome, why = gate(event, head_ref, labels)
     out = {"run": "true" if outcome == "run" else "false", "outcome": outcome, "why": why,
            "areas": "none", "darling_scope": "none", "lite_scope": "none", "build": "false",
            "darling_classes": "", "lite_classes": "", "test_minutes": "0", "legs": "0", "legs_json": "[]",
@@ -353,10 +352,6 @@ def _bool(v: bool) -> str:
     return "true" if v else "false"
 
 
-def parse_bool(text: str) -> bool:
-    return str(text).strip().lower() in ("true", "1", "yes")
-
-
 def parse_labels(text: str) -> "list[str]":
     """toJSON(labels.*.name) gives a JSON array; a comma list is accepted too."""
     text = (text or "").strip()
@@ -375,7 +370,6 @@ def main(argv: "list[str]") -> int:
     ap.add_argument("--event", required=True, choices=["pull_request", "push"])
     ap.add_argument("--base", default="dev", help="the base branch of a pull request; the pushed branch for a push")
     ap.add_argument("--head-ref", default="", help="the head branch of a pull request")
-    ap.add_argument("--draft", default="false")
     ap.add_argument("--labels", default="", help="a JSON array or a comma list")
     ap.add_argument("--files-file", help="changed files, one a line (default: stdin)")
     ap.add_argument("--github-output", help="also append the outputs to this file ($GITHUB_OUTPUT)")
@@ -388,7 +382,7 @@ def main(argv: "list[str]") -> int:
         text = sys.stdin.read()
     files = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    out = plan(args.event, args.base, args.head_ref, parse_bool(args.draft), parse_labels(args.labels), files,
+    out = plan(args.event, args.base, args.head_ref, parse_labels(args.labels), files,
                _CS.Rules())
     lines = [f"{k}={v}" for k, v in out.items()]
     print("\n".join(lines))

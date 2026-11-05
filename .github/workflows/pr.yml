@@ -3,13 +3,12 @@ name: PR CI
 # #6656: the pull request and dev-push CI. One plan job decides the work from the changed files, one build job builds
 # both test projects once, N test legs run weighted slices of the classes from that build, and one verdict job turns the
 # result into the commit status `CI result`. `CI result` is a commit status and not a job: a skipped required job counts
-# as passing, so a draft's skipped run could leave a green on a SHA nobody tested. The status stays pending until the
+# as passing, so a skipped run could leave a green on a SHA nobody tested. The status stays pending until the
 # verdict sets it, so a run that is cancelled or dies early never passes.
 #
-# Every pull request that is ready for review runs (PR 2 of the rollout removed the `ci-next` label gate); a draft costs
-# the plan job and sets no status. Whether it is a draft is read live from the pull request API at plan time, not from the
-# event payload: a push to a draft and `gh pr ready` seconds apart start the push run last, it cancels the ready run, and
-# its payload still says draft, which would leave the final head with no `CI result` (#6656).
+# Every pull request runs, draft or ready for review (#7717; PR 2 of the rollout removed the `ci-next` label gate). Agent
+# pull requests open as drafts and need their first build and test run on CI, not on the laptop. The draft flag is not an
+# input to the plan. Only a pull request carrying the `merge-train` label does not run; the verdict job fails its `CI result`.
 # No `labeled` trigger: an unrelated label would cancel and restart the run.
 
 on:
@@ -63,25 +62,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref || github.ref_name }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          IS_DRAFT: ${{ github.event.pull_request.draft || 'false' }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-
-          # The payload's draft flag is as old as the event. A push to a draft and `gh pr ready` seconds apart start the push run
-          # last: it cancels the ready run and its payload still says draft, so it would skip and the head would get no `CI result`.
-          # Read the live state instead; if the call fails, keep the payload's value.
-          if [ "${EVENT_NAME}" = "pull_request" ]; then
-            if live_draft=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.draft' 2>/dev/null) && [[ "${live_draft}" =~ ^(true|false)$ ]]; then
-              if [ "${live_draft}" != "${IS_DRAFT}" ]; then
-                echo "::notice title=Draft state read live::The pull request is draft=${live_draft} now, but the event payload said draft=${IS_DRAFT}. Using the live state."
-              fi
-              IS_DRAFT="${live_draft}"
-            else
-              echo "::notice title=Draft state read from the payload::The pull request API call failed, so the event payload's draft=${IS_DRAFT} is used."
-            fi
-          fi
 
           # A push runs every area whatever it changed, so it needs no file list.
           : > changed.txt
@@ -102,7 +86,7 @@ jobs:
           echo "$(wc -l < changed.txt) changed file(s)"
 
           python -I .github/scripts/ci-plan.py --event "${EVENT_NAME}" --base "${BASE_REF}" --head-ref "${HEAD_REF}" \
-            --draft "${IS_DRAFT}" --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
+            --labels "${LABELS}" --files-file changed.txt --github-output "${GITHUB_OUTPUT}"
 
       # The exporter job (Exporter/) has its own path rule: the `exporter` filter in build.yml, read here through ci-select.py
       # so there is one copy of the patterns. A push, a pull request that is not against dev, and a file list that cannot be
@@ -136,7 +120,7 @@ jobs:
           PY
 
       # Pending from the moment the plan says the run goes. A fork's read-only token cannot write it (the verdict job
-      # says so in one notice), and a draft sets nothing.
+      # says so in one notice).
       - name: Set CI result to pending
         if: steps.plan.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: bash
@@ -622,7 +606,7 @@ jobs:
   verdict:
     name: CI verdict
     needs: [plan, build, test, pg-old-targets, exporter]
-    # Nothing to say for a draft, which sets no status: skip the runner too.
+    # A run that does not go and is not train-blocked has nothing to say, so skip the runner; a failed plan job still reports.
     if: ${{ always() && (needs.plan.result != 'success' || needs.plan.outputs.run == 'true' || needs.plan.outputs.outcome == 'train-blocked') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
