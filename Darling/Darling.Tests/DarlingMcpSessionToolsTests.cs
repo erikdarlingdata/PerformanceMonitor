@@ -587,8 +587,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     public void TheEmptyAnswers_CarryTheHints_AndNotCollectedStaysBare_InTheToolSource()
     {
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpSessionTools.cs").ReplaceLineEndings("\n");
-        Assert.Contains("McpHelpers.Status(\"empty\", \"No active query snapshots found in the requested time range.\", notice.AsHints())", source, StringComparison.Ordinal);
-        Assert.Contains("McpHelpers.Status(\"empty\", \"No waiting tasks captured in the specified time range.\", notice.AsHints())", source, StringComparison.Ordinal);
+        Assert.Contains("McpHelpers.Status(\"empty\", \"No active query snapshots found in the requested time range.\" + MonitorLeftOutNote(includeMonitor), notice.AsHints())", source, StringComparison.Ordinal);
+        Assert.Contains("McpHelpers.Status(\"empty\", \"No waiting tasks captured in the specified time range.\" + MonitorLeftOutNote(includeMonitor), notice.AsHints())", source, StringComparison.Ordinal);
         Assert.DoesNotContain("NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, \"query_snapshots\", cancellationToken, notice", source, StringComparison.Ordinal);
     }
 

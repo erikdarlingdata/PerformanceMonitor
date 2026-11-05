@@ -47,7 +47,7 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY sqlserver_cpu_utilization DESC
 LIMIT 1";
 
-    public const string QueriesAtSpikeSql = @"
+    public const string QueriesAtSpikeSql = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
@@ -57,6 +57,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 

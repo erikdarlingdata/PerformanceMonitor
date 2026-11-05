@@ -53,7 +53,7 @@ public sealed class PgPileupSnapshotReader
     /// collector, ~50–150 rows on a busy server; the LIMIT is a tripwire against a misbehaving
     /// snapshot (a runaway session count), not a working cap.
     /// </summary>
-    public const string PileupWindowSql = @"
+    public const string PileupWindowSql = $@"
 SELECT collection_time,
        session_id,
        query_hash,
@@ -71,6 +71,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY collection_time DESC
 LIMIT 5000";
 

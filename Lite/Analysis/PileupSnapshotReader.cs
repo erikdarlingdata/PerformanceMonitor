@@ -79,7 +79,7 @@ public class PileupSnapshotReader
             await connection.OpenAsync(cancellationToken);
 
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 SELECT collection_time,
        session_id,
        query_hash,
@@ -97,6 +97,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   session_id > 50
 AND   COALESCE(is_cdc_capture, FALSE) = FALSE
+AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
 ORDER BY collection_time DESC
 LIMIT 5000";
             cmd.CommandText = cmd.CommandText.Replace("v_query_snapshots", relation, StringComparison.Ordinal);

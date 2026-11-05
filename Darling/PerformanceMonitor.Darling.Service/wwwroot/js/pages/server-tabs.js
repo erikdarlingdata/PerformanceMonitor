@@ -59,7 +59,7 @@ import { PG_SERVER_CONFIG_COLUMNS, PG_CONFIG_CHANGE_COLUMNS, PG_AUDIT_COLUMNS } 
 import { PG_IO_SUMMARY_STATS, pgIoTrendSpecs, PG_WRITE_STATS, pgWriteStatsBlankNote, PG_BUFFER_USAGE_COLUMNS, PG_IO_COLUMNS } from "./server-tabs/pg-io.js";
 import { momentStat, PG_CPU_SERIES, PG_EXTENSION_CENSUS_COLUMNS, PG_EXTENSION_COLUMNS } from "./server-tabs/pg-overview.js";
 import { PG_REPLICATION_STATS_COLUMNS, PG_SLOT_COLUMNS } from "./server-tabs/pg-replication.js";
-import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_INDEX_USAGE_COLUMNS } from "./server-tabs/pg-storage.js";
+import { PG_BLOAT_STATS, PG_INDEX_USAGE_STATS, PG_INDEX_BLOAT_COLUMNS, PG_BLOAT_COLUMNS, PG_BLOAT_ROWS, PG_INDEX_USAGE_COLUMNS, PG_INDEX_USAGE_ROWS } from "./server-tabs/pg-storage.js";
 import { PG_WRAPAROUND_THRESHOLD_STATS, PG_SESSION_STATE_STATS, PG_AUTOVACUUM_COLUMNS, PG_WRAPAROUND_COLUMNS, PG_XMIN_COLUMNS, PG_SESSION_STATE_COLUMNS } from "./server-tabs/pg-vacuum.js";
 import { pgWaitTrendSpecs, pgWaitSamplingBackendsNote, PG_WAIT_SAMPLING_COLUMNS, PG_KERNEL_COLUMNS, PG_WAIT_COLUMNS } from "./server-tabs/pg-waits.js";
 import { fanout, pickerControl, topRankingLabel, rankedParams, withTagPick, rankedCard, tablePanel, tablePanelPlain, stat, linePanel, SNAPSHOT, PROPERTY_STATS, ALERT_READ_PANEL, COLLECTION_CAVEATS_PANEL, SWEEP_STATS, SKIPPED_CYCLES_STATS, withWaitLink, TOP_QUERY_COLUMNS, TOP_QUERY_GROUPS, TOP_PROC_COLUMNS, TOP_PROC_GROUPS, serverTrendPanel, seriesTrendPanel, findingsPanel, COLLECTION_LOG_COLUMNS, selectionInside, COLLECTOR_COLUMNS, HEAVIEST_COLUMNS, PG_WRAPAROUND_STATS, PG_XMIN_STATS, PG_SLOT_STATS, PG_AUTOVACUUM_STATS } from "./server-tabs/shared.js";
@@ -74,7 +74,7 @@ import { fileIoPanel, TEMPDB_SERIES, FILE_IO_COLUMNS, DB_SIZE_COLUMNS, TABLE_SIZ
 import { MEMORY_STATS, PLAN_CACHE_STATS, MEMORY_SERIES, CLERK_COLUMNS, GRANT_WINDOW_COLUMNS, SEMAPHORE_WINDOW_COLUMNS, GRANT_COLUMNS, SEMAPHORE_COLUMNS, memoryClerksTrendPanel, memoryPressurePanels, CACHE_TYPE_COLUMNS } from "./server-tabs/sql-memory.js";
 import { overviewStripsPanel, dailySummaryPanels, OVERVIEW_STATS } from "./server-tabs/sql-overview.js";
 import { topQueriesPanel, tagFilteredCard, slicedTagCard, DURATION_SERIES, EXECUTION_RATE_SERIES, activeQueriesPanel, QUERY_STORE_REGRESSION_GROUPS, QUERY_STORE_REGRESSION_COLUMNS, QUERY_HEATMAP_COLUMNS, QUERY_STORE_COLUMNS, QS_CLUTTER_COLUMNS, QS_OVERHEAD_WAIT_COLUMNS, QS_CLERK_STATS, LONG_QUERY_GROUPS, LONG_QUERY_COLUMNS, PLAN_CORRECTION_GROUPS, PLAN_CORRECTION_COLUMNS, AUTO_TUNING_COLUMNS } from "./server-tabs/sql-queries.js";
-import { waitsPanel, WAITING_TASK_COLUMNS, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
+import { waitsPanel, waitingTasksPanel, LATCH_COLUMNS, SPINLOCK_COLUMNS, namedTrendPanel } from "./server-tabs/sql-waits.js";
 export { serverTrendPanel, seriesTrendPanel } from "./server-tabs/shared.js";
 export { perfmonPanel, drawPerfmonTrends, sessionStatsTrendPanel } from "./server-tabs/sql-activity.js";
 export { fileIoGrain, fileIoPanel } from "./server-tabs/sql-io.js";
@@ -128,15 +128,7 @@ export const SERVER_TABS = [
     label: "Wait Stats",
     build: (server, ctx) => [
       waitsPanel(server, ctx),
-      tablePanelPlain(
-        "Waiting Tasks",
-        "get_waiting_tasks",
-        { server, hours: ctx.hours, limit: 30 },
-        "tasks",
-        withWaitLink(WAITING_TASK_COLUMNS, server, "collection_time"),
-        ctx.label,
-        "No waiting tasks were captured in this window."
-      ),
+      waitingTasksPanel(server, ctx),
       tablePanelPlain(
         "Latch Stats",
         "get_latch_stats",
@@ -1884,6 +1876,7 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "tables",
           columns: PG_BLOAT_COLUMNS,
+          orderRows: PG_BLOAT_ROWS,
           emptyText:
             "No tables to list.",
         },
@@ -1905,6 +1898,7 @@ export const POSTGRES_TABS = [
           viz: "table",
           rowsKey: "indexes",
           columns: PG_INDEX_USAGE_COLUMNS,
+          orderRows: PG_INDEX_USAGE_ROWS,
           emptyText:
             "No indexes to list.",
         },
