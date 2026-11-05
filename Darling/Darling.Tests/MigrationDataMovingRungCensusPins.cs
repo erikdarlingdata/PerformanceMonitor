@@ -697,12 +697,19 @@ public sealed class MigrationDataMovingRungCensusPins
     /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
     /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
     /// spot to name.
+    ///
+    /// <para>V246 (#7609) is the exception that does build an index, so it is named here by hand too. Its <c>DO $$ ... $$</c> reads the
+    /// corrected hourly rollup's materialization name from <c>timescaledb_information</c> (that name is different on every store, so the DDL
+    /// cannot be written literally) and runs one non-concurrent <c>CREATE INDEX IF NOT EXISTS</c> on <c>(query_hash, bucket DESC)</c> over that
+    /// one hourly rollup. That is rollup rows at hourly grain, not the raw collector hypertables V22 and V39 build over, and the build is bounded
+    /// by the same <c>lock_timeout</c> V152 sets. It is not in <see cref="s_declared"/> because that register is derived from the scan, which cannot
+    /// see a dynamic statement, so a declaration here would fail the census equality check.</para>
     /// </summary>
-    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204];
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152, 204, 246];
 
     /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has two exempted rungs today (V152 and V204, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// ladder has three exempted rungs today (V152, V204 and V246, named in <see cref="s_dynamicSqlExemptedRungs"/> because
     /// each <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index or constraint rather than moving data) and
     /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
     /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
