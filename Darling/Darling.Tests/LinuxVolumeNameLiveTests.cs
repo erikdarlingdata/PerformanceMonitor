@@ -37,6 +37,7 @@ public sealed class LinuxVolumeNameLiveTests
     private const int LinuxServer = -7704, WindowsServer = -7705, MixedServer = -7706;
     private const int LiveTimeoutSeconds = 60;
     private const string LinuxDirectory = "/var/opt/mssql/data";
+    private const string LogDirectory = "/var/opt/mssql/log";
 
     private static async Task<NpgsqlConnection?> OpenAsync(string? connectionString, CancellationToken ct)
     {
@@ -154,6 +155,65 @@ VALUES ($1, $2, $3, 'linux-volume-7704', $4, $5, 'ROWS', $6, $7, 100, false, 0, 
                 Assert.Equal(3, names.Count);
                 Assert.All(names, n => Assert.Equal(LinuxDirectory, n));
             }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, (c, token) => DeleteSentinelsAsync(c, token));
+        }
+    }
+
+    [Fact]
+    public async Task ALinuxServersSecondAlertPass_ReadsTheFlooredStatement_AndStillNamesTheVolumeByItsDirectory()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        using var connection = (await OpenAsync(connectionString, ct))!;
+        await using var dataSource = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var now = Now();
+            var at = now.AddMinutes(-5);
+            /* The first test's Linux server (NULL names, files in the data directory), plus a log file in a second directory on the
+               same disk: the key is the directory, so the read shows one row per directory with the same free figure. */
+            await SeedLinuxAsync(connection, at, ct);
+            await InsertAsync(connection, LinuxServer, at, "SalesDb", 3, LogDirectory + "/SalesDb_log2.ldf", null, 1_000_000, 30_000, ct);
+
+            /* Pass one is unbounded and sets the server's floor to the newest snapshot; pass two on the same adapter is the
+               floored read every later alert pass runs. The floored read falls back to an unbounded one when it finds no row,
+               so this pair alone would pass on a floored statement that dropped Linux rows: the statement itself is read below. */
+            var adapter = new DarlingAlertReadAdapter(dataSource);
+            var first = await adapter.GetVolumeFreeSpaceAsync(Key(LinuxServer), ct);
+            var second = await adapter.GetVolumeFreeSpaceAsync(Key(LinuxServer), ct);
+            Assert.Equal(new[] { LinuxDirectory, LogDirectory }, second.Select(v => v.MountPoint).OrderBy(m => m, StringComparer.Ordinal).ToArray());
+            Assert.Equal(first.Select(v => v.MountPoint).OrderBy(m => m, StringComparer.Ordinal), second.Select(v => v.MountPoint).OrderBy(m => m, StringComparer.Ordinal));
+            Assert.All(second, v =>
+            {
+                Assert.Equal(1_000_000, v.TotalMb);
+                Assert.Equal(30_000, v.FreeMb);
+            });
+
+            /* The floored statement on its own, bounded by the snapshot's own time as the floor is: it must itself return the
+               directory-named volume, not nothing. */
+            await using var floored = new NpgsqlCommand(DarlingAlertReadAdapter.VolumeFreeSpaceSinceSql, connection) { CommandTimeout = LiveTimeoutSeconds };
+            floored.Parameters.AddWithValue(LinuxServer);
+            floored.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DarlingMcpTestData.Naive(at) });
+            await using var reader = await floored.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var rows = new List<(string Name, double Total, double Free)>();
+            do
+            {
+                rows.Add((reader.GetString(0), Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture), Convert.ToDouble(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+            while (await reader.ReadAsync(ct));
+            Assert.Equal(new[] { LinuxDirectory, LogDirectory }, rows.Select(r => r.Name).OrderBy(m => m, StringComparer.Ordinal).ToArray());
+            Assert.All(rows, r =>
+            {
+                Assert.Equal(1_000_000, r.Total);
+                Assert.Equal(30_000, r.Free);
+            });
 
             bodySucceeded = true;
         }
