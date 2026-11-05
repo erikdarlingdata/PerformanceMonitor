@@ -75,7 +75,19 @@ public sealed class McpQueryTools
             var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
 
             var requestedStart = nowUtc.AddHours(-hours_back);
-            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+            /* #7725 (Darling's twin): the databases the server dropped rank AFTER the ones it still lists, and carry database_dropped. This read did
+               not narrow before, so a dropped database's rows ranked among the rest; now the listed databases rank first and what the limit leaves
+               is filled from the dropped ones, ranked the same way. A named database is read as asked. */
+            var droppedDatabases = string.IsNullOrEmpty(database_name)
+                ? await dataService.GetDroppedDatabasesAsync(resolved.ServerId, asOfUtc: string.IsNullOrWhiteSpace(as_of) ? null : nowUtc, windowStartUtc: requestedStart)
+                : null;
+            var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, serverClock: serverClock, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope, excludeDatabaseNames: droppedDatabases);
+            if (droppedDatabases is { Count: > 0 } && rows.Count < top)
+            {
+                var fill = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top - rows.Count, serverClock: serverClock, databaseNames: droppedDatabases, asOfUtc: windowEnd, minMaxDop: minMaxDop, tags: tagScope);
+                rows = [.. rows, .. fill];
+            }
+
             /* #7005: every empty answer below also says whether the store holds the window (the notice rides it by WithEmptyWindowNoticeAsync). */
             async Task<string> EmptyAnswerAsync()
             {
@@ -192,7 +204,7 @@ public sealed class McpQueryTools
                     : null
             });
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -215,7 +227,13 @@ public sealed class McpQueryTools
                     note = attribution.Note
                 },
                 queries = result
-            }, McpHelpers.JsonOptions);
+            }, McpHelpers.JsonOptions)!.AsObject();
+            if (payload["queries"] is JsonArray queryRows)
+            {
+                DroppedDatabaseMark.Mark(queryRows, rows.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
+            }
+
+            return payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
@@ -678,6 +696,19 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStoreRegressionsAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd, excludedDatabases: droppedDatabases?.ToList(),
                 dataStartUtc: EffectiveWindowStart(floor, baselineStart));
+            /* #7725 (get_top_procedures_by_cpu's order): the databases the server still lists rank first. When the page has room, the
+               dropped databases' regressions fill it, ranked the same way, and carry database_dropped. regression_count then counts both
+               reads (the fill's own gate total), so it still says every regression that passed the gate. */
+            var listedTotal = rows.Count > 0 ? rows[0].TotalCount : 0;
+            var fillTotal = 0L;
+            if (droppedDatabases is { Count: > 0 } && rows.Count < limit + 1)
+            {
+                var fill = await dataService.GetQueryStoreRegressionsAsync(
+                    resolved.ServerId, hours_back, limit + 1 - rows.Count, droppedDatabases.ToList(), asOfUtc: windowEnd,
+                    dataStartUtc: EffectiveWindowStart(floor, baselineStart));
+                fillTotal = fill.Count > 0 ? fill[0].TotalCount : 0;
+                rows = [.. rows, .. fill];
+            }
 
             /* #4966: where this server's query_store_stats start, checked against the EARLIER of the two windows this
                tool compares — the baseline's start, not the recent window's: a store that began inside the baseline
@@ -696,8 +727,10 @@ public sealed class McpQueryTools
                     await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.DisplayName, hours_back, windowEnd, notice, databases, floor, baselineStart, !string.IsNullOrWhiteSpace(as_of)), leftOut)!;
 
             var truncated = rows.Count > limit;
+            var page = rows.Take(limit).ToList();
+            var pageLeftOut = DroppedDatabaseMark.WithoutRows(leftOut, page.Select(r => (string?)r.DatabaseName));
 
-            return JsonSerializer.Serialize(new
+            var payload = JsonSerializer.SerializeToNode(new
             {
                 server = resolved.DisplayName,
                 hours_back,
@@ -715,14 +748,20 @@ public sealed class McpQueryTools
                 baseline_is = $"Query Store captures from baseline_start to the recent window's start ({LocalDataService.BaselineLookbackDays} days)",
                 gate = "Regular average CPU regressed by more than 25% and the rise in CPU per run times the recent runs added at least 1 s of CPU over the window (cost), or the recent Aborted (timeouts) or Exception (errors) rate per hour is at least twice the baseline's (or nonzero where the baseline had none) with at least 3 such runs",
                 /* #6128: every regression that passed the gate, whatever limit asked for; returned_count is this page. */
-                regression_count = Math.Max(rows[0].TotalCount, rows.Count),
-                returned_count = Math.Min(rows.Count, limit),
+                regression_count = Math.Max(listedTotal + fillTotal, rows.Count),
+                returned_count = page.Count,
                 truncated,
-                regressions = rows.Take(limit).Select(r => RegressionRowJson(r, full_text)),
-                /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses. */
-                databases_left_out = DatabasesLeftOut.Named(leftOut),
-                databases_left_out_note = DatabasesLeftOut.Note(leftOut),
-            }, McpHelpers.JsonOptions);
+                regressions = page.Select(r => RegressionRowJson(r, full_text)),
+                /* #6654: the dropped databases this read left out, in the words get_top_procedures_by_cpu uses; #7725: only those with no row. */
+                databases_left_out = DatabasesLeftOut.Named(pageLeftOut),
+                databases_left_out_note = DatabasesLeftOut.Note(pageLeftOut),
+            }, McpHelpers.JsonOptions)!.AsObject();
+            if (payload["regressions"] is JsonArray regressionRows)
+            {
+                DroppedDatabaseMark.Mark(regressionRows, page.Select(r => (string?)r.DatabaseName).ToList(), droppedDatabases);
+            }
+
+            return payload.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {

@@ -319,7 +319,7 @@ SELECT
     /// returned top-N page in C#, and a box whose hottest plans were all serial answered an empty page while
     /// the window held parallel plans. Darling's <c>TopQueriesSql</c> carries the same floor as its $6.
     /// </summary>
-    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0, QueryTagReadScope? tags = null)
+    public async Task<List<QueryStatsRow>> GetTopQueriesByCpuAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, ServerClock? serverClock = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int minMaxDop = 0, QueryTagReadScope? tags = null, IReadOnlyList<string>? excludeDatabaseNames = null)
     {
         using var _q = TimeQuery("GetTopQueriesByCpuAsync", "v_query_stats top N by CPU");
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
@@ -332,6 +332,9 @@ SELECT
         {
         using var connection = await OpenConnectionAsync();
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
+        /* #7725: the databases the server dropped, left out of the listed-databases ranking (the fill reads them with databaseNames).
+           NULL-safe like the procedures read: a row with no database name stays. */
+        dbClause += BuildDbExcludeClause(excludeDatabaseNames, "database_name", 7 + dbValues.Count, out var excludeValues);
         /* #5992: the query tag filter rides the same place as the database filter, before the ranking and the cap. */
         var tagValues = new List<object>();
         if (tags is not null) { dbClause += QueryTagReadScope.HashToken("query_hash"); tagValues.AddRange(tags.ParameterValues); }
@@ -341,7 +344,7 @@ SELECT
         {
         using var command = connection.CreateCommand();
         command.CommandText = TopQueriesByCpuSql(dbClause, candidates);
-        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count);
+        if (tags is not null) command.CommandText = tags.Apply(command.CommandText, 7 + dbValues.Count + excludeValues.Count);
         if (relation != "v_query_stats") command.CommandText = command.CommandText.Replace("v_query_stats", relation, StringComparison.Ordinal);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -354,6 +357,8 @@ SELECT
         command.Parameters.Add(new DuckDBParameter { Value = (serverClock ?? ServerClock.Utc).OffsetMinutesAt(startTime) });
         command.Parameters.Add(new DuckDBParameter { Value = minMaxDop });
         foreach (var db in dbValues)
+            command.Parameters.Add(new DuckDBParameter { Value = db });
+        foreach (var db in excludeValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
         foreach (var tagValue in tagValues)
             command.Parameters.Add(new DuckDBParameter { Value = tagValue });
