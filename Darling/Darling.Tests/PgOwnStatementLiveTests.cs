@@ -174,6 +174,17 @@ public sealed class PgOwnStatementLiveTests
             Assert.Skip("pg_stat_statements is not preloaded on this server: " + ex.Message);
         }
 
+        /* First, so the check that a new target connection runs is the call that creates its pg_stat_statements entry: the entry keeps the text of the call that made it. */
+        var pinned = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Options = MonitoredServerConnection.PinnedSearchPathOption,
+            ApplicationName = "pm7567-r7-pinned",
+        };
+        await using (var pinnedConnection = PostgresTargetProvider.CreatePinnedConnection(pinned.ConnectionString))
+        {
+            await pinnedConnection.OpenAsync(ct);
+        }
+
         /* The provider's own command: a single statement, with the trailing semicolon a collector may carry. */
         var query = new CollectorQuery("SELECT 7567 + 1 AS pm7567_single;");
         await using (var command = PostgresTargetProvider.Instance.CreateCommand(query, connection, 30))
@@ -237,13 +248,56 @@ public sealed class PgOwnStatementLiveTests
         Assert.True(PgOwnStatement.IsOwn(Stored("pg_stat_clear_snapshot")), Stored("pg_stat_clear_snapshot"));
         Assert.True(PgOwnStatement.IsOwn(Stored("pg_catalog.pg_extension AS e")), Stored("pg_catalog.pg_extension AS e"));
         Assert.True(PgOwnStatement.IsOwn(Stored("aurora_probe")), Stored("aurora_probe"));
-        Assert.True(PgOwnStatement.IsOwn(Stored("SELECT pg_catalog.current_setting(")), Stored("SELECT pg_catalog.current_setting("));
+        Assert.True(PgOwnStatement.IsOwn(Stored("SELECT pg_catalog.current_setting($1, $2)")), Stored("SELECT pg_catalog.current_setting($1, $2)"));
         Assert.False(PgOwnStatement.IsOwn(Stored("pm7567_plain")), Stored("pm7567_plain"));
 
         /* The SQL predicate the readers use agrees with the C# one on the stored text. */
         await using var predicate = new NpgsqlCommand(
             "SELECT " + PgOwnStatement.IsOwnSql("query") + " FROM pg_stat_statements WHERE query LIKE '%pm7567\\_single%'", connection);
         Assert.True((bool)(await predicate.ExecuteScalarAsync(ct))!);
+
+        /* Round 7: the commands that build their own SQL and skip the provider. The zone read is a two-statement batch, and
+           pg_stat_statements stores each statement on its own, so BOTH must end with the marker; the capability probes and the
+           per-connection search_path check run on a target too. Each goes through its real code path, not a copy of its SQL. */
+        PgLogNamedZone.ForgetZoneNames();
+        var zonePairs = new[] { new PgLogZonePair("2026-03-01 12:00:00", "UTC") };
+        Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
+        /* The second read of a setting already found to be a named zone sends the other form of the batch. */
+        Assert.NotNull(await PgLogNamedZone.ResolveAsync(connection, "UTC", zonePairs, 30, ct));
+        PgFileSettingsCapability.Reset();
+        PgLogFormatCapability.Reset();
+        PgReadBinaryFileCapability.Reset();
+        await PgFileSettingsCapability.IsReadableAsync(connection, "pm7567-r7", ct);
+        await PgLogFormatCapability.IsCsvlogEnabledAsync(connection, "pm7567-r7", ct);
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "pm7567-r7", ct);
+
+        var texts = new List<string>();
+        await using (var readAll = new NpgsqlCommand("SELECT query FROM pg_stat_statements", connection))
+        await using (var readerAll = await readAll.ExecuteReaderAsync(ct))
+        {
+            while (await readerAll.ReadAsync(ct))
+            {
+                texts.Add(readerAll.GetString(0));
+            }
+        }
+
+        void AssertMarked(string what, string needle)
+        {
+            var found = texts.Where(t => t.Contains(needle, StringComparison.Ordinal)).ToList();
+            Assert.True(found.Count > 0, what + " was not stored: " + needle);
+            foreach (var text in found)
+            {
+                Assert.True(PgOwnStatement.IsOwn(text), what + " is stored without the marker: " + text);
+            }
+        }
+
+        AssertMarked("the zone lookup (statement one)", "FROM pg_catalog.pg_timezone_names");
+        AssertMarked("the zone match (statement two)", "GROUP BY m.stamp, m.zone");
+        AssertMarked("the known-zone set (statement one, later reads)", "set_config($2, $1, $3)");
+        AssertMarked("the pg_file_settings probe", "has_table_privilege(");
+        AssertMarked("the log format probe", "string_to_array(");
+        AssertMarked("the pg_read_binary_file probe", "has_function_privilege(current_user, $3, $4)");
+        AssertMarked("the search_path check", "SELECT pg_catalog.current_setting($1)");
     }
 
     [Fact]
