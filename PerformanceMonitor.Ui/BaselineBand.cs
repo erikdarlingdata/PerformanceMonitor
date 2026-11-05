@@ -51,13 +51,27 @@ public static class BaselineBand
         {
             if (steps is null)
                 return null;
-            foreach (var step in steps)
+
+            /* The steps arrive sorted by FromX and do not overlap, so the one step that can hold x is the last whose FromX is at or
+               before it. A binary search: a 30-day custom range holds about 720 steps and this runs for every marker point and on every
+               crosshair move, where the linear walk it replaces cost the whole list each time. NaN lands before every step, as it
+               matched none before. */
+            int lo = 0, hi = steps.Count - 1, found = -1;
+            while (lo <= hi)
             {
-                if (x >= step.FromX && x < step.ToX)
-                    return step;
+                var mid = lo + ((hi - lo) / 2);
+                if (steps[mid].FromX <= x)
+                {
+                    found = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    hi = mid - 1;
+                }
             }
 
-            return null;
+            return found >= 0 && x < steps[found].ToX ? steps[found] : null;
         }
     }
 

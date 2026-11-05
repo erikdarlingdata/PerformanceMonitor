@@ -379,7 +379,7 @@ public class PgBaselineProvider
     private async Task<CachedBaseline> BuildEntryAsync(
         int serverId, string metricName, DateTime analysisTime, DateTime roundedHour, CancellationToken cancellationToken)
     {
-        var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
+        var (byMember, clock, utcOffsetMinutes, timeZoneId, faulted) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var buckets = BucketsOf(byMember, UnkeyedMember);
         var realTime = DateTime.UtcNow;
@@ -391,7 +391,8 @@ public class PgBaselineProvider
             FreshUntilUtc = buckets is not null && IsDailyCacheArm(metricName) ? realTime.AddDays(1) : null,
             Clock = clock,
             UtcOffsetMinutes = utcOffsetMinutes,
-            TimeZoneId = timeZoneId
+            TimeZoneId = timeZoneId,
+            Faulted = faulted
         };
     }
 
@@ -416,7 +417,9 @@ public class PgBaselineProvider
     /// <see cref="SharedComputeTimeout"/>; a caller that gives up (the browser aborted, the user switched server) stops
     /// waiting and the compute finishes and stores its result for the next load. A compute that fails or times out
     /// answers <see cref="BaselineBucket.Empty"/>, as <see cref="GetBaselineAsync(int, string, DateTime, CancellationToken)"/>
-    /// does for a failed one.</para>
+    /// does for a failed one, but that answer is not stored: the next request starts a compute again (the callers
+    /// that were waiting on the failed one share its answer). A store that really has no rows for the key is stored
+    /// and served like any other result.</para>
     /// </summary>
     public async Task<BaselineBucket> GetBaselineSharedAsync(
         int serverId, string metricName, DateTime lookupTime, DateTime computeTime, CancellationToken cancellationToken = default)
@@ -484,7 +487,7 @@ public class PgBaselineProvider
         int serverId, string cacheKey, DateTime roundedKey,
         Func<CancellationToken, Task<CachedBaseline>> compute, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        if (TryGetFresh(serverId, cacheKey, roundedKey, out var cached))
+        if (TryGetFresh(serverId, cacheKey, roundedKey, out var cached) && !cached.Faulted)
         {
             return cached;
         }
@@ -496,7 +499,14 @@ public class PgBaselineProvider
             {
                 using var own = new CancellationTokenSource(timeout);
                 var entry = await compute(own.Token);
-                Store(serverId, cacheKey, entry);
+                /* A faulted compute (the statement's own command timeout fires at 60 s, before this token's 90 s) is
+                   answered to the callers waiting on it and not kept: stored, it would read as "no baseline" for the
+                   whole CacheTtl on the busiest server. The next request starts a compute again. */
+                if (!entry.Faulted)
+                {
+                    Store(serverId, cacheKey, entry);
+                }
+
                 return (CachedBaseline?)entry;
             }
             catch (Exception ex)
@@ -565,7 +575,7 @@ public class PgBaselineProvider
 
         foreach (var set in misses.Chunk(KeyedSetWidth))
         {
-            var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
+            var (byMember, clock, utcOffsetMinutes, timeZoneId, _) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
 
             var computedAt = DateTime.UtcNow;
             for (var member = 1; member <= set.Length; member++)
@@ -768,14 +778,14 @@ public class PgBaselineProvider
             keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
     }
 
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBaselinesAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> ComputeBaselinesAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, CancellationToken cancellationToken)
     {
         /* Two seams, never one: a keyed lookup resolves ONLY through the keyed seam, so a metric with an unkeyed arm
            and no keyed one answers "no baseline" to a keyed call rather than the population's buckets under a member's
            name — and the reverse, so lane 27's server-wide arm keeps answering the unkeyed call it always answered. */
         var query = keys is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
-        if (query == null) return (null, LocalClockWindow.Utc(analysisTime), null, null);
+        if (query == null) return (null, LocalClockWindow.Utc(analysisTime), null, null, false);
 
         return await ComputeBucketsAsync(serverId, metricName, keys, analysisTime, query, cancellationToken);
     }
@@ -1058,7 +1068,7 @@ LIMIT 1";
     /// eight robust ones — the 1-based position in <paramref name="keys"/> of the key the row belongs to (#3901, see
     /// <see cref="PerMemberScaffold"/>). Null on failure, through the one classified catch.
     /// </summary>
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBucketsAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId, bool Faulted)> ComputeBucketsAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
@@ -1188,7 +1198,7 @@ LIMIT 1";
                 };
             }
 
-            return (byMember, clock, rawUtcOffsetMinutes, rawTimeZoneId);
+            return (byMember, clock, rawUtcOffsetMinutes, rawTimeZoneId, false);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
@@ -1217,7 +1227,7 @@ LIMIT 1";
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
 
-            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId);
+            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId, true);
         }
     }
 
@@ -1916,6 +1926,12 @@ clean AS (
         /// <summary>The raw time zone id <see cref="ReadServerClockAsync"/> read for this compute, beside
         /// <see cref="UtcOffsetMinutes"/> — see its remarks.</summary>
         public string? TimeZoneId { get; init; }
+
+        /// <summary>#7644: the compute ended in a fault (a command timeout or a connection error), as distinct from a
+        /// store that has no rows for the key or a metric with no arm. Both leave <see cref="Buckets"/> null; only this
+        /// one is worth asking the store again, so the shared read (<see cref="GetOrComputeSharedAsync"/>) neither
+        /// stores nor serves it.</summary>
+        public bool Faulted { get; init; }
 
         /// <summary>The member key this series is scoped to (#3691 lane 33); null for the population-wide series.
         /// Read only by <see cref="KeyedEntryCount"/> — the entry's identity is the cache key string.</summary>

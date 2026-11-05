@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
@@ -210,5 +211,114 @@ public sealed class OverviewBaselineSharedComputeTests
         Assert.Null(first);
         Assert.Null(second);
         Assert.Equal(2, computes);
+    }
+
+    /// <summary>What the real compute hands back when its statement times out or the store is unreachable: null buckets, flagged as a fault.</summary>
+    private static PgBaselineProvider.CachedBaseline Faulted(DateTime roundedKey) => new()
+    {
+        ComputedAt = roundedKey,
+        RealTime = DateTime.UtcNow,
+        Clock = LocalClockWindow.Utc(roundedKey),
+        Buckets = null,
+        Faulted = true,
+    };
+
+    /// <summary>A store that answered and holds no rows for the key: null buckets too, but not a fault.</summary>
+    private static PgBaselineProvider.CachedBaseline NoData(DateTime roundedKey) => new()
+    {
+        ComputedAt = roundedKey,
+        RealTime = DateTime.UtcNow,
+        Clock = LocalClockWindow.Utc(roundedKey),
+        Buckets = null,
+    };
+
+    [Fact]
+    public async Task AComputeThatReturnsAFault_IsNotCached_AndTheNextRequestComputesAgain()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<PgBaselineProvider.CachedBaseline> Compute(CancellationToken ct)
+            => Task.FromResult(Interlocked.Increment(ref computes) == 1 ? Faulted(key) : Computed(key));
+
+        var first = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None).WaitAsync(TestLimit);
+
+        Assert.True(first!.Faulted);
+        Assert.Null(first.Buckets);
+        Assert.NotNull(second!.Buckets);
+        Assert.Equal(2, computes);
+    }
+
+    [Fact]
+    public async Task ACompute_ThatFoundNoData_IsStillCached()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var computes = 0;
+        Task<PgBaselineProvider.CachedBaseline> Compute(CancellationToken ct)
+        {
+            Interlocked.Increment(ref computes);
+            return Task.FromResult(NoData(key));
+        }
+
+        var first = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None).WaitAsync(TestLimit);
+        var second = await provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None).WaitAsync(TestLimit);
+
+        Assert.Same(first, second);
+        Assert.Equal(1, computes);
+    }
+
+    [Fact]
+    public async Task ConcurrentRequestsDuringOneFaultedCompute_ShareItsAnswer()
+    {
+        await using var postgres = Unreachable();
+        var provider = new PgBaselineProvider(postgres);
+        var key = provider.RoundedKeyTime(MetricNames.IoLatency, Now);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var computes = 0;
+        async Task<PgBaselineProvider.CachedBaseline> Compute(CancellationToken ct)
+        {
+            Interlocked.Increment(ref computes);
+            await gate.Task;
+            return Faulted(key);
+        }
+
+        var first = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var second = provider.GetOrComputeSharedAsync(ServerId, "k", key, Compute, TimeSpan.FromMinutes(1), CancellationToken.None);
+        gate.SetResult();
+        var results = await Task.WhenAll(first, second).WaitAsync(TestLimit);
+
+        Assert.Equal(1, computes);
+        Assert.Same(results[0], results[1]);
+    }
+
+    private sealed class CountingLogger : ILogger
+    {
+        public int Errors;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Error) Interlocked.Increment(ref Errors);
+        }
+    }
+
+    [Fact]
+    public async Task AnUnreachableStore_IsAskedAgainOnEveryRead_NotAnsweredFromTheCache()
+    {
+        /* The real compute, not a stand-in: the connection fails inside ComputeBucketsAsync's catch, which is the path a command timeout takes too. */
+        await using var postgres = Unreachable();
+        var logger = new CountingLogger();
+        var provider = new PgBaselineProvider(postgres, logger);
+
+        var first = await provider.GetBaselineSharedAsync(ServerId, MetricNames.Cpu, WindowStart, Now, CancellationToken.None).WaitAsync(TestLimit);
+        var second = await provider.GetBaselineSharedAsync(ServerId, MetricNames.Cpu, WindowStart, Now, CancellationToken.None).WaitAsync(TestLimit);
+
+        Assert.Equal(BaselineBucket.Empty.SampleCount, first.SampleCount);
+        Assert.Equal(BaselineBucket.Empty.SampleCount, second.SampleCount);
+        Assert.Equal(2, logger.Errors);
     }
 }
