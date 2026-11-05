@@ -16,12 +16,14 @@ import { mergeSeriesRows } from "../../multi-picker.js";
 import { findingTitle, severityLabel, mergeBySentence, chainLine } from "../analysis-findings.js";
 import { timeSlicer, windowOf, rangeKeyOf, getSlice, setSlice, onSliceChange, effectiveContext, windowParams, stripValue, stripGap } from "../../time-slicer.js";
 import { comparePick, compareControl, compareCard, COMPARE_TOP } from "../top-compare.js";
+import { withheldDisplayText } from "../../mute-context.js";
 
 /* ─────────────────────────── shared cell renderers ─────────────────────────── */
 
 /** Query-text cell: a truncated one-liner that expands to the full statement (mono) — the B2 disclosure. */
-export function codeDisclosure(text) {
-  if (text == null || text === "") return document.createTextNode("—");
+export function codeDisclosure(rawText) {
+  if (rawText == null || rawText === "") return document.createTextNode("—");
+  const text = withheldDisplayText(rawText); /* #7548: the stored marker reads as words; every other text is shown as stored. */
   return disclosure(text, el("pre", { class: "code" }, [text]), { max: 100 });
 }
 
