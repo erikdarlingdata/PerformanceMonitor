@@ -364,6 +364,12 @@ a:hover { text-decoration: underline; }
   gap: 0.5rem;
 }
 .panel .panel-sub { font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+/* #7543: panels in one row are as tall as the tallest, and a panel that holds a chart is a column whose chart sits at the bottom, so the plots
+   of a row start at the same y whatever sits above them: a heading that wraps (a source label beside the window label) or a note, strip or
+   floor line that only one panel has. No offset to tune. A panel with no chart is left as it was. */
+.panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) { display: flex; flex-direction: column; }
+.panel-grid > .panel:has(> .panel-body > :is(.chart, .zoomable-chart)) > .panel-body { flex: 1; display: flex; flex-direction: column; }
+.panel-body > :is(.chart, .zoomable-chart) { margin-top: auto; }
 .panel.span-2 { grid-column: 1 / -1; }
 /* #6439: a sentence over a group of cards (the System Events counter charts) spans the full row; the slot stays empty (and takes no room) until a chart is drawn. */
 .panel-intro { grid-column: 1 / -1; }
