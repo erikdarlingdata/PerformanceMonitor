@@ -131,8 +131,31 @@ public sealed class WebChartAxisBehaviourTests
 
         // Under 1,024 MB the axis is exactly the one it drew without the size unit.
         Assert.Equal(Strings(a.GetProperty("smallWithout")), Strings(a.GetProperty("small")));
-        Assert.Equal(Strings(a.GetProperty("edgeWithout")), Strings(a.GetProperty("edge")));
         Assert.All(Strings(a.GetProperty("small")), l => Assert.EndsWith("MB", l, StringComparison.Ordinal));
+    }
+
+    /// <summary>#7555: a gridline's label states the value the line is drawn at. A size axis whose data max sits just under a unit step (1,023 MB
+    /// rounds up to a 1,500 MB top tick, which labels in GB) used to pick its ticks in MB and print them in GB, so the 1,000 MB line read "1.0 GB"
+    /// (1,024 MB) while the 1,023 MB peak was drawn above it. Each gridline's value is read from where the line is drawn, scaled by a dot drawn at a
+    /// known value, and must equal its label's number times its unit. The ticks are round numbers of the unit they print in (0.2, 0.4 ... 1.0 GB), so a label is exact, and the
+    /// bound is only float noise: a 500 MB line labelled "0.5 GB" (512 MB) is off by 2% of the axis and fails. Left axis and right axis, in MB and in bytes.</summary>
+    [Fact]
+    public void ASizeAxis_JustUnderAUnitStep_LabelsEveryGridlineWithTheValueItIsDrawnAt()
+    {
+        var a = Run().GetProperty("gridAxis");
+        foreach (var name in new[] { "mb1023", "mb1010", "mb386", "bytes1030000", "right386", "right1023" })
+        {
+            var lines = a.GetProperty(name).EnumerateArray().ToArray();
+            Assert.True(lines.Length >= 3, name + " drew fewer than three labelled gridlines");
+            var top = lines.Max(x => Math.Abs(x.GetProperty("tick").GetDouble()));
+            foreach (var l in lines)
+            {
+                var tick = l.GetProperty("tick").GetDouble();
+                var said = l.GetProperty("said").GetDouble();
+                Assert.True(Math.Abs(tick - said) <= top * 1e-4,
+                    $"{name}: the gridline drawn at {tick} is labelled \"{l.GetProperty("label").GetString()}\", which says {said}");
+            }
+        }
     }
 
     /// <summary>#7515: the panels pass the size unit themselves. A composed panel (renderComposedResult, left axis and overlay axis) and a
