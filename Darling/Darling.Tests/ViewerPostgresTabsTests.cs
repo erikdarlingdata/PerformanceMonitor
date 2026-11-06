@@ -603,6 +603,23 @@ public sealed class ViewerPostgresTabsTests
     }
 
     /// <summary>
+    /// #8014: the xmin grid's Held In column divides over the captures in the window, not over the source's own rows. The collector
+    /// stores nothing on a capture with no holder, so a session seen in 2 captures that won both has 2 rows and 2 wins, and "2 of 2"
+    /// read the same as a slot that held the horizon all window.
+    /// </summary>
+    [Fact]
+    public void XminHeldIn_ASourceSeenTwiceThatWonBoth_DoesNotReadAsTwoOfTwo()
+    {
+        var seenTwice = new DarlingPgXminReader.PgXminRow(
+            "session", DateTime.UtcNow, XminAge: 10, Holder: "pid 1", Detail: null, IsWinner: false,
+            PeakXminAge: 10, SamplesAsWinner: 2, Samples: 2);
+
+        var shown = PgDisplay.Xmin(seenTwice);
+
+        Assert.DoesNotContain("2 of 2", shown.WinnerShare, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The viewer's three row flags agree with the MCP surface's severity band on the same row.
     ///
     /// <para><b>Why this pin has to exist at all.</b> The viewer does not reference the service project, so
