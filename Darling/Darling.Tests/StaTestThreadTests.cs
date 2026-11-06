@@ -243,6 +243,44 @@ public sealed class StaTestThreadTests
         }
     }
 
+    /// <summary>
+    /// #7600: the three stalls of 11-06 all had the shared thread parked in <c>wpfgfx_cor3!MilComposition_SyncFlush</c>, the UI thread waiting
+    /// for WPF's render thread, in bodies that were one TextBlock or one small window, each early in a fresh test process. The message says
+    /// whether WPF's render engine was already loaded when the body began (the body that loads it pays the engine's start-up) and reads the
+    /// render thread's own stack, so the next stall names what that thread waited on.
+    /// </summary>
+    [Fact]
+    public void TheHangGuardsMessage_SaysWhetherTheRenderEngineWasLoaded_AndNamesTheRenderThreadsWait()
+    {
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(300) };
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() =>
+            {
+                /* Showing a window starts WPF's render engine and its render thread when nothing in the process has yet. */
+                var window = new Window { Width = 50, Height = 50, ShowInTaskbar = false };
+                window.Show();
+                host.Step("waiting with a window shown");
+                release.Wait();
+                window.Close();
+            }));
+
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"WPF's render engine \(wpfgfx\w*\) was (already|not yet) loaded when the body began"),
+                timedOut.Message);
+            /* The render thread is found by the wpfgfx frames on its stack, so its sentence always carries one. */
+            Assert.True(
+                Regex.IsMatch(timedOut.Message, @"WPF's render thread \(native id \d+, .*?\) was at: [^\r\n]*?wpfgfx"),
+                timedOut.Message);
+        }
+        finally
+        {
+            release.Set();
+            host.Shutdown();
+        }
+    }
+
     [Fact]
     public void TheHangGuardsMessage_SaysABodyThatSpinsInOneCall_WasUsingTheCpu()
     {
