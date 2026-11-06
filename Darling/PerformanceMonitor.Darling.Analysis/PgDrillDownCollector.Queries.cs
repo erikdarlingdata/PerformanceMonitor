@@ -47,17 +47,28 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 ORDER BY sqlserver_cpu_utilization DESC
 LIMIT 1";
 
+    /// <summary>#7896: one entry per request. A request alive across several snapshots in the span is sampled once per snapshot with
+    /// a climbing cumulative CPU, so the read keeps each (session, request) once, at its longest sample, before ranking and cutting
+    /// to five. <c>request_id</c> is the DMV's and is stored on every row; DISTINCT ON treats a NULL from an older row as one key.</summary>
     public const string QueriesAtSpikeSql = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
        query_text
-FROM v_query_snapshots
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_text NOT LIKE 'WAITFOR%'
-AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
+FROM (
+    SELECT DISTINCT ON (session_id, request_id)
+           collection_time, session_id, database_name, status,
+           cpu_time_ms, total_elapsed_time_ms, logical_reads,
+           wait_type, dop, parallel_worker_count,
+           query_text
+    FROM v_query_snapshots
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_text NOT LIKE 'WAITFOR%'
+    AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
+    ORDER BY session_id, request_id, cpu_time_ms DESC, collection_time DESC
+) AS per_request
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 

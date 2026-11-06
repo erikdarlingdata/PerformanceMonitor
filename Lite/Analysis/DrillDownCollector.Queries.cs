@@ -52,6 +52,9 @@ LIMIT 1";
         if (peakTime == null) return;
 
         // Step 2: Get queries active within 2 minutes of peak
+        /* #7896: one entry per request. A request alive across several snapshots in the span is sampled once per snapshot with a
+           climbing cumulative CPU, so the read keeps each (session, request) once, at its longest sample, before ranking and
+           cutting to five. request_id is the DMV's and is stored on every row; a NULL from an older row partitions as one key. */
         using var queryCmd = connection.CreateCommand();
         queryCmd.CommandText = $@"
 SELECT collection_time, session_id, database_name, status,
@@ -64,6 +67,7 @@ AND   collection_time >= $2
 AND   collection_time <= $3
 AND   query_text NOT LIKE 'WAITFOR%'
 AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
+QUALIFY ROW_NUMBER() OVER (PARTITION BY session_id, request_id ORDER BY cpu_time_ms DESC, collection_time DESC) = 1
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 
