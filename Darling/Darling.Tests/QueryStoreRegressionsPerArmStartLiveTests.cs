@@ -213,8 +213,8 @@ SELECT COALESCE(MAX(log_id), 0) + 1, @server_id, '{ServerName}', 'query_store_in
         var note = hit.GetProperty("truncation_note").GetString()!;
         Assert.Contains(Z(costStart), note, StringComparison.Ordinal);
         Assert.Contains(Z(failureStart), note, StringComparison.Ordinal);
-        Assert.Contains("query_store_interval_latest", note, StringComparison.Ordinal);
-        Assert.Contains("query_store_interval_wide", note, StringComparison.Ordinal);
+        /* #7729: the page prints this note, so it names how far back each comparison reaches and no store table. */
+        Assert.DoesNotContain("query_store_interval", note, StringComparison.Ordinal);
 
         var regressions = hit.GetProperty("regressions").EnumerateArray().ToList();
         var cost = Assert.Single(regressions, r => r.GetProperty("query_id").GetInt64() == CostQuery);

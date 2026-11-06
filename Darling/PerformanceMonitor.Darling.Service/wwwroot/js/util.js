@@ -1291,7 +1291,12 @@ export const FORMATTERS = {
   int: fmtInt,
   /* #7552: an identifier (a process id, a query id) is a name and not a quantity: no thousands separator, so it can be copied into pg_terminate_backend or sp_query_store_force_plan. */
   id: (v) => (v == null || v === "" ? "—" : String(v)),
-  num1: (v, o) => fmtNum(v, axisPlaces(o, 1)),
+  /* #7729: a whole value prints without the decimal (1, 309, 2,485), a fractional one keeps its one place (1.5). A value that rounds to a whole
+     at one place counts as whole, so 309.04 reads 309 and never 309.0. An axis tick (it has a step) keeps the places its step needs. */
+  num1: (v, o) => {
+    const n = Number(v);
+    return fmtNum(v, stepOf(o) == null && isFinite(n) && Number(n.toFixed(1)) % 1 === 0 ? 0 : axisPlaces(o, 1));
+  },
   num2: (v, o) => fmtNum(v, axisPlaces(o, 2)),
   rate: fmtRate,
   pct: fmtPct,
