@@ -86,20 +86,13 @@ public sealed class ChangeWatchPostgresLiveTests
         }
     }
 
-    /// <summary>Two snapshots of one statement inside the window that starts at <paramref name="start"/>. #7909: a series' first
-    /// sample in a window carries no interval, so the deltas ride on the second.</summary>
-    private static async Task StatementAsync(NpgsqlConnection c, DateTime start, long calls, long totalMs, CancellationToken ct, long queryId = 42L)
-    {
-        foreach (var (minutes, deltaCalls, deltaMs) in new[] { (29, 0L, 0L), (30, calls, totalMs) })
+    private static Task StatementAsync(NpgsqlConnection c, DateTime start, long calls, long totalMs, CancellationToken ct) =>
+        SeedAsync(c, "pg_statement_stats", new Dictionary<string, object>
         {
-            await SeedAsync(c, "pg_statement_stats", new Dictionary<string, object>
-            {
-                ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(start.AddMinutes(minutes)),
-                ["queryid"] = queryId, ["database_id"] = 5L, ["user_id"] = 10L, ["toplevel"] = true,
-                ["delta_calls"] = deltaCalls, ["delta_total_exec_time_ms"] = deltaMs,
-            }, ct);
-        }
-    }
+            ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(start.AddMinutes(30)),
+            ["queryid"] = 42L, ["database_id"] = 5L, ["user_id"] = 10L, ["toplevel"] = true,
+            ["delta_calls"] = calls, ["delta_total_exec_time_ms"] = totalMs,
+        }, ct);
 
     private static Task<ChangeWatchChange[]> OneChange(DateTime at, string what) =>
         Task.FromResult(new[] { new ChangeWatchChange($"pg_config:{what}:{at:O}", "pg_config", at, what) });
@@ -365,7 +358,11 @@ public sealed class ChangeWatchPostgresLiveTests
             await h.NewPassAt(() => start.AddMinutes(10)).DetectAsync(ct);
 
             /* Statement rows exist in both windows, but the one after-query is not in the before window (a statistics reset or a new query). */
-            await StatementAsync(h.Connection, change.AddMinutes(-60), 50, 500, ct, queryId: 41L);
+            await SeedAsync(h.Connection, "pg_statement_stats", new Dictionary<string, object>
+            {
+                ["server_id"] = PgServerId, ["server_name"] = PgServerName, ["collection_time"] = Naive(change.AddMinutes(-30)),
+                ["queryid"] = 41L, ["database_id"] = 5L, ["user_id"] = 10L, ["toplevel"] = true, ["delta_calls"] = 50L, ["delta_total_exec_time_ms"] = 500L,
+            }, ct);
             await StatementAsync(h.Connection, change, 50, 5_000, ct);
             await h.NewPass().EvaluateDueAsync(ct);
 

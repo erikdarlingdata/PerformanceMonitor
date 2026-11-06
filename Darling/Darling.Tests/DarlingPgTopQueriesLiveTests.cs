@@ -143,11 +143,8 @@ public sealed class DarlingPgTopQueriesLiveTests
                CAST(SUM(delta_calls) AS bigint) overflows at RUNTIME. A deterministic fault that needs no
                DDL against the shared store. */
             await DeleteStatsAsync(connection, ct);
-            /* Three samples: a series' first sample in the window carries no interval (#7909), so two counted
-               maxima are what overflow the cast. */
             await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
             await SeedStatsAsync(connection, ct, t1, OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
-            await SeedStatsAsync(connection, ct, t1.AddSeconds(60), OutOfRangeQueryId, deltaCalls: long.MaxValue, deltaTimeMs: 500, deltaRows: 1, walBytes: 0);
 
             /* Aurora FIRST, and this is the assertion that keeps the fix honest. The collector CAN run here,
                so a genuine fault must still read as a fault. A catch block that answered not_collected
@@ -194,14 +191,79 @@ public sealed class DarlingPgTopQueriesLiveTests
     }
 
     /// <summary>
-    /// #7909: every counter measures the same intervals. The stored <c>delta_*</c> columns carry the interval that
-    /// ENDED at each sample, so a series' first sample in the window carries an interval that began before the
-    /// window. The block and WAL figures are differenced inside the window and contribute 0 for that sample. Calls,
-    /// execution time and rows follow the same rule, so a per-call figure such as blocks per call is taken over the
-    /// same two intervals as its numerator.
+    /// #7909: a statement that ran in one collection interval of the window has ONE stored row in it, because the
+    /// collector stores nothing for a pass with no new calls, and its previous row can be hours earlier. That row's
+    /// stored deltas already cover the interval that ended at it, and the block increment is its cumulative figure
+    /// less the series' latest row before the window, so the statement ranks with both.
     /// </summary>
     [Fact]
-    public async Task CallsTimeAndRows_CountTheSameIntervalsAsTheBlockFigures_SoAFirstSampleInTheWindowAddsNothing()
+    public async Task AStatementWithOneSampleInTheWindow_RanksWithItsCallsAndItsBlockIncrementSinceItsRowBeforeTheWindow()
+    {
+        var rows = await TopQueriesOverAsync(async (connection, ct) =>
+        {
+            /* The tool reads the last four hours. The previous row is two hours before that window began. */
+            await SeedStatsAsync(connection, ct, MinutesAgo(6 * 60), OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, calls: 100, sharedBlksRead: 1_000);
+            await SeedStatsAsync(connection, ct, MinutesAgo(30), OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 2_000, calls: 110, sharedBlksRead: 1_100);
+        });
+
+        var row = Assert.Single(rows);
+        Assert.Equal(10, row.GetProperty("calls").GetInt64());
+        Assert.Equal(100, row.GetProperty("total_exec_time_ms").GetInt64());
+        Assert.Equal(1_000, row.GetProperty("rows_returned").GetInt64());
+        Assert.Equal(100, row.GetProperty("shared_blks_read").GetInt64());
+        Assert.Equal(1_000, row.GetProperty("wal_bytes").GetInt64());
+    }
+
+    /// <summary>
+    /// #7909: every counter covers the same intervals. Three samples a minute apart inside the window, with the
+    /// series' previous row an hour before the window began: the stored deltas give 100, 10 and 10 calls, and the
+    /// block and WAL increments are taken over the same three intervals, the first against the row before the
+    /// window. Blocks per call is then one figure over one set of intervals.
+    /// </summary>
+    [Fact]
+    public async Task ThreeSamplesWithARowBeforeTheWindow_CountCallsAndBlocksOverTheSameThreeIntervals()
+    {
+        var rows = await TopQueriesOverAsync(async (connection, ct) =>
+        {
+            var t0 = MinutesAgo(30);
+            await SeedStatsAsync(connection, ct, MinutesAgo(5 * 60), OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 500, calls: 1_000, sharedBlksRead: 900);
+            await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, calls: 1_100, sharedBlksRead: 1_000);
+            await SeedStatsAsync(connection, ct, t0.AddSeconds(60), OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 2_000, calls: 1_110, sharedBlksRead: 1_100);
+            await SeedStatsAsync(connection, ct, t0.AddSeconds(120), OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 3_000, calls: 1_120, sharedBlksRead: 1_200);
+        });
+
+        var row = Assert.Single(rows);
+        Assert.Equal(120, row.GetProperty("calls").GetInt64());
+        Assert.Equal(1_200, row.GetProperty("total_exec_time_ms").GetInt64());
+        Assert.Equal(12_000, row.GetProperty("rows_returned").GetInt64());
+        Assert.Equal(300, row.GetProperty("shared_blks_read").GetInt64());
+        Assert.Equal(2_500, row.GetProperty("wal_bytes").GetInt64());
+
+        /* 2.5 blocks per call, numerator and denominator over the same three intervals. */
+        Assert.Equal(2.5, (double)row.GetProperty("shared_blks_read").GetInt64() / row.GetProperty("calls").GetInt64(), 3);
+    }
+
+    /// <summary>
+    /// #7909: a first sighting the collector could date stores <c>delta_calls</c> equal to <c>calls</c>, crediting
+    /// the whole accrual to the interval, and its block and WAL figures are the cumulative values for the same
+    /// reason. There is no earlier row to difference against.
+    /// </summary>
+    [Fact]
+    public async Task AFirstSightingInsideTheWindow_ReportsItsCumulativeBlocksBesideItsCalls()
+    {
+        var rows = await TopQueriesOverAsync(async (connection, ct) =>
+            await SeedStatsAsync(connection, ct, MinutesAgo(30), OutOfRangeQueryId, deltaCalls: 50, deltaTimeMs: 500, deltaRows: 5_000, walBytes: 4_000, calls: 50, sharedBlksRead: 1_000));
+
+        var row = Assert.Single(rows);
+        Assert.Equal(50, row.GetProperty("calls").GetInt64());
+        Assert.Equal(500, row.GetProperty("total_exec_time_ms").GetInt64());
+        Assert.Equal(1_000, row.GetProperty("shared_blks_read").GetInt64());
+        Assert.Equal(4_000, row.GetProperty("wal_bytes").GetInt64());
+    }
+
+    /// <summary>Seeds through <paramref name="seed"/> on a clean store and returns the rows <c>get_pg_top_queries</c> answers for a
+    /// stock PostgreSQL target, failing on the error envelope rather than on a missing property.</summary>
+    private static async Task<JsonElement[]> TopQueriesOverAsync(Func<NpgsqlConnection, CancellationToken, Task> seed)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs),
@@ -220,34 +282,16 @@ public sealed class DarlingPgTopQueriesLiveTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             await SetEngineKindAsync(connection, ct, MonitoredEngineKind.Postgres);
-
-            /* Three samples a minute apart, all inside the window. The first carries a 100-call interval that ended at
-               it and began before the window; the two later ones carry 10 calls each. shared_blks_read is cumulative:
-               1,000 then 1,100 then 1,200, so the two in-window intervals read 100 blocks each. */
-            var t0 = MinutesAgo(30);
-            var t1 = t0.AddSeconds(60);
-            var t2 = t1.AddSeconds(60);
-            await SeedStatsAsync(connection, ct, t0, OutOfRangeQueryId, deltaCalls: 100, deltaTimeMs: 1_000, deltaRows: 10_000, walBytes: 1_000, sharedBlksRead: 1_000);
-            await SeedStatsAsync(connection, ct, t1, OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 2_000, sharedBlksRead: 1_100);
-            await SeedStatsAsync(connection, ct, t2, OutOfRangeQueryId, deltaCalls: 10, deltaTimeMs: 100, deltaRows: 1_000, walBytes: 3_000, sharedBlksRead: 1_200);
+            await seed(connection, ct);
 
             var root = JsonDocument.Parse(await DarlingMcpPgTopQueries(dataSource)).RootElement;
             Assert.False(
                 root.TryGetProperty("status", out var status) && status.GetString() == "error",
                 $"the read threw instead of executing: {root}");
-            var row = Assert.Single(root.GetProperty("queries").EnumerateArray());
-
-            /* The two in-window intervals, on every counter. */
-            Assert.Equal(20, row.GetProperty("calls").GetInt64());
-            Assert.Equal(200, row.GetProperty("total_exec_time_ms").GetInt64());
-            Assert.Equal(2_000, row.GetProperty("rows_returned").GetInt64());
-            Assert.Equal(200, row.GetProperty("shared_blks_read").GetInt64());
-            Assert.Equal(2_000, row.GetProperty("wal_bytes").GetInt64());
-
-            /* So blocks per call is 10, taken over the same intervals as its numerator. */
-            Assert.Equal(10.0, (double)row.GetProperty("shared_blks_read").GetInt64() / row.GetProperty("calls").GetInt64(), 3);
+            var rows = root.GetProperty("queries").EnumerateArray().ToArray();
 
             bodySucceeded = true;
+            return rows;
         }
         finally
         {
@@ -268,7 +312,7 @@ public sealed class DarlingPgTopQueriesLiveTests
 
     private static async Task SeedStatsAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc,
-        long queryId, long deltaCalls, long deltaTimeMs, long deltaRows, long walBytes, long sharedBlksRead = 5) =>
+        long queryId, long deltaCalls, long deltaTimeMs, long deltaRows, long walBytes, long calls = 100, long sharedBlksRead = 5) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
@@ -277,12 +321,12 @@ INSERT INTO pg_statement_stats
      temp_blks_read, temp_blks_written, wal_bytes, max_exec_peakmem_bytes,
      delta_calls, delta_total_exec_time_ms, delta_rows)
 VALUES ($1, $2, $3, $4, $5, 16384, 10, TRUE,
-        100, 5000, 91.5, 250,
-        10, $10, 3, 2,
+        $10, 5000, 91.5, 250,
+        10, $11, 3, 2,
         0, 0, $6, 2097152,
         $7, $8, $9)",
             CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), ServerId, ServerName,
-            queryId, walBytes, deltaCalls, deltaTimeMs, deltaRows, sharedBlksRead);
+            queryId, walBytes, deltaCalls, deltaTimeMs, deltaRows, calls, sharedBlksRead);
 
     private static async Task SeedTextAsync(
         NpgsqlConnection connection, CancellationToken ct, long queryId, string text) =>

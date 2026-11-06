@@ -85,16 +85,9 @@ public sealed class DarlingMcpPgWindowD8aLiveTests
     [
         new("get_pg_top_queries", "pg_statement_stats", "pg_statement_stats",
             (ds, n, h, end) => DarlingMcpPgStatementTools.GetPgTopQueries(ds, n, h, as_of: AsOf(end)),
-            async (c, n, at) =>
-            {
-                /* #7909: a series' first sample in the window carries no interval, so the second snapshot carries the deltas. */
-                foreach (var (snap, deltaCalls, deltaMs, deltaRows) in new[] { (at, 0L, 0L, 0L), (at.AddMinutes(1), 5L, 50L, 50L) })
-                {
-                    await Exec(c,
-                        "INSERT INTO pg_statement_stats (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls, total_exec_time_ms, min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, temp_blks_read, temp_blks_written, blk_read_time_ms, blk_write_time_ms, wal_records, wal_fpi, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds) VALUES ($1, $2, $3, $4, 1, 1, 1, TRUE, 10, 100.0, 1.0, 20.0, 10.0, 100, 100, 10, 0, 0, 0, 0, 1.0, 0.0, 0, 0, 0, $5, $6, $7, 60)",
-                        CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(snap), Id(n), n, deltaCalls, deltaMs, deltaRows);
-                }
-            }),
+            async (c, n, at) => await Exec(c,
+                "INSERT INTO pg_statement_stats (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel, calls, total_exec_time_ms, min_exec_time_ms, max_exec_time_ms, mean_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read, shared_blks_dirtied, shared_blks_written, temp_blks_read, temp_blks_written, blk_read_time_ms, blk_write_time_ms, wal_records, wal_fpi, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds) VALUES ($1, $2, $3, $4, 1, 1, 1, TRUE, 10, 100.0, 1.0, 20.0, 10.0, 100, 100, 10, 0, 0, 0, 0, 1.0, 0.0, 0, 0, 0, 5, 50.0, 50, 60)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at), Id(n), n)),
         new("get_pg_database_stats", "pg_database_stats", "pg_database_stats",
             (ds, n, h, end) => DarlingMcpPgDatabaseTools.GetPgDatabaseStats(ds, n, h, as_of: AsOf(end)),
             async (c, n, at) =>
