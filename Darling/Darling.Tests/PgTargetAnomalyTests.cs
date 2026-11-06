@@ -998,13 +998,13 @@ public sealed class PgTargetAnomalyTests
 
         /* The gate arm: the mean's robust sigmas against the same routine. */
         var robust = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("mean_ms_per_sec", 1507.2), ("mean_modified_z", 8.8), ("mean_ratio", 7.5))))!;
-        Assert.Contains(" led by Lock:relation. The window's mean rate was 1507.2 ms/sec against a routine of 200 — 8.8 times its usual variation above it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak. This is a shift in the overall wait profile", robust.Investigation, StringComparison.Ordinal);
+        Assert.Contains(" led by Lock:relation. The window's mean rate was 1507.2 ms/sec against a routine of 200 — 8.8 times its usual variation above it — so the whole window sat high, not one delta. This is a shift in the overall wait profile", robust.Investigation, StringComparison.Ordinal);
         Assert.Contains("20.2 times its usual variation above its normal level", robust.Headline, StringComparison.Ordinal);
         Assert.DoesNotContain("× it", robust.Investigation, StringComparison.Ordinal);
 
         /* The ratio arm (modified z 0 by construction): the mean's multiple, the stamped mean_ratio first. */
         var classical = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("modified_z", 0), ("mean_ms_per_sec", 1507.2), ("mean_modified_z", 0), ("mean_ratio", 7.5))))!;
-        Assert.Contains("The window's mean rate was 1507.2 ms/sec against a routine of 200 — about 7.5× it — so the whole window sat high, not one delta; the detector fires only when the mean clears its bar as well as the peak.", classical.Investigation, StringComparison.Ordinal);
+        Assert.Contains("The window's mean rate was 1507.2 ms/sec against a routine of 200 — about 7.5× it — so the whole window sat high, not one delta.", classical.Investigation, StringComparison.Ordinal);
         Assert.DoesNotContain("times its usual variation above it", classical.Investigation, StringComparison.Ordinal);
         /* A fact stamped with the mean but no mean_ratio: the quotient is the belt (1507.2 / 200 = 7.5). */
         var unstampedRatio = PgTargetAdvice.Compose(PgTargetFactKeys.AnomalyWaitProfile, Lookup(Profile(("modified_z", 0), ("mean_ms_per_sec", 1507.2))))!;

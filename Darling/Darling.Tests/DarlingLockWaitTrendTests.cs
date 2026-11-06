@@ -103,7 +103,7 @@ public sealed class DarlingLockWaitTrendTests
             var cut = JsonDocument.Parse(await DarlingMcpBlockingTools.GetLockWaitTrend(dataSource, ServerName, 4));
             Assert.Equal("empty", cut.RootElement.GetProperty("status").GetString());
             Assert.True(cut.RootElement.GetProperty("hints").GetProperty("window_truncated").GetBoolean());
-            Assert.DoesNotContain("genuinely quiet", cut.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+            Assert.DoesNotContain("this window was quiet", cut.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
 
             /* A server monitored since before the window starts is covered, and the same empty read is a true all-clear. */
             await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET created_date = $2 WHERE server_id = $1", ServerId, DarlingMcpTestData.Naive(MinutesAgo(2 * 24 * 60)));
@@ -112,7 +112,7 @@ public sealed class DarlingLockWaitTrendTests
             var noLocksDoc = JsonDocument.Parse(noLocks);
             Assert.Equal("empty", noLocksDoc.RootElement.GetProperty("status").GetString());
             var noLocksText = noLocksDoc.RootElement.GetProperty("message").GetString()!;
-            Assert.Contains("genuinely quiet rather than broken", noLocksText, StringComparison.Ordinal);
+            Assert.Contains("this window was quiet", noLocksText, StringComparison.Ordinal);
 
             /* Same zero rows as the branch above, and it must NOT reach for the same word. */
             Assert.DoesNotContain("EVER", noLocksText, StringComparison.Ordinal);

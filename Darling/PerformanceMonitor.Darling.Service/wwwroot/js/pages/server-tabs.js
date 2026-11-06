@@ -578,6 +578,8 @@ export const SERVER_TABS = [
           series: DURATION_SERIES,
           format: "ms",
           span: 2,
+          /* #7692: rows exist only where queries ran, so the gap rule needs the reply's bucket. */
+          bucketKey: "bucket_minutes",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -588,6 +590,7 @@ export const SERVER_TABS = [
           xKey: "time",
           series: EXECUTION_RATE_SERIES,
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -602,6 +605,7 @@ export const SERVER_TABS = [
           subtitle: ctx.label,
           format: "ms",
           span: 2,
+          bucketKey: "bucket_minutes",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
@@ -1743,7 +1747,9 @@ export const POSTGRES_TABS = [
         /* #7409: Amazon Aurora has its own instrument and answers "not collected" here, so the panel is not drawn there. */
         true,
         /* #7428: what Backends Seen counts differs by instrument, and the answer says which instrument fed it. */
-        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true }
+        { noteFrom: pgWaitSamplingBackendsNote, noteQuiet: true,
+          /* #7684 item 4: a true negative says one plain sentence; the tool's long text (instrument names, the sampler's floor) is behind "More detail". */
+          emptyLine: true }
       ),
       tablePanel(
         "OS CPU by Query (pg_stat_kcache)",
