@@ -542,7 +542,11 @@ public sealed class SlackThreadPosterTests
 
         Assert.Equal(SlackThreadPostOutcome.Posted, outcome);
         Assert.Equal(parentTs, posts.Posts[^1].ThreadTs);
-        Assert.Single(threads.Threads);
+        /* The parent's thread is saved as the linked request's own, so a request linked to the linked one finds it with one lookup. No
+           new thread opened: both rows name the parent's channel and ts. */
+        Assert.Equal(2, threads.Threads.Count);
+        Assert.Equal(("C0BOT", parentTs), (threads.Threads[LinkedId].ChannelId, threads.Threads[LinkedId].ThreadTs));
+        Assert.Equal(parentTs, threads.Threads[RequestId].ThreadTs);
         Assert.Contains(SlackThreadPosts.OnceKey(LinkedId, SlackThreadPosts.RequestKey), threads.Marks);
     }
 

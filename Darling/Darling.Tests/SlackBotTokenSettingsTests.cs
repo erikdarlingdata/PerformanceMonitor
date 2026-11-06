@@ -31,13 +31,13 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class SlackBotTokenSettingsTests
 {
-    private const string BotToken = "xoxb-1111-2222-bot-token-not-real";
-    private const string AppToken = "xapp-1-A111-2222-app-token-not-real";
+    internal const string BotToken = "xoxb-1111-2222-bot-token-not-real";
+    internal const string AppToken = "xapp-1-A111-2222-app-token-not-real";
 
     private static string Seal(PasswordPrivateKey key, string value, string slot) =>
         PasswordSeal.Seal(value, key.PublicKey, PasswordBinding.ForWebhook(slot, PasswordBinding.WebhookSettingsRow, null, null));
 
-    private static void AssertNoToken(string text)
+    internal static void AssertNoToken(string text)
     {
         Assert.DoesNotContain(BotToken, text, StringComparison.Ordinal);
         Assert.DoesNotContain(AppToken, text, StringComparison.Ordinal);
@@ -181,6 +181,27 @@ public sealed class SlackBotTokenSettingsTests
         Assert.Equal("The service has published no key.", refused.Message);
     }
 
+    internal sealed class CapturingLogger : ILogger
+    {
+        public List<string> Lines { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Lines.Add(formatter(state, exception) + (exception is null ? "" : " " + exception));
+    }
+}
+
+/// <summary>
+/// #7656 on a live store: the start-up seal turns plain Slack bot and app-level tokens on the settings row into sealed text, the service
+/// opens them, and no log line carries a token.
+/// </summary>
+/* #1776 own-store: the one live fact mints its own scratch database through ScratchPostgres and touches nothing on the shared one, so
+   the class is deliberately NOT [Collection("live-postgres")]. */
+public sealed class SlackBotTokenSettingsLivePostgresTests
+{
     [Fact]
     public async Task TheStartSeal_SealsPlainTokensOnTheSettingsRow_AndTheServiceOpensThem_WithNoTokenInAnyLogLine()
     {
@@ -198,11 +219,11 @@ public sealed class SlackBotTokenSettingsTests
             }
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var logger = new CapturingLogger();
+            var logger = new SlackBotTokenSettingsTests.CapturingLogger();
             var provider = new StoreConfigProvider(postgres, logger);
             var seeded = new DarlingConfig();
-            seeded.Webhooks.SlackBotToken = BotToken;
-            seeded.Webhooks.SlackAppToken = AppToken;
+            seeded.Webhooks.SlackBotToken = SlackBotTokenSettingsTests.BotToken;
+            seeded.Webhooks.SlackAppToken = SlackBotTokenSettingsTests.AppToken;
             await provider.SeedIfEmptyAsync(seeded, ct);
             using var key = PasswordPrivateKey.Generate();
             var ring = DarlingPasswordKey.FromPrivateKey(key);
@@ -215,19 +236,19 @@ public sealed class SlackBotTokenSettingsTests
                 Assert.True(await reader.ReadAsync(ct));
                 Assert.True(PasswordSeal.IsSealed(reader.GetString(0)));
                 Assert.True(PasswordSeal.IsSealed(reader.GetString(1)));
-                AssertNoToken(reader.GetString(0));
-                AssertNoToken(reader.GetString(1));
+                SlackBotTokenSettingsTests.AssertNoToken(reader.GetString(0));
+                SlackBotTokenSettingsTests.AssertNoToken(reader.GetString(1));
             }
 
             var view = await provider.LoadViewAsync(new DarlingConfig(), ct);
             Assert.NotNull(view);
             var opened = DarlingWebhookSecrets.Open(view!.Webhooks, Array.Empty<NotificationRoute>(), ring);
             Assert.Empty(opened.Failures);
-            Assert.Equal(BotToken, opened.Webhooks.SlackBotToken);
-            Assert.Equal(AppToken, opened.Webhooks.SlackAppToken);
+            Assert.Equal(SlackBotTokenSettingsTests.BotToken, opened.Webhooks.SlackBotToken);
+            Assert.Equal(SlackBotTokenSettingsTests.AppToken, opened.Webhooks.SlackAppToken);
             foreach (var line in logger.Lines)
             {
-                AssertNoToken(line);
+                SlackBotTokenSettingsTests.AssertNoToken(line);
             }
 
             bodySucceeded = true;
@@ -237,18 +258,6 @@ public sealed class SlackBotTokenSettingsTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
             await scratch.DisposeAsync();
         }
-    }
-
-    internal sealed class CapturingLogger : ILogger
-    {
-        public List<string> Lines { get; } = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Lines.Add(formatter(state, exception) + (exception is null ? "" : " " + exception));
     }
 }
 
