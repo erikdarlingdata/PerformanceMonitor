@@ -2502,20 +2502,12 @@ public partial class MainWindow : Window
         try
         {
             /* One entry per destination (the settings row's, and each route's own), remembered by its Key and named by its
-               Label, so two routes pointing one channel at two destinations are told apart and the notice names the route. */
-            foreach (var channel in _webhookAlertService.GetChannelFailureCounts())
+               Label, so two routes pointing one channel at two destinations are told apart and the notice names the route.
+               The deciding and the remembering are WebhookChannelCheck's, which pins without a window. */
+            foreach (var (notice, label, count) in WebhookChannelCheck.Look(_webhookAlertService.GetChannelFailureCounts(), _webhookChannelFailing))
             {
-                _webhookChannelFailing.TryGetValue(channel.Key, out var wasFailing);
-                var notice = WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured);
-                if (notice == WebhookChannelNotice.None)
-                {
-                    continue;
-                }
-
-                _webhookChannelFailing[channel.Key] = notice == WebhookChannelNotice.Failing;
-
                 if (App.AlertsEnabled
-                    && WebhookChannelTrayNotice.For(notice, channel.Label, channel.ConsecutiveFailures) is { } text)
+                    && WebhookChannelTrayNotice.For(notice, label, count) is { } text)
                 {
                     _trayService?.ShowNotification(
                         text.Title,

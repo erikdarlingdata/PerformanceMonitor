@@ -334,19 +334,80 @@ public sealed class WebhookChannelFailureNoticeTests
     }
 
     /// <summary>The window wires the check onto the status timer that runs the connection checks, reads the
-    /// counts from the webhook service it built, and decides with the shared policy. A WPF window cannot be
-    /// driven from a unit test, so this is pinned from source.</summary>
+    /// counts from the webhook service it built, and hands them with its memory to <see cref="WebhookChannelCheck"/>,
+    /// which decides with the shared policy. A WPF window cannot be driven from a unit test, so the wiring is pinned
+    /// from source; the deciding is pinned by behaviour below.</summary>
     [Fact]
     public void TheStatusTimer_RunsTheChannelCheck_RightAfterTheConnectionCheck()
     {
         var window = ReadRepoFile(Path.Combine("Lite", "MainWindow.xaml.cs"));
+        var check = ReadRepoFile(Path.Combine("Lite", "Services", "WebhookChannelCheck.cs"));
 
         Assert.Contains(
             "CheckConnectionsAndNotify();\r\n            CheckWebhookChannelsAndNotify();",
             window.Replace("\r\n", "\n").Replace("\n", "\r\n"), StringComparison.Ordinal);
         Assert.Contains("_webhookAlertService.GetChannelFailureCounts()", window, StringComparison.Ordinal);
-        Assert.Contains("WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures, channel.Configured)", window, StringComparison.Ordinal);
+        Assert.Contains("WebhookChannelCheck.Look(_webhookAlertService.GetChannelFailureCounts(), _webhookChannelFailing)", window, StringComparison.Ordinal);
+        Assert.Contains("WebhookChannelFailurePolicy.Decide(wasFailing, destination.ConsecutiveFailures, destination.Configured)", check, StringComparison.Ordinal);
         Assert.Contains("WebhookChannelTrayNotice.For(", window, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The window's loop, as the helper it calls: three Slack destinations (the settings row's and two routes') are
+    /// remembered apart by Key. The failing route is announced once with its Label, the healthy destinations say
+    /// nothing, a later look at the same state says nothing again, and the route's destination going away closes it as
+    /// turned off, naming the route, and forgets it.
+    /// </summary>
+    [Fact]
+    public void TheWindowsLook_RemembersEachDestinationByKey_AndNamesTheRoute()
+    {
+        var memory = new Dictionary<string, bool>(StringComparer.Ordinal);
+        WebhookChannelFailureCount SettingsRow(int count) => new(NotificationRouter.SlackChannel, count, Configured: true);
+        WebhookChannelFailureCount Route(int id, int count, bool configured = true) => new(NotificationRouter.SlackChannel, count, configured, RouteId: id);
+
+        var first = WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 3), Route(2, 0) }, memory);
+
+        var failing = Assert.Single(first);
+        Assert.Equal(WebhookChannelNotice.Failing, failing.Notice);
+        Assert.Equal("Slack (route 1)", failing.Label);
+        Assert.Equal(3, failing.ConsecutiveFailures);
+        Assert.True(memory["Slack:route:1"]);
+        Assert.False(memory.ContainsKey("Slack"));
+        Assert.False(memory.ContainsKey("Slack:route:2"));
+
+        /* The same state, further along: an edge is not announced twice, and a delivery on route 2 is not route 1's recovery. */
+        Assert.Empty(WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 5), Route(2, 0) }, memory));
+        Assert.True(memory["Slack:route:1"]);
+
+        /* Route 1 is disabled: the service reports its destination once more, unconfigured, and the look closes it as turned off. */
+        var closed = WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(1, 5, configured: false), Route(2, 0) }, memory);
+
+        var turnedOff = Assert.Single(closed);
+        Assert.Equal(WebhookChannelNotice.TurnedOff, turnedOff.Notice);
+        Assert.Equal("Slack (route 1)", turnedOff.Label);
+        Assert.False(memory.ContainsKey("Slack:route:1"));
+
+        /* Forgotten: the destination is no longer listed, and nothing is said about it again. */
+        Assert.Empty(WebhookChannelCheck.Look(new[] { SettingsRow(0), Route(2, 0) }, memory));
+        Assert.Empty(memory);
+    }
+
+    /// <summary>A destination that recovers is told so and forgotten, and the settings row's own destination is keyed
+    /// by the channel name alone, as it was before routes had entries of their own.</summary>
+    [Fact]
+    public void TheWindowsLook_ClosesARecoveredDestination_AndKeysTheSettingsRowByChannel()
+    {
+        var memory = new Dictionary<string, bool>(StringComparer.Ordinal);
+
+        var failing = Assert.Single(WebhookChannelCheck.Look(new[] { new WebhookChannelFailureCount(NotificationRouter.SlackChannel, 3, Configured: true) }, memory));
+        Assert.Equal(WebhookChannelNotice.Failing, failing.Notice);
+        Assert.Equal("Slack", failing.Label);
+        Assert.True(memory["Slack"]);
+
+        var recovered = Assert.Single(WebhookChannelCheck.Look(new[] { new WebhookChannelFailureCount(NotificationRouter.SlackChannel, 0, Configured: true) }, memory));
+        Assert.Equal(WebhookChannelNotice.Recovered, recovered.Notice);
+        Assert.Equal("Slack", recovered.Label);
+        Assert.Empty(memory);
     }
 
     /// <summary>
