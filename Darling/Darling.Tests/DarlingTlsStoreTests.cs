@@ -485,7 +485,7 @@ public sealed class DarlingTlsStoreTests
             new List<X509Certificate2> { bad }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
 
         Assert.Contains($"web.network.tls.store.subject '{Name}' matches no certificate", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("1 certificate(s) in the LocalMachine\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -497,8 +497,8 @@ public sealed class DarlingTlsStoreTests
         var ex = Assert.Throws<InvalidOperationException>(() => DarlingTlsStore.Select(
             new List<X509Certificate2> { bad, expired }, new WebTlsStoreConfig { Subject = Name }, Now, "web"));
 
-        Assert.Contains("matches 1 certificate(s) in the LocalMachine\My store but none can be served (expired: 1,", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("1 certificate(s) in the LocalMachine\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("matches 1 certificate(s) in the LocalMachine\\My store but none can be served (expired: 1,", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1 certificate(s) in the LocalMachine\\My store have a Subject Alternative Name that could not be read", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
