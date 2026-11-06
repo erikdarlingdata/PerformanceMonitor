@@ -855,6 +855,7 @@ public partial class ServerTab : UserControl
     /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>
     private async System.Threading.Tasks.Task RefreshOverviewAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
+        string? failedReads = null;
         try
         {
             /* #4296, #4766: the lanes plot the UTC instant, and the comparison is "the same wall-clock hours N days
@@ -868,12 +869,17 @@ public partial class ServerTab : UserControl
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
                     CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, clock);
-            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
+            failedReads = await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, clock, comparison);
         }
         catch (Exception ex)
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshOverviewAsync failed: {ex.Message}");
         }
+
+        /* A lane that did not read is drawn as failed, and the tab is not refreshed: the refresh's own catch puts the failed reads
+           on the status line in place of "Last refresh". */
+        if (failedReads is not null)
+            throw new InvalidOperationException(failedReads);
     }
 
     /// <summary>Tab 4 — CPU</summary>

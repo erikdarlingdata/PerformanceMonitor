@@ -156,10 +156,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// <para>Ten reads go out at once against a ten-permit pool, which is why the fan-out width is declared
     /// below: at a 30-day range these were measured at 24.4-64.1 s EACH, and a deadline derived from one read
     /// in isolation is not a bound on that (#3004).</para>
+    ///
+    /// <para>A read that fails costs its lane, which is drawn as failed (<see cref="ShowFailed"/>), and the other lanes draw as
+    /// usual. The return value names the reads that failed (<see cref="OverviewLaneReadFailures.Summary"/>), so the host does not
+    /// call the tab refreshed; null when all ten completed.</para>
     /// </summary>
-    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
+    public async Task<string?> RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        if (_dataService == null || _isRefreshing) return;
+        if (_dataService == null || _isRefreshing) return null;
         _isRefreshing = true;
 
         try
@@ -223,14 +227,14 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
             }
             else
-                ShowEmpty(CpuChart, "CPU %");
+                ShowFailed(CpuChart, "CPU %");
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
                     waitTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
                     "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
             else
-                ShowEmpty(WaitStatsChart, "Wait ms/sec");
+                ShowFailed(WaitStatsChart, "Wait ms/sec");
 
             {
                 var blockingData = blockingTask.IsCompletedSuccessfully
@@ -243,6 +247,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     ? PerformanceMonitor.Ui.BlockingTrendLabels.UnitFor(blockingTask.Result.Select(d => d.Source))
                     : PerformanceMonitor.Ui.BlockingTrendLabels.ReportsUnit;
                 UpdateBlockingLane(blockingData, deadlockData, blockingBaseline, (endUtc - startUtc).TotalDays, blockingUnit);
+                /* The lane draws the series that read; a series that did not is not "no events", so the lane says so. */
+                if (!blockingTask.IsCompletedSuccessfully || !deadlockTask.IsCompletedSuccessfully)
+                    MarkFailed(BlockingChart);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
@@ -250,7 +257,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     memoryTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
-                ShowEmpty(MemoryChart, "Memory MB");
+                ShowFailed(MemoryChart, "Memory MB");
 
             if (fileIoTask.IsCompletedSuccessfully)
             {
@@ -267,7 +274,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                     pointReads: ioReads, minPointReads: ioMinReads);
             }
             else
-                ShowEmpty(FileIoChart, "I/O ms");
+                ShowFailed(FileIoChart, "I/O ms");
 
             /* VLines must be re-attached before SyncXAxes so they're part of
                the render set when the chart refreshes. */
@@ -282,6 +289,15 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 startUtc, endUtc,
                 blockingTask.IsCompletedSuccessfully ? blockingTask.Result.Select(d => d.Time) : [],
                 deadlockTask.IsCompletedSuccessfully ? deadlockTask.Result.Select(d => d.Time) : []);
+
+            /* The reads that failed, named in lane order for the host's status line; null when all ten read. */
+            return OverviewLaneReadFailures.Summary(
+            [
+                ("CPU %", cpuTask), ("Wait ms/sec", waitTask), ("Blocking", blockingTask), ("Deadlocks", deadlockTask),
+                ("Buffer Pool MB", memoryTask), ("I/O ms", fileIoTask),
+                ("CPU baseline", cpuBaselineTask), ("Wait baseline", waitBaselineTask), ("I/O baseline", ioBaselineTask),
+                ("Blocking baseline", blockingBaselineTask),
+            ]);
         }
         finally
         {
@@ -653,6 +669,25 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         chart.Plot.Axes.Margins(bottom: 0);
         chart.Plot.Axes.SetLimitsY(0, 1);
 
+        chart.Refresh();
+    }
+
+    /* A lane whose read failed is drawn as the empty lane is, then says so over it, so it cannot pass for a quiet healthy lane. */
+    private void ShowFailed(ScottPlot.WPF.WpfPlot chart, string title)
+    {
+        ShowEmpty(chart, title);
+        MarkFailed(chart);
+    }
+
+    /* The note is anchored to the lane's pixels, not its axes, so SyncXAxes leaves it where it is. */
+    private static void MarkFailed(ScottPlot.WPF.WpfPlot chart)
+    {
+        var note = chart.Plot.Add.Annotation("read failed", ScottPlot.Alignment.MiddleCenter);
+        note.LabelFontColor = ChartStyle.GetThemeColors().Text;
+        note.LabelFontSize = 11;
+        note.LabelBackgroundColor = ScottPlot.Colors.Transparent;
+        note.LabelBorderColor = ScottPlot.Colors.Transparent;
+        note.LabelShadowColor = ScottPlot.Colors.Transparent;
         chart.Refresh();
     }
 
