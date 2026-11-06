@@ -277,6 +277,16 @@ public sealed class DarlingServer : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Takes the dot back to the unclassified grey. The status pass calls this when its freshness read fails:
+    /// nothing was learned about this server this tick, so the last tick's answer must not keep standing as if it were
+    /// current.</summary>
+    public void ClearFreshness()
+    {
+        IsOnline = null;
+        CollectionStale = false;
+        AwaitingFirstCollection = false;
+    }
+
     /// <summary>
     /// The sidebar row's status, as a VALUE — the same <see cref="ServerCollectionStatus"/> the Overview card
     /// renders (#2473). This row used to derive its own copy of the status ladder from the same flags, on a
