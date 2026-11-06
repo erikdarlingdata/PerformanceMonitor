@@ -158,6 +158,38 @@ public sealed class FleetGateStatsTests
         Assert.Equal(100.0 * 8 / 13, snapshot.SkippedPercent, 6);
     }
 
+    /// <summary>#4938: a slot the grid counted as run and the single-flight gate then refused is one skipped slot and no run,
+    /// in the full and the judged counts. The run is taken from the minute that holds it when the minute turned over between
+    /// the two records, and a run no minute in the window holds any more leaves only the skip: no count goes below zero.</summary>
+    [Fact]
+    public void AMoveOfARunToSkipped_TakesTheRunFromTheNewestMinuteThatHoldsOne_AndNeverGoesBelowZero()
+    {
+        var now = T0;
+        var stats = new FleetGateStats(() => now, () => TimeSpan.FromMinutes(DarlingSelfAlertEvaluator.FleetGateStartupMinutes + 1));
+
+        stats.RecordSlot(0);
+        stats.MoveRunToSkipped();
+        var sameMinute = stats.Snapshot();
+        Assert.Equal(0, sameMinute.Run);
+        Assert.Equal(1, sameMinute.Skipped);
+        Assert.Equal(0, stats.SnapshotJudged().Run);
+        Assert.Equal(1, stats.SnapshotJudged().Skipped);
+
+        now = T0.AddMinutes(5);
+        stats.RecordSlot(0);
+        now = T0.AddMinutes(6);
+        stats.MoveRunToSkipped();
+        var turnedOver = stats.Snapshot();
+        Assert.Equal(0, turnedOver.Run);
+        Assert.Equal(2, turnedOver.Skipped);
+
+        now = T0.AddMinutes(70);
+        stats.MoveRunToSkipped();
+        var noRunLeft = stats.Snapshot();
+        Assert.Equal(0, noRunLeft.Run);
+        Assert.Equal(1, noRunLeft.Skipped);
+    }
+
     [Fact]
     public void TheWindow_KeepsSixtyMinutes_AndDropsTheOldBuckets()
     {

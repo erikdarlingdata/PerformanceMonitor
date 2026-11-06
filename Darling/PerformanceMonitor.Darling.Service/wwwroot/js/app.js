@@ -85,7 +85,9 @@ const statusbar = document.getElementById("statusbar");
 
 /* RULE for every route this switch returns: a route must never write, export or confirm anything on load. A link
    from another site can open the dashboard with a live session behind it (#6286), so a page reached by an address
-   may only read and draw; a change happens after a click on a button inside the page, never from the address. */
+   may only read and draw; a change happens after a click on a button inside the page, never from the address.
+   The only POSTs a route sends on load are reads: /api/compose/run (notebooks and views), and the alert editor's
+   /api/alerts/validate and /api/alerts/test, which check the rule and save or deliver nothing (#7846). */
 function currentRoute() {
   /* #6840: a front door's #/s/{store}/ prefix is not part of the route; the store it names is applied in route(). */
   const h = routeHash() || "#/fleet";

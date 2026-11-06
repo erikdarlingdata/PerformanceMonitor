@@ -100,6 +100,7 @@ public sealed class FinOpsRecommendationsToolParityLiveTests
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton(postgres);
         await using var app = builder.Build();
+        FixedJudgeSweep.UseForNextMapAll();
         DarlingWebEndpoints.MapAll(app, postgres, new CollectorRuntimeState(), new CapturingTestLogger());
         await app.StartAsync(ct);
         using var server = app.GetTestServer();

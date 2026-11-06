@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -268,6 +269,48 @@ public sealed class DailyRunLimiterTests
         limiter.Release();
         Assert.Equal(0, limiter.InUse);
         Assert.True(limiter.TryAcquire(), "the cancelled run left no permit behind");
+    }
+
+    [Fact]
+    public async Task TheOldestWait_IsTheFirstQueuedRunsStamp_AndMovesAsTheQueueDrains()
+    {
+        var start = new DateTime(2026, 11, 5, 8, 0, 0, DateTimeKind.Utc);
+        var now = start;
+        var limiter = new DailyRunLimiter(1, () => now);
+        var ct = TestContext.Current.CancellationToken;
+
+        Assert.True(limiter.TryAcquire());
+        Assert.Null(limiter.OldestWaitUtc);
+
+        var first = limiter.AcquireAsync(ct);
+        now = start.AddHours(2);
+        var second = limiter.AcquireAsync(ct);
+        Assert.Equal(2, limiter.Waiting);
+        Assert.Equal(start, limiter.OldestWaitUtc);
+
+        limiter.Release();
+        await first;
+        Assert.Equal(start.AddHours(2), limiter.OldestWaitUtc);
+
+        limiter.Release();
+        await second;
+        Assert.Null(limiter.OldestWaitUtc);
+    }
+
+    [Fact]
+    public void TheBacklogLine_NamesTheWaitingRuns_TheCap_AndTheOldestWait()
+    {
+        var now = new DateTime(2026, 11, 5, 8, 0, 0, DateTimeKind.Utc);
+
+        Assert.Equal(
+            "Daily permits: 3 waiting of 2, oldest 26 h 10 min",
+            DailyRunLimiter.DescribeBacklog(3, 2, now.AddHours(-26).AddMinutes(-10), now));
+        Assert.Equal(
+            "Daily permits: 1 waiting of 4, oldest 45 min",
+            DailyRunLimiter.DescribeBacklog(1, 4, now.AddMinutes(-45), now));
+        Assert.Equal(
+            "Daily permits: 0 waiting of 4",
+            DailyRunLimiter.DescribeBacklog(0, 4, null, now));
     }
 
     [Fact]
@@ -626,6 +669,164 @@ public sealed class DailyRunWatchdogTests
             var warning = Assert.Single(Warnings(logger));
             Assert.Contains(going.Config.DisplayName, warning, StringComparison.Ordinal);
             Assert.DoesNotContain(queued.Config.DisplayName, warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    [Fact]
+    public async Task ADailyRunDueBehindItsOwnQueuedRun_CountsALostSlot_AndWarnsWithTheBacklog()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily);
+        var going = DailyRunKit.MakeServer(7305, DailyRunKit.Daily);
+        var queued = DailyRunKit.MakeServer(7306, DailyRunKit.Daily);
+        var ct = TestContext.Current.CancellationToken;
+
+        /* One permit: the first server's run goes, the second server's run queues behind it. */
+        worker.ApplyDailyRunCap(1, 4);
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(going, null!, ct);
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1 && worker.InFlightDetachedRuns.Count == 2, Patience),
+                "one daily run goes and one waits for a permit");
+
+            /* The queued server's run comes due again while its previous run is still waiting: that run is lost for the
+               day, and the loss is counted against the server and worded with the permit backlog. */
+            queued.NextDue[DailyRunKit.Daily] = DateTime.UtcNow.AddMinutes(-5);
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => queued.CycleSkips.Pending == 1, Patience),
+                "the lost daily slot is counted against the server whose run was skipped");
+            Assert.Equal(0, going.CycleSkips.Pending);
+            Assert.Equal(1, runs.Started);
+
+            var warning = Assert.Single(Warnings(logger));
+            Assert.Contains(queued.Config.DisplayName, warning, StringComparison.Ordinal);
+            Assert.Contains(DailyRunKit.Daily, warning, StringComparison.Ordinal);
+            Assert.Contains("Daily permits: 1 waiting of 1, oldest ", warning, StringComparison.Ordinal);
+            Assert.DoesNotContain("daily permits", warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>The pass counts an interval daily's slot as run when it dispatches it, and the refusal behind the previous run
+    /// then turns that one slot into a skip: the fleet gate reads one skipped slot and no run for it, as it does for a run-time
+    /// collector's lost day, so the Collection Falling Behind share is judged on one due slot and not two.</summary>
+    [Fact]
+    public async Task ADailyRunRefusedBehindItsOwnRun_IsOneSkippedSlotAndNoRun_InTheFleetGate()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily);
+        var server = DailyRunKit.MakeServer(7307, DailyRunKit.Daily);
+        var gate = worker.FleetGateStatsForTest!;
+        var ct = TestContext.Current.CancellationToken;
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1, Patience), "the daily run goes");
+            var before = gate.Snapshot();
+            Assert.Equal(1, before.Run);
+            Assert.Equal(0, before.Skipped);
+
+            server.NextDue[DailyRunKit.Daily] = DateTime.UtcNow.AddMinutes(-5);
+            await worker.RunDueCollectorsAsync(server, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => server.CycleSkips.Pending == 1, Patience),
+                "the refused run is counted as a lost daily slot");
+            Assert.Equal(1, runs.Started);
+
+            var after = gate.Snapshot();
+            Assert.Equal(0, after.Run - before.Run);
+            Assert.Equal(1, after.Skipped - before.Skipped);
+        }
+        finally
+        {
+            runs.ReleaseAll();
+        }
+    }
+
+    /// <summary>The server's collection_cycle row carries the lost daily slot and, beside it, the permit backlog as the pass that
+    /// flushes the row read it: how many daily runs were waiting and for how long, stated as a fact and not as the cause. The slot
+    /// is counted from its due time, so the row's gap starts where the slot was due and not where the run was refused, as a
+    /// run-time collector's lost day does. The pass that refuses the run counts the slot inside its dispatch loop and flushes the
+    /// row at its end, so with the write seam set the count is committed before the pass returns: the refusal is observed on its
+    /// Warning and the row on the seam, never on the pending count in between.</summary>
+    [Fact]
+    public async Task TheCollectionCycleRow_ForALostDailySlot_StatesThePermitBacklogBesideIt()
+    {
+        var logger = new DailyRunLogger();
+        var worker = DailyRunKit.MakeWorker(logger);
+        var runs = new HeldRuns(worker, DailyRunKit.Daily);
+        var going = DailyRunKit.MakeServer(7308, DailyRunKit.Daily);
+        var queued = DailyRunKit.MakeServer(7309, DailyRunKit.Daily);
+        var rows = new List<CycleSkipReport>();
+        var ct = TestContext.Current.CancellationToken;
+
+        worker.CycleSkipWriteOverride = report =>
+        {
+            lock (rows)
+            {
+                rows.Add(report);
+            }
+
+            return Task.FromResult(true);
+        };
+        worker.ApplyDailyRunCap(1, 4);
+
+        try
+        {
+            await worker.RunDueCollectorsAsync(going, null!, ct);
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(() => runs.Started == 1 && worker.InFlightDetachedRuns.Count == 2, Patience),
+                "one daily run goes and one waits for a permit");
+
+            /* The refused dispatch counts the lost slot inside this pass, which flushes the row through the seam at its end and
+               commits the count, reading the backlog as it stands: one run still waiting. The refusal is awaited on the Warning it
+               logs after counting, so a dispatch that landed after that flush is caught by the pass that follows, which writes
+               nothing when the row has already gone. */
+            var due = DateTime.UtcNow.AddMinutes(-5);
+            queued.NextDue[DailyRunKit.Daily] = due;
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            Assert.True(
+                await DailyRunKit.BecomesTrueAsync(
+                    () => Warnings(logger).Any(w =>
+                        w.Contains(queued.Config.DisplayName, StringComparison.Ordinal)
+                        && w.Contains("previous daily run has not finished", StringComparison.Ordinal)),
+                    Patience),
+                "the refused run is warned about");
+            Assert.Equal(1, runs.Started);
+
+            await worker.RunDueCollectorsAsync(queued, null!, ct);
+            CycleSkipReport row;
+            lock (rows)
+            {
+                row = Assert.Single(rows);
+            }
+
+            /* One row, one slot, and nothing left pending on either server: the skip was counted once and the row took it. */
+            Assert.Equal(1, row.SlotsSkipped);
+            Assert.Equal(0, queued.CycleSkips.Pending);
+            Assert.Equal(0, going.CycleSkips.Pending);
+            Assert.Contains(
+                "1 daily collector slot(s) lost their day (index object stats), daily permits: 1 waiting, oldest ",
+                row.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Daily permits:", row.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                string.Create(CultureInfo.InvariantCulture, $"The gap ran from {due:yyyy-MM-dd HH:mm:ss} UTC to "),
+                row.Message, StringComparison.Ordinal);
         }
         finally
         {

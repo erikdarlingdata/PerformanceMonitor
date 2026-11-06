@@ -749,6 +749,7 @@ public sealed class FinOpsStorageGrowthViewLiveTests
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton(ds);
         await using var app = builder.Build();
+        FixedJudgeSweep.UseForNextMapAll();
         DarlingWebEndpoints.MapAll(app, ds, new CollectorRuntimeState(), new CapturingTestLogger());
         await app.StartAsync(ct);
         using var server = app.GetTestServer();
@@ -778,7 +779,47 @@ public sealed class FinOpsStorageGrowthViewLiveTests
             var tool = await DarlingMcpFinOpsTools.GetFinOps(ds, "storage_growth", ServerName, 24, 10, database, object_name: objectName, cancellationToken: ct);
             using var actual = JsonDocument.Parse(body);
             using var expected = JsonDocument.Parse(tool);
-            Assert.True(JsonElement.DeepEquals(expected.RootElement, actual.RootElement), $"route and tool differ at {extra}");
+            var difference = FirstDifference(expected.RootElement, actual.RootElement, "$");
+            Assert.True(difference is null, $"route and tool differ at '{extra}', first at {difference}");
+        }
+    }
+
+    /// <summary>
+    /// The first place two JSON values differ, as the path and both values (tool first, route second), or null when they are
+    /// equal (#7855). A bare "bodies differ" gave a failed run no field to look at.
+    /// </summary>
+    private static string? FirstDifference(JsonElement tool, JsonElement route, string path)
+    {
+        static string Show(JsonElement e) => e.GetRawText() is { Length: > 300 } text ? text[..300] + "..." : e.GetRawText();
+
+        if (tool.ValueKind != route.ValueKind)
+            return $"{path}: tool {Show(tool)}, route {Show(route)}";
+
+        switch (tool.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var toolProps = tool.EnumerateObject().ToList();
+                var routeProps = route.EnumerateObject().ToList();
+                foreach (var prop in toolProps)
+                {
+                    if (!route.TryGetProperty(prop.Name, out var other))
+                        return $"{path}.{prop.Name}: tool {Show(prop.Value)}, route missing";
+                    if (FirstDifference(prop.Value, other, $"{path}.{prop.Name}") is { } nested) return nested;
+                }
+                var extra = routeProps.FirstOrDefault(p => !tool.TryGetProperty(p.Name, out _));
+                return extra.Value.ValueKind == JsonValueKind.Undefined
+                    ? null
+                    : $"{path}.{extra.Name}: tool missing, route {Show(extra.Value)}";
+            case JsonValueKind.Array:
+                var toolItems = tool.EnumerateArray().ToList();
+                var routeItems = route.EnumerateArray().ToList();
+                for (var i = 0; i < Math.Min(toolItems.Count, routeItems.Count); i++)
+                {
+                    if (FirstDifference(toolItems[i], routeItems[i], $"{path}[{i}]") is { } nested) return nested;
+                }
+                return toolItems.Count == routeItems.Count ? null : $"{path}: tool has {toolItems.Count} items, route has {routeItems.Count}";
+            default:
+                return JsonElement.DeepEquals(tool, route) ? null : $"{path}: tool {Show(tool)}, route {Show(route)}";
         }
     }
 }
