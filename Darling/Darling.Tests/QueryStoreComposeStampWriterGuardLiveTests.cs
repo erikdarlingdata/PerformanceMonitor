@@ -84,10 +84,13 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false);
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false, at: ThisHour().AddHours(1));
         var bodySucceeded = false;
         try
         {
+            /* The seed ends one hour later than the default (see the Arrange call), so the hour built here is the store's current hour: a writer
+               that just began is before that hour plus the one-hour guard (QueryStoreComposeStamp.WriterGuardSql). From the hour before it the
+               guard no longer defers a build for a writer that began in the current hour. */
             var hour = hourNow.AddHours(-1);
             await using var builder = await source.OpenConnectionAsync(ct);
 
@@ -186,7 +189,7 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             await ExecAsync(writer, "INSERT INTO collect.query_store_interval_wide VALUES (1)", ct);
 
             await using var command = new NpgsqlCommand(QueryStoreComposeStamp.OpenWriterSql, observer);
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = ThisHour().AddHours(-1) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = ThisHour() });
             Assert.Equal(writer.ProcessID, Convert.ToInt32(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
             await open.RollbackAsync(ct);
             bodySucceeded = true;
@@ -203,7 +206,7 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false);
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false, at: ThisHour().AddHours(1));
         var bodySucceeded = false;
         try
         {
@@ -211,8 +214,9 @@ public sealed class QueryStoreComposeStampWriterGuardLiveTests
             await using var open = await writer.BeginTransactionAsync(ct);
             await InsertRowAsync(writer, 1, hourNow.AddMinutes(-50), 9_200_003, ct);
 
-            /* A store clock eight hours ahead makes the plan's newest hours (up to hourNow + 5 h) ones that this writer, begun now,
-               would defer: every hour from hourNow - 1 h on, seven of them, one more than a tick builds. */
+            /* The seed ends one hour later than the default (see the Arrange call), so its newest hour, hourNow - 1 h, is the store's current hour:
+               this writer, begun now, is before that hour plus the one-hour guard (QueryStoreComposeStamp.WriterGuardSql) and holds it back. A store
+               clock eight hours ahead makes the plan's newest hours ones the writer would defer too, one more than a tick builds. */
             var logger = new CapturingTestLogger();
             var now = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc);
             var watch = new QueryStoreComposeStamp.DeferralWatch(() => now);
