@@ -72,11 +72,13 @@ globalThis.location = { hash: "#/server/A/cpu" };
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-gap-")));
 let charts;
 let slicer;
+let panels;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   slicer = await import(pathToFileURL(path.join(scratch, "time-slicer.js")).href);
+  panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -272,6 +274,28 @@ out.stripGaps = {
   bucket: String(slicer.stripGap({}, { bucket_minutes: 10 })),
   none: String(slicer.stripGap({}, {})),
   seam: slicer.stripGap({ bucketed: false, seam: (d) => d.routing.raw_from }, { bucket_minutes: 60, routing: { raw_from: "2026-01-01T04:00:00" } }),
+};
+
+/* #7692: Query Duration Trend on a quiet server. The reply holds rows only where queries ran: steps of 12, 1, 23, 1, 1, 256 and 9 minutes on a 1 minute bucket.
+   Those steps are uneven, so the chart's own cadence guess reads them as events and never breaks; the panel names the reply's bucket (bucketKey) and the
+   rows' own cadence (median 9 minutes) sets the break, so the 23 minute and 256 minute steps break and no segment crosses the 256 minute one. The strip
+   above Top Queries takes the same step through stripGap. */
+const quietServer = [0, 12, 13, 36, 37, 38, 294, 303];
+const quietReply = { bucket_minutes: 1, trend: quietServer.map((m, i) => ({ time: iso(T0 + m * MIN), value: 5 + (i % 3) })) };
+const quietDesc = { viz: "line", rowsKey: "trend", xKey: "time", series: [{ key: "value", label: "Duration" }], format: "ms", emptyText: "none" };
+const vertexCounts = (host) => lineXs(host).map((xs) => xs.length);
+out.quietPanel = { runs: vertexCounts(panels.VIZ.line(quietReply, { ...quietDesc, bucketKey: "bucket_minutes" })), dots: marks(panels.VIZ.line(quietReply, { ...quietDesc, bucketKey: "bucket_minutes" })).dots };
+out.quietPanelNoKey = { runs: vertexCounts(panels.VIZ.line(quietReply, quietDesc)) };
+/* a busy server (a row every minute, one 4 hour hole) breaks at the hole and nowhere else */
+const busyReply = { bucket_minutes: 1, trend: seq(0, 60).concat(seq(300, 360)).map((m) => ({ time: iso(T0 + m * MIN), value: 5 })) };
+out.busyPanel = { runs: vertexCounts(panels.VIZ.line(busyReply, { ...quietDesc, bucketKey: "bucket_minutes" })) };
+const quietPoints = quietServer.map((m, i) => ({ t: T0 + m * MIN, v: 5 + (i % 3) }));
+const quietStrip = { bucketed: true };
+out.quietStrip = shape(slicer.stripPaths(quietPoints, stripWin, null, slicer.stripGap(quietStrip, { bucket_minutes: 1 }, quietPoints.map((p) => p.t))));
+out.quietStripNoBucketed = shape(slicer.stripPaths(quietPoints, stripWin, null, slicer.stripGap({}, { bucket_minutes: 1 }, quietPoints.map((p) => p.t))));
+out.quietStripGaps = {
+  noBucketInReply: String(slicer.stripGap(quietStrip, {}, quietPoints.map((p) => p.t))),
+  stepWins: String(slicer.stripGap({ bucketed: true, stepMs: 60000 }, { bucket_minutes: 10 }, quietPoints.map((p) => p.t))),
 };
 
 out.split = charts.splitAtGaps([0, 1, 2, 3, 4], [0, 1, 2, 100, 101], 10).map((r) => r.join(","));
