@@ -891,9 +891,9 @@ export const PROPERTY_STATS = [
    "Newest" beside the counts for the same reason the Last Error column has a timestamp - the count never
    ages out of a window, so a nonzero value with an old stamp is a healed episode. */
 const ALERT_READ_STATS = [
-  { key: "alert_read_health.server_read_failures", label: "Blind reads (server)", format: "int" },
+  { key: "alert_read_health.server_read_failures", label: "Failed alert reads (server)", format: "int" },
   { key: "alert_read_health.server_alert_passes", label: "Alert passes", format: "int" },
-  { key: "alert_read_health.instance_read_failures", label: "Blind reads (service)", format: "int" },
+  { key: "alert_read_health.instance_read_failures", label: "Failed alert reads (service)", format: "int" },
   { key: "alert_read_health.last_failure_read", label: "Which read", format: "text", small: true, hideWhenEmpty: true },
   /* Beside "Which read" because the two answer one question together: which condition went blind, and
      whose deadline ended it. An elapsed at or about the alert pass's command deadline is this service
@@ -906,7 +906,7 @@ const ALERT_READ_STATS = [
      belonging to no server (the store's own self-alerts went quiet). The failures on other servers are
      the service count less the server count less this one, and are deliberately not a column: nothing
      holds a newest failure for that population, and a count with no stamp is what these stamps fix. */
-  { key: "alert_read_health.fleet_read_failures", label: "Blind reads (no server)", format: "int" },
+  { key: "alert_read_health.fleet_read_failures", label: "Failed alert reads (no server)", format: "int" },
   { key: "alert_read_health.fleet_last_failure_read", label: "Which read (no server)", format: "text", small: true, hideWhenEmpty: true },
   { key: "alert_read_health.fleet_last_failure_elapsed_ms", label: "Ran for (no server)", format: "ms", small: true, hideWhenEmpty: true },
   { key: "alert_read_health.fleet_last_failure_at", label: "Newest (no server)", format: "reltime", small: true, hideWhenEmpty: true },
@@ -1251,7 +1251,7 @@ const SERIES_TRENDS = {
     note: "One line per tempdb file: its average read latency plus its average write latency, the five files with the most I/O in the window.",
     charts: [
       {
-        title: "Read plus write latency (ms)",
+        title: "Read plus write latency",
         unit: "ms",
         value: (r) => (r.avg_read_latency_ms == null && r.avg_write_latency_ms == null ? null : (r.avg_read_latency_ms || 0) + (r.avg_write_latency_ms || 0)),
         empty: "No tempdb file I/O samples in this window.",

@@ -517,6 +517,13 @@ export function renderLineChart(spec) {
          width, so a dense chart does not overlap itself more than before), and in a windowed chart at most STACKED_BAR_MAX_PX. */
       barW = Math.max(barW, Math.min(STACKED_BAR_MIN_PX, (plotW / rows.length) * 0.7));
       if (hasWindow) barW = Math.min(barW, STACKED_BAR_MAX_PX);
+      /* #7684 item 10: a lone bar has no neighbour to measure, so it took the tiling width and drew at the maximum (64 px, about an
+         hour and a half on a 24-hour axis) for one 2 ms wait. It is one sample wide: a bucket when the reply states one (bucketMs), else the
+         floor, which is what a collector interval of a minute or two is on a day axis. The floor keeps it findable. */
+      if (hasWindow && xs.length === 1) {
+        const bucketPx = typeof bucketMs === "number" && Number.isFinite(bucketMs) && bucketMs > 0 && spanMs > 0 ? (bucketMs / spanMs) * plotW : 0;
+        barW = Math.min(STACKED_BAR_MAX_PX, Math.max(STACKED_BAR_MIN_PX, bucketPx));
+      }
       for (let i = 0; i < rows.length; i++) {
         const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
         for (let k = 0; k < series.length; k++) {

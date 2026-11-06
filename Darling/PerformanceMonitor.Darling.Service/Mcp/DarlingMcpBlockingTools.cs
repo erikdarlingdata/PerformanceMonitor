@@ -1062,7 +1062,7 @@ public sealed class DarlingMcpBlockingTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                            coveredClaim: ". This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples."),
                         emptyHints)
                     : McpHelpers.Status(
                         "unavailable",

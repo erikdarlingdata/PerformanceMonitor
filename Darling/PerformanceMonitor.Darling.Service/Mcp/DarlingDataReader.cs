@@ -856,7 +856,7 @@ internal static class DarlingDataReader
         WHERE server_id = $1
         AND   collection_time = (SELECT MAX(collection_time) FROM v_file_io_stats WHERE server_id = $1)
         AND   ($2::text[] IS NULL OR database_name = ANY($2))
-        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC
+        ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC, database_name, file_name
         """;
 
     /// <summary>

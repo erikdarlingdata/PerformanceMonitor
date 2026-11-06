@@ -102,7 +102,7 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         var noLocks = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 4));
         Assert.Equal("empty", noLocks.GetProperty("status").GetString());
         var noLocksText = noLocks.GetProperty("message").GetString()!;
-        Assert.Contains("genuinely quiet rather than broken", noLocksText, StringComparison.Ordinal);
+        Assert.Contains("this window was quiet", noLocksText, StringComparison.Ordinal);
 
         /* Same zero rows as the branch above, and it must NOT reach for the same word. */
         Assert.DoesNotContain("EVER", noLocksText, StringComparison.Ordinal);

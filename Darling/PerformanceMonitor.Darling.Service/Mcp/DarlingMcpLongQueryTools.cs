@@ -119,7 +119,13 @@ public sealed class DarlingMcpLongQueryTools
                    this server in the window, and only then does the answer send the reader to the opt-in switch. With rows for other
                    databases the collector is on, and the answer is about the chosen databases. A failed probe gives no verdict, so a
                    filtered answer leaves the sentence off. */
-                var collectorMayBeOff = (databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null);
+                /* #7684 item 1: and only when the schedule says it is off. The words used to print for every unfiltered empty window, so a
+                   server whose collector is on (and healthy) was told to enable it. The resolution is the service's own (a server's row,
+                   else the fleet's, else the shipped default OFF); a failed read of the rows gives no overrides, so the default answers. */
+                var scheduleOverrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, resolved.ServerId, cancellationToken);
+                var collectorEnabled = StoreConfigProvider.ResolveSchedule("long_query_completions", resolved.ServerId, scheduleOverrides).Enabled;
+                var collectorMayBeOff = !collectorEnabled
+                    && ((databaseFilter.IsAll && !tagFilter.Active) || (!emptyNotice.IsUnavailable && emptyNotice.EffectiveStart is null));
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.StatusForDatabase("empty",
                     "No long-running query completions found in the specified time range" + DarlingMcpBlockingTools.ForChosenDatabases(databaseFilter)
                         + (tagFilter.Active ? $" for query tag '{tagFilter.Requested}'" : "")
