@@ -81,7 +81,7 @@ export async function renderEditor(main, id) {
       backHead(id),
       el("div", { class: "strip empty" }, [
         session.probe_failed
-          ? "Couldn't confirm your session, so the composer is read-only for now. Reload the page to edit; " +
+          ? "Couldn't confirm your session yet, so editing is not available. Reload the page to try again; " +
             "you can still open and export views."
           : "Your account has read-only access, so the composer is read-only. You can still open and export " +
             "views.",
