@@ -108,6 +108,8 @@ export function agentUndoOutcome(res) {
 let status = null;
 let busy = false;
 let pending = null;
+/* #7954: true while the Turn on warning panel is shown; the switch is written only from that panel's button. */
+let pendingSwitch = false;
 
 /** The state the server reported, in a line a person can read: the plan forced now, or that none is. */
 export function agentStateText(state) {
@@ -134,12 +136,17 @@ export async function buildAgentChanges(body, generation, ctx) {
   }
   nodes.push(captionStrip(notice));
   nodes.push(switchBar(data.enabled !== false, canDecide, ctx));
+  if (pendingSwitch && canDecide) nodes.push(switchPanel(ctx));
   const rows = agentChangeRows(data);
   const columns = AGENT_CHANGE_COLUMNS.concat(canDecide ? [{
     key: "undo", label: "Undo", csv: false, copy: false,
     render: (row) => (row && row.can_undo ? el("button", {
       class: "btn", type: "button", text: "Undo", "aria-label": "Undo agent change " + row.called_id,
-      onClick: () => undo(row.called_id, ctx),
+      onClick: () => {
+        /* #7954: a plan force or unforce is confirmed through the service's own two-step answer (confirmPanel); every other kind asks here first. */
+        if (!row.is_plan && !window.confirm("Undo agent change " + row.called_id + " (" + row.kind + " on " + row.server + ")? The setting goes back to what it was before the agent changed it.")) return undefined;
+        return undo(row.called_id, ctx);
+      },
     }) : null),
   }] : []);
   nodes.push(VIZ.table({ changes: rows }, { rowsKey: "changes", columns, emptyText: "No agent has changed anything." }));
@@ -162,15 +169,43 @@ function switchBar(enabled, canDecide, ctx) {
   if (canDecide) {
     children.push(el("button", {
       class: "btn" + (enabled ? "" : " primary"), type: "button", text: enabled ? "Turn off agent changes" : "Turn on agent changes",
-      onClick: () => flip(!enabled, ctx),
+      onClick: () => {
+        /* #7954: turning the switch off asks here; turning it on shows the warning panel first, as the per-server action switches do. */
+        if (enabled) return window.confirm("Turn off agent changes? Every agent change on every server is refused until they are turned on again.") ? flip(false, ctx) : undefined;
+        return askSwitch(ctx);
+      },
     }));
   }
   return el("div", { class: "row-actions" }, children);
 }
 
+const SWITCH_ON_WARNING =
+  "With agent changes on, an agent whose route is at Act (Level 2) or Act on servers (Level 3) can change settings and run server actions on " +
+  "every server its route covers, within the route's limits and approval and each server's action switches. Every change is journaled here and can be undone.";
+
+/** Turning the switch ON asks first (#7954): what it lets agents do across the fleet. The write goes only from the panel's button. */
+function askSwitch(ctx) {
+  if (busy) return;
+  pendingSwitch = true;
+  status = null;
+  ctx.repaint();
+}
+
+function switchPanel(ctx) {
+  return el("div", { class: "notice", role: "alertdialog", "aria-label": "Turn on agent changes" }, [
+    el("p", { class: "mute-label", text: "Turn on: agent changes" }),
+    el("p", { text: SWITCH_ON_WARNING }),
+    el("div", { class: "row-actions" }, [
+      el("button", { class: "btn primary", type: "button", text: "Turn them on", onClick: () => flip(true, ctx) }),
+      el("button", { class: "btn", type: "button", text: "Cancel", onClick: () => { pendingSwitch = false; ctx.repaint(); } }),
+    ]),
+  ]);
+}
+
 async function flip(enabled, ctx) {
   if (busy) return;
   busy = true;
+  pendingSwitch = false;
   try {
     const res = await apiWrite("PUT", "/api/agent-changes/switch", { enabled });
     if (res && res.status === 200) status = { message: enabled ? "Agent changes are on." : "Agent changes are off.", isError: false };
@@ -214,4 +249,5 @@ async function undo(calledId, ctx, sent) {
 export function resetAgentChangesStatus() {
   status = null;
   pending = null;
+  pendingSwitch = false;
 }

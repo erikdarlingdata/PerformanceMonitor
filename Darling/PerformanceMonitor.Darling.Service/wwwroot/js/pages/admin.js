@@ -2047,7 +2047,12 @@ function overrideActions(row) {
   });
   const remove = el("button", {
     class: "btn", type: "button", text: "Remove", "aria-label": "Remove " + row.key + " for " + row.scope_text, "data-action": "remove-override",
-    onClick: () => changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database }),
+    onClick: () => {
+      /* #7954: Remove sits beside Edit, so it asks first and names what goes away, as the route Delete does. */
+      const where = row.scope_text + (row.database ? ", database " + row.database : "");
+      if (!window.confirm("Remove the " + row.key + " override for " + where + "? Its value " + row.value + " goes away and the global value applies at the engine's next reload.")) return undefined;
+      return changeOverride("clear", { server: row.tag_id == null ? row.server_name : "", tag: row.tag_id == null ? "" : String(row.tag_id), key: row.key, database: row.database });
+    },
   });
   return el("span", { class: "row-actions" }, [edit, remove]);
 }
