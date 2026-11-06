@@ -40,3 +40,13 @@ CurrentWaitsStackedBarTests 42052646621  # the known STA test thread stall
 # differ between the two heads are a Fleet viewer window, one Viewer data service file and a Fleet test, none of which the
 # deadlock reader or the statement host filter reads. The class has no edge to the change, so it is not a map gap.
 StatementFilterBlockingReadsLiveTests 42052646621  # passed on the previous head of the same pull request, which differs in three unrelated Fleet files
+
+# #7734's replay of the five projects the build.yml `core` filter used to keep FULL (Collectors, Analysis, Ui, Notifications,
+# Alerting): 107 failed runs whose change touches one of them, 485 failing classes, 6 not picked. Each class covers files of those
+# projects in the map, but none of the files this change touched, and its failure message is a timing, ordering or store matter.
+SingleFlightTtlCacheTests 42033655238  # a fetch the test itself faults escapes its await (a thread race); the change was CollectorDeltaCalculator.cs, which the cache never calls
+AgentLevel2ToolLiveTests 41772037526  # Npgsql read timeout on the run's store; the change was PgTargetAdvice.Queries.cs
+ArchiveSpanReadTests 41766195958  # a Lite timing assertion (lock wait 0 ms); the change was two Postgres collectors Lite never runs
+QueryStoreReadBudgetLiveTests 41346430047  # expected alpha, got zeta: the order a budget-cut read answers in; the change was two alert text files
+QueryTagRollupHashRouteLiveTests 40582055605  # rows examined 20,542 against 15,336: the store-dependent plan the two earlier runs above show
+InvestigationEvidenceFamiliesLiveTests 39981434784  # a slow-section deadline test; the pull request's webhook change is read by McpConfigReadAvoidsSecretColumnsTests, which the map picked
