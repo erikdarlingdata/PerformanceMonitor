@@ -1651,13 +1651,22 @@ function vizLine(data, desc) {
      count of 0. Not when the answer's source (`sourceKey`) is the DMV snapshot, a sample taken on a schedule: a bucket it has no row for is time
      nobody observed, so those points reach the chart as they came. */
   const fill = desc.zeroFill && !(desc.sourceKey && getPath(data, desc.sourceKey) === SAMPLED_BLOCKING_SOURCE);
+  /* #7850: the reply's `covered` ranges are the time the collector's successful runs read; the fill is 0 only inside them. A reply without the field (an
+     older service) fills the whole window, as #7839 did. */
+  const covered = fill ? coveredRanges(getPath(data, "covered")) : null;
+  /* #7850: with a `covered` list every covered bucket has a point, so two neighbouring points more than one bucket apart have a stretch nobody
+     observed between them, and the line breaks there (a lone point is drawn as a dot). The bucket is the reply's `bucket_minutes`: get_blocking_trend
+     and get_deadlock_trend state 1, as their SQL buckets by minute. Only a reply with no such field falls back to the smallest gap between its events,
+     a guess that joins two events exactly that far apart. The chart's own spacing guess cannot see it: three events
+     hours apart are uneven steps, read as events, and were joined into one slope. Without `covered` the chart keeps its own rule, as before. */
+  const fillBucketMs = covered ? zeroFillStepMs(points, desc.xKey, getPath(data, "bucket_minutes")) : null;
   const chart = zoomableLineChart({
-    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win) : points,
+    points: fill ? zeroFilledPoints(points, desc.xKey, seriesCfg, getPath(data, "bucket_minutes"), win, covered) : points,
     xKey: desc.xKey,
     series,
     annotations,
     gapSeamMs: seam ? seam.getTime() : null,
-    bucketMs,
+    bucketMs: fillBucketMs != null ? fillBucketMs : bucketMs,
     formatValue,
     clampMax,
     /* A count chart's ticks are whole numbers: on a small domain a fractional step (0.2, 0.5) prints through the
@@ -1684,13 +1693,46 @@ function vizLine(data, desc) {
 }
 
 /**
+ * The `covered` field of a trend reply (#7850) as [startMs, endMs] pairs, or null when the reply has none (an older service: the fill keeps #7839's
+ * whole-window behaviour). An empty list is a window no run covered, so nothing is filled. A range with an unreadable time is dropped.
+ */
+export function coveredRanges(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  for (const r of raw) {
+    const from = r ? parseUtc(r.start) : null;
+    const to = r ? parseUtc(r.end) : null;
+    if (from instanceof Date && to instanceof Date && Number.isFinite(from.getTime()) && Number.isFinite(to.getTime()) && to > from) out.push([from.getTime(), to.getTime()]);
+  }
+  return out;
+}
+
+/**
+ * The bucket step, in ms, of a zero-filled trend (#7850): the reply's own `bucket_minutes` when it states one, else the smallest step between the
+ * points it returned, and never under a minute. zeroFilledPoints lays its grid at this step and the chart breaks the line at a jump longer than it.
+ */
+export function zeroFillStepMs(points, xKey, bucketMinutes) {
+  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
+  if (!Number.isFinite(stepMs)) {
+    const times = [...new Set((Array.isArray(points) ? points : []).map((p) => { const d = p ? parseUtc(p[xKey]) : null; return d instanceof Date ? d.getTime() : NaN; }).filter(Number.isFinite))].sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
+    if (!Number.isFinite(stepMs)) stepMs = 60000;
+  }
+  return Math.max(60000, stepMs);
+}
+
+/**
  * The points of an event-count trend with every bucket of the window present (`zeroFill`). get_blocking_trend and get_deadlock_trend
  * return only the buckets that have events, so a bucket they leave out is a count of 0 and not a gap in collection: two reports a
  * minute apart must not read as a line floating between 1 and 4. The bucket is the reply's own (`bucket_minutes`) when it states one,
  * else the smallest step between the points it returned, and never under a minute. The window is the chart's own (windowStart and
  * windowEnd in epoch ms); without one the fill spans the points. The points the read returned are kept as they are.
+ *
+ * `covered` (#7850) is the reply's `covered` ranges as [startMs, endMs] pairs (coveredRanges), the time the collector's successful runs read. A
+ * bucket is filled only when the whole bucket lies inside one range; a bucket outside them is time nobody observed and is left out, as it was before
+ * the fill. Null (no `covered` field, an older service) fills the whole window.
  */
-export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
+export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win, covered = null) {
   const timeOf = (p) => {
     const d = p ? parseUtc(p[xKey]) : null;
     return d instanceof Date && Number.isFinite(d.getTime()) ? d.getTime() : null;
@@ -1702,21 +1744,27 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
   }
   const times = [...have.keys()].sort((a, b) => a - b);
   if (!times.length) return points;
-  let stepMs = Number(bucketMinutes) > 0 ? Number(bucketMinutes) * 60000 : Infinity;
-  if (!Number.isFinite(stepMs)) {
-    for (let i = 1; i < times.length; i++) stepMs = Math.min(stepMs, times[i] - times[i - 1]);
-    if (!Number.isFinite(stepMs)) stepMs = 60000;
-  }
-  stepMs = Math.max(60000, stepMs);
+  const stepMs = zeroFillStepMs(points, xKey, bucketMinutes);
   const start = win && Number.isFinite(Number(win.windowStart)) ? Number(win.windowStart) : times[0];
   const end = win && Number.isFinite(Number(win.windowEnd)) ? Number(win.windowEnd) : times[times.length - 1];
-  /* The grid is aligned on the first returned point, so every returned point sits on it. At most 20,000 buckets are drawn. */
+  /* The grid is aligned on the first returned point, so every returned point sits on it. At most 50,000 buckets are drawn (a 30 day window of minute buckets is 43,200). */
   const first = times[0] - Math.ceil((times[0] - start) / stepMs) * stepMs;
   const out = [];
-  for (let t = first, n = 0; t <= end && n < 20000; t += stepMs, n++) {
+  /* The ranges sorted by start, walked once as t rises: a range whose end the bucket has passed can never hold a later bucket. A scan of every range
+     per bucket was most of the fill's time on a 30 day window of minute buckets. */
+  const ranges = covered ? [...covered].sort((x, y) => x[0] - y[0]) : null;
+  let ri = 0;
+  for (let t = first, n = 0; t <= end && n < 50000; t += stepMs, n++) {
     const p = have.get(t);
-    if (p) out.push(p);
-    else {
+    if (p) {
+      out.push(p);
+      continue;
+    }
+    if (ranges) {
+      while (ri < ranges.length && ranges[ri][1] < t + stepMs) ri++;
+      if (ri >= ranges.length || ranges[ri][0] > t) continue;
+    }
+    {
       const zero = { [xKey]: new Date(t).toISOString() };
       for (const s of seriesCfg) zero[s.key] = 0;
       out.push(zero);
@@ -1725,8 +1773,11 @@ export function zeroFilledPoints(points, xKey, seriesCfg, bucketMinutes, win) {
   /* A returned point off the grid (a second row for one time, or one past the bucket cap) is kept too. A set, not a scan of `out` per point:
      a week of minute buckets is 10,000 points against as many buckets, redrawn on every poll. */
   const placed = new Set(out);
+  const gridCount = out.length;
   for (const p of points) if (!placed.has(p) && timeOf(p) != null) out.push(p);
-  return out.sort((a, b) => timeOf(a) - timeOf(b));
+  /* The grid is already in time order: sort only when an off-grid point was added. Sorting 43,200 minute buckets parsed their times twice per
+     comparison, over half of the fill's time on a 30 day window. */
+  return out.length === gridCount ? out : out.sort((a, b) => timeOf(a) - timeOf(b));
 }
 
 /* bandlist: desc = { rowsKey, primaryKey, bandKey, bandLabelKey?, reasonKey?, navKey?, emptyText? } */

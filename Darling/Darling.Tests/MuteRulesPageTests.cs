@@ -102,7 +102,7 @@ public sealed class MuteRulesPageTests
         Assert.Contains("<a data-route=\"mute-rules\" href=\"#/mute-rules\">Mute Rules</a>", Wwwroot("index.html"));
         var app = Wwwroot("js", "app.js");
         Assert.Contains("h === \"#/mute-rules\" || h.startsWith(\"#/mute-rules?\")", app);
-        Assert.Contains("else if (r.name === \"muteRules\") renderMuteRules(main, r.query);", app);
+        Assert.Contains("muteRules: (m, r) => renderMuteRules(m, r.query),", app);
         Assert.Contains("if (r.name === \"muteRules\") return \"mute-rules\";", app);
     }
 }

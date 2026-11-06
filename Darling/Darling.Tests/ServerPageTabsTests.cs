@@ -868,7 +868,7 @@ public sealed class ServerPageTabsTests
            trailing opts argument — the poll flag renderServer uses to decide whether to re-fetch /api/fleet —
            so this now matches the call's own leading args rather than the whole argument list.) */
         Assert.Contains("function serverRoute(rest)", AppJs, StringComparison.Ordinal);
-        Assert.Contains("renderServer(main, r.param, r.tab, opts)", AppJs, StringComparison.Ordinal);
+        Assert.Contains("renderServer(m, r.param, r.tab, o)", AppJs, StringComparison.Ordinal);
 
         /* The name is decoded AFTER the split, so an encoded '/' inside a server name survives the tab segment
            being introduced — the one way this change could have broken existing links. */
