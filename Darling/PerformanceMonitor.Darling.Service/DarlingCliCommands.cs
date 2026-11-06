@@ -290,9 +290,9 @@ public static partial class DarlingCliCommands
     public static bool IsDisableCollectorVerb(string arg) =>
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced, so
-    /// the next start makes a new one (#5366; without <c>passwordKey</c>, and with it the start waits for a new key in that
-    /// source, #8006). It changes the store only (as the store owner) and never touches a key file.</summary>
+    /// <summary>The verb <see cref="ResetPasswordKeyAsync"/> handles: mark the service's current password key replaced. Without
+    /// <c>passwordKey</c> the next start makes a new key (#5366); with it set, the next start waits for a new key in that
+    /// source (#8006). It changes the store only (as the store owner) and never touches a key file.</summary>
     public static bool IsResetPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--reset-password-key", StringComparison.OrdinalIgnoreCase);
 

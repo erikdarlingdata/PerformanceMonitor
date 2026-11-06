@@ -462,15 +462,19 @@ public sealed class DarlingPasswordKeySourceTests
         finally
         {
             CryptographicOperations.ZeroMemory(pkcs8);
-            /* The links go first, each itself and never what it points at, so the recursive delete never walks one. */
-            var outsideLinks = Path.Combine(dir, "outside");
-            if (Directory.Exists(Path.Combine(outsideLinks, "credentials-link")))
+            /* Every step is guarded by an existence check, because setup may have failed before it made the thing, and a
+               throw here would hide that original failure. The directory link goes first, itself and never what it points
+               at, so the recursive delete never walks it; the file link is an ordinary entry to that delete. */
+            var directoryLinkPath = Path.Combine(dir, "outside", "credentials-link");
+            if (Directory.Exists(directoryLinkPath))
             {
-                Directory.Delete(Path.Combine(outsideLinks, "credentials-link"), recursive: false);
+                Directory.Delete(directoryLinkPath, recursive: false);
             }
 
-            File.Delete(Path.Combine(outsideLinks, "link"));
-            Directory.Delete(dir, recursive: true);
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
         }
     }
 

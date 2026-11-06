@@ -26,7 +26,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para>Four groups of checks. The key file: generate it, read the mode, owner and link count back, reload it to the
 /// same key id, and see a wider mode and a second name each refused. The external key (#8006): the <c>passwordKey</c>
 /// loader reads one key to the same key id from a base64 file, a PEM file, a Kubernetes-style <c>..data</c> link chain
-/// and an environment variable, and refuses a PKCS#1 PEM, a 2048-bit key and a literal. The file identity: a file and its hard link give
+/// and an environment variable, and refuses a PKCS#1 PEM, a 2048-bit key, a link into a credentials directory and a
+/// literal. The file identity: a file and its hard link give
 /// one identity and two files give two. The vector: a sealed value made on another platform opens here to the expected
 /// text, and stops opening when a bound field changes. A check that cannot be made counts as a failure, never as a
 /// pass.</para>
@@ -283,8 +284,9 @@ internal static class DarlingPasswordKeySelfCheck
     /// <summary>The <c>passwordKey</c> source (#8006) on this Unix system: one generated key loads to the same key id from
     /// a base64 file, a PEM file, a Kubernetes-style secret mount (a link to <c>..data/password-key</c>, where
     /// <c>..data</c> links to a timestamped directory holding the file at mode 440) and an environment variable with
-    /// whitespace around the base64; a PKCS#1 PEM, a 2048-bit key and a literal are each refused. Returns null when all
-    /// of it held, otherwise the first thing that did not.</summary>
+    /// whitespace around the base64; a PKCS#1 PEM, a 2048-bit key, a symbolic link from outside a credentials directory
+    /// to the key file inside it, and a literal are each refused. Returns null when all of it held, otherwise the first
+    /// thing that did not.</summary>
     [UnsupportedOSPlatform("windows")]
     internal static string? CheckExternalKey(string directory)
     {
@@ -367,6 +369,12 @@ internal static class DarlingPasswordKeySelfCheck
                 return failure;
             }
 
+            failure = CheckLinkIntoCredentialsRefused(base64, directory, logger);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
             var literal = DarlingPasswordKeySource.LoadFromSetting(new string(base64), credentialsDirectory: null, logger);
             return ExternalMustBeRefused(literal, "a literal");
         }
@@ -433,6 +441,35 @@ internal static class DarlingPasswordKeySelfCheck
         }
 
         return ExternalMustBeRefused(DarlingPasswordKeySource.LoadFromSetting("file:" + path, credentialsDirectory: null, logger), "a 2048-bit key");
+    }
+
+    /// <summary>A symbolic link outside a credentials directory that points at the <c>password-key</c> file inside it. The
+    /// Windows tests cover the link refusal with junctions and hard links only, and every other case here passes no
+    /// credentials directory, so this is the one run of the real-path and file-identity comparison on Unix. The key in the
+    /// file is usable, so a refusal can only be the directory's; the sentence must also say so. Returns null when the link
+    /// was refused for reaching the credentials directory.</summary>
+    [UnsupportedOSPlatform("windows")]
+    private static string? CheckLinkIntoCredentialsRefused(char[] base64, string directory, Microsoft.Extensions.Logging.ILogger logger)
+    {
+        const string what = "a link into the credentials directory";
+        var credentials = Path.Combine(directory, "credentials");
+        Directory.CreateDirectory(credentials, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var keyPath = Path.Combine(credentials, DarlingPasswordKeyFile.UnixFileName);
+        WriteKeyText(keyPath, base64);
+        var link = Path.Combine(directory, "credentials-key-link");
+        File.CreateSymbolicLink(link, keyPath);
+
+        var load = DarlingPasswordKeySource.LoadFromSetting("file:" + link, credentials, logger);
+        var refusal = load.Refusal;
+        var failure = ExternalMustBeRefused(load, what);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        return refusal!.Contains("credentials directory", StringComparison.Ordinal)
+            ? null
+            : $"passwordKey refused {what}, but not for reaching the credentials directory";
     }
 
     private static string? ExternalMustLoad(string reference, string keyId, Microsoft.Extensions.Logging.ILogger logger, string from)

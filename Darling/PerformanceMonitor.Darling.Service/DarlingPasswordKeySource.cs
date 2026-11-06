@@ -34,9 +34,10 @@ public static class DarlingPasswordKeySource
 
     /// <summary>
     /// The validation problem for a literal <c>passwordKey</c>. A constant on purpose: the sentence never repeats the
-    /// value, because that value would be the key.
+    /// value, because that value would be the key. It says the prefix must come first because a padded reference such as
+    /// <c>" file:/x"</c> is refused as a literal too, and its author did write a reference.
     /// </summary>
-    public const string LiteralRefusal = "passwordKey must be a file: or env: reference to the password key, never the key itself. Put the key in a secret file or an environment variable and point passwordKey at it.";
+    public const string LiteralRefusal = "passwordKey must be a file: or env: reference to the password key, never the key itself, and must begin with file: or env: with nothing before it, not even a space. Put the key in a secret file or an environment variable and point passwordKey at it.";
 
     private const string FilePrefix = "file:";
     private const string EnvPrefix = "env:";
