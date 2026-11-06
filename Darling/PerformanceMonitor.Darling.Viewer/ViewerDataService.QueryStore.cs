@@ -124,6 +124,14 @@ public sealed partial class ViewerDataService
     /// </summary>
     public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
 
+    /// <summary>#7776: the collection_time bounds beside the interval-start window on the raw top read and the slicer. The floor is the
+    /// clock-skew slack below the window and the ceiling is a day of engine maximum interval plus collector-outage allowance above it
+    /// (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
+    private const string CollectionFloorSlackSql = "interval '1 hour'";
+
+    /// <summary>The ceiling half of <see cref="CollectionFloorSlackSql"/>.</summary>
+    private const string CollectionCeilingSql = "interval '30 days'";
+
     /// <summary>
     /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
     /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
@@ -131,7 +139,7 @@ public sealed partial class ViewerDataService
     /// <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -180,8 +188,8 @@ public sealed partial class ViewerDataService
                (server_id, collection_time) index and the chunk pruning. */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
             AND   COALESCE(interval_start_time_utc, collection_time) <= $3
-            AND   collection_time >= $2 - interval '1 hour'
-            AND   collection_time <= $3 + interval '30 days'
+            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
 
@@ -413,13 +421,16 @@ public sealed partial class ViewerDataService
                                WHERE s.server_id = $1
                                AND   s.query_id = r.query_id
                                AND   s.database_name = r.database_name
-                               /* #5420: bounded to the read's own window ($2 through $3, the same bound the fact rows
-                                  above were read with). Without it a query with no inline text anywhere walked every
+                               /* #5420: bounded to the read's own window ($2 through $3). Without it a query with no inline text anywhere walked every
                                   retained chunk of query_store_stats on the time index looking for one. A query whose
                                   only inline text is older than the window now shows none, as a query with no text
-                                  at all already did. Twins the other copy of this tail; keep them matching. */
+                                  at all already did. #7776: the ceiling is the one the fact rows above are read with (CollectionCeilingSql), not the
+                                  bare $3, because the fact rows are windowed by interval start and an interval started in the window
+                                  can be collected after $3; a bare $3 left its inline-only text blank. The floor stays $2: a fact row's
+                                  collection is never before its interval's start, and text only older than the window shows none. The Darling MCP copy of this tail (DarlingDataReader) keeps the bare window with its own
+                                  collection_time window (#7814 is the twin). */
                                AND   s.collection_time >= $2
-                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3)
+                               AND   ($3::timestamp IS NULL OR s.collection_time <= $3 + {{CollectionCeilingSql}})
                                AND   s.query_text IS NOT NULL
                                ORDER BY s.collection_time DESC, s.collection_id DESC
                                LIMIT 1
@@ -915,7 +926,7 @@ public sealed partial class ViewerDataService
     /// the slicer does not, and this is its only statement.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStoreSlicerSql = """
+    public const string QueryStoreSlicerSql = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
@@ -973,8 +984,8 @@ public sealed partial class ViewerDataService
                and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
                straddling an old window's edge could still omit that one bar; the data stays in the store,
                and the alternative (no ceiling) makes every historical window scan to the present. */
-            AND   collection_time >= $2 - interval '1 hour'
-            AND   collection_time <= $3 + interval '30 days'
+            AND   collection_time >= $2 - {{CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{CollectionCeilingSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
         SELECT

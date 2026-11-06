@@ -89,7 +89,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
             Assert.Equal(wideRows, narrowRows);
         }
 
-        /* The straddling plan: its only interval began at 10:00, two hours before the window, and was collected at 12:02. */
+        /* The straddling plan: its only interval starts at 12:00, the window start, with a first execution at 10:00, two hours before the window (#7776 moved the interval start from 10:00 so the Viewer reads see it). */
         var straddlerKey = (await RunAsync(connection, QueryStoreIntervalWide.WithEdgeMargin(wide, QueryStoreIntervalWide.EdgeMarginSqlFor(twoHourMargin)), TwoHour, ct))[0];
         Assert.StartsWith($"a|{StraddlerPlan}|{StraddlerPlan}|", straddlerKey, StringComparison.Ordinal);
 
@@ -173,7 +173,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
              avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, runtime_stats_interval_id, interval_start_time_utc)
             VALUES (timestamp '{WindowStart:yyyy-MM-dd} 13:02', {TwoHour}, 'a', 9990, 9990, 'Regular',
                     timestamp '{WindowStart.AddHours(-20):yyyy-MM-dd HH:mm}', timestamp '{WindowStart:yyyy-MM-dd} 12:55', 'qhx', 'phx', 2000, 90000000, 1, 1, 0, 0, 1, 2,
-                    timestamp '{WindowStart.AddHours(-20):yyyy-MM-dd HH:mm}')
+                    timestamp '{WindowStart:yyyy-MM-dd} 12:00')
             """, ct);
         Assert.Equal(narrowOpen, await GridAsync(null));
         Assert.Equal(narrowCustom, await GridAsync(WindowEnd));
@@ -211,7 +211,10 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
         /* Two databases a and b, 30 plans each, tied costs on purpose (duration depends on plan % 5). Servers 1, 3, 4 and 5 write
            one row per plan per hourly interval, collected two minutes after it closes. Server 2 writes 2-hour intervals starting on
            even hours, collected two minutes after they close, so the 10:00 interval on the 14th (first execution 10:00 to 10:49)
-           is collected at 12:02, inside the window, with every first execution before it. Plan 9999 exists only in that interval. */
+           is collected at 12:02, inside the window, with every first execution before it. Plan 9999 exists only in that interval. #7776: the
+           Viewer grid places its window by the interval's start, so the two straddlers below carry an interval start of 12:00, the window
+           start, with a first execution two hours (9999) and three and a half hours (9998) before it, which is the row the edge margin
+           has to keep; an interval start of 10:00 is outside the grid's window and the Viewer reads would never return it. */
         const string columns = """
             (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
              last_execution_time, query_hash, query_plan_hash, execution_count, avg_duration_us, avg_cpu_time_us,
@@ -240,7 +243,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
             INSERT INTO collect.query_store_interval_wide {columns}
             VALUES (timestamp '{WindowStart:yyyy-MM-dd} 12:02', {TwoHour}, 'a', {StraddlerPlan}, {StraddlerPlan}, 'Regular',
                     timestamp '{WindowStart:yyyy-MM-dd} 10:00', timestamp '{WindowStart:yyyy-MM-dd} 11:55', 'qhs', 'phs', 1000, 90000000, 1, 1, 0, 0, 1, 1,
-                    timestamp '{WindowStart:yyyy-MM-dd} 10:00')
+                    timestamp '{WindowStart:yyyy-MM-dd} 12:00')
             """, ct);
 
         /* Server 6: hourly database "a" (health row, 60 minutes) and 2-hour database "c" (no health row at all), same shape as
@@ -265,7 +268,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
             INSERT INTO collect.query_store_interval_wide {columns}
             VALUES (timestamp '{WindowStart:yyyy-MM-dd} 12:02', {UnreportedDatabase}, 'c', {UnreportedStraddlerPlan}, {UnreportedStraddlerPlan}, 'Regular',
                     timestamp '{WindowStart:yyyy-MM-dd} 08:30', timestamp '{WindowStart:yyyy-MM-dd} 11:55', 'qhu', 'phu', 1000, 90000000, 1, 1, 0, 0, 1, 1,
-                    timestamp '{WindowStart:yyyy-MM-dd} 08:30')
+                    timestamp '{WindowStart:yyyy-MM-dd} 12:00')
             """, ct);
 
         /* Servers 7 and 8: hourly wide rows for database "a" (and "b" on server 8), one plan, enough for the skip scan to see the

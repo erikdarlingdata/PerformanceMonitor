@@ -1117,6 +1117,11 @@ public sealed class ViewerQueriesLivePostgresTests
             Assert.Equal(new long[] { 2, 3 }, rows.Select(r => r.QueryId).OrderBy(id => id).ToArray());
             Assert.Equal(7, Assert.Single(rows, r => r.QueryId == 2).TotalExecutions);
 
+            /* The text of both rows is inline on the fact row only (no query_store_text row, the legacy shape). Query 2 was collected
+               after the window's end, so the inline-text lookup has to reach past it the way the fact rows do. */
+            Assert.Equal("SELECT after", Assert.Single(rows, r => r.QueryId == 2).QueryText);
+            Assert.Equal("SELECT inside", Assert.Single(rows, r => r.QueryId == 3).QueryText);
+
             /* The bars above the grid are drawn from the same intervals. */
             var buckets = await viewer.GetQueryStoreSlicerDataAsync(GridWindowEdgeServerId, start, end);
             Assert.Equal(new[] { h1, h3 }, buckets.Select(b => b.BucketTime).OrderBy(t => t).ToArray());

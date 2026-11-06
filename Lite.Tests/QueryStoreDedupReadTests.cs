@@ -739,6 +739,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     /// <summary>
+    /// #7776: Lite's <c>get_query_store_top</c> MCP tool goes through the same <c>GetQueryStoreTopQueriesAsync</c> (it passes
+    /// <c>hours_back</c> and <c>as_of</c> straight in), so it places its window by interval start too. At <c>hours_back=4</c> an
+    /// interval that started five hours ago and was collected three and a half hours ago is outside the window, and a neighbouring
+    /// interval that started three hours ago is inside it. Darling's MCP tool still windows on collection_time (#7814).
+    /// </summary>
+    [Fact]
+    public async Task McpTopTool_PlacesTheWindowByIntervalStart_AtTheEdge()
+    {
+        var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+        await SeedAsync(now.AddHours(-3.5), queryId: 94, planId: 994, FirstExecA,
+            executionCount: 4, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE5",
+            intervalId: 9005, intervalStart: HourFloor(now.AddHours(-5)));
+        await SeedAsync(now.AddHours(-2), queryId: 95, planId: 995, FirstExecB,
+            executionCount: 6, avgCpuUs: 1_000, avgDurationUs: 2_000, avgReads: 6, queryHash: "0xEDGE6",
+            intervalId: 9006, intervalStart: HourFloor(now.AddHours(-3)));
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(ServerId, hoursBack: 4, asOfUtc: now);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(95, row.QueryId);
+    }
+
+    /// <summary>
     /// WATCHED (mutation): the duration trend carries the identical mismatch, and fixing only the slicer
     /// leaves the two charts on the same screen disagreeing about which interval is in the window.
     /// </summary>
