@@ -88,6 +88,38 @@ public sealed class DarlingWebNamedTokenTests
         Assert.Contains(problems, p => p.Contains("has no valid name", StringComparison.Ordinal));
     }
 
+    /// <summary>A token's name becomes its <c>updated_by</c> stamp and its <c>person:</c> journal actor, so a name a built-in writer already
+    /// stamps as itself (web, mcp, cli, viewer) or an mcp.tokens placeholder (invalid, unclaimed) is refused in any case, and the finding
+    /// names the entry.</summary>
+    [Theory]
+    [InlineData("web")]
+    [InlineData("MCP")]
+    [InlineData("unclaimed")]
+    [InlineData("Invalid")]
+    [InlineData("cli")]
+    [InlineData("Viewer")]
+    public void Check_RefusesAReservedName_ABuiltInStampOrAnMcpPlaceholder(string name)
+    {
+        var problems = Check(Network(Entry(name, ReaderToken, "operator")), out var usable);
+
+        Assert.Empty(usable);
+        var problem = Assert.Single(problems);
+        Assert.Contains("web.network.tokens[0] is named " + name + ", which is reserved", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain(ReaderToken, problem, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("web-ops")]
+    [InlineData("mcp.readers")]
+    [InlineData("unclaimed2")]
+    public void Check_ServesANameThatOnlyContainsAReservedWord(string name)
+    {
+        var problems = Check(Network(Entry(name, ReaderToken, "reader")), out var usable);
+
+        Assert.Empty(problems);
+        Assert.Equal(name, Assert.Single(usable).Name);
+    }
+
     [Theory]
     [InlineData("reader", "reader", false)]
     [InlineData("Reader", "reader", false)]
