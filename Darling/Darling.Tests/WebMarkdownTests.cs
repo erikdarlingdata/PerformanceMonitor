@@ -130,4 +130,56 @@ public sealed class WebMarkdownTests
         var span = block.GetProperty("kids").EnumerateArray().Single(k => k.GetProperty("tag").GetString() == tag);
         Assert.Equal(inner, PlainText(span));
     }
+
+    /// <summary>The text a block reads as, a code span's own text included.</summary>
+    private static string ShownText(JsonElement node) =>
+        node.GetProperty("text").ValueKind == JsonValueKind.String
+            ? node.GetProperty("text").GetString()!
+            : string.Concat(node.GetProperty("kids").EnumerateArray().Select(ShownText));
+
+    /// <summary>
+    /// #7944: a backtick fence's info string holds no backtick (CommonMark), so a line that opens and closes inline code with three
+    /// backticks, with more text after it, is a paragraph holding one code span, and the lines after it are drawn as themselves rather
+    /// than swallowed into a code block that runs to the end of the cell.
+    /// </summary>
+    [Fact]
+    public void ALineOfInlineTripleBacktickCode_IsAParagraphWithOneCodeSpan_AndOpensNoFence()
+    {
+        var blocks = Render("```code``` and then some text\n\nA second paragraph.").EnumerateArray().ToArray();
+
+        Assert.Equal(2, blocks.Length);
+        Assert.Equal("p", blocks[0].GetProperty("tag").GetString());
+        var code = Assert.Single(blocks[0].GetProperty("kids").EnumerateArray(), k => k.GetProperty("tag").GetString() == "code");
+        Assert.Equal("code", code.GetProperty("text").GetString());
+        Assert.Equal("code and then some text", ShownText(blocks[0]));
+        Assert.Equal("p", blocks[1].GetProperty("tag").GetString());
+        Assert.Equal("A second paragraph.", ShownText(blocks[1]));
+        Assert.False(HasTag(blocks[0], "pre") || HasTag(blocks[1], "pre"), "no line of this cell is a fence");
+    }
+
+    /// <summary>#7944: the same line inside a paragraph run stays in that paragraph (soft-wrapped), since it starts no block.</summary>
+    [Fact]
+    public void ALineOfInlineTripleBacktickCode_AfterProse_StaysInTheSameParagraph()
+    {
+        var block = Assert.Single(Render("Intro line\n```code``` tail").EnumerateArray());
+
+        Assert.Equal("p", block.GetProperty("tag").GetString());
+        Assert.Equal("Intro line code tail", ShownText(block));
+        Assert.Single(block.GetProperty("kids").EnumerateArray(), k => k.GetProperty("tag").GetString() == "code");
+    }
+
+    /// <summary>#7944: a real fence still opens: a backtick fence with a plain info string, and a tilde fence whose info string may hold backticks.</summary>
+    [Theory]
+    [InlineData("```\nx = `1`\n```", "md-pre", "x = `1`")]
+    [InlineData("```sql\nselect `1`\n```", "md-pre", "select `1`")]
+    [InlineData("~~~ `info`\nbody\n~~~", "md-pre", "body")]
+    [InlineData("```text\n```code``` inside\n```", "md-pre md-pre-text", "```code``` inside")]
+    public void ARealFence_StillOpens_AndHoldsItsBodyVerbatim(string markdown, string cls, string body)
+    {
+        var pre = Assert.Single(Render(markdown).EnumerateArray());
+
+        Assert.Equal("pre", pre.GetProperty("tag").GetString());
+        Assert.Equal(cls, pre.GetProperty("cls").GetString());
+        Assert.Equal(body, pre.GetProperty("kids")[0].GetProperty("text").GetString());
+    }
 }
