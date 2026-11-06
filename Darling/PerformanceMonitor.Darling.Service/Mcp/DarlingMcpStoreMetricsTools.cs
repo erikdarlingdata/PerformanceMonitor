@@ -185,6 +185,19 @@ public sealed class DarlingMcpStoreMetricsTools
 
             var (composePage, composeTruncated) = McpHelpers.BoundPage(composeFailures ?? Array.Empty<QueryStoreComposeStamp.HourFailure>(), limit);
 
+            /* #7674: the opt-in trigram index on the plan-cache text. Its own checkout, failure-isolated to null ("Unreadable"), so a catalog
+               read that fails never reads as "the index is off". */
+            TrigramIndexHealth? trigramHealth;
+            try
+            {
+                await using var trigramConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                trigramHealth = await QueryTextTrigramIndex.ReadHealthAsync(trigramConnection, QueryTextTrigramIndexTracker.Shared, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                trigramHealth = null;
+            }
+
             var heldPolicies = holds
                 .Where(h => !h.Armed)
                 .OrderByDescending(h => h.OverHorizonRatio ?? 0)
@@ -418,6 +431,31 @@ public sealed class DarlingMcpStoreMetricsTools
                         retry_at = f.NextAttemptAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                     }),
                 },
+                /* #7674. Present on EVERY response, like the blocks around it: an absent block must not read as "no index". status is one of
+                   Off, DropPending, Dropping, Pending, Building, Ready, Failed or WaitingOnExtension; Unreadable when the catalog read failed. */
+                query_text_index = trigramHealth is null
+                    ? (object)new { status = "Unreadable", note = "The trigram index state on the plan-cache text could not be read." }
+                    : new
+                    {
+                        status = trigramHealth.Status.ToString(),
+                        enabled = trigramHealth.Enabled,
+                        table = QueryTextTrigramIndex.TableName,
+                        index_name = QueryTextTrigramIndex.IndexName,
+                        exists = trigramHealth.Exists,
+                        valid = trigramHealth.Valid,
+                        size_bytes = trigramHealth.SizeBytes,
+                        build_running = trigramHealth.BuildRunning,
+                        build_started_at = trigramHealth.BuildStartedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                        extension_installed = trigramHealth.ExtensionInstalled,
+                        extension_available = trigramHealth.ExtensionAvailable,
+                        failed_attempts = trigramHealth.FailedAttempts,
+                        last_error = trigramHealth.LastError,
+                        last_sqlstate = trigramHealth.LastSqlState,
+                        last_failed_at = trigramHealth.LastFailedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                        next_attempt_at = trigramHealth.NextAttemptUtc?.ToString("o", CultureInfo.InvariantCulture),
+                        operator_statement = trigramHealth.OperatorStatement,
+                        note = QueryTextTrigramIndex.Note(trigramHealth),
+                    },
                 /* #3175. Present on EVERY response, for the #2813 reason one line up and one step further:
                    here the absence being guarded is the absence of ROWS in the instrument this description
                    sends a maximum question to, so an absent block would leave the redirect unqualified

@@ -19,7 +19,18 @@ All sections except `postgres` and `servers` are optional — omit a section (or
 | `mcp.enabled`, `mcp.port`, `web.enabled`, `web.port` | First-run seed | The Viewer's Settings window, live and with no restart. On a box with no Viewer, `--enable-mcp` and `--enable-web` |
 | `servers` | First-run seed, copied once while the server registry is empty. A server added to the file later is ignored | The Viewer, the web dashboard's Admin page, or the MCP tools `add_servers` and `edit_server`. The one exception is the `remediation*` and `hypotheticalIndex*` login keys, which the service syncs from the file at every start |
 | `analysis.uncorroboratedRoute` | Both. The store's value wins when it is set. Otherwise the file's value is used | The store value, from the same places as the rest of `analysis`. Clear it to hand the choice back to the file |
-| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `frontDoor`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+| `postgres`, `collectSchemaChangeEvents`, `rawChunkIntervalReconcileEnabled` (default `true`), `queryTextTrigramIndexEnabled` (default `false`), `procedureStatsPlanCycleInterval`, `queryStatsDeferredPlanFetch`, `procedureStatsDeferredPlanFetch`, `allowedAwsRoles`, `peers`, `frontDoor`, `heartbeat`, `reads`, `forcePlanBot`, `analyzer`, and every other key in `mcp` and `web` (including `mcp.network` and `web.network`) | File only | Edit `darling.json` and restart the service |
+
+## queryTextTrigramIndexEnabled
+
+Off by default. When `true`, the service builds a trigram index on the plan-cache text (`collect.query_text_dim.query_text`). A search across a busy server's whole text can then answer in seconds. On the largest store measured, the index took 3.1 GB, which is 52% of the table. It took about 17 minutes to build and added about 0.5 ms to each row written. That is why it is off until you ask for it.
+
+- The service builds it in the background about 20 minutes after it starts, with `CREATE INDEX CONCURRENTLY`. Collection keeps running and an upgrade never waits for it. It is never part of a migration.
+- It needs the `pg_trgm` extension, and the service tries `CREATE EXTENSION IF NOT EXISTS pg_trgm`. If the store login is refused, the service stops asking. `get_store_metrics` then shows the state `WaitingOnExtension` and the statement to run as a role that can create it. Once the extension exists, the next pass builds the index.
+- A build that fails or is cut short leaves its index half built. The service drops it and tries again after 30 minutes, then 1 hour, then twice as long each time, up to 12 hours.
+- Setting the key back to `false` and restarting the service drops the index.
+- `get_store_metrics` has a `query_text_index` block with the state (`Off`, `DropPending`, `Dropping`, `Pending`, `Building`, `Ready`, `Failed` or `WaitingOnExtension`), the index size, and the last error.
+- An edit takes effect when the service restarts.
 
 ## postgres
 
