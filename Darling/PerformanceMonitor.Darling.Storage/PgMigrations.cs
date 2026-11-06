@@ -2616,7 +2616,7 @@ ALTER TABLE config.config_monitored_servers
     ADD COLUMN IF NOT EXISTS xe_session_databases text[] NOT NULL DEFAULT '{}'::text[];";
 
     /// <summary>
-    /// V248 (#7691): <c>collect.memory_pressure_events.memory_node_id</c>, the memory node a resource monitor ring buffer record came from. A server
+    /// V250 (#7691): <c>collect.memory_pressure_events.memory_node_id</c>, the memory node a resource monitor ring buffer record came from. A server
     /// with several memory nodes writes one record per node for the same event, so the grid listed one event once per node with nothing to tell the
     /// rows apart. One nullable <c>integer</c>, no DEFAULT, no backfill, no scan of the table (V241's shape): a row stored before this rung never read
     /// the node, so NULL is the honest value. Catalog-only, accepted on a compressed hypertable. <b>Appended LAST</b> after
@@ -2625,7 +2625,7 @@ ALTER TABLE config.config_monitored_servers
     /// trailing <c>CREATE OR REPLACE VIEW</c> re-expands <c>v_memory_pressure_events</c>' pinned <c>SELECT *</c>. An older build writes its own column
     /// list, so the column stays NULL for the rows it writes, and its reads name their columns, so the extra one changes nothing for it.
     /// </summary>
-    private const string V248Sql = @"
+    private const string V250Sql = @"
 ALTER TABLE collect.memory_pressure_events ADD COLUMN IF NOT EXISTS memory_node_id integer;
 CREATE OR REPLACE VIEW v_memory_pressure_events AS SELECT * FROM memory_pressure_events;";
 
@@ -3134,7 +3134,7 @@ $rung$;";
         new Migration(245, "database-protection-thresholds", V245Sql),
         new Migration(246, "query-store-corrected-hourly-hash-index", V246Sql),
         new Migration(247, "xe-session-databases", V247Sql),
-        new Migration(248, "memory-pressure-node", V248Sql),
+        new Migration(250, "memory-pressure-node", V250Sql),
     };
 
     /// <summary>

@@ -122,7 +122,7 @@ OPTION(RECOMPILE);";
         new CollectorColumn("memory_notification", CollectorColumnType.Varchar),
         new CollectorColumn("memory_indicators_process", CollectorColumnType.Integer),
         new CollectorColumn("memory_indicators_system", CollectorColumnType.Integer),
-        /* #7691: LAST, so a store that predates it comes up to shape with one ADD COLUMN (Darling's V248, Lite's v81). */
+        /* #7691: LAST, so a store that predates it comes up to shape with one ADD COLUMN (Darling's V250, Lite's v81). */
         new CollectorColumn("memory_node_id", CollectorColumnType.Integer),
     };
 

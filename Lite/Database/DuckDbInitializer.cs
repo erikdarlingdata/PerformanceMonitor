@@ -3116,7 +3116,7 @@ public partial class DuckDbInitializer : IDisposable
 
         if (fromVersion < 81)
         {
-            /* v81 (#7691, twinning Darling's V248): memory_pressure_events.memory_node_id, the memory node a resource monitor record came from. INTEGER,
+            /* v81 (#7691, twinning Darling's V250): memory_pressure_events.memory_node_id, the memory node a resource monitor record came from. INTEGER,
                nullable, the LAST column (the shared added-columns list). NULL on a row stored before v81 and on a record with no node; the archive
                views union parquet by name, so a parquet file written before v81 reads NULL for it. */
             _logger?.LogInformation("Running migration to v81: adding memory_pressure_events.memory_node_id");
@@ -3206,7 +3206,7 @@ public partial class DuckDbInitializer : IDisposable
         (79, "blocked_process_reports", "blocking_open_transaction_count", "INTEGER"),
         /* #7573: the program name of the waiting task's session (Darling's V243 column). NULL on a row stored before v80; a reader never hides a NULL. */
         (80, "waiting_tasks", "program_name", "VARCHAR"),
-        /* #7691: the memory node a resource monitor ring buffer record came from (Darling's V248 column). NULL on a row stored before v81 and on a record that has none. */
+        /* #7691: the memory node a resource monitor ring buffer record came from (Darling's V250 column). NULL on a row stored before v81 and on a record that has none. */
         (81, "memory_pressure_events", "memory_node_id", "INTEGER"),
     };
 

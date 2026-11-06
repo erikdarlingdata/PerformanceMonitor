@@ -1463,7 +1463,7 @@ SELECT
     /* V247 (#7639) adds the per-server list of databases that get Extended Events sessions to the server registry. Found by catalog so the
        answer does not depend on the connecting role's privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('config.config_monitored_servers') AND attname = 'xe_session_databases' AND NOT attisdropped),
-    /* V248 (#7691) adds the memory node to the memory pressure events. Found by catalog so the answer does not depend on the connecting role's
+    /* V250 (#7691) adds the memory node to the memory pressure events. Found by catalog so the answer does not depend on the connecting role's
        privileges. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.memory_pressure_events') AND attname = 'memory_node_id' AND NOT attisdropped)";
 
@@ -1745,12 +1745,12 @@ SELECT
         /* V247 (#7639): the per-server list of databases that get Extended Events sessions on the server registry. Column-existence sentinel,
            newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to
            246 and showing a spurious upgrade banner on a store that is current. */
-        /* V248 (#7691): the memory node on the memory pressure events. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
+        /* V250 (#7691): the memory node on the memory pressure events. Column-existence sentinel, newest-first, and the TOP rung, so a fully-migrated
            store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 247 and showing a spurious upgrade banner on a store
            that is current. */
         if (hasMemoryPressureNode)
         {
-            return 248;
+            return 250;
         }
         if (hasXeSessionDatabases)
         {
