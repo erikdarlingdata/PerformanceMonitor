@@ -113,4 +113,64 @@ public sealed class ViewsListPollBehaviourTests
         Assert.Equal(new[] { "Waits by server", "CPU trend, renamed", "Blocking" }, Strings(navigated.GetProperty("names")));
         Assert.Equal("", navigated.GetProperty("boxValue").GetString());
     }
+
+    [Fact]
+    public void APollWhoseFleetReadAddsAServer_ShowsItInThePicker_AndKeepsTheOpenMenuAndThePick()
+    {
+        var run = Run();
+        var grows = run.GetProperty("fleetGrows");
+        Assert.Equal(1, grows.GetProperty("fleetReads").GetInt32());
+        Assert.Equal(new[] { "SQL01", "SQL02", "SQL03" }, Strings(grows.GetProperty("servers")));
+        Assert.Equal("SQL02", grows.GetProperty("serverPick").GetString());
+        Assert.True(grows.GetProperty("menuOpen").GetBoolean());
+        Assert.Equal("{\"definition\": {\"panels\": [{\"viz\": \"line\"}]}}", grows.GetProperty("boxValue").GetString());
+        Assert.Equal(new[] { "Waits by server", "CPU trend, renamed", "Blocking" }, Strings(grows.GetProperty("names")));
+
+        var heroGrows = run.GetProperty("heroFleetGrows");
+        Assert.True(heroGrows.GetProperty("heroKept").GetBoolean());
+        Assert.True(heroGrows.GetProperty("heroMenuOpen").GetBoolean());
+        Assert.Equal(new[] { "SQL01" }, Strings(heroGrows.GetProperty("heroMenuServers")));
+        Assert.Equal(new[] { "SQL01" }, Strings(heroGrows.GetProperty("heroServers")));
+        Assert.Equal(new[] { "SQL01" }, Strings(heroGrows.GetProperty("headServers")));
+        Assert.True(heroGrows.GetProperty("starterChips").GetInt32() > 0);
+    }
+
+    [Fact]
+    public void APollAfterAFailedFirstPaint_DrawsTheErrorAgain_OrTheEmptyStoreHero()
+    {
+        var run = Run();
+        var first = run.GetProperty("failedFirstPaint");
+        Assert.False(first.GetProperty("hero").GetBoolean());
+        Assert.Contains("the store is down", Assert.Single(Strings(first.GetProperty("errors"))));
+
+        var again = run.GetProperty("failedAgainPoll");
+        Assert.Contains("the store is down", Assert.Single(Strings(again.GetProperty("errors"))));
+        Assert.Equal(0, again.GetProperty("refreshError").GetInt32());
+        Assert.False(again.GetProperty("hero").GetBoolean());
+
+        var empty = run.GetProperty("emptyAfterFailure");
+        Assert.True(empty.GetProperty("hero").GetBoolean());
+        Assert.Equal("Compose your own dashboards & notebooks", empty.GetProperty("heroTitle").GetString());
+        Assert.Empty(Strings(empty.GetProperty("errors")));
+        Assert.Equal(0, empty.GetProperty("refreshError").GetInt32());
+        Assert.Empty(Strings(empty.GetProperty("heroServers")));
+    }
+
+    [Fact]
+    public void APollAfterTheSessionProbeRecovers_DrawsTheEditingAffordances()
+    {
+        var run = Run();
+        var readOnly = run.GetProperty("readOnlyFirstPaint");
+        Assert.Equal(new[] { "Waits by server", "CPU trend", "Blocking" }, Strings(readOnly.GetProperty("names")));
+        Assert.Equal(0, readOnly.GetProperty("templateMenus").GetInt32());
+        Assert.Equal(0, readOnly.GetProperty("newView").GetInt32());
+        Assert.False(readOnly.GetProperty("hasImportBox").GetBoolean());
+
+        var edit = run.GetProperty("canEditPoll");
+        Assert.Equal(new[] { "Waits by server", "CPU trend", "Blocking" }, Strings(edit.GetProperty("names")));
+        Assert.Equal(1, edit.GetProperty("templateMenus").GetInt32());
+        Assert.Equal(1, edit.GetProperty("newView").GetInt32());
+        Assert.True(edit.GetProperty("hasImportBox").GetBoolean());
+        Assert.Equal(new[] { "SQL01", "SQL02" }, Strings(edit.GetProperty("servers")));
+    }
 }

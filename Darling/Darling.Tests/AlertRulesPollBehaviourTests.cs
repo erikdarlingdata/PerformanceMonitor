@@ -112,4 +112,53 @@ public sealed class AlertRulesPollBehaviourTests
         Assert.Equal(0, recovered.GetProperty("refreshError").GetInt32());
         Assert.Equal(new[] { "CPU hot", "PLE low, renamed", "Blocked sessions" }, Strings(recovered.GetProperty("names")));
     }
+
+    [Fact]
+    public void APollWhoseTemplatesReadAddsATemplate_ListsItInTheOpenMenu()
+    {
+        var grows = Run().GetProperty("templatesGrow");
+        Assert.Equal(
+            new[] { "High CPUCPU over 80% for five minutes", "Low PLEPage life expectancy under 300 for ten minutes" },
+            Strings(grows.GetProperty("templateItems")));
+        Assert.True(grows.GetProperty("menuKept").GetBoolean());
+        Assert.Equal(new[] { "CPU hot", "PLE low, renamed", "Blocked sessions" }, Strings(grows.GetProperty("names")));
+    }
+
+    [Fact]
+    public void APollAfterAFailedFirstPaint_DrawsTheErrorAgain_OrTheEmptyStoreHero()
+    {
+        var run = Run();
+        var first = run.GetProperty("failedFirstPaint");
+        Assert.False(first.GetProperty("hero").GetBoolean());
+        Assert.Contains("the store is down", Assert.Single(Strings(first.GetProperty("errors"))));
+
+        var again = run.GetProperty("failedAgainPoll");
+        Assert.Contains("the store is down", Assert.Single(Strings(again.GetProperty("errors"))));
+        Assert.Equal(0, again.GetProperty("refreshError").GetInt32());
+        Assert.False(again.GetProperty("hero").GetBoolean());
+
+        var empty = run.GetProperty("emptyAfterFailure");
+        Assert.True(empty.GetProperty("hero").GetBoolean());
+        Assert.Equal("Alert on any metric you can chart", empty.GetProperty("heroTitle").GetString());
+        Assert.Empty(Strings(empty.GetProperty("errors")));
+        Assert.Equal(0, empty.GetProperty("refreshError").GetInt32());
+    }
+
+    [Fact]
+    public void APollAfterTheSessionProbeRecovers_DrawsTheEditingAffordances()
+    {
+        var run = Run();
+        var readOnly = run.GetProperty("readOnlyFirstPaint");
+        Assert.Equal(new[] { "CPU hot", "PLE low", "Blocked sessions" }, Strings(readOnly.GetProperty("names")));
+        Assert.Equal(0, readOnly.GetProperty("templateMenus").GetInt32());
+        Assert.Equal(0, readOnly.GetProperty("newRule").GetInt32());
+
+        var edit = run.GetProperty("canEditPoll");
+        Assert.Equal(new[] { "CPU hot", "PLE low", "Blocked sessions" }, Strings(edit.GetProperty("names")));
+        Assert.Equal(1, edit.GetProperty("templateMenus").GetInt32());
+        Assert.Equal(1, edit.GetProperty("newRule").GetInt32());
+        Assert.Equal(
+            new[] { "High CPUCPU over 80% for five minutes", "Low PLEPage life expectancy under 300 for ten minutes" },
+            Strings(edit.GetProperty("templateItems")));
+    }
 }

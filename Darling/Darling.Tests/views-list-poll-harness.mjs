@@ -1,7 +1,8 @@
 /* Runs the shipped Custom Views list (wwwroot/js/pages/views.js) under Node against a recording fetch and a fake DOM, and prints as
    one line of JSON what the 60 s poll does to a list the reader is working on (#7925): the import JSON pasted into the import box, the
    open Import and template menus and the server picked for a template, the per-view definition reads the poll costs, a poll whose
-   list read fails, and a fresh navigation to the list. ViewsListPollBehaviourTests starts it as
+   list read fails, a fresh navigation to the list, a poll whose fleet read has a server added since the first paint, a poll after a
+   failed first paint, and a poll after the session probe recovers. ViewsListPollBehaviourTests starts it as
        node views-list-poll-harness.mjs <path to wwwroot/js> */
 import fs from "node:fs";
 import os from "node:os";
@@ -110,14 +111,16 @@ const definitions = {
   3: { panels: [{ viz: "pie" }, { viz: "pie" }, { viz: "stat" }] },
 };
 let listFails = false;
+let sessionFails = false;
+const fleet = [{ server_id: 1, server_name: "SQL01", display_name: "SQL01" }, { server_id: 2, server_name: "SQL02", display_name: "SQL02" }];
 const fetches = [];
 let onListRead = null;
 globalThis.fetch = async (url) => {
   const u = String(url).split("?")[0];
   fetches.push(u);
   const reply = (body, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
-  if (u === "/api/session") return reply({ can_edit: true, can_own: true });
-  if (u === "/api/fleet") return reply({ cards: [{ server_id: 1, server_name: "SQL01", display_name: "SQL01" }, { server_id: 2, server_name: "SQL02", display_name: "SQL02" }] });
+  if (u === "/api/session") return sessionFails ? reply({ error: "no session" }, 500) : reply({ can_edit: true, can_own: true });
+  if (u === "/api/fleet") return reply({ cards: fleet.slice() });
   if (u === "/api/views") {
     if (onListRead) onListRead();
     return listFails ? reply({ error: "the store is down" }, 500) : reply(list);
@@ -136,14 +139,27 @@ const importBox = (main) => withClass(main, "import-box")[0] || null;
 const importPanel = (main) => withClass(main, "import-panel")[0] || null;
 const templateMenu = (main) => withClass(main, "template-menu")[0] || null;
 const templateServer = (main) => { const menu = templateMenu(main); return menu ? all(menu, (n) => n.tag === "select")[0] || null : null; };
+/* The option values of the first server picker under `node`, or none when `node` has no picker. */
+const pickerServers = (node) => { const sel = node ? all(node, (n) => n.tag === "select")[0] : null; return sel ? sel.children.map((o) => o.getAttribute("value")) : []; };
+const hero = (main) => withClass(main, "views-hero")[0] || null;
+const heroTitle = (main) => { const h = hero(main); return h ? withClass(h, "hero-title").map((n) => n.textContent)[0] || null : null; };
+const starterRow = (main) => withClass(main, "hero-suggest")[0] || null;
+const errorStrips = (main) => all(main, (n) => (" " + n.className + " ").includes(" error ") && !(" " + n.className + " ").includes(" refresh-error ")).map((n) => n.textContent);
+const newViewLinks = (main) => all(main, (n) => n.tag === "a" && n.textContent === "New view").length;
+
+/* A second copy of the page script, with its own session cache: the first good session answer is kept for the life of the page. */
+const loadPage = (dir) => {
+  fs.cpSync(jsDir, dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "package.json"), '{ "type": "module" }');
+  return import(pathToFileURL(path.join(dir, "pages", "views.js")).href);
+};
 
 const PASTED = '{"definition": {"panels": [{"viz": "line"}]}}';
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "views-list-poll-"));
+const scratch2 = fs.mkdtempSync(path.join(os.tmpdir(), "views-list-poll-"));
 const out = {};
 try {
-  fs.cpSync(jsDir, scratch, { recursive: true });
-  fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  const page = await import(pathToFileURL(path.join(scratch, "pages", "views.js")).href);
+  const page = await loadPage(scratch);
   const main = new FakeNode("main");
   main.isRoot = true;
 
@@ -207,7 +223,94 @@ try {
   await page.renderViewList(main);
   await settle();
   out.navigated = { names: namesOf(main), boxValue: importBox(main) ? importBox(main).value : null };
+
+  /* The reader opens the template menu, picks the second server and pastes JSON again. The next poll's fleet read answers with a
+     server added since the first paint: the picker lists it, the menu is still the same open element, and the pick and the text stay. */
+  const menuAgain = templateMenu(main);
+  menuAgain.open = true;
+  templateServer(main).value = "SQL02";
+  importBox(main).value = PASTED;
+  fleet.push({ server_id: 3, server_name: "SQL03", display_name: "SQL03" });
+  const beforeFleetPoll = fetches.length;
+  await page.renderViewList(main, { poll: true });
+  await settle();
+  out.fleetGrows = {
+    fleetReads: fetches.slice(beforeFleetPoll).filter((f) => f === "/api/fleet").length,
+    servers: pickerServers(templateMenu(main)),
+    serverPick: templateServer(main) ? templateServer(main).value : null,
+    menuOpen: templateMenu(main) === menuAgain && templateMenu(main).open === true,
+    boxValue: importBox(main) ? importBox(main).value : null,
+    names: namesOf(main),
+  };
+
+  /* A list whose first paint fails, over a store with no views and a fleet with no server yet. */
+  const main2 = new FakeNode("main");
+  main2.isRoot = true;
+  list = [];
+  fleet.length = 0;
+  listFails = true;
+  await page.renderViewList(main2);
+  await settle();
+  out.failedFirstPaint = { errors: errorStrips(main2), hero: hero(main2) !== null };
+
+  /* A poll that fails again draws the error page again: there is no earlier list to keep under a refresh notice. */
+  await page.renderViewList(main2, { poll: true });
+  await settle();
+  out.failedAgainPoll = { errors: errorStrips(main2), refreshError: withClass(main2, "refresh-error").length, hero: hero(main2) !== null };
+
+  /* The poll after that answers an empty list: the page shows the empty-store hero, drawn for a fleet with no server. */
+  listFails = false;
+  await page.renderViewList(main2, { poll: true });
+  await settle();
+  out.emptyAfterFailure = {
+    hero: hero(main2) !== null,
+    heroTitle: heroTitle(main2),
+    errors: errorStrips(main2),
+    refreshError: withClass(main2, "refresh-error").length,
+    heroServers: pickerServers(starterRow(main2)),
+  };
+
+  /* The reader opens the hero's template menu. The next poll's fleet read has a server: the hero's starter row and its menu gain the
+     picker, the hero is the same element, and the menu stays open. */
+  const heroBefore = hero(main2);
+  const heroMenu = heroBefore ? templateMenu(heroBefore) : null;
+  if (heroMenu) heroMenu.open = true;
+  fleet.push({ server_id: 1, server_name: "SQL01", display_name: "SQL01" });
+  await page.renderViewList(main2, { poll: true });
+  await settle();
+  out.heroFleetGrows = {
+    heroKept: hero(main2) !== null && hero(main2) === heroBefore,
+    heroMenuOpen: heroMenu !== null && hero(main2) !== null && templateMenu(hero(main2)) === heroMenu && heroMenu.open === true,
+    heroMenuServers: pickerServers(heroMenu),
+    heroServers: pickerServers(starterRow(main2)),
+    starterChips: withClass(main2, "hero-chip").length,
+    headServers: pickerServers(withClass(main2, "page-head")[0] || null),
+  };
+
+  /* A seat whose first session probe failed is drawn read-only. A failed probe is kept for a few seconds and then asked again
+     (#7928): the poll after the probe recovers draws the editing affordances. The second copy of the page script starts with an
+     empty session cache, and the clock is moved past the retry wait for that poll. */
+  const page2 = await loadPage(scratch2);
+  const main3 = new FakeNode("main");
+  main3.isRoot = true;
+  list = [view(1, "Waits by server", 1), view(2, "CPU trend", 1), view(3, "Blocking", 1)];
+  fleet.push({ server_id: 2, server_name: "SQL02", display_name: "SQL02" });
+  sessionFails = true;
+  await page2.renderViewList(main3);
+  await settle();
+  out.readOnlyFirstPaint = { names: namesOf(main3), templateMenus: withClass(main3, "template-menu").length, newView: newViewLinks(main3), hasImportBox: importBox(main3) !== null };
+  sessionFails = false;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 10 * 60 * 1000;
+  try {
+    await page2.renderViewList(main3, { poll: true });
+    await settle();
+  } finally {
+    Date.now = realNow;
+  }
+  out.canEditPoll = { names: namesOf(main3), templateMenus: withClass(main3, "template-menu").length, newView: newViewLinks(main3), hasImportBox: importBox(main3) !== null, servers: pickerServers(templateMenu(main3)) };
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
+  fs.rmSync(scratch2, { recursive: true, force: true });
 }
 process.stdout.write(JSON.stringify(out));
