@@ -246,7 +246,15 @@ public partial class MainWindow
         }
         catch (Exception ex)
         {
+            /* Nothing was read this tick, so the dots and the Collection field must not keep last tick's answer: a
+               green dot and "Collection: Active" under an unreachable store are claims nothing measured. */
             ViewerLogger.Warn("ServerStatus", $"freshness read failed: {ex.Message}");
+            foreach (var s in _fleet.All)
+            {
+                s.ClearFreshness();
+            }
+
+            CollectionStatusText.Text = CollectionStatusUnknownLabel;
             return;
         }
 
@@ -285,17 +293,26 @@ public partial class MainWindow
            the server COUNT is a separate field (ServerCountText). Mirrors Lite's UpdateCollectorHealth. */
         await UpdateCollectorHealthTextAsync();
 
-        if (newest is null)
+        CollectionStatusText.Text = CollectionStatusLabel(newest, nowUtc);
+    }
+
+    /// <summary>The status bar's Collection field when the freshness read failed: neither Active nor Idle, because
+    /// neither was measured.</summary>
+    internal const string CollectionStatusUnknownLabel = "Collection: Unknown";
+
+    /// <summary>The status bar's Collection field from the fleet's newest collection: Idle when nothing has collected,
+    /// Active within 90 seconds, otherwise how long ago.</summary>
+    internal static string CollectionStatusLabel(DateTime? newestUtc, DateTime nowUtc)
+    {
+        if (newestUtc is null)
         {
-            CollectionStatusText.Text = "Collection: Idle";
+            return "Collection: Idle";
         }
-        else
-        {
-            var age = nowUtc - newest.Value;
-            CollectionStatusText.Text = age.TotalSeconds < 90
-                ? "Collection: Active"
-                : $"Collection: {FormatAge(age)} ago";
-        }
+
+        var age = nowUtc - newestUtc.Value;
+        return age.TotalSeconds < 90
+            ? "Collection: Active"
+            : $"Collection: {FormatAge(age)} ago";
     }
 
     /// <summary>

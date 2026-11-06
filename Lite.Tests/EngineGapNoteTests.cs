@@ -347,7 +347,7 @@ public sealed class EngineGapNoteTests
     [Fact]
     public void TheCollectorHistory_IsReadOncePerTabRefresh_AndByTheConfigurationChangesRefreshButton()
     {
-        var refresh = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task RefreshVisibleTabAsync(");
+        var refresh = MethodBody("Lite/Controls/ServerTab.Refresh.cs", "Task<string?> RefreshVisibleTabAsync(");
         var edition = refresh.IndexOf("RefreshEngineEditionAsync(", StringComparison.Ordinal);
         var history = refresh.IndexOf("RefreshCollectorRunsAsync(", StringComparison.Ordinal);
         Assert.True(edition >= 0 && history > edition, "RefreshVisibleTabAsync must read the collector history after the edition");
