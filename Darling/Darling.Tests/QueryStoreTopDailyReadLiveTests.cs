@@ -89,7 +89,9 @@ public sealed class QueryStoreTopDailyReadLiveTests
     /// <summary>The wide table for server 1 from 2026-01-05 to 2026-01-14 12:00, one row per query per hour for most
     /// hours (a row at every midnight among them), with nulls where the facts need them. 40 queries: query 40 has every
     /// average NULL, queries divisible by 7 have a NULL cpu on odd hours, queries divisible by 4 change module
-    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role.</summary>
+    /// between hours, queries divisible by 5 are Aborted, and queries divisible by 6 carry a replica role. #7814: every row's interval start is its collection time, so the table read
+    /// (placed by the interval's start) and the daily summary (built on collection days) place each row in the same window, which the
+    /// bit-for-bit comparisons need; an interval that started before its collection moves a row across an outer window edge in one and not the other.</summary>
     private const string SeedSql = @"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
@@ -107,7 +109,7 @@ SELECT
     CASE WHEN q = 40 THEN NULL ELSE (q + h * 5) % 211 END,
     CASE WHEN q = 40 THEN NULL ELSE 1 + (q * 29 + h * 3) % 1009 END,
     'ph' || (h % 5), CASE WHEN q % 6 = 0 THEN 'PRIMARY' ELSE NULL END,
-    q * 100000 + h, ct - interval '10 minutes'
+    q * 100000 + h, ct
 FROM
 (
     SELECT q, h, TIMESTAMP '2026-01-05 00:00:00' + make_interval(hours => h) AS ct
@@ -133,7 +135,7 @@ INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct)", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("fet", NpgsqlDbType.Timestamp) { Value = (object?)firstExecution ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
@@ -274,7 +276,7 @@ INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, @ec, @dur, @dur, @dur, 0, 0, 1, 'skew', @q * 1000 + EXTRACT(HOUR FROM @ct)::bigint, @ct - interval '10 minutes')", connection);
+VALUES (@ct, 1, 'dbskew', @q, @q, 'Regular', @ct - interval '10 minutes', @ct, 'h' || @q, @ec, @dur, @dur, @dur, 0, 0, 1, 'skew', @q * 1000 + EXTRACT(HOUR FROM @ct)::bigint, @ct)", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("ec", NpgsqlDbType.Bigint) { Value = executions });
