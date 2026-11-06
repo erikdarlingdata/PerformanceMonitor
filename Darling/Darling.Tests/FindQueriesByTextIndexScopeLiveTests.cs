@@ -59,6 +59,16 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await Stat(1, "ix-a", "Sales", "0xA001", 77, TimeSpan.FromHours(1));
         await Stat(2, "ix-b", "Hr", "0xB002", 77, TimeSpan.FromHours(1));
         await Stat(2, "ix-b", "Hr", "0xB003", 1234, TimeSpan.FromHours(1));
+
+        /* The ids come last, from the same generator, so none repeats one used above. */
+        /* Server ix-a has a sample for almost every text. With only a handful of samples the planner reads the text by primary key, one digest at a time,
+           and never considers the trigram index, so the plan checks below could not tell a statement the index can serve from one it cannot. */
+        await DarlingMcpTestData.ExecAsync(c, ct,
+            @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
+              SELECT $1::bigint + i, $2::timestamp, 1, 'ix-a', 'Sales', '0xS' || i, sha256(i::text::bytea)
+              FROM generate_series(1, 3000) AS i
+              WHERE i NOT IN (77, 1234)",
+            CollectionIdGenerator.Next(), LiveClock.AnchoredEnd() - TimeSpan.FromHours(3));
     }
 
     internal static async Task<ScratchPostgres> OpenScratchAsync(CancellationToken ct)
@@ -124,7 +134,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         await BuildIndexAsync(data, ct);
 
-        var plan = await ExplainAsync(data, DarlingMcpFindQueriesByTextTools.PlanCacheSql, database, "orders_77", withServer: true, ct);
+        var plan = await ExplainAsync(data, DarlingMcpFindQueriesByTextTools.PlanCacheSql, database, "orders_77 where", withServer: true, ct);
 
         Assert.Contains("query_text_dim", plan, StringComparison.Ordinal);
         Assert.DoesNotContain(IndexShortName, plan, StringComparison.Ordinal);
@@ -140,7 +150,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var reply = JsonDocument.Parse(await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
-            data, "orders_77", null, null, 20, McpDataDetail.Full,
+            data, "orders_77 where", null, null, 20, McpDataDetail.Full,
             DarlingMcpFindQueriesByTextTools.SourceBudget.Default, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct)).RootElement;
 
         Assert.Equal("invalid", reply.GetProperty("status").GetString());
