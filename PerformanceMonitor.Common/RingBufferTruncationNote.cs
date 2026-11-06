@@ -123,7 +123,7 @@ public static class RingBufferTruncationNote
         var first = eventsRead > 0
             ? string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} {1} event(s) were read for {2} in the last {3} hour(s), and {4}",
+                "{0:N0} {1} event(s) were read for {2} in the last {3} hour(s), and {4}",
                 eventsRead,
                 eventType,
                 serverName,
@@ -141,7 +141,7 @@ public static class RingBufferTruncationNote
             ? string.Format(CultureInfo.InvariantCulture, "the system_health collection run at {0}, which read events of this window,", FormatStamp(stretch.First))
             : string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
+                "{0:N0} system_health collection runs that read events of this window (the first at {1}, the last at {2})",
                 stretch.Count, FormatStamp(stretch.First), FormatStamp(stretch.Last));
 
         return first + string.Format(
