@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -710,7 +711,7 @@ public sealed class DailyRunWatchdogTests
             Assert.Contains(queued.Config.DisplayName, warning, StringComparison.Ordinal);
             Assert.Contains(DailyRunKit.Daily, warning, StringComparison.Ordinal);
             Assert.Contains("Daily permits: 1 waiting of 1, oldest ", warning, StringComparison.Ordinal);
-            Assert.DoesNotContain("waited for a permit", warning, StringComparison.Ordinal);
+            Assert.DoesNotContain("daily permits", warning, StringComparison.Ordinal);
         }
         finally
         {
@@ -757,10 +758,11 @@ public sealed class DailyRunWatchdogTests
     }
 
     /// <summary>The server's collection_cycle row carries the lost daily slot and, beside it, the permit backlog as the pass that
-    /// flushes the row read it: how many daily runs were waiting and for how long, stated as a fact and not as the cause. The pass
-    /// that refuses the run counts the slot inside its dispatch loop and flushes the row at its end, so with the write seam set the
-    /// count is committed before the pass returns: the refusal is observed on its Warning and the row on the seam, never on the
-    /// pending count in between.</summary>
+    /// flushes the row read it: how many daily runs were waiting and for how long, stated as a fact and not as the cause. The slot
+    /// is counted from its due time, so the row's gap starts where the slot was due and not where the run was refused, as a
+    /// run-time collector's lost day does. The pass that refuses the run counts the slot inside its dispatch loop and flushes the
+    /// row at its end, so with the write seam set the count is committed before the pass returns: the refusal is observed on its
+    /// Warning and the row on the seam, never on the pending count in between.</summary>
     [Fact]
     public async Task TheCollectionCycleRow_ForALostDailySlot_StatesThePermitBacklogBesideIt()
     {
@@ -795,7 +797,8 @@ public sealed class DailyRunWatchdogTests
                commits the count, reading the backlog as it stands: one run still waiting. The refusal is awaited on the Warning it
                logs after counting, so a dispatch that landed after that flush is caught by the pass that follows, which writes
                nothing when the row has already gone. */
-            queued.NextDue[DailyRunKit.Daily] = DateTime.UtcNow.AddMinutes(-5);
+            var due = DateTime.UtcNow.AddMinutes(-5);
+            queued.NextDue[DailyRunKit.Daily] = due;
             await worker.RunDueCollectorsAsync(queued, null!, ct);
             Assert.True(
                 await DailyRunKit.BecomesTrueAsync(
@@ -818,9 +821,12 @@ public sealed class DailyRunWatchdogTests
             Assert.Equal(0, queued.CycleSkips.Pending);
             Assert.Equal(0, going.CycleSkips.Pending);
             Assert.Contains(
-                "1 run-time collector slot(s) lost their day (index object stats), daily permits: 1 waiting, oldest ",
+                "1 daily collector slot(s) lost their day (index object stats), daily permits: 1 waiting, oldest ",
                 row.Message, StringComparison.Ordinal);
-            Assert.DoesNotContain("waited for a permit", row.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("Daily permits:", row.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                string.Create(CultureInfo.InvariantCulture, $"The gap ran from {due:yyyy-MM-dd HH:mm:ss} UTC to "),
+                row.Message, StringComparison.Ordinal);
         }
         finally
         {
