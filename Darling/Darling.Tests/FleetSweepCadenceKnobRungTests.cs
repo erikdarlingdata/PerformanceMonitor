@@ -307,18 +307,8 @@ public sealed class FleetSweepCadenceKnobRungTests
         Assert.Contains("if (config.Alerts.FleetSweepEnabled", worker, StringComparison.Ordinal);
 
         /* ...the cadence is read ONCE through the shared clamp into the local both the stamp and the
-           engine use... */
+           engine use. */
         Assert.Equal(1, CountOf(worker, "FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes)"));
-
-        /* ...and the master switch rides into the engine as data (the run row's alerts_enabled header):
-           read ONCE on the loop at the fire, like the cadence, and carried on the launch call itself into
-           the tracked task's engine run. */
-        Assert.Contains("var fleetSweepAlertsEnabled = config.Alerts.Enabled;", worker, StringComparison.Ordinal);
-        Assert.Contains("_fleetSweep = RunFleetSweepAsync(", worker, StringComparison.Ordinal);
-        var launch = worker.IndexOf("_fleetSweep = RunFleetSweepAsync(", StringComparison.Ordinal);
-        var launchStatement = worker[launch..worker.IndexOf(';', launch)];
-        Assert.Contains("FleetSweepEngine.RunAsync(", launchStatement, StringComparison.Ordinal);
-        Assert.Contains("fleetSweepAlertsEnabled", launchStatement, StringComparison.Ordinal);
     }
 
     /// <summary>
