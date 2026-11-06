@@ -57,6 +57,17 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
 
     private static string StoredChannel(int routeId) => $"SELECT slack_bot_channel FROM config.config_notification_routes WHERE route_id = {routeId}";
 
+    /// <summary>When the route got its bot channel, read through the row's JSON so a store with no such column reads as blank instead of failing the query.</summary>
+    private static string StoredStamp(int routeId) => $"SELECT to_jsonb(r) ->> 'slack_bot_channel_set_at' FROM config.config_notification_routes AS r WHERE route_id = {routeId}";
+
+    /// <summary>The service loader's copy of the stamp. By reflection, so the test names the member it needs when it is missing.</summary>
+    private static DateTime? StampOf(NotificationRoute route)
+    {
+        var property = typeof(NotificationRoute).GetProperty("SlackBotChannelSetAt");
+        Assert.True(property is not null, "NotificationRoute has no SlackBotChannelSetAt: the time the route got its bot channel, which gates the parent post (#7656).");
+        return (DateTime?)property!.GetValue(route);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(Channel)]
@@ -152,6 +163,9 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             Assert.Equal("", await ScalarAsync(owner, StoredChannel(agentRoute), ct));
             Assert.Equal(Channel, await ScalarAsync(owner, StoredChannel(plainRoute), ct));
             Assert.Equal("0", await ScalarAsync(owner, Journal, ct));
+            /* The stamp: a route inserted with a channel carries the time it got it, and a route with none carries no stamp. */
+            Assert.False(string.IsNullOrEmpty(await ScalarAsync(owner, StoredStamp(plainRoute), ct)), "a route inserted with a bot channel carries slack_bot_channel_set_at");
+            Assert.Equal("", await ScalarAsync(owner, StoredStamp(agentRoute), ct));
 
             /* A channel name is refused with its sentence, and nothing is stored. */
             var stored = (await NotificationRouteWriter.ReadStoredAsync(owner, agentRoute, 30, ct))!;
@@ -170,6 +184,8 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             await NotificationRouteWriter.SaveAsync(owner, typed, stored, proxies, null, null, 30, ct, "bob");
             Assert.Equal(Channel, (await NotificationRouteWriter.ReadStoredAsync(owner, agentRoute, 30, ct))!.SlackBotChannel);
             Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
+            var stampedAt = await ScalarAsync(owner, StoredStamp(agentRoute), ct);
+            Assert.False(string.IsNullOrEmpty(stampedAt), "setting the bot channel stamps slack_bot_channel_set_at");
             Assert.Equal("person:bob|changed slack_bot_channel||" + Channel, await ScalarAsync(owner,
                 "SELECT actor || '|' || reason || '|' || coalesce(detail->'before'->>'slack_bot_channel', '<missing>') || '|' || coalesce(detail->'after'->>'slack_bot_channel', '<missing>') FROM config.investigation_journal WHERE event = 'route_agent_changed' ORDER BY journal_id DESC LIMIT 1", ct));
 
@@ -180,6 +196,15 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             await NotificationRouteWriter.SaveAsync(owner, typed2, stored2, proxies, null, null, 30, ct, "bob");
             Assert.Equal(OtherChannel, await ScalarAsync(owner, StoredChannel(agentRoute), ct));
             Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+            /* A different channel moves the stamp; a save that keeps the channel keeps it. */
+            var movedTo = await ScalarAsync(owner, StoredStamp(agentRoute), ct);
+            Assert.False(string.IsNullOrEmpty(movedTo), "changing the bot channel stamps slack_bot_channel_set_at again");
+            Assert.NotEqual(stampedAt, movedTo);
+            var stored3 = (await NotificationRouteWriter.ReadStoredAsync(owner, agentRoute, 30, ct))!;
+            var sameChannel = stored3.Clone();
+            sameChannel.Enabled = !sameChannel.Enabled;
+            await NotificationRouteWriter.SaveAsync(owner, sameChannel, stored3, proxies, null, null, 30, ct, "bob");
+            Assert.Equal(movedTo, await ScalarAsync(owner, StoredStamp(agentRoute), ct));
 
             var plainStored = (await NotificationRouteWriter.ReadStoredAsync(owner, plainRoute, 30, ct))!;
             var plainTyped = plainStored.Clone();
@@ -187,12 +212,19 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             await NotificationRouteWriter.SaveAsync(owner, plainTyped, plainStored, proxies, null, null, 30, ct, "bob");
             Assert.Equal("", await ScalarAsync(owner, StoredChannel(plainRoute), ct));
             Assert.Equal("2", await ScalarAsync(owner, Journal, ct));
+            Assert.Equal("", await ScalarAsync(owner, StoredStamp(plainRoute), ct));
 
             /* The service's reader (the resolver's input) and the MCP store both read the column. */
             var view = await new StoreConfigProvider(owner).LoadViewAsync(new DarlingConfig(), ct);
             Assert.NotNull(view);
             Assert.Equal(OtherChannel, view!.NotificationRoutes.Single(r => r.RouteId == agentRoute).SlackBotChannel);
             Assert.Equal("", view.NotificationRoutes.Single(r => r.RouteId == plainRoute).SlackBotChannel);
+            /* The loader carries the stamp the thread pass gates on: set on the route with a channel, none on the route without. */
+            var loadedStamp = StampOf(view.NotificationRoutes.Single(r => r.RouteId == agentRoute));
+            Assert.NotNull(loadedStamp);
+            Assert.Equal(DateTimeKind.Utc, loadedStamp!.Value.Kind);
+            Assert.Equal(DateTime.Parse(movedTo!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal), loadedStamp.Value);
+            Assert.Null(StampOf(view.NotificationRoutes.Single(r => r.RouteId == plainRoute)));
 
             var summaries = await new PgNotificationRouteStore(owner).LoadSummariesAsync(ct);
             Assert.Equal(OtherChannel, summaries.Single(r => r.RouteId == agentRoute).SlackBotChannel);
@@ -235,6 +267,7 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             Assert.Equal("created", (string)created.Body["status"]!);
             var routeId = (int)created.Body["route_id"]!;
             Assert.Equal(Channel, await ScalarAsync(owner, StoredChannel(routeId), ct));
+            Assert.False(string.IsNullOrEmpty(await ScalarAsync(owner, StoredStamp(routeId), ct)), "a route the web form saves with a bot channel carries slack_bot_channel_set_at");
 
             var name = await Save("""{"metric_match":"deadlocks","agent_level":1,"slack_bot_channel":"#ops"}""");
             Assert.Equal(400, name.Status);
@@ -271,6 +304,9 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             var routeId = RouteIdOf(created);
             Assert.Equal(Channel, await ScalarAsync(owner, StoredChannel(routeId), ct));
             Assert.Equal(Channel, await ReadBotChannelAsync(asMcp, routeId, ct));
+            Assert.Equal("", await ScalarAsync(owner, StoredStamp(RouteIdOf(plain)), ct));
+            var stampedAt = await ScalarAsync(owner, StoredStamp(routeId), ct);
+            Assert.False(string.IsNullOrEmpty(stampedAt), "a route the MCP tool creates with a bot channel carries slack_bot_channel_set_at");
 
             /* An update changes it, a field left out keeps it, the undo carries it, and blank clears it. */
             var updated = await DarlingMcpAlertTools.UpdateNotificationRoute(
@@ -278,12 +314,18 @@ public sealed class NotificationRouteSlackBotChannelLiveTests
             Assert.Equal("updated", Status(updated));
             Assert.Equal(Channel, JsonDocument.Parse(updated).RootElement.GetProperty("undo").GetProperty("arguments").GetProperty("slack_bot_channel").GetString());
             Assert.Equal(OtherChannel, await ReadBotChannelAsync(asMcp, routeId, ct));
+            /* The stamp moves with the channel, stays through a change to another field, and goes with the channel. */
+            var movedTo = await ScalarAsync(owner, StoredStamp(routeId), ct);
+            Assert.False(string.IsNullOrEmpty(movedTo), "changing the bot channel through the MCP tool stamps slack_bot_channel_set_at again");
+            Assert.NotEqual(stampedAt, movedTo);
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, enabled: false, served: OperatorPolicy(), cancellationToken: ct)));
             Assert.Equal(OtherChannel, await ReadBotChannelAsync(asMcp, routeId, ct));
+            Assert.Equal(movedTo, await ScalarAsync(owner, StoredStamp(routeId), ct));
             Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
                 asMcp, routeId, slack_bot_channel: "", served: OperatorPolicy(), cancellationToken: ct)));
             Assert.Equal("", await ReadBotChannelAsync(asMcp, routeId, ct));
+            Assert.Equal("", await ScalarAsync(owner, StoredStamp(routeId), ct));
 
             /* A channel name is invalid on both tools, and nothing changes or is stored. */
             var badCreate = await DarlingMcpAlertTools.CreateNotificationRoute(

@@ -120,6 +120,13 @@ public sealed class ViewerNotificationRouteSlackBotChannelTests
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
+    /// <summary>When the route got its bot channel, read through the row's JSON so a store with no such column reads as blank instead of failing the query.</summary>
+    private static async Task<string> StampAsync(NpgsqlConnection connection, int routeId, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand($"SELECT to_jsonb(r) ->> 'slack_bot_channel_set_at' FROM config.config_notification_routes AS r WHERE route_id = {routeId}", connection);
+        return Convert.ToString(await command.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture) ?? "";
+    }
+
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, System.Threading.CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
@@ -160,16 +167,25 @@ public sealed class ViewerNotificationRouteSlackBotChannelTests
                 Assert.Equal(Channel, read.Single(r => r.RouteId == inserted).SlackBotChannel);
                 Assert.Equal("", read.Single(r => r.RouteId == plain).SlackBotChannel);
                 Assert.Equal(OtherChannel, read.Single(r => r.RouteId == sealedId).SlackBotChannel);
+                /* The stamp follows the channel through the Viewer's insert, update and sealed save. */
+                var stampedAt = await StampAsync(connection, inserted, ct);
+                Assert.False(string.IsNullOrEmpty(stampedAt), "a route the Viewer inserts with a bot channel carries slack_bot_channel_set_at");
+                Assert.Equal("", await StampAsync(connection, plain, ct));
+                Assert.False(string.IsNullOrEmpty(await StampAsync(connection, sealedId, ct)), "a route the Viewer saves sealed with a bot channel carries slack_bot_channel_set_at");
 
                 var edited = read.Single(r => r.RouteId == inserted).Clone();
                 edited.SlackBotChannel = OtherChannel;
                 await viewer.UpdateNotificationRouteAsync(edited, ct);
                 Assert.Equal(OtherChannel, (await viewer.GetNotificationRoutesAsync(ct)).Single(r => r.RouteId == inserted).SlackBotChannel);
+                var movedTo = await StampAsync(connection, inserted, ct);
+                Assert.False(string.IsNullOrEmpty(movedTo), "changing the bot channel through the Viewer stamps slack_bot_channel_set_at again");
+                Assert.NotEqual(stampedAt, movedTo);
 
                 var cleared = (await viewer.GetNotificationRoutesAsync(ct)).Single(r => r.RouteId == sealedId).Clone();
                 cleared.SlackBotChannel = "";
                 await viewer.UpdateNotificationRouteAsync(cleared, ct);
                 Assert.Equal("", (await viewer.GetNotificationRoutesAsync(ct)).Single(r => r.RouteId == sealedId).SlackBotChannel);
+                Assert.Equal("", await StampAsync(connection, sealedId, ct));
 
                 await Assert.ThrowsAsync<ArgumentException>(() => viewer.InsertNotificationRouteAsync(
                     new NotificationRouteRow { MetricMatch = "performance", SmtpRecipients = "c@example.invalid", SlackBotChannel = "#ops" }, ct));
@@ -183,6 +199,12 @@ public sealed class ViewerNotificationRouteSlackBotChannelTests
                 "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'slack_bot_channel' AND NOT attisdropped)", connection))
             {
                 Assert.False((bool)(await columns.ExecuteScalarAsync(ct))!, "the V252 rewind drops slack_bot_channel");
+            }
+            await using (var stamp = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'config.config_notification_routes'::regclass AND attname = 'slack_bot_channel_set_at' AND NOT attisdropped)"
+                + " OR EXISTS (SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid = 'config.config_notification_routes'::regclass AND tgname = 'trg_notification_routes_slack_bot_channel_stamp')", connection))
+            {
+                Assert.False((bool)(await stamp.ExecuteScalarAsync(ct))!, "the V252 rewind drops slack_bot_channel_set_at and its trigger");
             }
             await using (var older = new ViewerDataService(scratch.ConnectionString))
             {

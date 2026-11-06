@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -101,11 +103,25 @@ public sealed class SlackThreadPassTests
             eventKind == "opened" ? SlackThreadPosts.RequestKey : eventKind == "action_unknown" ? SlackThreadPosts.UnknownKey(journalId) : SlackThreadPosts.EventKey(eventKind, journalId),
             requestId, RouteId, ServerId: 3, "prod-sql-01", "CPU", "critical", "alert", followUpOf, calledDetailJson, claimNo, verdict, rootCause);
 
-    private static (SlackThreadPass Pass, SlackPostThrottle Throttle) Pass(MemoryStore store, QueuePosts posts, Func<DateTime> now, string channel = Channel)
+    /// <summary>Sets when the route got its bot channel. By reflection, so the test names the member it needs when it is missing.</summary>
+    private static void Stamp(NotificationRoute route, DateTime setAtUtc)
+    {
+        var property = typeof(NotificationRoute).GetProperty("SlackBotChannelSetAt");
+        Assert.True(property is not null, "NotificationRoute has no SlackBotChannelSetAt: the time the route got its bot channel, which gates the parent post (#7656).");
+        property!.SetValue(route, setAtUtc);
+    }
+
+    private static (SlackThreadPass Pass, SlackPostThrottle Throttle) Pass(MemoryStore store, QueuePosts posts, Func<DateTime> now, string channel = Channel, DateTime? channelSetAt = null)
     {
         var throttle = new SlackPostThrottle();
         var poster = new SlackThreadPoster(store, posts, NullLogger<SlackThreadPoster>.Instance, throttle, now);
-        var routes = new List<NotificationRoute> { new(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = channel } };
+        var route = new NotificationRoute(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = channel };
+        if (channelSetAt is DateTime setAt)
+        {
+            Stamp(route, setAt);
+        }
+
+        var routes = new List<NotificationRoute> { route };
         var pass = new SlackThreadPass(store, store, poster, throttle, () => routes, NullLogger.Instance, McpDataDetail.Full, () => "https://pm.example", now);
         return (pass, throttle);
     }
@@ -288,6 +304,109 @@ public sealed class SlackThreadPassTests
         Assert.Equal(Channel, store.Threads[R3].ChannelId);
         Assert.Equal("1700000000.000002", posts.Posts[2].ThreadTs);
         Assert.Equal("C0OLD", store.Threads[R2].ChannelId);
+    }
+
+    /// <summary>A request that opened before the route got its bot channel gets no thread: its parent is not posted, and its rows are
+    /// marked so the pass does not read them again. The opened row's time is the request's opened time (Now less 30 minutes, plus its
+    /// journal id in seconds); the route's stamp is later.</summary>
+    [Fact]
+    public async Task ARequestOpenedBeforeTheRouteGotItsChannel_GetsNoParentPost_AndItsRowsAreMarked()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(3, "claimed", R1, actor: "agent:atlas", claimNo: 1));
+        store.Rows.Add(Row(5, "resolved", R1, actor: "service", reason: "CPU"));
+        var (pass, _) = Pass(store, posts, () => Now, channelSetAt: Now.AddMinutes(-20));
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(0, posted);
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Threads);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.RequestKey), store.Marks);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("claimed", 3)), store.Marks);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("resolved", 5)), store.Marks);
+        Assert.Empty(await store.PendingSlackThreadRowsAsync(SlackThreadPass.PostedEvents, Now, 100, CancellationToken.None));
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+    }
+
+    /// <summary>A request that opened at the stamp posts: the gate is "at or after".</summary>
+    [Fact]
+    public async Task ARequestOpenedAtOrAfterTheRouteGotItsChannel_Posts()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(3, "claimed", R1, actor: "agent:atlas", claimNo: 1));
+        var (pass, _) = Pass(store, posts, () => Now, channelSetAt: Now.AddMinutes(-30).AddSeconds(1));
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, posted);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.Null(posts.Posts[0].ThreadTs);
+        Assert.Equal(store.Threads[R1].ThreadTs, posts.Posts[1].ThreadTs);
+    }
+
+    /// <summary>A request with a stored thread keeps posting its later rows into it after the channel changed, so a request in flight is
+    /// not cut off: the stamp gates the parent post alone. The thread sits in the earlier channel, and the replies go there.</summary>
+    [Fact]
+    public async Task ARequestWithAStoredThread_FromBeforeTheChannelChanged_KeepsPostingItsLaterRowsIntoThatThread()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Threads[R1] = new SlackRequestThread(R1, "C0OLD", "1700000000.000777");
+        store.Marks.Add(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.RequestKey));
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(3, "claimed", R1, actor: "agent:atlas", claimNo: 1));
+        store.Rows.Add(Row(8, "resolved", R1, actor: "service", reason: "CPU"));
+        var (pass, _) = Pass(store, posts, () => Now, channelSetAt: Now.AddMinutes(-20));
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, posted);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.All(posts.Posts, p => Assert.Equal("1700000000.000777", p.ThreadTs));
+        Assert.All(posts.Posts, p => Assert.Equal("C0OLD", p.Channel));
+        Assert.Equal("1700000000.000777", store.Threads[R1].ThreadTs);
+    }
+
+    /// <summary>A follow-up of a request the gate skipped has a parent with no stored thread, so it starts its own, under the follow-up rule.</summary>
+    [Fact]
+    public async Task AFollowUpOfARequestTheGateSkipped_StartsItsOwnThread()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(3, "claimed", R1, actor: "agent:atlas", claimNo: 1));
+        store.Rows.Add(Row(9, "opened", R2, actor: "service", reason: "CPU", followUpOf: R1));
+        store.Rows.Add(Row(11, "claimed", R2, actor: "agent:atlas", claimNo: 1));
+        var (pass, _) = Pass(store, posts, () => Now, channelSetAt: Now.AddMinutes(-30).AddSeconds(5));
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, posted);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.Null(posts.Posts[0].ThreadTs);
+        Assert.Equal(store.Threads[R2].ThreadTs, posts.Posts[1].ThreadTs);
+        Assert.False(store.Threads.ContainsKey(R1));
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.RequestKey), store.Marks);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, SlackThreadPosts.EventKey("claimed", 3)), store.Marks);
+    }
+
+    /// <summary>The proposal card says when the proposal expires: the row's time plus the one proposal lifetime, with no second read.</summary>
+    [Fact]
+    public void TheProposalCard_SaysWhenTheProposalExpires()
+    {
+        var row = Row(21, "proposal_created", R1, actor: "agent:atlas", reason: "slow", detailJson: """{"tool":"kill_session","proposal_id":"aaaaaaaa-1111-2222-3333-abcdefabcdef"}""");
+
+        var content = SlackThreadPass.Content(row, [], McpDataDetail.Full, "https://pm.example");
+
+        var rendered = content.Text + "\n" + string.Join("\n", content.Blocks.Select(b => JsonSerializer.Serialize(b)));
+        Assert.Contains("Expires", rendered);
+        Assert.Contains(row.EventTimeUtc.AddMinutes(ProposalRules.ExpiryMinutes).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " UTC", rendered);
     }
 
     [Fact]
