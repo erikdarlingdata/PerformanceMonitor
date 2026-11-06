@@ -79,6 +79,7 @@ public sealed class DataImportOpenFailureTests : IDisposable
     [InlineData("The process cannot access the file because it is being used by another process.", DataImportOpenFailure.Locked)]
     [InlineData("IO Error: Trying to read a database file with version number 65, but we can only read version 64.", DataImportOpenFailure.StorageVersion)]
     [InlineData("Serialization Error: Failed to deserialize: unknown field id 7", DataImportOpenFailure.StorageVersion)]
+    [InlineData("IO Error: The database file was written with a newer storage version than this build reads.", DataImportOpenFailure.StorageVersion)]
     [InlineData("IO Error: The file \"C:/old/monitor.duckdb\" exists, but it is not a valid DuckDB database file!", DataImportOpenFailure.Corrupt)]
     [InlineData("IO Error: Corrupt database file: computed checksum 1a2b does not match stored checksum 3c4d in block at location 262144", DataImportOpenFailure.Corrupt)]
     [InlineData("IO Error: Cannot open file \"C:/old/monitor.duckdb\": Zugriff verweigert", DataImportOpenFailure.Unknown)]
@@ -162,16 +163,110 @@ public sealed class DataImportOpenFailureTests : IDisposable
         Assert.NotNull(result.ErrorMessage);
         Assert.Contains("corrupt", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("1 parquet file", result.ErrorMessage, StringComparison.Ordinal);
+        Assert.Contains("archive folder was imported", result.ErrorMessage, StringComparison.Ordinal);
+        Assert.True(result.ViewsRefreshed, "the archive views were rebuilt over the copied file, so the window must re-read the store");
+    }
+
+    /// <summary>
+    /// A lock and a failure no known shape matches both earn the retry prompt: the previous Lite may still hold the
+    /// file, and closing it is the one remedy a user can try. Cancelling at the prompt ends the import before the
+    /// archive copy, so nothing is copied and the views are not rebuilt. The open failure is driven through the flush
+    /// seam, since a real lock needs a second process and an unknown failure has no file shape to stage.
+    /// </summary>
+    [Theory]
+    [InlineData(DataImportOpenFailure.Locked)]
+    [InlineData(DataImportOpenFailure.Unknown)]
+    public async Task RunImportAsync_ALockedOrUnknownOpenFailure_AsksToRetry_AndCancelImportsNothing(DataImportOpenFailure failure)
+    {
+        var oldInstall = Path.Combine(_tempRoot, "old-install");
+        var oldArchive = Path.Combine(oldInstall, "archive");
+        Directory.CreateDirectory(oldArchive);
+        File.WriteAllText(Path.Combine(oldInstall, "monitor.duckdb"), "stands in for the held file");
+        File.WriteAllText(Path.Combine(oldArchive, "20260101_0000_wait_stats.parquet"), "must not be copied");
+        var currentArchive = Path.Combine(_tempRoot, "archive");
+        using var current = new DuckDbInitializer(Path.Combine(_tempRoot, "current.duckdb"));
+        var import = new DataImportService(current, currentArchive)
+        {
+            FlushOldDatabaseForTests = _ => (failure, 0, new IOException("open failed")),
+        };
+        var retryPrompts = 0;
+
+        var result = await import.RunImportAsync(oldInstall, _ =>
+        {
+            retryPrompts++;
+            return Task.FromResult(false);
+        });
+
+        Assert.Equal(1, retryPrompts);
+        Assert.False(result.Success);
+        Assert.Equal("Import cancelled.", result.ErrorMessage);
+        Assert.Equal(0, result.FilesImported);
+        Assert.False(result.ViewsRefreshed);
+        Assert.False(Directory.Exists(currentArchive), "the archive copy ran after the user cancelled");
     }
 
     [Theory]
+    [InlineData(DataImportOpenFailure.Locked)]
+    [InlineData(DataImportOpenFailure.Unknown)]
+    public async Task RunImportAsync_ALockedOrUnknownOpenFailure_RetriesTheFlush_WhenTheUserClicksOk(DataImportOpenFailure failure)
+    {
+        var oldInstall = Path.Combine(_tempRoot, "old-install");
+        Directory.CreateDirectory(oldInstall);
+        File.WriteAllText(Path.Combine(oldInstall, "monitor.duckdb"), "stands in for the held file");
+        using var current = new DuckDbInitializer(Path.Combine(_tempRoot, "current.duckdb"));
+        var flushes = 0;
+        var import = new DataImportService(current, Path.Combine(_tempRoot, "archive"))
+        {
+            /* Held on the first open, free on the second: the previous Lite was closed at the prompt. */
+            FlushOldDatabaseForTests = _ => ++flushes == 1
+                ? (failure, 0, new IOException("open failed"))
+                : (DataImportOpenFailure.None, 2, (Exception?)null),
+        };
+        var retryPrompts = 0;
+
+        var result = await import.RunImportAsync(oldInstall, _ =>
+        {
+            retryPrompts++;
+            return Task.FromResult(true);
+        });
+
+        Assert.Equal(1, retryPrompts);
+        Assert.Equal(2, flushes);
+        Assert.True(result.Success, result.ErrorMessage);
+        Assert.Equal(2, result.TablesFlushed);
+        Assert.True(result.ViewsRefreshed);
+    }
+
+    /// <summary>
+    /// The message for a failure no retry can fix is built after the archive copy, so it states what the import did and
+    /// did not do: the archive folder was imported, with the count, and the data the old install had not yet archived
+    /// was not. It names the cause, carries DuckDB's own text, and never blames a lock.
+    /// </summary>
+    [Theory]
     [InlineData(DataImportOpenFailure.StorageVersion, "storage version")]
     [InlineData(DataImportOpenFailure.Corrupt, "corrupt")]
-    public void UserMessage_NamesTheCause_CarriesDuckDbsText_AndDoesNotBlameALock(DataImportOpenFailure failure, string cause)
+    public void UserMessage_SaysTheArchiveWasImported_AndTheUnarchivedDataWasNot(DataImportOpenFailure failure, string cause)
     {
-        var text = DataImportOpenFailureClassifier.UserMessage(failure, new InvalidOperationException("duckdb said so"));
+        var text = DataImportOpenFailureClassifier.UserMessage(failure, new InvalidOperationException("duckdb said so"), 3);
 
         Assert.Contains(cause, text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("archive folder was imported", text, StringComparison.Ordinal);
+        Assert.Contains("3 parquet files", text, StringComparison.Ordinal);
+        Assert.Contains("had not yet archived was not imported", text, StringComparison.Ordinal);
+        Assert.Contains("duckdb said so", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("lock", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(DataImportOpenFailure.StorageVersion)]
+    [InlineData(DataImportOpenFailure.Corrupt)]
+    public void UserMessage_SaysNothingWasImported_WhenTheArchiveFolderHeldNoFiles(DataImportOpenFailure failure)
+    {
+        var text = DataImportOpenFailureClassifier.UserMessage(failure, new InvalidOperationException("duckdb said so"), 0);
+
+        Assert.Contains("no parquet files", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("nothing was imported", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("was imported:", text, StringComparison.Ordinal);
         Assert.Contains("duckdb said so", text, StringComparison.Ordinal);
         Assert.DoesNotContain("lock", text, StringComparison.OrdinalIgnoreCase);
     }
