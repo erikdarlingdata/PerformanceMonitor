@@ -63,6 +63,13 @@ public sealed class McpCollectorRunTimes
     }
 
     /// <summary>
+    /// #7684 item 1: whether one collector is switched on for the server, or null when the schedules are not available or the
+    /// server or collector is not in them. The long-query tool prints "opt-in, enable it" only for a collector that is off.
+    /// </summary>
+    internal bool? IsCollectorEnabled(int storageServerId, string collectorName) =>
+        _schedules?.IsCollectorEnabledForStorageServer(_servers, storageServerId, collectorName);
+
+    /// <summary>
     /// The run time and next due time of every collector in <paramref name="rows"/> that has a run time on this server.
     /// The server's clock is read only when a run time exists, so a server with none costs no store read.
     /// </summary>

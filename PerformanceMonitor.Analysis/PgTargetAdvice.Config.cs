@@ -157,7 +157,7 @@ public static partial class PgTargetAdvice
                 "in this analysis — no card roots on it.",
             Remediation:
                 "Tune it with max_wal_size, not instead of it: a longer timeout means fewer, larger checkpoints and a longer " +
-                "crash recovery; the checkpoint-pressure card, if it fired, carries the measured WAL rate to size against.");
+                "crash recovery; the checkpoint pressure finding, if it fired, carries the measured WAL rate to size against.");
     }
 
     /// <summary>Context, never a root (base 0).</summary>
@@ -173,7 +173,7 @@ public static partial class PgTargetAdvice
                 "WAL on a write-heavy server; it is stated beside a checkpoint-pressure finding because fewer WAL bytes per " +
                 "checkpoint interval is one of the two ways to reach max_wal_size less often. It is context — no card roots on it.",
             Remediation:
-                "Consider enabling it (lz4 or zstd on PostgreSQL 15+, pglz before) when the checkpoint-pressure card shows a " +
+                "Consider enabling it (lz4 or zstd on PostgreSQL 15+, pglz before) when the checkpoint pressure finding shows a " +
                 "high full-page-image share. Counter-objective: CPU per WAL record, on the backends writing it.");
     }
 

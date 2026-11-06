@@ -24,6 +24,8 @@ import { focusSnapshotAt } from "./snapshot-pick.js";
 
 /* Re-exported so every existing import of the gap rule from charts.js keeps working (it moved to chart-gaps.js, #6291). */
 export { gapThresholdMs, splitAtGaps, bucketMsOf };
+/* One dash plus one gap of the overlay line's pattern (`.series-line-overlay` in app.css, 6 3), in viewBox units (#7668). */
+const OVERLAY_DASH_PERIOD = 9;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -247,12 +249,14 @@ function watchPlotWidth(host, draw, key, drawnW) {
  *   bucketMs   — optional ms (#7572): the width of one bucket of a trend whose reply states it (`bucket_minutes`). A step longer than
  *                one bucket breaks the line, so a quiet series thinned to its buckets with readings still shows its silences, and a
  *                lone reading is a dot. Absent => the cadence the series shows for itself, as before.
+ *   tooltipOffsetMs — optional ms (#7679): how far after its bucket's start each bar is stamped. A stacked bar is centred on its stamp, so an hourly
+ *                count is stamped at the middle of the hour, and the hover tooltip subtracts this to name the hour's start. Absent => the stamp, as before.
  *   windowExact— optional true (#7386): the window is exact and is never trimmed to the server's data start. A zoomed
  *                chart sets it. Without it, the axis starts at the later of windowStart and the server's data start
  *                (see xStartMs), moved back to the earliest plotted row when that is older.
  */
 export function renderLineChart(spec) {
-  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null } = spec;
+  const { points, xKey, series: allSeries, formatValue = (v) => String(v), clampMax = null, unit = null, mode = "line", thresholds = null, annotations = null, onSelect = null, series2: series2Spec = null, onZoom = null, integerTicks = false, sizeUnit = null, windowStart = null, windowEnd = null, gapSeamMs = null, bucketMs = null, tooltipOffsetMs = 0 } = spec;
   const { title = null, source = null, zoomed = false, onResetZoom = null, menuKey = null, exportPoints = null } = spec;
   const widthKey = menuKey || spec.widthKey || null;
   const { hiddenKeys = null, onLegend = null, atTime = null } = spec;
@@ -517,6 +521,13 @@ export function renderLineChart(spec) {
          width, so a dense chart does not overlap itself more than before), and in a windowed chart at most STACKED_BAR_MAX_PX. */
       barW = Math.max(barW, Math.min(STACKED_BAR_MIN_PX, (plotW / rows.length) * 0.7));
       if (hasWindow) barW = Math.min(barW, STACKED_BAR_MAX_PX);
+      /* #7684 item 10: a lone bar has no neighbour to measure, so it took the tiling width and drew at the maximum (64 px, about an
+         hour and a half on a 24-hour axis) for one 2 ms wait. It is one sample wide: a bucket when the reply states one (bucketMs), else the
+         floor, which is what a collector interval of a minute or two is on a day axis. The floor keeps it findable. */
+      if (hasWindow && xs.length === 1) {
+        const bucketPx = typeof bucketMs === "number" && Number.isFinite(bucketMs) && bucketMs > 0 && spanMs > 0 ? (bucketMs / spanMs) * plotW : 0;
+        barW = Math.min(STACKED_BAR_MAX_PX, Math.max(STACKED_BAR_MIN_PX, bucketPx));
+      }
       for (let i = 0; i < rows.length; i++) {
         const bx = Math.max(M.l, Math.min(M.l + plotW - barW, xs[i] - barW / 2));
         for (let k = 0; k < series.length; k++) {
@@ -628,7 +639,11 @@ export function renderLineChart(spec) {
           const [cx, cy] = pts2[0].split(",");
           root.appendChild(svg("circle", { class: "series-dot", cx, cy, r: 4, fill: normalizeColor(series2.color) }));
         } else {
-          root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color) }));
+          /* #7668: the dash is the overlay's mark of being the other axis, and it only reads while a dash spans a few points. Points closer together than one
+             dash period (6 + 3, app.css) turn the dashes into a hatched block drawn over the first line, so such a run is drawn solid: its colour and its own
+             axis already set it apart. The spacing is the run's mean step in viewBox units, which are pixels here. */
+          const dense = (xs[run[run.length - 1]] - xs[run[0]]) / (run.length - 1) < OVERLAY_DASH_PERIOD;
+          root.appendChild(svg("polyline", { class: "series-line series-line-overlay", "clip-path": clipAttr, points: pts2.join(" "), stroke: normalizeColor(series2.color), ...(dense ? { style: "stroke-dasharray:none" } : {}) }));
         }
       }
     }
@@ -777,7 +792,7 @@ export function renderLineChart(spec) {
 
       /* Tooltip is built with textContent only (values may include untrusted series labels). */
       while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
-      tooltip.appendChild(el("div", { class: "t-time", text: t.toLocaleString() }));
+      tooltip.appendChild(el("div", { class: "t-time", text: (tooltipOffsetMs ? new Date(t.getTime() - tooltipOffsetMs) : t).toLocaleString() }));
       for (const s of series) {
         const v = r[s.key];
         tooltip.appendChild(

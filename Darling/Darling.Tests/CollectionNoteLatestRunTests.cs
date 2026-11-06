@@ -162,10 +162,39 @@ public class CollectionNoteLatestRunTests
             NoteCount = 174,
         };
 
-        Assert.Equal("latest run: " + Counts, row.NoteFormatted);
+        /* #7670: the grid shows the counts in words, and note_summary keeps the raw counts. */
         Assert.Equal(
-            row.NoteFormatted,
+            "latest run: shred gated: 2, events read: 0, report xml empty: 0, report xml unparsed: 0, events stored: 0",
+            row.NoteFormatted);
+        Assert.Equal(
+            "latest run: " + Counts,
             CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns, row.CollectorName, row.TargetHasUserDatabases));
+    }
+
+    /// <summary>#7670: a grid row's note shows the shred gate in words, as the web page does, so "shred_gated=1" is never printed raw. The
+    /// MCP note_summary text (FormatCollectionNote) keeps the counts as they are stored.</summary>
+    [Fact]
+    public void A_Grid_Row_Shows_The_Shred_Gate_In_Words_While_Note_Summary_Keeps_The_Raw_Counts()
+    {
+        var row = new PerformanceMonitor.Darling.Viewer.CollectorHealthRow
+        {
+            CollectorName = "deadlocks",
+            TotalRuns = 12,
+            LastNote = "shred_gated=1 events_read=0",
+            NoteCount = 12,
+        };
+
+        Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0", row.NoteFormatted);
+        Assert.Equal("latest run: shred_gated=1 events_read=0", CollectorHealthClassifier.FormatCollectionNote(row.LastNote, row.NoteCount, row.TotalRuns, row.CollectorName));
+    }
+
+    [Fact]
+    public void The_Display_Form_Keeps_A_Host_Note_Before_The_Counts_And_The_Some_Runs_Qualifier()
+    {
+        var text = CollectorHealthClassifier.FormatCollectionNoteForDisplay("budget abandoned 2 databases; shred_gated=0 events_read=4", 3, 12, "deadlocks");
+
+        Assert.Equal("latest noted run: budget abandoned 2 databases; shred gated: 0 (the XML was read), events read: 4 (3 of 12 runs)", text);
+        Assert.Equal("a plain note (2 of 12 runs)", CollectorHealthClassifier.FormatCollectionNoteForDisplay("a plain note", 2, 12));
     }
 
     [Fact]
