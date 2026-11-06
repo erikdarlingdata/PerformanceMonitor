@@ -77,7 +77,7 @@ internal static class DiagnosticsBundle
     internal static readonly string[] ConfigShapeProjected =
     {
         "DarlingConfig.Postgres", "DarlingConfig.Servers", "DarlingConfig.Analyzer", "DarlingConfig.CapturePlans",
-        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
+        "DarlingConfig.Mcp", "DarlingConfig.Web", "DarlingConfig.Reads", "ReadsConfig.MaxHeavyReads", "DarlingConfig.QueryStatsDeferredPlanFetch", "DarlingConfig.QueryTextTrigramIndexEnabled", "DarlingConfig.ProcedureStatsDeferredPlanFetch", "PostgresConfig.Managed", "PostgresConfig.ConnectionString",
         "PostgresConfig.Network", "McpConfig.Enabled", "McpConfig.Network", "McpConfig.AllowWrites", "McpConfig.AllowServerAdmin", "McpConfig.AllowInvestigations", "McpConfig.AllowAgentMuteRules", "McpConfig.AllowWindowsAuthOverUnverifiedTls", "McpConfig.DataDetail", "McpConfig.AllowTokenlessLoopback", "WebConfig.Enabled", "WebConfig.Network", "WebConfig.AllowTokenlessLoopback", "WebConfig.AllowAdminWrites", "WebConfig.AllowWindowsAuthOverUnverifiedTls",
         "MonitoredServer.Engine", "MonitoredServer.AlertDeliveryModeOverride",
     };
@@ -201,6 +201,8 @@ internal static class DiagnosticsBundle
             ["reads_max_heavy_reads"] = config.Reads?.MaxHeavyReads,
             ["capture_plans"] = config.CapturePlans,
             ["query_stats_deferred_plan_fetch"] = config.QueryStatsDeferredPlanFetch,
+            /* #7674: the opt-in trigram index on the plan-cache text; a plain bool, and what get_store_metrics query_text_index is read beside. */
+            ["query_text_trigram_index_enabled"] = config.QueryTextTrigramIndexEnabled,
             // The PARSED mode word, never the raw text (free config text); an unknown value runs as off, so it reports off.
             ["procedure_stats_deferred_plan_fetch"] = ProcedureStatsPlanFetchModes.TryParse(config.ProcedureStatsDeferredPlanFetch, out var psMode)
                 ? psMode.ToString().ToLowerInvariant() : "off",

@@ -9,14 +9,29 @@
 namespace PerformanceMonitor.Notifications;
 
 /// <summary>
-/// One webhook channel's failures in a row (#4750). The count only: a webhook error can carry the endpoint's
+/// One webhook destination's failures in a row (#4750). The count only: a webhook error can carry the endpoint's
 /// URL, and the URL is the credential, so this type has no field a host could build alert text from that
-/// would leak it. <paramref name="Channel"/> is a <see cref="NotificationRouter"/> channel name.
-/// <paramref name="Configured"/> is whether the channel still has a destination to send to: the parent
-/// settings carry one, or an enabled route does. A channel with none was turned off (disabled, or its URL or
-/// key removed), and its count is not a failure to announce.
+/// would leak it. <paramref name="Channel"/> is a <see cref="NotificationRouter"/> channel name, and
+/// <paramref name="RouteId"/> is the route whose destination this is, or null for the destination the settings
+/// row carries. Two routes can point one channel at two destinations, and a delivery to one says nothing about
+/// the other, so each destination is counted and judged on its own. <paramref name="Configured"/> is whether the
+/// destination is still there to send to: the settings row carries it, or the route still names it and can match.
+/// A destination with none was turned off (disabled, or its URL or key removed), and its count is not a failure
+/// to announce.
 /// </summary>
-public readonly record struct WebhookChannelFailureCount(string Channel, int ConsecutiveFailures, bool Configured);
+public readonly record struct WebhookChannelFailureCount(string Channel, int ConsecutiveFailures, bool Configured, int? RouteId = null)
+{
+    /// <summary>The destination's identity for a host's memory of what it has announced: the channel name for
+    /// the settings row's destination, the channel name and route id for a route's.</summary>
+    public string Key => RouteId is { } id ? $"{Channel}:route:{id}" : Channel;
+
+    /// <summary>The destination as alert and notice text names it: <c>Slack</c> for the settings row's
+    /// destination, <c>Slack (route 7)</c> for a route's. Never the URL or key, which is the credential.</summary>
+    public string Label => LabelOf(Channel, RouteId);
+
+    /// <summary>The <see cref="Label"/> rule for a caller that holds the channel and route id and not the count.</summary>
+    public static string LabelOf(string channel, int? routeId) => routeId is { } id ? $"{channel} (route {id})" : channel;
+}
 
 /// <summary>What a host should announce about one webhook channel on this observation, if anything.</summary>
 public enum WebhookChannelNotice
