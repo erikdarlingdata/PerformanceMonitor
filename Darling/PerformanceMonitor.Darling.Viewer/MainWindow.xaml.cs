@@ -1786,8 +1786,8 @@ public partial class MainWindow : Window
             totals = new FleetTotals();
         }
 
-        /* #2753: TotalServers must be the registered fleet size (list.Count, the same source the sidebar's
-           "Servers: N" reads), not cards.Count — cards silently drops any server whose per-server summary
+        /* #2753: TotalServers must be the enabled fleet size (list.Count, read from the same fleet the sidebar's
+           "Servers: N" counts), not cards.Count — cards silently drops any server whose per-server summary
            read failed this cycle, which made the Overview's total wobble against the stable sidebar count. */
         _overviewTotals = totals;
         _overviewRegisteredCount = list.Count;
