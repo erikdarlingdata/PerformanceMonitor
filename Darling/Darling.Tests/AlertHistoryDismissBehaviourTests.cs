@@ -96,6 +96,21 @@ public sealed class AlertHistoryDismissBehaviourTests
         Assert.Equal(0, r.GetProperty("firstHasBox").GetInt32());
     }
 
+    /// <summary>#7919: a column filter hides lines with display:none; Dismiss All asks about and posts only the live rows still shown.</summary>
+    [Fact]
+    public void DismissAll_ActsOnlyOnRowsTheColumnFilterLeavesShowing()
+    {
+        var r = Run("columnFilter");
+        // Three lines pass Severity = info (one of them already dismissed), two are hidden.
+        Assert.Equal(new[] { "High CPU 1", "High CPU 3", "High CPU 5" }, r.GetProperty("shownMetrics").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.False(r.GetProperty("allDisabled").GetBoolean());
+        Assert.True(r.GetProperty("allDisabledWhenNoneShown").GetBoolean());
+        var ask = Assert.Single(r.GetProperty("asks").EnumerateArray()).GetString();
+        Assert.StartsWith("Dismiss 2 alert(s)?", ask);
+        var post = Assert.Single(r.GetProperty("posts").EnumerateArray());
+        Assert.Equal(new[] { "High CPU 1", "High CPU 3" }, post.EnumerateArray().Select(e => e.GetString()).ToArray());
+    }
+
     [Fact]
     public void DismissAll_PostsEveryLiveRowTheFiltersShow()
     {

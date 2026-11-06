@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 class FakeNode {
   constructor(tag) {
     this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null; this._text = "";
-    this.className = ""; this.dataset = {}; this.value = ""; this.checked = false; this.open = false; this.isRoot = false;
+    this.className = ""; this.style = {}; this.dataset = {}; this.value = ""; this.checked = false; this.open = false; this.isRoot = false;
   }
   get parentNode() { return this.parent; }
   get firstChild() { return this.children[0] || null; }
@@ -159,6 +159,24 @@ try {
       alertsReply = { alerts: [], truncated: false };
       button(main, "Dismiss All").fire("click"); await tick();
       out.all = posts.map((p) => ({ url: p.url, contentType: p.contentType, keys: p.req.alerts }));
+    },
+    async columnFilter() {
+      // #7919: a column filter hides rows with display:none; Dismiss All must act on the rows still shown, not the whole window
+      alertsReply = { alerts: [row(1, { severity: "info" }), row(2), row(3, { severity: "info" }), row(4), row(5, { dismissed: true, severity: "info" })], truncated: false };
+      const main = newMain(); await renderAlerts(main);
+      const th = main.all("th").find((t) => t.textContent.includes("Severity"));
+      th.all("button")[0].fire("click", { target: th.all("button")[0] });
+      const box = main.all("input").find((i) => i.className === "grid-filter-input");
+      box.value = "info"; box.fire("input");
+      out.shownMetrics = bodyRows(main).filter((tr) => tr.style.display !== "none").map((tr) => (tr.children.find((td) => td.textContent.startsWith("High CPU")) || { textContent: "" }).textContent);
+      out.allDisabled = button(main, "Dismiss All").disabled;
+      box.value = "no such severity"; box.fire("input");
+      out.allDisabledWhenNoneShown = button(main, "Dismiss All").disabled;
+      box.value = "info"; box.fire("input");
+      alertsReply = { alerts: [], truncated: false };
+      button(main, "Dismiss All").fire("click"); await tick();
+      out.asks = confirms.slice();
+      out.posts = posts.map((p) => p.req.alerts.map((a) => a.metric_name));
     },
     async chunks() {
       const many = Array.from({ length: 1500 }, (_, i) => row(i + 1, { alert_time: new Date(T0 - 60000 - i * 30000).toISOString() })); // 30 s apart so all 1500 sit inside the default day

@@ -25,7 +25,7 @@
 
 import { el, mount, readTool, apiSend, buildQuery, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, disclosure,
          ALERT_STATE_LABELS, applyFormat, alertDeliveryState, parseUtc, localizeAlertDetail, rowsUnder, storeHash, NO_MESSAGE_TEXT_PREFIX } from "../util.js";
-import { VIZ, reapplyGridSort, gridRowOf } from "../panels.js";
+import { VIZ, reapplyGridSort, gridRowOf, gridRowShown } from "../panels.js";
 import { copyText } from "../grid-tools.js";
 import { pageRangePicker, windowResultOfSpec } from "../page-range.js";
 import { relativeSpec, specName } from "../time-range.js";
@@ -622,10 +622,19 @@ function updateDismissBar(state) {
   d.allBtn.disabled = d.busy || !visibleRows(state).some(dismissable);
 }
 
-/* The rows the current filter box lets through - what the table shows and what Dismiss All acts on. */
+/* The rows the table shows, which Dismiss All acts on: the server filter box, then every column filter. A column
+ * filter hides a line with display:none and the grid records it (panels.js gridRowShown), so this asks the grid
+ * instead of keeping a second copy of the filter rule (#7919). */
 function visibleRows(state) {
   const q = state.filter.value.trim().toLowerCase();
-  return q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  const rows = q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+  if (!state.tbody) return rows;
+  const shown = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && gridRowShown(tr)) shown.add(alertKey(row));
+  }
+  return rows.filter((a) => shown.has(alertKey(a)));
 }
 
 function dismissOutcomeText(t) {
@@ -961,7 +970,7 @@ function drawAlerts(state) {
     return;
   }
 
-  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns() });
+  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: alertColumns(), onFilter: () => updateDismissBar(state) });
   mount(state.tableBox, table);
   const tbody = table.querySelector("tbody");
   const rowMap = new Map();
