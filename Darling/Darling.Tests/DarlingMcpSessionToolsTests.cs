@@ -99,7 +99,11 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_session_stats", sql, StringComparison.Ordinal);
         Assert.Contains("program_name", sql, StringComparison.Ordinal);
         Assert.Contains("connection_count", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* #8013: the snapshot is resolved first by DarlingSessionStatsReader.GetLatestSnapshotTimeAsync and bound as $2;
+           the MAX(collection_time) lives on its two probes. */
+        Assert.Contains("collection_time = $2", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time)", DarlingSessionStatsReader.LatestSnapshotWindowedProbeSql, StringComparison.Ordinal);
+        Assert.Contains("MAX(collection_time)", DarlingSessionStatsReader.LatestSnapshotFallbackProbeSql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY connection_count DESC", sql, StringComparison.Ordinal);
     }
 

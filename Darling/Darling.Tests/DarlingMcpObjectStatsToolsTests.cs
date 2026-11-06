@@ -231,9 +231,15 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         var select = sql.LastIndexOf("\nSELECT", from, StringComparison.Ordinal);
         Assert.Contains("collection_time", sql[(select < 0 ? 0 : select)..from], StringComparison.Ordinal);
 
-        /* Exactly one MAX(collection_time): the anchor. A second one would be a stamp read that can see a
-           capture the returned rows did not come from. */
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"MAX\(collection_time\)"));
+        /* #8013: the anchor is resolved by GetLatestIndexObjectStatsSnapshotTimeAsync (a windowed probe, falling back to
+           an unbounded one) and bound as $4, the way DatabaseSizeLatestSql binds its $2, so the statement itself computes
+           no MAX(collection_time): the stamp it projects is the bound instant, never a fresher capture. */
+        Assert.Contains("ios.collection_time = $4", sql, StringComparison.Ordinal);
+        Assert.Empty(System.Text.RegularExpressions.Regex.Matches(sql, @"MAX\(collection_time\)"));
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql,
+            "the windowed probe is no longer anchored to the latest snapshot in its window");
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotFallbackProbeSql,
+            "the fallback probe is no longer anchored to the latest snapshot");
 
         /* The stamp reaches the row type at ordinal 0, which is the mapping the reader's GetDateTime(0) and
            the tool's rows[0].CollectionTime both depend on: a member inserted ahead of it would shift every

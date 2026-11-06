@@ -1767,7 +1767,9 @@ LIMIT 1";
 
     /// <summary>
     /// Lite's anomalous-jobs read verbatim (running_jobs table). $2 is the threshold percent
-    /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)).
+    /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)). $3 is the newest snapshot's
+    /// <c>collection_time</c>, the one the freshness probe below resolved, bound as a literal so the planner
+    /// excludes every other chunk at plan time instead of building a subplan per retained chunk (#8013).
     /// <para><c>start_time</c> is the monitored server's own clock, so the newest snapshot's collected UTC
     /// offset and time zone id (one <c>server_properties</c> row, so the two describe one snapshot) are
     /// projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
@@ -1800,11 +1802,20 @@ SELECT
     (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM running_jobs
 WHERE server_id = $1
-AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
+AND collection_time = $3
 AND avg_duration_seconds >= 60
 AND percent_of_average >= $2
 ORDER BY percent_of_average DESC
 LIMIT 5";
+
+    /// <summary>The newest <c>running_jobs</c> snapshot inside a window: $1 server_id, $2 window start. Bounded below so
+    /// the planner excludes every chunk before the window at plan time; not bounded above, because the collector host's
+    /// clock is not this reader's and a snapshot stamped a few minutes ahead is still the newest (#8013).</summary>
+    public const string RunningJobsLatestSnapshotWindowedProbeSql = "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1 AND collection_time >= $2";
+
+    /// <summary>The unbounded fallback of the probe above, run only when the window is empty, so a server whose collection
+    /// stopped earlier still resolves its newest snapshot (which the freshness rule then reports as stale). $1 server_id.</summary>
+    public const string RunningJobsLatestSnapshotFallbackProbeSql = "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1";
 
     public Task<AnomalousJobsResult> GetAnomalousJobsAsync(
         string serverKey, int multiplier, CancellationToken cancellationToken = default)
@@ -1835,26 +1846,40 @@ LIMIT 5";
            or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
            per-run cooldown key expires each pass, so a stale snapshot re-fires the same historical run
            every cooldown, forever. Same rule as Lite's adapter; parity is the point. */
-        DateTime? newestSampleUtc = null;
-        using (var snapshotProbe = new NpgsqlCommand(
-            "SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1", connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        /* #8013: the probe is windowed to the last two days first (generous over the five-minute cadence), so the planner
+           excludes every older chunk; the unbounded probe runs only when the window is empty, so a stopped collector's
+           newest snapshot still resolves and is still judged stale by the rule below. The windowed MAX, when it finds a
+           row, IS the unbounded MAX. */
+        object? snapshot;
+        using (var snapshotProbe = new NpgsqlCommand(RunningJobsLatestSnapshotWindowedProbeSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
             snapshotProbe.Parameters.AddWithValue(serverId);
-            var snapshot = await snapshotProbe.ExecuteScalarAsync(cancellationToken);
-            var cadence = ResolveRunningJobsCadence(serverId);
-            if (snapshot is not DateTime snapshotTime
-                || DateTime.UtcNow - snapshotTime > AnomalousJobsResult.MaxSnapshotAge(cadence))
-            {
-                return AnomalousJobsResult.Stale;
-            }
-
-            /* #5642: the snapshot the rows below were read from, for the age line (naive UTC in the store). */
-            newestSampleUtc = DateTime.SpecifyKind(snapshotTime, DateTimeKind.Utc);
+            snapshotProbe.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
+            snapshot = await snapshotProbe.ExecuteScalarAsync(cancellationToken);
         }
+
+        if (snapshot is not DateTime)
+        {
+            using var fallbackProbe = new NpgsqlCommand(RunningJobsLatestSnapshotFallbackProbeSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
+            fallbackProbe.Parameters.AddWithValue(serverId);
+            snapshot = await fallbackProbe.ExecuteScalarAsync(cancellationToken);
+        }
+
+        var cadence = ResolveRunningJobsCadence(serverId);
+        if (snapshot is not DateTime snapshotTime
+            || DateTime.UtcNow - snapshotTime > AnomalousJobsResult.MaxSnapshotAge(cadence))
+        {
+            return AnomalousJobsResult.Stale;
+        }
+
+        /* #5642: the snapshot the rows below were read from, for the age line (naive UTC in the store). */
+        DateTime? newestSampleUtc = DateTime.SpecifyKind(snapshotTime, DateTimeKind.Utc);
 
         using var command = new NpgsqlCommand(AnomalousJobsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
+        /* The store's naive stamp, bound as it came back, so the equality is timestamp against timestamp. */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(snapshotTime, DateTimeKind.Unspecified));
 
         ServerClock? clock = null;
         using var reader = await command.ExecuteReaderAsync(cancellationToken);

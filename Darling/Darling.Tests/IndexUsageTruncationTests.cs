@@ -98,13 +98,17 @@ public sealed class IndexUsageTruncationTests
         foreach (var clause in new[]
         {
             "WHERE server_id = $1",
-            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
             "($2::text[] IS NULL OR database_name = ANY($2))",
         })
         {
             Assert.Contains(clause, ReaderSql, StringComparison.Ordinal);
             Assert.Contains(clause, DarlingObjectStatsReaderSource.IndexUsageMatchCountSql, StringComparison.Ordinal);
         }
+
+        /* #8013: both bind the snapshot GetLatestIndexObjectStatsSnapshotTimeAsync resolved (the rows' $4 and the count's
+           $3, each the statement's last parameter) rather than deriving it per statement, so the two still read one capture. */
+        Assert.Contains("collection_time = $4", ReaderSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time = $3", DarlingObjectStatsReaderSource.IndexUsageMatchCountSql, StringComparison.Ordinal);
     }
 
     /// <summary>

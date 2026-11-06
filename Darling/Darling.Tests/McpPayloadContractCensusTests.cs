@@ -1318,8 +1318,8 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly string[] LatestAnchoredReadsWithoutTheirStamp =
     [
-        "DarlingObjectStatsReader.cs IndexUsageMatchCountSql",
-        "DarlingObjectStatsReader.cs IndexUsageSql",
+        /* #8013: IndexUsageSql and IndexUsageMatchCountSql bind a snapshot resolved before the statement, so neither
+           carries a depth-zero MAX(collection_time) anchor any more and the roster is empty. */
     ];
 
     private static readonly Regex LatestAnchor = new(
