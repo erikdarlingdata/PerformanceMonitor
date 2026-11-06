@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Collectors;
 /// whose <c>WritePayload</c> advances them (<see cref="DeltaBaselineRollbackRows.Capture{TRow}"/>), or one by one through
 /// <see cref="CaptureKey"/> for a family that differences each row as the reader yields it. The snapshot restores only what
 /// the run itself wrote: a row the failed write never reached has not advanced and is left alone, and so is a baseline
-/// anyone else replaced or cleared since. A key with no baseline before the run goes back to unseen.
+/// anyone else replaced or cleared since. A key with no baseline before the run keeps the one the run gave it, so its next delta is one interval, as it is when nothing fails.
 /// </summary>
 public sealed class DeltaBaselineRollbackRows<TRow> : List<TRow>, IBaselineRollback
 {
@@ -54,9 +54,18 @@ public sealed class DeltaBaselineRollbackRows<TRow> : List<TRow>, IBaselineRollb
         }
     }
 
+    /// <summary>Adds a snapshot taken elsewhere for this run (a pass window on another clock) to what the rollback restores.</summary>
+    public void CaptureSnapshot(IDeltaBaselineSnapshot? snapshot)
+    {
+        if (snapshot is not null)
+        {
+            _snapshots?.Add(snapshot);
+        }
+    }
+
     private void Snapshot(IReadOnlyCollection<string> keys)
     {
-        var snapshot = _context.Deltas.CaptureBaselines(_context.ServerId, _groups, keys, _context.CollectionTime);
+        var snapshot = _context.Deltas.CaptureBaselines(_context.ServerId, _groups, keys, _context.CollectionTime, keepNewKeys: true);
         if (snapshot is not null)
         {
             _snapshots?.Add(snapshot);

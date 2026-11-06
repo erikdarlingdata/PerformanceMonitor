@@ -540,6 +540,7 @@ WHERE calls > 0";
     {
         var rows = new DeltaBaselineRollbackRows<Row>(context, DeltaGroups);
         var epochObserved = false;
+        var targetClockCaptured = false;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -614,6 +615,14 @@ WHERE calls > 0";
                calls below keep for themselves. Rolled every pass — target_now moves forward on every
                genuine pass, so this always advances — and returns the PREVIOUS pass's target_now, the
                only clock a restart may be placed against. */
+            /* The target-clock window moves on targetNow, not the collection time, so the baseline snapshots cannot put it back; it is
+               captured once per run before the first roll-forward, guarded on the targetNow this run writes, and restored with the rows. */
+            if (!targetClockCaptured)
+            {
+                rows.CaptureSnapshot(context.Deltas.CapturePass(context.ServerId, "pg_statement_stats_target_clock", targetNow));
+                targetClockCaptured = true;
+            }
+
             var previousTargetNow = context.Deltas.PreviousPass(context.ServerId, "pg_statement_stats_target_clock", targetNow);
 
             /* Captured before the first delta call of the run for this key, so a store write that fails before the rows are

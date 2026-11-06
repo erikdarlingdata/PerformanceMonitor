@@ -269,6 +269,15 @@ public interface ICollectorDeltaCalculator
     /// every group, before a collector's read advances them for <paramref name="collectionTime"/>. Default-implemented to
     /// return null (nothing captured, nothing to restore) like <see cref="PeekBaselines"/>, so every test double compiles.
     /// </summary>
-    IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime)
+    /// <param name="keepNewKeys">True leaves a key the run saw for the first time in place on restore, so its next delta is one
+    /// interval, as it is when nothing fails. False (query_stats, #7419) removes it, which its series-age credit relies on.</param>
+    IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime, bool keepNewKeys = false)
+        => null;
+
+    /// <summary>
+    /// #7782: captures one pass window that moves on a clock other than the collection time, as it stands before the run rolls
+    /// it forward to <paramref name="observedTime"/>. Default-implemented to return null, like <see cref="CaptureBaselines"/>.
+    /// </summary>
+    IDeltaBaselineSnapshot? CapturePass(int serverId, string group, DateTime observedTime)
         => null;
 }
