@@ -556,7 +556,10 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         return (objects, samples);
     }
 
-    /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).</summary>
+    /// <summary>Per-index size + usage for one object at its database's latest snapshot (Storage Growth index drill).
+    /// $1 server_id, $2 database, $3 schema, $4 table, $5 collection_time: the database's newest snapshot
+    /// <see cref="GetLatestObjectIndexSnapshotAsync"/> resolved first, bound as a literal so the planner excludes every
+    /// other chunk at plan time (#8013).</summary>
     public const string ObjectIndexDetailSql = @"
 SELECT
     database_name,
@@ -590,22 +593,73 @@ WHERE server_id = $1
 AND   database_name = $2
 AND   schema_name = $3
 AND   table_name = $4
-AND   collection_time = (
-    SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1 AND database_name = $2)
+AND   collection_time = $5
 ORDER BY index_id";
+
+    /// <summary>The windowed half of <see cref="GetLatestObjectIndexSnapshotAsync"/>: $1 server_id, $2 database, $3 window
+    /// start. No upper bound, for the reason <see cref="DatabaseSizeLatestSnapshotWindowedProbeSql"/> has none.</summary>
+    public const string ObjectIndexSnapshotWindowedProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_index_object_stats
+WHERE server_id = $1
+AND   database_name = $2
+AND   collection_time >= $3";
+
+    /// <summary>The unbounded fallback half of <see cref="GetLatestObjectIndexSnapshotAsync"/>, reached only when the windowed
+    /// probe finds nothing. $1 server_id, $2 database.</summary>
+    public const string ObjectIndexSnapshotFallbackProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_index_object_stats
+WHERE server_id = $1
+AND   database_name = $2";
+
+    /// <summary>#8013: one database's newest <c>index_object_stats</c> snapshot, the anchor <see cref="ObjectIndexDetailSql"/>
+    /// binds. A windowed probe first (three days, one missed daily run still inside it), falling back to an unbounded probe
+    /// only when the window is empty, so the result equals an unbounded <c>MAX(collection_time)</c> in every case. Null when
+    /// the database has no index history.</summary>
+    public static async Task<DateTime?> GetLatestObjectIndexSnapshotAsync(
+        NpgsqlDataSource dataSource, int serverId, string databaseName, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-3), DateTimeKind.Unspecified);
+
+        await using (var probe = dataSource.CreateCommand(ObjectIndexSnapshotWindowedProbeSql))
+        {
+            probe.CommandTimeout = commandTimeoutSeconds;
+            probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            probe.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+            probe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            if (await probe.ExecuteScalarAsync(cancellationToken) is DateTime windowedStamp)
+            {
+                return windowedStamp;
+            }
+        }
+
+        await using var fallback = dataSource.CreateCommand(ObjectIndexSnapshotFallbackProbeSql);
+        fallback.CommandTimeout = commandTimeoutSeconds;
+        fallback.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        fallback.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+        return await fallback.ExecuteScalarAsync(cancellationToken) is DateTime unboundedStamp ? unboundedStamp : null;
+    }
 
     public static async Task<List<IndexUsageDto>> GetObjectIndexDetailAsync(
         NpgsqlDataSource dataSource, int serverId, string databaseName, string schemaName, string tableName,
         int commandTimeoutSeconds, CancellationToken cancellationToken)
     {
+        var items = new List<IndexUsageDto>();
+        var snapshotTime = await GetLatestObjectIndexSnapshotAsync(dataSource, serverId, databaseName, commandTimeoutSeconds, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return items;
+        }
+
         await using var command = dataSource.CreateCommand(ObjectIndexDetailSql);
         command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = schemaName });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = tableName });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(snapshotTime.Value, DateTimeKind.Unspecified) });
 
-        var items = new List<IndexUsageDto>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
