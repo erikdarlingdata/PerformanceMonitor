@@ -14,9 +14,11 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4526 — rule 34 "Bare Scan": a Clustered Index Scan or heap Table Scan with no predicate
-/// (and not a lookup) is a candidate for a narrower index. An actual plan fires when the
-/// operator's own time is above 0ms; an estimated plan fires when the scan costs at least 20%
-/// of the plan. Three or fewer output columns suggests a covering nonclustered index; more
+/// (and not a lookup) is a candidate for a narrower index. An actual plan fires when the scan
+/// read at least 10,000 rows and its own time is at least 10% of the statement's elapsed time,
+/// or any own time at all when the plan carries no statement time (#7891); an estimated plan
+/// fires when the table has at least 10,000 rows and the scan costs at least 20% of the plan.
+/// Three or fewer output columns suggests a covering nonclustered index; more
 /// columns suggests columnstore, because column count doesn't penalize columnstore the way it
 /// does a rowstore index.
 ///
@@ -44,6 +46,7 @@ public sealed class PlanSync4526Tests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = true,
+            ActualRows = 1_000_000,
             ActualElapsedMs = 50,
             OutputColumns = "[dbo].[t].[a],[dbo].[t].[b]"
         };
@@ -62,6 +65,7 @@ public sealed class PlanSync4526Tests
             PhysicalOp = "Clustered Index Scan",
             LogicalOp = "Clustered Index Scan",
             HasActualStats = true,
+            ActualRows = 1_000_000,
             ActualElapsedMs = 50,
             OutputColumns = "[dbo].[t].[a],[dbo].[t].[b],[dbo].[t].[c],[dbo].[t].[d],[dbo].[t].[e]"
         };
@@ -79,6 +83,7 @@ public sealed class PlanSync4526Tests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = true,
+            ActualRows = 1_000_000,
             ActualElapsedMs = 50,
             OutputColumns = "[dbo].[t].[a]",
             Predicate = "[dbo].[t].[a] = 1"
@@ -96,6 +101,7 @@ public sealed class PlanSync4526Tests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = false,
+            TableCardinality = 1_000_000,
             CostPercent = 25,
             OutputColumns = "[dbo].[t].[a]"
         };
@@ -112,6 +118,7 @@ public sealed class PlanSync4526Tests
             PhysicalOp = "Table Scan",
             LogicalOp = "Table Scan",
             HasActualStats = false,
+            TableCardinality = 1_000_000,
             CostPercent = 10,
             OutputColumns = "[dbo].[t].[a]"
         };

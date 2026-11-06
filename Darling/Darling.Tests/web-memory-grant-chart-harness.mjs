@@ -97,7 +97,7 @@ try {
       "  const format = opts.formatValue || ((v) => String(v));\n" +
       "  const node = drawLineChart({ ...opts, formatValue: (v) => { const text = format(v); if (drawing) axis.push(text); return text; } });\n" +
       "  drawing = false;\n" +
-      "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, mode: opts.mode || null, points: opts.points, windowStart: opts.windowStart, windowEnd: opts.windowEnd, axis, node });\n" +
+      "  chartCalls.push({ series: (opts.series || []).map((s) => ({ key: s.key, label: s.label })), unit: opts.unit == null ? null : opts.unit, mode: opts.mode || null, points: opts.points, windowStart: opts.windowStart, windowEnd: opts.windowEnd, axis, tooltip: [0.4, 2.5, 3].map((v) => format(v)), node });\n" +
       "  return node;\n" +
       "}\n" +
       "export function zoomableLineChart(opts) { return renderLineChart(opts); }\n"
@@ -165,7 +165,7 @@ const calls = modules.charts.chartCalls;
 
 console.log(JSON.stringify({
   panels: panels.map((p) => p.attrs["data-title"]),
-  charts: calls.map((c) => ({ series: c.series, unit: c.unit, points: c.points })),
+  charts: calls.map((c) => ({ series: c.series, unit: c.unit, points: c.points, tooltip: c.tooltip })),
   empties: all(root, "div").filter((n) => n.className === "strip empty").map((n) => n.textContent),
   errors: all(root, "div").filter((n) => n.className === "strip error").map((n) => n.textContent),
   fetches,

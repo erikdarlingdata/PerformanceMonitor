@@ -79,10 +79,12 @@ WHERE coalesce(scope_server_id, 0) = coalesce($1::integer, 0) AND coalesce(scope
     public const string ServerExistsSql = "SELECT 1 FROM config.config_monitored_servers WHERE server_id = $1";
 
     /// <summary>A profile: one scope at most (fleet, a server or a tag), at most <see cref="MaxLength"/> characters. A tag id is 1 or more
-    /// (#6400): the store matches a scope on <c>coalesce(scope_tag_id, 0)</c>, so a profile saved for tag 0 would stand in the fleet profile's place.</summary>
+    /// (#6400): the store matches a scope on <c>coalesce(scope_tag_id, 0)</c>, so a profile saved for tag 0 would stand in the fleet profile's place.
+    /// A server id is any nonzero number (#7975): Darling's ids are a 32-bit hash of the storage name, negative for about half of all servers. Server 0
+    /// is refused for the same reason as tag 0, and <see cref="ServerExistsSql"/> is the check that the server exists.</summary>
     public static string? Validate(int? scopeServerId, int? scopeTagId, string? profileText) =>
         scopeServerId.HasValue && scopeTagId.HasValue ? "A profile is for the fleet, one server or one tag, not a server and a tag."
-        : scopeServerId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Server id {scopeServerId} is not a server; server ids start at 1.")
+        : scopeServerId is 0 ? "Server id 0 is not a server."
         : scopeTagId is <= 0 ? string.Create(CultureInfo.InvariantCulture, $"Tag id {scopeTagId} is not a tag; tag ids start at 1.")
         : (profileText?.Trim().Length ?? 0) > MaxLength
             ? string.Create(CultureInfo.InvariantCulture, $"A profile must be {MaxLength:N0} characters or fewer.")

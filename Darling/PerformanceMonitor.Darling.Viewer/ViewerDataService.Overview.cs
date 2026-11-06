@@ -1701,13 +1701,18 @@ public sealed class ServerSummaryItem
 /// colour). The label brush is a constant readable light, so a pill looks the same in either theme.</summary>
 public sealed class ServerTagPill
 {
-    public ServerTagPill(string name, string? colour)
+    public ServerTagPill(string name, string? colour, System.Collections.Generic.IReadOnlyList<string>? ancestorNames = null)
     {
         Name = name;
         Fill = TagColorBrushes.Fill(colour);
+        AncestorNames = ancestorNames ?? System.Array.Empty<string>();
     }
 
     public string Name { get; }
+
+    /// <summary>The names of the tags above this one, nearest first (#7984). The Overview search matches them, so a
+    /// server tagged HOSTS under PROD &gt; BULK is found by "BULK"; the pill itself shows only <see cref="Name"/>.</summary>
+    public System.Collections.Generic.IReadOnlyList<string> AncestorNames { get; }
 
     public System.Windows.Media.Brush Fill { get; }
 

@@ -84,13 +84,13 @@ public sealed class DiskFactCriticalScoreTests
     [Fact]
     public void ASpillingFact_AddsItsBoostOnTopOfTheCriticalBase()
     {
-        // QUERY_SPILLS at 500 scores a base severity above 0, so the 0.2 spill arm of DiskSpaceAmplifiers matches:
-        // Severity = base x (1 + 0.2) = 1.5 x 1.2.
+        // QUERY_SPILLS at 60,000 pages with no period reads as one hour, past the 57,000 pages-an-hour warning bar, so it
+        // clears the root bar and the 0.2 spill arm of DiskSpaceAmplifiers matches: Severity = base x (1 + 0.2) = 1.5 x 1.2.
         var disk = CriticalDisk();
-        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 500 };
+        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 60_000 };
         new FactScorer().ScoreAll(new List<Fact> { disk, spills });
 
-        Assert.True(spills.BaseSeverity > 0);
+        Assert.True(FactScorer.ClearsRootBar(spills));
         Assert.Equal(CriticalBand, disk.BaseSeverity, precision: 6);
         Assert.Equal(CriticalBand * 1.2, disk.Severity, precision: 6);
     }
@@ -100,7 +100,7 @@ public sealed class DiskFactCriticalScoreTests
     {
         // TEMPDB_USAGE at 95% clears the root bar (+0.3) and the spills add +0.2: 1.5 x 1.5 = 2.25, capped at 2.0.
         var disk = CriticalDisk();
-        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 500 };
+        var spills = new Fact { Source = "queries", Key = "QUERY_SPILLS", Value = 60_000 };
         var tempdb = new Fact { Source = "tempdb", Key = "TEMPDB_USAGE", Value = 0.95 };
         new FactScorer().ScoreAll(new List<Fact> { disk, spills, tempdb });
 

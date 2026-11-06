@@ -62,7 +62,7 @@ public sealed record KnownPatternInput(
             return $"The time zone '{zone}' is not known on this machine. Use an IANA id such as America/New_York, or leave it empty for UTC.";
         }
 
-        if (ServerId is < 1)
+        if (ServerId is 0)
         {
             return "server_id must be a registered server's id, or empty for every server.";
         }

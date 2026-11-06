@@ -42,7 +42,7 @@ const fetches = [];
 let reply = { status: 200, body: "{}" };
 globalThis.fetch = async (url) => {
   fetches.push(String(url));
-  return { status: reply.status, ok: reply.status < 400, text: async () => reply.body };
+  return { status: reply.status, ok: reply.status < 400, url: new URL(String(url), "http://viewer.test").href, text: async () => reply.body };
 };
 
 /* ResizeObserver stand-in that counts the observers still connected (plan-row.js: a closed panel must leave none). */
@@ -241,6 +241,37 @@ const scenarios = {
   async points() {
     out.points = mod.procedurePoints(procTrend().trend);
     out.none = mod.procedurePoints(null);
+  },
+  /* #7945: a failed read whose answer carries no sentence of its own names the path it asked for. */
+  async failedReadNamesPath() {
+    reply = { status: 500, body: "" };
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    out.error = cell.all((n) => n.className === "strip error").map((n) => n.textContent);
+  },
+  /* #7933: the rate measures' formatter as a tooltip calls it (the value alone) and as an axis tick calls it (with the tick step). */
+  async tooltipRates() {
+    respond(procTrend());
+    const cell = mod.statsHistoryColumn("procedures", "srv-a", 24).render(procRow);
+    cell.byText("History").click();
+    await flush();
+    const select = cell.all((n) => n.tag === "select")[0];
+    const formatterFor = (metric) => {
+      select.value = metric;
+      select.listeners.change[0]();
+      return globalThis.__charts.slice(-1)[0].spec.formatValue;
+    };
+    const msPerSecond = formatterFor("elapsed_ms_per_second");
+    out.msPerSecond = {
+      tooltip: [msPerSecond(0.17), msPerSecond(0), msPerSecond(200)],
+      ticks: [0, 0.2, 0.4].map((t) => msPerSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
+    const perSecond = formatterFor("executions_per_second");
+    out.perSecond = {
+      tooltip: [perSecond(0.00028), perSecond(0), perSecond(4)],
+      ticks: [0, 0.2, 0.4].map((t) => perSecond(t, { step: 0.2, axisMax: 0.4 })),
+    };
   },
 };
 await scenarios[process.argv[3]]();

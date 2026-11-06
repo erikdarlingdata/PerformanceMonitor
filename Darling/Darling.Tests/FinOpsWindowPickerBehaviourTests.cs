@@ -17,7 +17,7 @@ using static Darling.Tests.RepoFile;
 namespace Darling.Tests;
 
 /// <summary>
-/// The Window picker on the FinOps Optimization and High Impact tabs, run from the shipped
+/// The Window picker on the FinOps Optimization, High Impact and Database Resources tabs, run from the shipped
 /// page scripts under Node (<c>finops-window-picker-harness.mjs</c>): the first build reads 24 hours, a pick re-reads
 /// with the chosen hours, a rebuild for the same server (the 60 s poll) keeps the pick, and another server starts at
 /// 24 hours again. Node is skipped when it is not installed.
@@ -61,6 +61,7 @@ public sealed class FinOpsWindowPickerBehaviourTests
     [Theory]
     [InlineData("optimization")]
     [InlineData("high-impact")]
+    [InlineData("database-resources")]
     public void ThePickKeepsAcrossARebuildForTheSameServerAndResetsForAnother(string tab)
     {
         var t = Run().GetProperty(tab);
