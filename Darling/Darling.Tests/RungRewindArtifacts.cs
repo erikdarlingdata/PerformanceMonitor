@@ -702,7 +702,7 @@ CREATE OR REPLACE VIEW collect.v_blocked_process_reports AS SELECT * FROM collec
         // V247 (#7730): the key trigger also recognizes the old statements, and the state row is deleted so the backfill runs again. The rewind puts
         // V219's marker-only function back (the probe's sentinel is the digest test in the function's source), so a re-run of V247 replaces it
         // again. The state row is left as it is: the re-run deletes it.
-        new(247, "hasSelfKeysOldStatements", QueryStoreSelfKeys.MarkerOnlyTriggerSql),
+        new(247, "hasSelfKeysOldStatements", PerformanceMonitor.Darling.Storage.QueryStoreSelfKeys.MarkerOnlyTriggerSql),
     ];
 
     /// <summary>
