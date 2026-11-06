@@ -236,6 +236,17 @@ try {
   await wait(300);
   out.newestWins = { afterNewest, afterStale: options(root), searches: fetches.filter(isRoute).map((u) => paramsOf(u).get("search")) };
 
+  // #7690: the read's "Complete: ..." sentence is the MCP reader's, not the page's: no strip for a whole list, the cap sentence when cut.
+  const lockRow = { database_name: "SalesDb", schema_name: "dbo", table_name: "Orders", index_name: "IX_Orders", row_lock_wait_count: 1 };
+  databases = () => ({ databases: [], truncated: false });
+  toolBody = () => ({ truncated: false, note: "Complete: every index with lock/latch contention at the latest snapshot is included.", objects: [lockRow] });
+  const whole = tab.build("srv-whole", {});
+  await wait(40);
+  toolBody = () => ({ truncated: true, note: "TRUNCATED: more than 1 indexes have lock/latch contention at the latest snapshot.", objects: [lockRow] });
+  const capped = tab.build("srv-capped", {});
+  await wait(40);
+  out.noteStrip = { wholeText: whole.textContent, cappedText: capped.textContent };
+
   // Index Analysis shares the box: a typed "salesdb" goes as "SalesDb" (its list comes from its own read).
   toolBody = () => ({ databases: [{ database_name: "SalesDb" }, { database_name: "Other" }], recommendations: [], recommendation_count: 0 });
   const ia = indexAnalysis.build("srv-ia", {});

@@ -149,12 +149,15 @@ public sealed class WebPageRefreshIntervalBehaviourTests
     }
 
     [Fact]
-    public void TheStatusBarHint_NamesTheInterval_AndTheControlShowsOnlyOnServerAndFinOpsPages()
+    public void TheStatusBarHint_NamesTheInterval_AndRefreshShowsOnEveryPageWithTheIntervalOnServerAndFinOpsPagesOnly()
     {
         var r = Run();
         Assert.Equal("Auto-refresh: 30 sec", r.GetProperty("hint30").GetString());
         Assert.Equal("Auto-refresh off", r.GetProperty("hintOff").GetString());
-        Assert.True(r.GetProperty("controlHiddenOnFleet").GetBoolean());
+        // #7690: the row stays on every page so the sidebar list does not move and Refresh is always there; the interval is blanked, not removed.
+        Assert.False(r.GetProperty("controlHiddenOnFleet").GetBoolean());
         Assert.False(r.GetProperty("controlHiddenOnFinops").GetBoolean());
+        Assert.Equal("hidden", r.GetProperty("intervalVisibilityOnFleet").GetString());
+        Assert.Equal("", r.GetProperty("intervalVisibilityOnFinops").GetString());
     }
 }

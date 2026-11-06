@@ -1092,7 +1092,7 @@ internal static class DarlingDataReader
     /// $7 the candidate limit for pass 1 (#5313: top + 5 first, larger when the WAITFOR trim leaves a short page),
     /// $8 the databases to leave out (#7725: the ones the server dropped, ranked after the listed ones by a second read; NULL = none).
     /// </summary>
-    public const string TopQueriesSql = $"""
+    public static readonly string TopQueriesSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1114,7 +1114,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
                TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
@@ -1351,7 +1351,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = $"""
+    public static readonly string TopQueriesByHostObjectSql = $"""
         WITH winners AS MATERIALIZED (
             /* #5226 pass 1 of 2: rank every group of the window on NARROW columns. The wide row (forty
                aggregates and the distinct-text count) forces a sort of wide rows when it shares the
@@ -1373,7 +1373,7 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($8::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($8))
+           {DatabaseFilter.ExcludeClause("database_name", 8)}
             /*TAG:hash:query_hash*/
             /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
@@ -1596,7 +1596,7 @@ internal static class DarlingDataReader
     /// sums on <c>query_stats_io_hourly</c> and typed NULLs on the stitched relation. <c>min_dop</c> and host-object grouping need columns only raw carries, so
     /// a read that sets either never reaches this const (it is forced to raw) and it takes no $6, $7 or $8.
     /// </summary>
-    public const string TopQueriesHourlySql = """
+    public static readonly string TopQueriesHourlySql = $"""
         WITH ranked AS MATERIALIZED (
             SELECT
                 database_name,
@@ -1613,7 +1613,7 @@ internal static class DarlingDataReader
             AND   bucket >= $2
             AND   bucket < $3$CEIL$
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
-            AND   ($7::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($7))
+           {DatabaseFilter.ExcludeClause("database_name", 7)}
             /*TAG:hash:query_hash*/
             GROUP BY database_name, query_hash
             HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
