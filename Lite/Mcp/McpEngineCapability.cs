@@ -226,25 +226,9 @@ internal static class McpEngineCapability
     public static bool PvsVersionHasStore(ServerManager serverManager, int storageServerId) =>
         PvsStatsCollector.Instance.AppliesTo(PvsTarget(serverManager, storageServerId));
 
-    /// <summary>
-    /// The empty sentence of get_plan_corrections for this server: no automatic tuning before SQL Server 2017, no database with Query
-    /// Store on, or nothing recommended so far. The version comes from the same connection status <see cref="PvsTarget"/> reads, and
-    /// the Query Store state from the newest health capture; a store that cannot be read makes no claim about Query Store.
-    /// </summary>
-    public static async Task<string> PlanCorrectionNoRowsMessageAsync(LocalDataService dataService, ServerManager serverManager, int storageServerId)
-    {
-        IReadOnlyList<CollectorRuntimePrecondition.QueryStoreDatabaseState>? states;
-        try
-        {
-            states = (await dataService.GetQueryStoreStatesAsync(storageServerId)).States;
-        }
-        catch (Exception)
-        {
-            states = null;
-        }
-
-        return PlanCorrectionCollector.NoRowsMessage(PvsTarget(serverManager, storageServerId), states);
-    }
+    /// <summary>#7813: the empty sentence of get_plan_corrections for this server: no automatic tuning before SQL Server 2017, or no stored cycle yet. The version comes from the same connection status <see cref="PvsTarget"/> reads.</summary>
+    public static string PlanCorrectionNoRowsMessage(ServerManager serverManager, int storageServerId) =>
+        PlanCorrectionCollector.NoRowsMessage(PvsTarget(serverManager, storageServerId));
 
     /// <summary>
     /// #6178: the <c>not_collected</c> envelope for a read that covers every registered server and found nothing, when

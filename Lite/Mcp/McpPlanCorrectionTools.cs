@@ -75,7 +75,7 @@ public sealed class McpPlanCorrectionTools
                         /* #5244: a filtered empty is a verdict about the chosen database only, the same words as Darling's twin. */
                         database != null
                             ? $"No plan correction data found{McpBlockingTools.ForChosenDatabase(database)}."
-                            : await McpEngineCapability.PlanCorrectionNoRowsMessageAsync(dataService, serverManager, resolved.ServerId),
+                            : McpEngineCapability.PlanCorrectionNoRowsMessage(serverManager, resolved.ServerId),
                         database, /* #5244 review L2: the echo rides on an empty answer too */
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),

@@ -358,24 +358,6 @@ ORDER BY lower(database_name), database_name";
         }
     }
 
-    /// <summary>
-    /// The newest Query Store snapshot of every database on the server, for a sentence whose wording depends on it (the empty answer
-    /// of get_plan_corrections). Null when the store cannot be read: the sentence then makes no claim about Query Store, since it rides
-    /// on an answer that is already empty and a diagnostic must not turn that into an error.
-    /// </summary>
-    public static async Task<IReadOnlyList<CollectorRuntimePrecondition.QueryStoreDatabaseState>?> QueryStoreStatesOrNullAsync(
-        NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return (await ReadQueryStoreStatesAsync(postgres, serverId, DatabaseFilter.All, cancellationToken)).States;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return null;
-        }
-    }
-
     /// <summary>The payload member that carries <see cref="QueryStoreErrorNoteAsync"/>'s sentence on an answer with rows (#7675).</summary>
     public const string QueryStoreErrorNoteKey = "query_store_error_note";
 
