@@ -281,6 +281,38 @@ public sealed class StaTestThreadTests
         }
     }
 
+    /// <summary>
+    /// #7600: in every leg's result file the first WPF body of the process pays WPF's render engine start-up (5 to 12 s on a green leg, 61 to
+    /// 126 s on the five stalled ones), and every later WPF test is fast. That cost landed inside whichever test's hang guard came first. The
+    /// host now starts the engine once per process, on the shared thread before its first body, bounded by the hang guard: a start-up that
+    /// overruns it is named as the start-up, not as the test, and bodies run once it has finished, each beginning with the engine loaded.
+    /// </summary>
+    [Fact]
+    public void TheRenderEngineIsStartedBeforeTheFirstBody_AndAStartUpThatOverrunsTheGuard_IsNamedAsItself()
+    {
+        /* A guard no window can be shown and closed within, so the start-up overruns it and the first call names the start-up, not this body. */
+        var host = new StaHost { HangGuard = TimeSpan.FromMilliseconds(1) };
+        try
+        {
+            var ran = false;
+            var timedOut = Assert.Throws<TimeoutException>(() => host.Run(() => ran = true));
+            Assert.False(ran);
+            Assert.StartsWith("WPF's render engine did not start within 1 ms", timedOut.Message);
+
+            /* Once the start-up has finished the host runs bodies again, and each begins with the engine already loaded. */
+            host.HangGuard = TimeSpan.FromSeconds(60);
+            var loadedAtBodyStart = false;
+            Assert.True(
+                SpinWait.SpinUntil(() => RunsAfterRefusals(host, () => loadedAtBodyStart = RenderEngineIsLoaded()), TimeSpan.FromSeconds(60)),
+                "once the engine's start-up has finished, the next body must run instead of being refused");
+            Assert.True(loadedAtBodyStart, "the first body ran before WPF's render engine was loaded");
+        }
+        finally
+        {
+            host.Shutdown();
+        }
+    }
+
     [Fact]
     public void TheHangGuardsMessage_SaysABodyThatSpinsInOneCall_WasUsingTheCpu()
     {
@@ -486,6 +518,13 @@ public sealed class StaTestThreadTests
 
         await caller.WaitAsync(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.True(ran.IsSet);
+    }
+
+    /// <summary>Whether WPF's native render engine is in the process. It loads with the first MediaContext, so this is what a started engine looks like from outside the harness.</summary>
+    private static bool RenderEngineIsLoaded()
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        return process.Modules.Cast<System.Diagnostics.ProcessModule>().Any(m => m.ModuleName.StartsWith("wpfgfx", StringComparison.OrdinalIgnoreCase));
     }
 
     private static (int Id, ApartmentState Apartment, bool Background) Describe() =>
