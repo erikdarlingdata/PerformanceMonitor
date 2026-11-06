@@ -83,6 +83,15 @@ public sealed class AdminPendingNotesTests
             Pure("noteDecisionOutcome", "reject", 7, new { status = 403, body = new { reason = "store_refused" } }).GetProperty("message").GetString());
     }
 
+    /* #7955: the host's write gate refuses a read-only seat with the account sentence and the read_only_seat reason, so the page reads the code. */
+    [Fact]
+    public void AReadOnlySeatsRefusal_CarriesItsSentenceAndTheReadOnlySeatReason()
+    {
+        var body = JsonNode.Parse(PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.ReadOnlySeatRefusalJson())!;
+        Assert.Equal(DarlingWebEndpoints.ReadOnlyAccountText, (string)body["error"]!);
+        Assert.Equal("read_only_seat", (string)body["reason"]!);
+    }
+
     [Theory]
     [InlineData("approve", 200, """{"status":"approved","note_id":7}""", "Note 7 approved.", false, true)]
     [InlineData("reject", 200, """{"status":"rejected","note_id":7}""", "Note 7 rejected.", false, true)]
@@ -278,7 +287,7 @@ public sealed class AdminPendingNotesTests
     [Theory]
     [InlineData("approved", 2, "7|8", "8", "Note 7 approved.")]
     [InlineData("gone", 2, "7|8", "8", "Note 7 was not changed. That note is not pending: it was already decided, or it is gone.")]
-    [InlineData("refused", 1, "7|8", "7|8", "Deciding a note needs a store login with the admin role.")]
+    [InlineData("refused", 1, "7|8", "7|8", "This dashboard's store login has no write access, so it cannot decide notes. Decide them in the Viewer app.")]
     [InlineData("broken", 1, "7|8", "7|8", "Note 7 was not approved. The service answered 500. The store did not answer.")]
     [InlineData("signin", 1, "7|8", "7|8", "Sign in to the web as an admin to make this change, or use the Viewer.")]
     public void TheDecideButton_ReadsTheListAgainOnlyWhenTheAnswerSaysItIsStale(

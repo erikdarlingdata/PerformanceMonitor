@@ -1561,7 +1561,7 @@ public sealed class DarlingWebHostService : BackgroundService
                                 DateTime.UtcNow);
                             context.Response.StatusCode = StatusCodes.Status403Forbidden;
                             context.Response.ContentType = "application/json; charset=utf-8";
-                            await context.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(new { error = DarlingWebEndpoints.ReadOnlyAccountText }));
+                            await context.Response.WriteAsync(ReadOnlySeatRefusalJson());
                             return;
                         }
 
@@ -1842,11 +1842,18 @@ public sealed class DarlingWebHostService : BackgroundService
         => path.Equals("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The body a read-only seat's write is refused with: <see cref="DarlingWebEndpoints.ReadOnlyAccountText"/> and the
+    /// <see cref="DarlingWebStoreWrites.RefusalReason.ReadOnlySeat"/> reason (#7955).</summary>
+    internal static string ReadOnlySeatRefusalJson() => System.Text.Json.JsonSerializer.Serialize(
+        new { error = DarlingWebEndpoints.ReadOnlyAccountText, reason = DarlingWebStoreWrites.RefusalReason.ReadOnlySeat });
+
     /// <summary>Writes the body of a write a reads-only dashboard refuses (the caller sets the 403): <paramref name="message"/> as the JSON error.</summary>
     private static async Task WriteReadsOnlyRefusalAsync(HttpContext context, string message)
     {
         context.Response.ContentType = "application/json; charset=utf-8";
-        await context.Response.WriteAsync("{\"error\": " + System.Text.Json.JsonSerializer.Serialize(message) + "}");
+        await context.Response.WriteAsync(
+            "{\"error\": " + System.Text.Json.JsonSerializer.Serialize(message)
+            + ", \"reason\": " + System.Text.Json.JsonSerializer.Serialize(DarlingWebStoreWrites.RefusalReason.ReadsOnlyDashboard) + "}");
     }
 
     /// <summary>
