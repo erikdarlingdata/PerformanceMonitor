@@ -657,6 +657,68 @@ public sealed class ConnectionFaultDispositionTests
         Assert.Equal(2, probes);
     }
 
+    [Fact]
+    public async Task AProbeThatReturnsAfterTheMemoWasCleared_LeavesNeitherStreakNorVerdictBehind()
+    {
+        // #7851: run A's Dead verdict clears the memo while run B's probe is still in flight. B's late TimedOut is
+        // about the connection that was dropped, so it must not start the reconnected server at 1 of 3 or hold a verdict.
+        var memo = new LivenessProbeMemo();
+        var held = new TaskCompletionSource<LivenessProbeOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ct = TestContext.Current.CancellationToken;
+
+        var b = memo.ProbeAsync(SqlRuntime(), (_, _) => held.Task, T0, ct);
+        memo.Clear();
+        held.SetResult(LivenessProbeOutcome.TimedOut);
+
+        Assert.True(await b); // B still gets its own answer
+        Assert.Equal(0, memo.TimedOutProbesInARow);
+        Assert.Null(memo.Last);
+
+        var probes = 0;
+        await memo.ProbeAsync(SqlRuntime(), (_, _) => { probes++; return Task.FromResult(LivenessProbeOutcome.LoggedIn); }, T0.AddSeconds(1), ct);
+        Assert.Equal(1, probes);
+    }
+
+    [Fact]
+    public async Task AClearThatLandsBetweenTheGenerationCheckAndTheWrite_IsNotFollowedByAStaleWrite()
+    {
+        // #7851: the generation compare and the writes run under one lock, so a Clear that arrives between them waits
+        // and runs after the write. Without the lock it runs first and the probe's write lands in the new generation.
+        var memo = new LivenessProbeMemo();
+        Task? clear = null;
+        memo.BetweenCheckAndWriteForTests = () =>
+        {
+            clear = Task.Run(memo.Clear);
+            clear.Wait(TimeSpan.FromMilliseconds(100)); // blocks on the lock while the probe holds it
+        };
+
+        await memo.ProbeAsync(SqlRuntime(), (_, _) => Task.FromResult(LivenessProbeOutcome.TimedOut), T0, TestContext.Current.CancellationToken);
+        await clear!;
+
+        Assert.Null(memo.Last);
+        Assert.Equal(0, memo.TimedOutProbesInARow);
+    }
+
+    [Fact]
+    public async Task AProbeThatLogsInAfterTheMemoWasCleared_LeavesTheNewGenerationsStreakAndVerdictAlone()
+    {
+        // The stale LoggedIn must not end the streak the reconnected server has built since.
+        var memo = new LivenessProbeMemo();
+        var held = new TaskCompletionSource<LivenessProbeOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ct = TestContext.Current.CancellationToken;
+
+        var stale = memo.ProbeAsync(SqlRuntime(), (_, _) => held.Task, T0, ct);
+        memo.Clear();
+        await memo.ProbeAsync(SqlRuntime(), (_, _) => Task.FromResult(LivenessProbeOutcome.TimedOut), T0, ct);
+        var verdict = memo.Last;
+        held.SetResult(LivenessProbeOutcome.LoggedIn);
+
+        Assert.True(await stale);
+        Assert.Equal(1, memo.TimedOutProbesInARow);
+        Assert.Same(verdict, memo.Last);
+        Assert.Equal(LivenessProbeOutcome.TimedOut, memo.Last?.Outcome);
+    }
+
     /// <summary>The real probe with its login replaced by one that throws <paramref name="fault"/>.</summary>
     private static Func<ServerRuntime, CancellationToken, Task<LivenessProbeOutcome>> ProbeWhoseLoginThrows(Exception fault) =>
         (runtime, token) => ConnectionFaultDisposition.ProbeFreshConnectionAsync(runtime, (_, _) => Task.FromException(fault), token);
@@ -781,10 +843,10 @@ public sealed class ConnectionFaultDispositionTests
     }
 
     /// <summary>A worker whose store nothing listens on: the collection_log write fails and is swallowed, as it is for any observability write.</summary>
-    private static DarlingWorker NewWorker(LivenessProbeOutcome probeFinds)
+    private static DarlingWorker NewWorker(LivenessProbeOutcome probeFinds, ILogger<DarlingWorker>? logger = null)
     {
         var worker = new DarlingWorker(
-            NullLogger<DarlingWorker>.Instance,
+            logger ?? NullLogger<DarlingWorker>.Instance,
             NullLoggerFactory.Instance,
             new McpRuntimeState(),
             new WebRuntimeState(),
@@ -853,6 +915,52 @@ public sealed class ConnectionFaultDispositionTests
         Assert.Null(server.Runtime);
         Assert.Null(server.Liveness.Last);
         Assert.True(server.NextConnectAttempt >= before.AddSeconds(60));
+    }
+
+    [Fact]
+    public async Task TheWorker_NamesTheOtherRunsDrop_NotAKeptConnection_WhenTheProbeTimesOutAfterTheMemoWasCleared()
+    {
+        // #7851: another run dropped the runtime and cleared the memo while this run's probe was in flight. The probe's own
+        // login timed out, and the connection is already gone, so "keeping the connection" would be false twice over.
+        var log = new CapturingTestLogger();
+        var worker = NewWorker(LivenessProbeOutcome.TimedOut, new WorkerLog(log));
+        var runtime = SqlRuntime();
+        var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+        worker.LivenessProbeOverride = (_, _) =>
+        {
+            server.Liveness.Clear();
+            return Task.FromResult(LivenessProbeOutcome.TimedOut);
+        };
+
+        await RunOneAsync(worker, server, () => throw Timeout());
+
+        Assert.Same(runtime, server.Runtime); // no second drop
+        Assert.Contains(log.Lines, line => line.Contains("another run already dropped and reset the connection") && line.Contains("timed out"));
+        Assert.DoesNotContain(log.Lines, line => line.Contains("keeping the connection"));
+    }
+
+    [Fact]
+    public async Task TheWorker_LogsTheProbesStreak_WhenItsOwnLoginTimesOutOnTheCurrentConnection()
+    {
+        var log = new CapturingTestLogger();
+        var worker = NewWorker(LivenessProbeOutcome.TimedOut, new WorkerLog(log));
+        var runtime = SqlRuntime();
+        var server = new DarlingWorker.ServerLoopState { Config = runtime.Config, Runtime = runtime };
+
+        await RunOneAsync(worker, server, () => throw Timeout());
+
+        Assert.Contains(log.Lines, line => line.Contains("so did the liveness probe's own login") && line.Contains("probe 1 of 3"));
+    }
+
+    /// <summary>The worker's typed logger over a <see cref="CapturingTestLogger"/>.</summary>
+    private sealed class WorkerLog(CapturingTestLogger inner) : ILogger<DarlingWorker>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+        public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            inner.Log(logLevel, eventId, state, exception, formatter);
     }
 
     /// <summary>SqlException has no public constructor; this builds one through the driver's internals.</summary>
