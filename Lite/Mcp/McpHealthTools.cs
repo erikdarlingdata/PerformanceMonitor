@@ -1607,7 +1607,7 @@ public sealed class McpHealthTools
                             factual: database == null
                                 ? $"No blocking or deadlocks recorded for {resolved.DisplayName} in the last {hours} hour(s)"
                                 : $"No blocking{McpDatabaseSelection.ForChosen(new[] { database })} (and no deadlocks, which are not limited by database) recorded for {resolved.DisplayName} in the last {hours} hour(s)",
-                            coveredClaim: ". The blocking collectors HAVE run successfully for this server, so the window is genuinely clear rather than blind."),
+                            coveredClaim: ". The blocking collectors have run successfully for this server, so there was no blocking or deadlock in this window."),
                         emptyNotice.AsHints()), windowEnd.AddHours(-hours))
                     : McpHelpers.Status(
                         "unavailable",

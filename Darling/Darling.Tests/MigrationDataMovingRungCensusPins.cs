@@ -413,6 +413,14 @@ public sealed class MigrationDataMovingRungCensusPins
             + "constant default are catalog-only. The CHECK and the UPDATE each read the table once, and the table is a hand-edited registry of at "
             + "most a few hundred routes, so both take milliseconds. The new proposals table starts empty. It reads no collected data and spends "
             + "none of the lock-wait budget, so the multiple stays 5."),
+        new(
+            248,
+            SetsTheFloor: false,
+            "Replaces the key trigger function and creates both triggers again, then one DELETE FROM collect.query_store_self_keys_state "
+            + "(created V219, #7730): the state row the background backfill reads, a single row. The trigger function body names a DELETE on "
+            + "collect.query_store_self_keys, which is the function text and not a statement the rung runs. The rung scans no table and "
+            + "rewrites no collected row (the backfill runs in the background after start), so it spends none of the lock-wait budget "
+            + "and the multiple stays 5."),
     ];
 
     /// <summary>

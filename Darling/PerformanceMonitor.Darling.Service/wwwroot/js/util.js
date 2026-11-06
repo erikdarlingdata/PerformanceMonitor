@@ -444,14 +444,28 @@ export function chartNote(data, kind) {
  * parseUtc reads it everywhere; a space-separated one is rewritten ONLY with a "Z" or " UTC" after it, because the same
  * shape without one is a monitored server's own wall clock ("2026-09-27 21:32:43 (server clock)") and shifting it would
  * state the wrong hour. Text with no such stamp, and a non-string, come back as given.
+ *
+ * #7726: a stamp with no seconds ("2026-11-05 16:52 UTC", the unreachable-since sentence) is left alone unless the caller passes
+ * `opts.minutes`, so every other sentence keeps the server's own text. Only the Server Connection sentence and the red strip under
+ * the server name opt in. Such a stamp is shifted only with a zone after it. `opts.since` is the reply's own instant for the same
+ * moment (it has the seconds): a stamp in that same UTC minute prints that instant, seconds included, so the sentence, the strip
+ * and the tile beside it show the same time. Any other no-seconds stamp prints without seconds, never with an invented ":00".
  */
-export function localizeIsoText(text) {
+export function localizeIsoText(text, opts) {
   if (typeof text !== "string") return text;
-  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d:\d\d)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, time, frac, zone) => {
+  const minutes = !!(opts && opts.minutes);
+  const exact = minutes && opts.since ? parseUtc(opts.since) : null;
+  return text.replace(/(\d{4}-\d\d-\d\d)([T ])(\d\d:\d\d(?::\d\d)?)(?:\.(\d{1,7}))?(Z(?![A-Za-z])| UTC(?![A-Za-z])|[+-]\d\d:?\d\d)?/g, (m, date, sep, hm, frac, zone) => {
     if (sep === " " && !zone) return m;
+    const noSeconds = hm.length === 5;
+    if (noSeconds && (!minutes || !zone)) return m;
+    const time = noSeconds ? hm + ":00" : hm;
     const iso = date + "T" + time + (frac ? "." + frac.slice(0, 3).padEnd(3, "0") : "") + (zone === " UTC" ? "Z" : zone || "");
     const d = parseUtc(iso);
-    return d ? d.toLocaleString() : m;
+    if (!d) return m;
+    if (!noSeconds) return d.toLocaleString();
+    if (exact && Math.floor(exact.getTime() / 60000) === Math.floor(d.getTime() / 60000)) return exact.toLocaleString();
+    return d.toLocaleString(undefined, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
   });
 }
 
@@ -940,7 +954,7 @@ export function relTime(s) {
   const diffMs = Date.now() - d.getTime();
   if (diffMs < 0) return d.toLocaleString();
   const sec = Math.floor(diffMs / 1000);
-  if (sec < 45) return "just now";
+  if (sec < 60) return "just now";
   const min = Math.floor(sec / 60);
   if (min < 60) return min + "m ago";
   const hr = Math.floor(min / 60);
@@ -1123,6 +1137,12 @@ export function fmtMs(v, o) {
      tooltip or grid cell (no axisMax) picks the unit from its own value. */
   const top = axisTopOf(o);
   const basis = top == null ? Math.abs(n) : top;
+  /* #7726: a positive figure under 1 ms in a cell or tooltip (no axis step, no axis top) is printed in whole microseconds, so a query that
+     ran a million times at 0.03 ms reads "32 µs" and not "0 ms". Exactly 0 stays "0 ms". An axis tick keeps its decimals of ms. */
+  if (top == null && stepOf(o) == null && n > 0 && n < 1) {
+    const us = Math.max(1, Math.round(n * 1000));
+    if (us < 1000) return us.toLocaleString(undefined, { maximumFractionDigits: 0 }) + " µs";
+  }
   if (basis < 1000) return fmtInt(n, stepArg(o)) + " ms";
   const per = basis < 60000 ? 1000 : basis < 3600000 ? 60000 : 3600000;
   const unit = per === 1000 ? " s" : per === 60000 ? " min" : " h";

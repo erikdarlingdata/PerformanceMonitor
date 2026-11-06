@@ -357,6 +357,16 @@ OPTION(RECOMPILE);";
         target.MeetsMinimumVersion(15, unknownIsNewest: true);
 
     /// <summary>
+    /// #7699 item 7: the empty answer of get_pvs_stats on a server with no PVS rows, in the one sentence that fits. A version below
+    /// SQL Server 2019 has no persistent version store at all (the same gate <see cref="AppliesTo"/> applies), which is a fact about
+    /// the version, not about collection. Any other server has simply not completed a cycle. Both products' tools say it through here.
+    /// </summary>
+    public static string NoRowsMessage(CollectorTargetInfo target) =>
+        Instance.AppliesTo(target)
+            ? "No PVS data collected for this server yet: its pvs_stats collector has not completed a cycle."
+            : "This SQL Server version has no persistent version store (it arrived in SQL Server 2019), so there is nothing to collect.";
+
+    /// <summary>
     /// Per-database on Azure SQL DB only (#7165). The Azure query is database-scoped
     /// (<c>pvss.database_id = DB_ID()</c>), and a logical-server registration names no database, so the host
     /// connects to <c>master</c>: with one connection the collector read master's version store and no user

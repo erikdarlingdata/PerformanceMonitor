@@ -28,7 +28,7 @@
 
 import { el, localTime, parseUtc, TRIM_TO } from "./util.js";
 import { MINIMUM_SPAN_MS } from "./time-range.js";
-import { gapThresholdMs, splitAtGaps } from "./chart-gaps.js";
+import { gapThresholdMs, splitAtGaps, bucketMsOf } from "./chart-gaps.js";
 
 const HOUR_MS = 3600000;
 const MINUTE_MS = 60000;
@@ -190,8 +190,15 @@ export function stripValue(v) {
  * width (1 minute for a day), not the collector's cadence, and a collector scheduled slower than that would draw every step as a stem. A strip that
  * joins two grains (`seam`, the Query Store duration trend's routing.raw_from) is judged on each side of it. Returns what stripPaths takes as its `gap`.
  */
-export function stripGap(strip, data) {
+export function stripGap(strip, data, rowTimes = null) {
   if (strip && strip.stepMs > 0) return strip.stepMs;
+  /* #7692: a `bucketed` strip (the query and procedure duration trends: rows only where something ran, so a quiet server's steps are uneven and read as
+     events, and a four hour hole was filled) takes the reply's bucket through bucketMsOf with the strip's own row times, as the line charts do. That covers
+     the collector-slower-than-the-bucket case the paragraph above warns about: the rows' own median step wins when it is longer than the bucket. */
+  if (strip && strip.bucketed && data) {
+    const step = bucketMsOf(data.bucket_minutes, rowTimes);
+    if (step !== null) return step;
+  }
   const seam = strip && strip.seam ? parseUtc(strip.seam(data)) : null;
   return seam ? { seamMs: seam.getTime() } : null;
 }

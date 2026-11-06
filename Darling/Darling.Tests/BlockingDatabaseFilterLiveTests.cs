@@ -164,7 +164,7 @@ public sealed class BlockingDatabaseFilterLiveTests
             var emptyAll = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlocking(
                 postgres, ServerName, 1, 50, null, false, now.AddDays(-30).ToString("o"), DatabaseFilter.All, 150, cancellationToken: ct)).RootElement;
             Assert.Equal("empty", emptyAll.GetProperty("status").GetString());
-            Assert.Equal("No blocking events found in the specified time range.", emptyAll.GetProperty("message").GetString());
+            Assert.Equal("No blocking events found in this window.", emptyAll.GetProperty("message").GetString());
 
             /* A dedup_key from A's incident, asked over B alone: a miss that says the scan was limited to the chosen databases. */
             string aKey;
@@ -218,7 +218,7 @@ public sealed class BlockingDatabaseFilterLiveTests
 
             var emptyAll = JsonDocument.Parse(await DarlingMcpBlockingTools.GetBlockedProcessXml(
                 postgres, ServerName, 1, 50, now.AddDays(-30).ToString("o"), DatabaseFilter.All, cancellationToken: ct)).RootElement;
-            Assert.Equal("No blocked process report XML available in the specified time range.", emptyAll.GetProperty("message").GetString());
+            Assert.Equal("No blocked process report XML available in this window.", emptyAll.GetProperty("message").GetString());
         });
     }
 

@@ -174,7 +174,7 @@ public sealed class DarlingMcpBlockingTools
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken)
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocking events found in the specified time range{ForChosenDatabases(databases)}.",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocking events found in this window{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
@@ -426,7 +426,7 @@ public sealed class DarlingMcpBlockingTools
                        did not deadlock — the one answer nobody should be given without being told. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected and the precondition stay bare. */
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlocks found in the specified time range.",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlocks found in this window.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
@@ -603,7 +603,7 @@ public sealed class DarlingMcpBlockingTools
             if (candidates.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "deadlocks", cancellationToken)
                     /* #4966: the window keys ride on an empty answer under hints; not_collected stays bare. */
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlock XML available in the specified time range.",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", "No deadlock XML available in this window.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "deadlocks", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "deadlocks", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
@@ -754,7 +754,7 @@ public sealed class DarlingMcpBlockingTools
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "blocked_process_report", cancellationToken)
                     /* #4966: the report XML exists only in the XE arm, so the probe is the XE collector's alone: the DMV snapshots are
                        not a source of these rows, and their longer history must not read as coverage of reports they cannot hold. */
-                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocked process report XML available in the specified time range{ForChosenDatabases(databases)}.",
+                    ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocked process report XML available in this window{ForChosenDatabases(databases)}.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "blocked_process_reports", resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, "blocked_process_reports", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
@@ -1067,7 +1067,7 @@ public sealed class DarlingMcpBlockingTools
                         McpHelpers.QuietUnlessCut(
                             emptyNotice.WindowTruncated, emptyNotice.EffectiveStart,
                             factual: $"No lock waits recorded for {resolved.DisplayName} in the last {hours_back} hour(s)",
-                            coveredClaim: ". This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples."),
+                            coveredClaim: ". This server has collected wait stats before, so this window was quiet — widen hours_back to find the most recent samples."),
                         emptyHints)
                     : McpHelpers.Status(
                         "unavailable",
@@ -1168,7 +1168,7 @@ public sealed class DarlingMcpBlockingTools
         if (captureCount > 0)
             return McpHelpers.Status(
                 "empty",
-                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount} collector run(s) did execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
+                $"No {subject} was recorded for {serverName}{ForChosenDatabases(databases)} in the last {hoursBack} hour(s). {captureCount.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} collector run(s) did execute over this window, so this is a genuine all-clear rather than missing data — see hints.captures for which collectors ran and when.",
                 hints);
 
         var everCaptured = await hasEverCapturedAsync();

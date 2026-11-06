@@ -163,6 +163,18 @@ public partial class CustomViewRunWindow : Window
         {
             host.Children.Add(Muted(text));
         }
+
+        /* #7668: the run's warnings for a panel that will not draw what its author meant (a /sec counter charted as its running total). */
+        if (run.Payload["warnings"] is JsonArray warnings)
+        {
+            foreach (var warning in warnings)
+            {
+                if (warning is JsonValue value && value.TryGetValue<string>(out var warningText) && warningText.Length > 0)
+                {
+                    host.Children.Add(Muted(warningText));
+                }
+            }
+        }
     }
 
     private DataGrid Grid(JsonArray rows) => new()

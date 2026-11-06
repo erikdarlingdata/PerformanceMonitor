@@ -125,6 +125,19 @@ public sealed class CollectorRunEmptyReasonTests
         Assert.Contains("no successful run inside the last 6h", Field(json, "message"), StringComparison.Ordinal);
     }
 
+    /* #7690: a count in an empty text carries the thousands separator the tiles and grids on the same page use. */
+    [Fact]
+    public void RunCountsInTheEmptyTexts_CarryAThousandsSeparator()
+    {
+        var facts = new CollectorRunFacts(2862, 1433, Last, 0);
+        Assert.Contains("ran successfully 1,433 time(s)", facts.ProcedureStatsEmpty(24).Message, StringComparison.Ordinal);
+        Assert.Contains("ran successfully 1,433 time(s)", facts.ProcedureStatsEmpty(24, 3).Message, StringComparison.Ordinal);
+
+        var stamp = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+        var stretch = new RingBufferTruncationNote.TruncatedStretch(1, stamp, stamp, "note");
+        Assert.StartsWith("1,152 ", RingBufferTruncationNote.HealthParserMessage("deadlock", "srv", 24, "x", stretch, eventsRead: 1152), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TraceFlagChanges_AfterARunThatStoredNothing_SaysNoFlagIsEnabled()
     {

@@ -480,7 +480,7 @@ export const READ_FIELDS = {
         { key: "pct_of_database", label: "% of DB", format: "num1" },
         { key: "database_data_size_mb", label: "Data size", format: "mbfit" },
         { key: "aborted_transaction_count", label: "Aborted txns", format: "int" },
-        { key: "oldest_active_transaction_id", label: "Oldest active txn" },
+        { key: "oldest_active_transaction_id", label: "Oldest active txn", format: "int" },
       ],
     },
   },
@@ -822,13 +822,34 @@ export const READ_FIELDS = {
 };
 
 /**
+ * #7670: a table cell that carries its own columns (a Custom View built from a sample read keeps only key, label and format) still says its
+ * collector notes in the words the catalog's column for the same read and key uses ("shred gated: 1", not "shred_gated=1"). Only `plain` and
+ * `localizeText` come across, and only for a column that sets neither and has no format.
+ */
+function withCatalogWords(cell) {
+  const entry = READ_FIELDS[cell.read];
+  const known = entry ? [...((entry.table && entry.table.columns) || []), ...((entry.tableFleet && entry.tableFleet.columns) || [])] : [];
+  if (!known.length) return cell;
+  let changed = false;
+  const columns = cell.columns.map((c) => {
+    if (!c || c.format || c.plain !== undefined || c.localizeText !== undefined) return c;
+    const same = known.find((k) => k.key === c.key && k.plain);
+    if (!same) return c;
+    changed = true;
+    return { ...c, plain: same.plain, localizeText: same.localizeText };
+  });
+  return changed ? { ...cell, columns } : cell;
+}
+
+/**
  * The cell with the fields its viz needs filled in from READ_FIELDS. A cell that already carries its own field
  * array, a viz the catalog has no part for, and a read with no entry come back as they were.
  */
 export function resolveReadTable(cell) {
   if (!cell) return cell;
   const field = cell.viz === "line" ? "series" : cell.viz === "stat" ? "stats" : cell.viz === "table" ? "columns" : null;
-  if (!field || (Array.isArray(cell[field]) && cell[field].length)) return cell;
+  if (!field) return cell;
+  if (Array.isArray(cell[field]) && cell[field].length) return cell.viz === "table" ? withCatalogWords(cell) : cell;
   const entry = READ_FIELDS[cell.read];
   const fleet = cell.viz === "table" && entry && entry.tableFleet && !(cell.params && cell.params.collector_name);
   const part = entry && (fleet ? entry.tableFleet : entry[cell.viz]);
