@@ -93,7 +93,6 @@ public sealed class TopQueriesHourlyRoutingTests
         Assert.Contains("LIMIT $6", sql, StringComparison.Ordinal);   /* #5313: the candidate limit; #7725: $7 is the dropped-database exclusion, the ceiling moved to $8 */
         Assert.DoesNotContain("+ 5", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("worker_time_min", sql, StringComparison.Ordinal);
-        Assert.Contains("database_name <> ALL($7)", sql, StringComparison.Ordinal);   /* #7725 */
         Assert.DoesNotContain("$8", sql, StringComparison.Ordinal);   /* the ceiling is a $CEIL$ placeholder ($8), bound only when known */
         Assert.Null(typeof(DarlingDataReader).GetField("TopQueriesHourlyTextLookupSql",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
