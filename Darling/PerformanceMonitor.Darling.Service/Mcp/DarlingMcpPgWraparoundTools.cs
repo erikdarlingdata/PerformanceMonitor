@@ -131,7 +131,7 @@ public sealed class DarlingMcpPgWraparoundTools
                out of the databases and the worst database, and named in omitted_databases so the drop is visible. measured_at on
                each database is the sample it comes from. */
             var allRows = await DarlingPgWraparoundReader.GetPgWraparoundAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken, includeCleared: true);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
             var rows = allRows.Where(r => r.IsCurrent).ToList();
             var omittedDatabases = allRows.Where(r => !r.IsCurrent).Select(r => r.DatabaseName).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var omittedNote = omittedDatabases.Count == 0

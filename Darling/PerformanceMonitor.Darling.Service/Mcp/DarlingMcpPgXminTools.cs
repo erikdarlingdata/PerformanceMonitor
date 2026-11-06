@@ -80,7 +80,7 @@ public sealed class DarlingMcpPgXminTools
                collector's newest run has cleared since. Only the sources still holding are reported as holders; the rest are
                named in cleared_holders, with no winner flag and no remedy, and never become winning_source. */
             var allRows = await DarlingPgXminReader.GetPgXminHorizonAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken, includeCleared: true);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
             var rows = allRows.Where(r => r.IsCurrent).ToList();
             var clearedHolders = allRows.Where(r => !r.IsCurrent).Select(r => new
             {

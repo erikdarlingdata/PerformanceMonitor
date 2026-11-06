@@ -142,7 +142,7 @@ public static class DarlingPgXminReader
     /// grid shows only holders that are still there. The MCP tool passes true to report them as cleared.</param>
     public static async Task<List<PgXminRow>> GetPgXminHorizonAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default, bool includeCleared = false)
+        bool includeCleared = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgXminRow>();
         await using var command = postgres.CreateCommand(PgXminHorizonSql);

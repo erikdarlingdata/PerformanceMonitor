@@ -146,7 +146,7 @@ public static class DarlingPgAutovacuumReader
     /// run. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgAutovacuumRow>> GetPgAutovacuumAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
-        CancellationToken cancellationToken = default, bool includeCleared = false)
+        bool includeCleared = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgAutovacuumRow>();
         await using var command = postgres.CreateCommand(PgAutovacuumSql);

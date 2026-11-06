@@ -104,7 +104,7 @@ public static class DarlingPgSlotReader
     /// dropped. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgSlotRow>> GetPgSlotsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default, bool includeCleared = false)
+        bool includeCleared = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgSlotRow>();
         await using var command = postgres.CreateCommand(PgSlotsSql);

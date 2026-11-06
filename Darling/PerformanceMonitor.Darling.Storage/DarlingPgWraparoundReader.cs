@@ -106,7 +106,7 @@ public static class DarlingPgWraparoundReader
     /// dropped. The MCP tool passes true so it can name them.</param>
     public static async Task<List<PgWraparoundRow>> GetPgWraparoundAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default, bool includeCleared = false)
+        bool includeCleared = false, CancellationToken cancellationToken = default)
     {
         var rows = new List<PgWraparoundRow>();
         await using var command = postgres.CreateCommand(PgWraparoundSql);

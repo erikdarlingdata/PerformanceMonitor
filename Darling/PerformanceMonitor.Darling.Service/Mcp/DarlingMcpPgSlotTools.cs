@@ -96,7 +96,7 @@ public sealed class DarlingMcpPgSlotTools
                last stored sample is not the present state. The read marks it (DarlingPgSlotReader, PgCurrentCapture); it is
                left out of the slots, the worst slot and the totals, and named in omitted_slots so the drop is visible. */
             var allRows = await DarlingPgSlotReader.GetPgSlotsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken, includeCleared: true);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, includeCleared: true, cancellationToken: cancellationToken);
             var rows = allRows.Where(r => r.IsCurrent).ToList();
             var omittedSlots = allRows.Where(r => !r.IsCurrent).Select(r => r.SlotName).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var omittedNote = omittedSlots.Count == 0
