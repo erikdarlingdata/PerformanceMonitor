@@ -64,7 +64,7 @@ const SCOPED_CONFIG_COLUMNS = [
 /* The scoped-configuration read groups settings under each database; the grid wants one row per setting. The
    rows live in the panel's closure, not module state, so the 60 s repaint rebuilds them from the read. */
 export function scopedConfigPanel(server) {
-  const { panel, body } = panelShell("Database Scoped Configuration", "sys.database_scoped_configurations, newest connect-time snapshot", 2, "get_database_scoped_config");
+  const { panel, body } = panelShell("Database Scoped Configuration", "Newest snapshot, taken when the service connected", 2, "get_database_scoped_config");
   const signal = getPanelSignal();
   (async () => {
     const res = await readTool("get_database_scoped_config", { server }, signal);
@@ -115,11 +115,18 @@ export const TRACE_FLAG_COLUMNS = [
   { key: "is_session", label: "Session", format: "bool" },
 ];
 
+/** An audit figure as the Why column prints its own: a whole number is grouped (92,160), and any other value (ON, a name, a fraction) is shown as it came. */
+export function auditFigureText(v) {
+  if (v == null || v === "") return "—";
+  const s = String(v).trim();
+  return /^-?\d+$/.test(s) ? Number(s).toLocaleString(undefined, { maximumFractionDigits: 0 }) : s;
+}
+
 export const AUDIT_COLUMNS = [
   { key: "setting", label: "Setting" },
   { key: "status", label: "Status", statusSev: true },
-  { key: "current_value", label: "Current" },
-  { key: "suggested_value", label: "Suggested" },
+  { key: "current_value", label: "Current", display: (r) => auditFigureText(r.current_value) },
+  { key: "suggested_value", label: "Suggested", display: (r) => auditFigureText(r.suggested_value) },
   /* #7557: the sentence is worded for an MCP client and names the reads that carry the number. plain says the tab that shows each. */
   { key: "recommendation", label: "Why", wrap: true, plain: true },
 ];

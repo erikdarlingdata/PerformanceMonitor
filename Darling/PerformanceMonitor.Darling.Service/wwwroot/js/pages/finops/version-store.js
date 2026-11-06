@@ -12,7 +12,7 @@
 import { VIZ } from "../../panels.js";
 import { gatedEmptyStrip } from "./gate.js";
 import { zoomableLineChart, chartZoomScope, SERIES_COLORS } from "../../charts.js";
-import { el, readTool, readErrorStrip, emptyStrip, captionStrip, noticeStrip, errorStrip, loadingStrip, mount, fmtNum, tickDecimals, localTime, windowFromHours } from "../../util.js";
+import { el, readTool, readErrorStrip, emptyStrip, captionStrip, noticeStrip, errorStrip, loadingStrip, mount, fmtNum, axisPlaces, localTime, windowFromHours } from "../../util.js";
 
 /* Seven days, the desktop's window, and the read's own ceiling (McpHelpers.MaxHoursBack = 168): a larger value is refused, not clamped. */
 const TREND_HOURS = 168;
@@ -96,7 +96,7 @@ async function load(server, ctx, body) {
     });
     const { points, series } = pivotTrend(data.trend);
     const chart = points.length
-      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v, o) => fmtNum(v, Math.max(2, tickDecimals(o && o.step))), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
+      ? zoomableLineChart({ points, xKey: "collection_time", series, formatValue: (v, o) => fmtNum(v, axisPlaces(o, 2)), unit: "PVS off-row MB", ...windowFromHours(TREND_HOURS) }, "pvs-size-trend", chartZoomScope(TREND_HOURS))
       : emptyStrip("No PVS size history in the last " + TREND_HOURS + " hours.");
     mount(body, [
       captionStrip("As of " + localTime(data.as_of) + " (latest snapshot)."),

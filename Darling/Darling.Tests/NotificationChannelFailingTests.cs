@@ -243,6 +243,9 @@ public sealed class NotificationChannelFailingTests
 
     private const string TurnedOffTail = ": the Slack webhook channel was turned off (no destination is configured for it)";
 
+    /// <summary>The same resolution for a route's destination, which names the route (<see cref="SlackRoute"/> is route 1).</summary>
+    private const string RouteTurnedOffTail = ": the Slack (route 1) webhook channel was turned off (no destination is configured for it)";
+
     private static int s_serverSequence;
 
     /// <summary>Fails the Slack channel <paramref name="times"/> times against the endpoint the settings name.
@@ -401,7 +404,7 @@ public sealed class NotificationChannelFailingTests
 
     /// <summary>A route can carry a channel the parent settings do not (an only-pages-page setup), so a channel
     /// whose parent settings are empty but which an enabled route still carries is not turned off. Disabling
-    /// that route is what turns it off.</summary>
+    /// that route is what turns it off, and the resolution names the route whose destination it was.</summary>
     [Fact]
     public async Task AChannelWithEmptyParentSettings_ThatAnEnabledRouteCarries_IsNotTurnedOff()
     {
@@ -411,7 +414,7 @@ public sealed class NotificationChannelFailingTests
         await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
         Assert.Single(live.Rig.Deliverer.Outcomes);
 
-        var slack = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel);
+        var slack = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1);
         Assert.True(slack.Configured);
         Assert.Equal(3, slack.ConsecutiveFailures);
 
@@ -422,7 +425,35 @@ public sealed class NotificationChannelFailingTests
         await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
 
         var resolved = Assert.Single(live.Rig.History.Records);
-        Assert.EndsWith(TurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+        Assert.EndsWith(RouteTurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A route whose channel is set off on it (a destination the route set that could not be read) sends nothing
+    /// for that channel and does not fall back, so the route's destination is gone the way a disabled route's is. The alert
+    /// for it closes as turned off, naming the route, and is then forgotten.</summary>
+    [Fact]
+    public async Task AFailingRouteDestination_WhoseChannelIsSetOffOnTheRoute_ResolvesAsTurnedOff()
+    {
+        using var live = new LiveRig(slackViaParentSettings: false);
+        var route = SlackRoute(live.SlackUrl, enabled: true);
+        live.Slack.NotificationRoutes = new[] { route };
+        await FailSlackAsync(live.Webhooks, 3);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+        Assert.Empty(live.Rig.History.Records);
+
+        live.Slack.NotificationRoutes = new[] { route with { OffChannels = new[] { NotificationRouter.SlackChannel } } };
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(live.Rig.History.Records);
+        Assert.Equal(RecoveredName, resolved.MetricName);
+        Assert.EndsWith(RouteTurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        /* Once: the destination is forgotten, and the next look says nothing about it. */
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.History.Records);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
     }
 
     /// <summary>The service's own read: a channel with no destination comes back with its current count and
@@ -527,6 +558,339 @@ public sealed class NotificationChannelFailingTests
         Assert.Equal(0, counts[NotificationRouter.TeamsChannel]);
         Assert.Equal(0, counts[NotificationRouter.GenericChannel]);
         Assert.Equal(0, counts[NotificationRouter.PagerDutyChannel]);
+    }
+
+    /// <summary>
+    /// Two routes point Slack at two destinations, and one of them is broken. Each destination has its own count,
+    /// so a delivery to the healthy destination is not a recovery of the broken one: its count climbs to the
+    /// threshold, the alert is raised, and the text names the route that is failing. Turning that route off closes
+    /// the alert the way turning a channel off does.
+    /// </summary>
+    [Fact]
+    public async Task TwoRoutesOnOneChannel_TheBrokenDestinationKeepsCounting_WhileTheOtherDelivers()
+    {
+        using var broken = new CapturingWebhookEndpoint(statusCode: 500);
+        using var healthy = new CapturingWebhookEndpoint(statusCode: 200);
+        var brokenRoute = new NotificationRoute(
+            RouteId: 1, MetricMatch: "High CPU", TeamsUrl: "", SlackUrl: broken.Url, GenericUrl: "", PagerDutyRoutingKey: "",
+            SmtpRecipients: "", Enabled: true);
+        var healthyRoute = new NotificationRoute(
+            RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: healthy.Url, GenericUrl: "", PagerDutyRoutingKey: "",
+            SmtpRecipients: "", Enabled: true);
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = false,
+            SlackWebhookUrl = "",
+            NotificationRoutes = new[] { brokenRoute, healthyRoute },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+        var rig = new Rig();
+        var e = new DarlingSelfAlertEvaluator(
+            rig.Settings, rig.Deliverer, rig.History, _ => false,
+            webhookChannelFailures: webhooks.GetChannelFailureCounts);
+
+        /* A failure on route 1 and a delivery on route 2, three times over. Distinct servers, by name and id, so neither the
+           per-server cooldown a delivery stamps nor anything else stands between a destination and its next post. */
+        for (var i = 0; i < 3; i++)
+        {
+            var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+            Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync("High CPU", server, "97%", "90%", serverId: server)).Outcome);
+            Assert.Equal(AlertChannelOutcome.Delivered, (await webhooks.TrySendWebhookAlertsAsync("Spare Metric", server, "1", "0", serverId: server)).Outcome);
+        }
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(3, slack.Max(c => c.ConsecutiveFailures));
+        Assert.Contains(slack, c => c.ConsecutiveFailures == 0 && c.Configured);
+
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        var fired = Assert.Single(rig.Deliverer.Outcomes);
+        Assert.Equal(FailingName, fired.MetricName);
+        Assert.Contains("Slack", fired.ServerKey, StringComparison.Ordinal);
+        Assert.Contains("Slack", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("route 1", fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("route 1", fired.ShortMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("route 2", fired.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain(broken.Url, fired.DetailText, StringComparison.Ordinal);
+        Assert.Contains("3 times in a row", fired.DetailText, StringComparison.Ordinal);
+
+        /* Another delivery on route 2 recovers nothing: route 1 is still broken. */
+        var later = "SQL" + Interlocked.Increment(ref s_serverSequence);
+        Assert.Equal(AlertChannelOutcome.Delivered, (await webhooks.TrySendWebhookAlertsAsync("Spare Metric", later, "1", "0", serverId: later)).Outcome);
+        await e.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(rig.Deliverer.Outcomes);
+        Assert.Empty(rig.History.Records);
+
+        /* Disabling the failing route closes its alert as turned off, and names the route. */
+        settings.NotificationRoutes = new[] { brokenRoute with { Enabled = false }, healthyRoute };
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(rig.History.Records);
+        Assert.Equal(RecoveredName, resolved.MetricName);
+        Assert.Contains("route 1", resolved.DetailText, StringComparison.Ordinal);
+        Assert.Contains("turned off", resolved.DetailText, StringComparison.Ordinal);
+        Assert.Single(rig.Deliverer.Outcomes);
+    }
+
+    /// <summary>A resolution's facts, for the send path that is handed a destination and not a route.</summary>
+    private static AlertResolutionFacts ResolutionFacts(string serverName) => new(
+        "CPU Resolved", "High CPU", serverName, new DateTime(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc),
+        new DateTime(2026, 9, 29, 12, 5, 0, DateTimeKind.Utc), "97%", "CPU has returned to normal", TriageUrl: null);
+
+    /// <summary>Posts one Slack resolution to <paramref name="destination"/> from a distinct server, so no cooldown
+    /// stands in the way, and returns the send's error text, null when it delivered.</summary>
+    private static Task<string?> ResolveSlackAsync(WebhookAlertService webhooks, string destination)
+    {
+        var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+        return webhooks.TrySendResolutionAsync(NotificationRouter.SlackChannel, destination, ResolutionFacts(server), server, genericDedupKey: null, Ct);
+    }
+
+    /// <summary>
+    /// An alert that fired through a route is resolved after the operator turns the route off, and the resolution goes
+    /// to the route's destination. Its outcome is that route's, enabled or not: the settings row's own destination is a
+    /// different endpoint, so a failure there must not raise the settings row's count, and a delivery there must not
+    /// reset it. The disabled route's entry is reported once, as turned off, with the count it reached.
+    /// </summary>
+    [Fact]
+    public async Task AResolutionToADisabledRoutesDestination_CountsAgainstThatRoute_NotTheSettingsRow()
+    {
+        using var row = new CapturingWebhookEndpoint(statusCode: 500);
+        using var routeBroken = new CapturingWebhookEndpoint(statusCode: 500);
+        using var routeHealthy = new CapturingWebhookEndpoint(statusCode: 200);
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = row.Url,
+            NotificationRoutes = new[]
+            {
+                SlackRoute(routeBroken.Url, enabled: false),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: routeHealthy.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: false),
+            },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        /* The settings row's own destination is failing: two so far, under the bar. The routes are disabled, so the
+           alerts resolve to the settings row. */
+        await FailSlackAsync(webhooks, 2);
+        Assert.Equal(2, row.Bodies.Count);
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.NotNull(await ResolveSlackAsync(webhooks, routeBroken.Url));
+        }
+
+        Assert.Equal(3, routeBroken.Bodies.Count);
+
+        var counts = webhooks.GetChannelFailureCounts();
+        var settingsRow = counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId is null);
+        Assert.True(settingsRow.Configured);
+        Assert.Equal(2, settingsRow.ConsecutiveFailures);
+        var route = counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1);
+        Assert.Equal(3, route.ConsecutiveFailures);
+        Assert.False(route.Configured);
+
+        /* A delivery to the other disabled route's destination is that route's, not the settings row's recovery. */
+        Assert.Null(await ResolveSlackAsync(webhooks, routeHealthy.Url));
+        Assert.Single(routeHealthy.Bodies);
+        Assert.Equal(2, webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId is null).ConsecutiveFailures);
+        Assert.Equal(2, webhooks.GetSlackHealth().ConsecutiveFailures);
+    }
+
+    /// <summary>
+    /// A resolution to a destination that neither the settings row nor any route names (a route's URL that was edited
+    /// away between the fire and the clear) belongs to no configured channel. It is still sent, and its outcome is
+    /// counted nowhere: not against the settings row, whose own destination it is not, and under no route's entry.
+    /// </summary>
+    [Fact]
+    public async Task AResolutionToADestinationNoChannelNames_IsSentAndCountedNowhere()
+    {
+        using var row = new CapturingWebhookEndpoint(statusCode: 500);
+        using var strayBroken = new CapturingWebhookEndpoint(statusCode: 500);
+        using var strayHealthy = new CapturingWebhookEndpoint(statusCode: 200);
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = row.Url,
+            NotificationRoutes = new[] { SlackRoute("http://192.0.2.10/edited", enabled: true) },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        /* The settings row's own destination is failing: two so far, under the bar. "Spare Metric" matches no route. */
+        for (var i = 0; i < 2; i++)
+        {
+            var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+            Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync("Spare Metric", server, "1", "0", serverId: server)).Outcome);
+        }
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.NotNull(await ResolveSlackAsync(webhooks, strayBroken.Url));
+        }
+
+        Assert.Null(await ResolveSlackAsync(webhooks, strayHealthy.Url));
+        Assert.Equal(3, strayBroken.Bodies.Count);
+        Assert.Single(strayHealthy.Bodies);
+
+        var counts = webhooks.GetChannelFailureCounts();
+        Assert.Equal(4, counts.Count);
+        Assert.All(counts, c => Assert.Null(c.RouteId));
+        var slack = counts.Single(c => c.Channel == NotificationRouter.SlackChannel);
+        Assert.True(slack.Configured);
+        Assert.Equal(2, slack.ConsecutiveFailures);
+        Assert.Equal(2, webhooks.GetSlackHealth().ConsecutiveFailures);
+    }
+
+    /// <summary>
+    /// The settings row and a route point Slack at one URL, so a send to that URL is a send from both configured places,
+    /// and its outcome is both entries'. A failed alert through the route and a failed resolution handed the URL alone each
+    /// raise both counts, so each entry reaches the threshold at the cadence of the sends to the URL and not a share of it,
+    /// and a delivered resolution to the URL leaves both at 0.
+    /// </summary>
+    [Fact]
+    public async Task ASendToAUrlTheSettingsRowAndARouteShare_CountsAgainstBoth_AndADeliveryClearsBoth()
+    {
+        using var shared = new CapturingWebhookEndpoint(statusSequence: new[] { 500, 500, 200 });
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = shared.Url,
+            NotificationRoutes = new[] { SlackRoute(shared.Url, enabled: true) },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        /* "High CPU" matches route 1, so the fan-out sends through the route. The URL is the settings row's too. */
+        await FailSlackAsync(webhooks, 1);
+        Assert.Single(shared.Bodies);
+
+        var counts = webhooks.GetChannelFailureCounts();
+        Assert.Equal(1, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1).ConsecutiveFailures);
+        Assert.Equal(1, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId is null).ConsecutiveFailures);
+
+        /* A resolution is handed the shared URL and not the route, and fails too. */
+        Assert.NotNull(await ResolveSlackAsync(webhooks, shared.Url));
+        Assert.Equal(2, shared.Bodies.Count);
+
+        counts = webhooks.GetChannelFailureCounts();
+        Assert.Equal(2, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1).ConsecutiveFailures);
+        Assert.Equal(2, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId is null).ConsecutiveFailures);
+        Assert.Equal(2, webhooks.GetSlackHealth().ConsecutiveFailures);
+
+        /* The endpoint answers 200 from here on. */
+        Assert.Null(await ResolveSlackAsync(webhooks, shared.Url));
+        Assert.Equal(3, shared.Bodies.Count);
+
+        counts = webhooks.GetChannelFailureCounts();
+        Assert.Equal(0, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == 1).ConsecutiveFailures);
+        Assert.Equal(0, counts.Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId is null).ConsecutiveFailures);
+        Assert.Equal((0, (string?)null), webhooks.GetSlackHealth());
+    }
+
+    /// <summary>
+    /// The settings row and two routes point Slack at one URL that is broken. A failed send to the URL is a failure of every
+    /// configured place that names it, so each entry climbs with every send to the URL and reaches the threshold on the
+    /// third: three alerts, one per entry, naming the settings row, route 1 and route 2, and none of them the URL. A count
+    /// landing on one entry per send would leave every entry under the bar while the URL failed every send.
+    /// </summary>
+    [Fact]
+    public async Task ASharedUrlThatFails_CountsAgainstEveryEntryThatNamesIt_AndEachIsAnnouncedOnTheThirdFailure()
+    {
+        using var broken = new CapturingWebhookEndpoint(statusCode: 500);
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = broken.Url,
+            NotificationRoutes = new[]
+            {
+                SlackRoute(broken.Url, enabled: true),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: broken.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+            },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+        var rig = new Rig();
+        var e = new DarlingSelfAlertEvaluator(
+            rig.Settings, rig.Deliverer, rig.History, _ => false,
+            webhookChannelFailures: webhooks.GetChannelFailureCounts);
+
+        /* Two failures through route 1: every entry that names the URL reads 2, and nothing is announced yet. */
+        await FailSlackAsync(webhooks, 2);
+        Assert.Equal(2, broken.Bodies.Count);
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(new int?[] { null, 1, 2 }, slack.Select(c => c.RouteId).ToArray());
+        Assert.All(slack, c => Assert.Equal(2, c.ConsecutiveFailures));
+        await e.ApplyNotificationChannelsAsync(Ct);
+        Assert.Empty(rig.Deliverer.Outcomes);
+
+        /* The third failure takes every entry to the threshold at once. */
+        await FailSlackAsync(webhooks, 1);
+        Assert.Equal(3, broken.Bodies.Count);
+
+        slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(3, slack.Count);
+        Assert.All(slack, c => Assert.Equal(3, c.ConsecutiveFailures));
+        Assert.Equal(3, webhooks.GetSlackHealth().ConsecutiveFailures);
+
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        Assert.Equal(3, rig.Deliverer.Outcomes.Count);
+        Assert.All(rig.Deliverer.Outcomes, o => Assert.Equal(FailingName, o.MetricName));
+        Assert.Equal(3, rig.Deliverer.Outcomes.Select(o => o.ServerKey).Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains(rig.Deliverer.Outcomes, o => o.ShortMessage == "Slack webhook failed 3 times in a row");
+        Assert.Contains(rig.Deliverer.Outcomes, o => o.ShortMessage == "Slack (route 1) webhook failed 3 times in a row");
+        Assert.Contains(rig.Deliverer.Outcomes, o => o.ShortMessage == "Slack (route 2) webhook failed 3 times in a row");
+        Assert.All(rig.Deliverer.Outcomes, o => Assert.DoesNotContain(broken.Url, o.DetailText, StringComparison.Ordinal));
+
+        /* Each is announced once. */
+        await e.ApplyNotificationChannelsAsync(Ct);
+        Assert.Equal(3, rig.Deliverer.Outcomes.Count);
+        Assert.Empty(rig.History.Records);
+    }
+
+    /// <summary>
+    /// The settings row and two routes point Slack at one URL. A failed send to the URL counts against all three entries,
+    /// whichever route the metric matched (none, so the fan-out sent through the settings row, or route 2), and a delivered
+    /// resolution handed the URL alone clears all three: a count that survived a working delivery would raise "failed 3
+    /// times in a row" across it.
+    /// </summary>
+    [Theory]
+    [InlineData("Other Metric", null)]
+    [InlineData("Spare Metric", 2)]
+    public async Task ADeliveredResolutionToASharedUrl_ClearsEveryEntryThatNamesIt_WhicheverRouteTheMetricMatched(string metric, int? matchedRouteId)
+    {
+        using var shared = new CapturingWebhookEndpoint(statusSequence: new[] { 500, 200 });
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = shared.Url,
+            NotificationRoutes = new[]
+            {
+                SlackRoute(shared.Url, enabled: true),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: shared.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+            },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+        Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync(metric, server, "1", "0", serverId: server)).Outcome);
+        Assert.Single(shared.Bodies);
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(1, slack.Single(c => c.RouteId == matchedRouteId).ConsecutiveFailures);
+        Assert.Equal(3, slack.Count);
+        Assert.All(slack, c => Assert.Equal(1, c.ConsecutiveFailures));
+        Assert.Equal(1, webhooks.GetSlackHealth().ConsecutiveFailures);
+
+        /* The endpoint answers 200 from here on. The resolution is handed the shared URL and not the route. */
+        Assert.Null(await ResolveSlackAsync(webhooks, shared.Url));
+        Assert.Equal(2, shared.Bodies.Count);
+
+        slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(3, slack.Count);
+        Assert.All(slack, c => Assert.Equal(0, c.ConsecutiveFailures));
+        Assert.Equal((0, (string?)null), webhooks.GetSlackHealth());
     }
 
     /// <summary>The metric names are webhook automation keys and the history grids classify by name, so both

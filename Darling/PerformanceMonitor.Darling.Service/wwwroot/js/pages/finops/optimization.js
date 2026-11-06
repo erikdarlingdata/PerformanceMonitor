@@ -41,13 +41,13 @@ const TEMPDB_COLUMNS = [
   { key: "warning", label: "Warning" },
 ];
 
-const WAIT_COLUMNS = [
+export const WAIT_COLUMNS = [
   { key: "category", label: "Category" },
-  { key: "total_wait_time_ms", label: "Total wait (ms)", format: "int" },
+  { key: "total_wait_time_ms", label: "Total wait", format: "ms" },
   { key: "waiting_tasks", label: "Waiting tasks", format: "int" },
   { key: "pct_of_total", label: "% of total", format: "num1" },
   { key: "top_wait_type", label: "Top wait type" },
-  { key: "top_wait_time_ms", label: "Top wait (ms)", format: "int" },
+  { key: "top_wait_time_ms", label: "Top wait", format: "ms" },
   { key: "est_cost_usd", label: "Est. cost share ($)", format: "num2" },
 ];
 

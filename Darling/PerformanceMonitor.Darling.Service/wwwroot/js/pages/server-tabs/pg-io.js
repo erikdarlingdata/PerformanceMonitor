@@ -139,10 +139,20 @@ export const PG_WRITE_STATS = [
   { key: "postmaster_restarted", label: "Restarted in window", format: "bool", small: true },
 ];
 
+/* The catalog's one-letter relation kind (pg_class.relkind), in words. A letter not listed here is shown as it came. */
+const PG_RELATION_KIND_WORDS = {
+  r: "Table", i: "Index", t: "TOAST", m: "Materialized view", p: "Partitioned table", I: "Partitioned index", S: "Sequence", v: "View", f: "Foreign table", c: "Composite type",
+};
+export function pgRelationKindWord(kind) {
+  if (kind == null || kind === "") return "—";
+  const k = String(kind).trim();
+  return PG_RELATION_KIND_WORDS[k] || k;
+}
+
 export const PG_BUFFER_USAGE_COLUMNS = [
   /* #7455: relation_display is the name, or a word for a buffer that has none (another database, shared catalogs). */
   { key: "relation_display", label: "Relation" },
-  { key: "relation_kind", label: "Kind" },
+  { key: "relation_kind", label: "Kind", display: (r) => pgRelationKindWord(r.relation_kind) },
   { key: "buffer_bytes", label: "Resident", format: "bytes" },
   { key: "pct_of_pool", label: "% of Pool", format: "num1" },
   { key: "dirty_buffers", label: "Dirty", format: "int" },

@@ -30,11 +30,12 @@
 import { VIZ } from "../panels.js";
 import { routeHash, el, mount, loadingStrip, errorStrip, emptyStrip, plainEmptyStrip, noticeStrip, captionStrip, adminListOnlyNote, ADMIN_WRITES_OFF_NOTE, readTool, apiGet, apiGetFleet, apiWrite, onSessionExpired, localizeIsoText, storeHash } from "../util.js";
 import { getSession } from "../views-api.js";
+import { severityLabel } from "./analysis-findings.js";
 import { writeNote, startPractice, writeAccess, SIGN_IN_SENTENCE, NOTE_MAX_LENGTH, NOTE_MAX_DAYS, NOTE_DEFAULT_DAYS } from "../investigation-writes.js";
 import { dailyReportEditor, dailyReportPreviewOnly } from "./admin-daily-report.js";
 import { databaseProtectionEditor } from "./admin-database-protection.js";
 import { buildAgentChanges, resetAgentChangesStatus } from "./admin-agent-changes.js";
-import { buildServerActions, resetServerActionsStatus } from "./admin-server-actions.js";
+import { buildServerActions, resetServerActionsStatus, engineWord } from "./admin-server-actions.js";
 import { buildPeople, resetPeopleStatus } from "./admin-people.js";
 import { buildProfiles, nobodyCanApproveNodes, readAgentSetupAccess, routeColumns, routeEditorNodes, routeListOnlyNodes, routeUseText } from "./admin-agent-setup.js";
 
@@ -42,7 +43,7 @@ export const SERVER_COLUMNS = [
   { key: "display_name", label: "Display Name" },
   { key: "server_name", label: "Server" },
   { key: "auth", label: "Auth" },
-  { key: "engine", label: "Engine" },
+  { key: "engine", label: "Engine", display: (r) => engineWord(r.engine) },
   { key: "version", label: "Version" },
   { key: "status", label: "Status" },
   { key: "freshness", label: "Freshness", statusSev: true },
@@ -137,9 +138,9 @@ const GROUP_LABELS = {
   agent_alert_gaps: "Agent alert gaps",
   ag: "Availability Groups",
   delivery: "Delivery",
-  health_bands: "Health bands",
-  analysis: "Automated analysis",
-  fleet_sweep: "Fleet sweep reports",
+  health_bands: "Health Bands",
+  analysis: "Automated Analysis",
+  fleet_sweep: "Fleet Sweep Reports",
   daily_report: "Daily Health Report",
 };
 
@@ -168,7 +169,8 @@ export function settingLabel(prefix, key) {
       break;
     }
   }
-  words = words.replace(/_/g, " ").replace(/\bpg\b/g, "PostgreSQL");
+  /* A procedure name inside a key keeps its underscores: exclude_sp_server_diagnostics names sp_server_diagnostics. */
+  words = words.replace(/_/g, " ").replace(/\bpg\b/g, "PostgreSQL").replace(/\bsp server diagnostics\b/g, "sp_server_diagnostics");
   words = words.charAt(0).toUpperCase() + words.slice(1);
   if (!prefix) return words + unit;
   const group = GROUP_LABELS[prefix] || prefix.replace(/_/g, " ");
@@ -179,7 +181,7 @@ export function settingLabel(prefix, key) {
    named group; a group the read does not carry is left out rather than shown empty. */
 export const SETTING_SECTIONS = [
   {
-    title: "Alert thresholds",
+    title: "Alert Thresholds",
     groups: ["cpu", "blocking", "deadlocks", "poison_wait", "runnable_queue", "client_timeouts", "long_running_query", "tempdb_space", "low_disk",
       "self_alerts", "pvs", "file_growth", "long_running_job", "failed_job", "database_state", "agent_alert_gaps", "backup_overdue", "log_backup_overdue", "checkdb_overdue", "identity_capacity", "ag", "delivery"],
     top: ["alerts_enabled", "notify_connection_changes", "notify_connection_down_at_startup", "connection_refire_minutes",
@@ -193,10 +195,10 @@ export const SETTING_SECTIONS = [
     groupFields: { long_running_query: ["exclude_sp_server_diagnostics", "exclude_wait_for", "exclude_backups",
       "exclude_misc_waits", "exclude_cdc", "excluded_program_name_prefixes", "excluded_logins"] },
   },
-  { title: "Health bands", groups: ["health_bands"], top: [] },
-  { title: "Global alert filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
-  { title: "Automated analysis", groups: ["analysis"], top: [] },
-  { title: "Fleet sweep reports", groups: ["fleet_sweep"], top: [] },
+  { title: "Health Bands", groups: ["health_bands"], top: [] },
+  { title: "Global Alert Filters", groups: [], top: ["excluded_databases", "excluded_volumes"] },
+  { title: "Automated Analysis", groups: ["analysis"], top: [] },
+  { title: "Fleet Sweep Reports", groups: ["fleet_sweep"], top: [] },
   { title: "Daily Health Report", groups: ["daily_report"], top: [] },
 ];
 
@@ -260,8 +262,14 @@ export function sendResolutionsText(v) {
   return parts.length ? parts.join(", ") : "—";
 }
 
-/* A listed field whose value is an object, drawn by its own formatter (valueText draws any object as "—"). */
-const FIELD_TEXT = { "delivery.send_resolutions": sendResolutionsText };
+/** The analysis notify severity, a score, with the word the findings page gives it: 1.5 reads "Critical (1.5)". */
+export function notifySeverityText(v) {
+  if (v == null || v === "" || !Number.isFinite(Number(v))) return valueText(v);
+  return severityLabel(v) + " (" + String(v) + ")";
+}
+
+/* A listed field whose value is an object or a score, drawn by its own formatter (valueText draws any object as "—"). */
+const FIELD_TEXT = { "delivery.send_resolutions": sendResolutionsText, "analysis.notify_severity": notifySeverityText };
 
 /** Setting rows for one group: [{ setting, value }], only the fields the group allow-list names (or `fields`, when a
     section shows part of a group) that the group carries; a secret-shaped key is dropped even if it were listed. */
@@ -1358,7 +1366,7 @@ async function buildSettings(body, generation) {
     nodes.push(VIZ.table({ rows: s.rows }, { rowsKey: "rows", columns: SETTING_COLUMNS }));
     /* #7041: the Daily Health Report is the one setting group the web edits; a signed-in admin gets the form under its rows. */
     /* #7611: the three Database Protection overdue ages are editable under the alert thresholds, the same way. */
-    if (s.title === "Alert thresholds" && canEditSettings && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
+    if (s.title === "Alert Thresholds" && canEditSettings && ["backup_overdue", "log_backup_overdue", "checkdb_overdue"].some((g) => res.data[g])) {
       nodes.push(databaseProtectionEditor(res.data, () => (shownTab === "settings" && shownBody ? startBuilder("settings", shownBody, ++renderGeneration) : undefined)));
     }
     /* #7700: Preview only reads, so with writes off the Preview button is still drawn (no Save, no inputs). */

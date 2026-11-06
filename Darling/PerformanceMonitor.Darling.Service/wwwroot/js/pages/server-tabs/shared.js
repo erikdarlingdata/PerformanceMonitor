@@ -843,6 +843,9 @@ export function linePanel(title, read, params, rowsKey, xKey, series, opts = {})
     emptyWins: opts.emptyWins === true,
     /* #5244: the answer's field naming the collector that answered (get_blocking_trend's `source`); absent on every other line. */
     sourceKey: opts.sourceKey,
+    /* An event-count read that returns only the buckets with events: the buckets it leaves out are drawn at 0 (zeroFilledPoints), unless the
+       answer's `sourceKey` names the DMV snapshot, a sample whose trend is drawn as it came. */
+    zeroFill: opts.zeroFill === true,
     /* #7508: the answer's field holding the instant a series changes grain (get_query_store_duration_trend's routing.raw_from); absent on every other line. */
     seamKey: opts.seamKey,
     /* #7692: the answer's field stating the bucket width (bucket_minutes), for a read with rows only where something ran; absent on every other line. */
