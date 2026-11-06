@@ -25,7 +25,7 @@ public sealed class AdminPollBehaviourTests
     [Fact]
     public void APollWhileARoutesBoxHasTheFocus_LeavesThatBoxOnThePage_StillFocused()
     {
-        var result = AdminServerEditBehaviourTests.Run("poll:focus");
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:focus");
 
         Assert.True(result.GetProperty("onPage").GetBoolean());
         Assert.True(result.GetProperty("focused").GetBoolean());
@@ -38,7 +38,7 @@ public sealed class AdminPollBehaviourTests
     [Fact]
     public void TextTypedIntoTheAlertSettingsEditors_SurvivesAPoll_WithTheFocusKeptAndAfterARebuild()
     {
-        var result = AdminServerEditBehaviourTests.Run("poll:draft");
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:draft");
 
         var kept = result.GetProperty("focusKept");
         Assert.True(kept.GetProperty("sameNode").GetBoolean());
@@ -64,7 +64,7 @@ public sealed class AdminPollBehaviourTests
     [Fact]
     public void APreviewInFlightAcrossAPoll_LandsInTheBoxOnThePage()
     {
-        var result = AdminServerEditBehaviourTests.Run("poll:preview");
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:preview");
 
         Assert.True(result.GetProperty("newBox").GetBoolean());
         Assert.Contains("Building the preview", result.GetProperty("whileHeld").GetString(), StringComparison.Ordinal);

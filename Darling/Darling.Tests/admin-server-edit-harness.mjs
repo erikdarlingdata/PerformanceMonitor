@@ -1375,7 +1375,7 @@ try {
        the boxes' values at each step, whether the Title box is the same node, and the PUT bodies. "preview": Preview pressed with its read
        held, the poll's render while it is in flight (no box has the focus, so the tab rebuilds), then the read answers; returns the preview
        box's text while held and after, whether the box is a new node, and what the box taken off the page holds. */
-    poll: async (param) => {
+    adminPoll: async (param) => {
       state.canEdit = true;
       state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false } });
       const settings = {
@@ -1438,7 +1438,7 @@ try {
         const after = byAttr(main, "data-field", "daily-report-preview-box")[0];
         return { newBox: during !== before, whileHeld, onPage: text(after), offPage: text(before), reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length };
       }
-      throw new Error("unknown poll case " + param);
+      throw new Error("unknown adminPoll case " + param);
     },
     /* #7700: Alert Settings, Practice Scores and Pending Notes on a signed-in admin's seat. The param is "<tab>/<off|on>": "off" is a managed
        store with web.allowAdminWrites off (the session says so), "on" the same seat with the switch on. Returns the forms and buttons the
