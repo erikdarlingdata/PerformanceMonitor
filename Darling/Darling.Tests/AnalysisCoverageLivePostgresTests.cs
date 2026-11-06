@@ -450,6 +450,70 @@ public sealed class AnalysisCoverageLivePostgresTests
     }
 
     /// <summary>
+    /// #7895 on the real store: a full bucket the collector saw end to end divides by its own four hours whatever the
+    /// rest of the window did. The collector was up for the first six hours of a 24 h window only, and forty waits
+    /// sit in the fully observed first bucket: 10/h, the rate a fully observed day reads for the same bucket, not
+    /// 40/h from a divisor shrunk by the window's one coverage fraction. Lite's <c>BlockingPeakBucketHoursTests</c>
+    /// is the twin.
+    /// </summary>
+    [Fact]
+    public async Task AQuarterObservedDay_ReadsAFullBucketAtItsOwnFourHours()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live quarter-observed-day test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-24);
+
+            /* A wait sample every fifteen minutes for the first six hours only: observed 6 h of 24, coverage 0.25. */
+            for (var i = 0; i <= 24; i++)
+                await PlantWaitAsync(connection, windowStart.AddMinutes(15 * i), "CXPACKET", i == 0 ? 0L : 1_000L, ct);
+
+            /* Forty waits across the fully observed [0h, 4h) bucket. */
+            for (var i = 0; i < 40; i++)
+                await PlantBlockingAsync(connection, windowStart.AddMinutes(6 * i), 100 + i, ct);
+
+            var context = new AnalysisContext
+            {
+                ServerId = ServerId,
+                ServerName = ServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+                ServerUtcOffset = TimeSpan.Zero
+            };
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+
+            var blocking = Assert.Single(facts, f => f.Key == "BLOCKING_EVENTS");
+            Assert.Equal(0.25, blocking.Metadata["observed_hours"] / blocking.Metadata["period_hours"], precision: 6);
+            Assert.Equal(10.0, blocking.Value, precision: 6);
+            Assert.Equal(10.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+            Assert.Equal(40.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+            Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+            Assert.Equal(4.0, covered, precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// #7178 on the real store: the engine's LCK_M_SCH_M wait reaches its own SCH_M fact instead of
     /// folding into LCK with the writer/writer lock modes, so the SCH_M scorer ramp, advice card and
     /// RUNNING_JOBS edge can fire. LCK_M_SCH_S still folds into LCK. Lite's

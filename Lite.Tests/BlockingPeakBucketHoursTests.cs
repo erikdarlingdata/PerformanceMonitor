@@ -20,9 +20,10 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #7895, the Lite twin of the Darling live tests in <c>AnalysisCoverageLivePostgresTests</c>: the BLOCKING_EVENTS peak
-/// divides each 4 h bucket's waits by that bucket's own covered hours, its span clipped to the window end times the
-/// window's coverage fraction and never under one hour, and the peak is the bucket with the highest rate, not the
-/// biggest count. The wait samples planted here are the coverage witness, a reading every fifteen minutes.
+/// divides each 4 h bucket's waits by that bucket's own covered hours, its span clipped to the window end, never more
+/// than the hours the collector observed in the window and never under one hour, and the peak is the bucket with the
+/// highest rate, not the biggest count. The wait samples planted here are the coverage witness, a reading every
+/// fifteen minutes.
 /// </summary>
 public sealed class BlockingPeakBucketHoursTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -99,22 +100,43 @@ public sealed class BlockingPeakBucketHoursTests : IClassFixture<SharedDuckDbFix
     }
 
     [Fact]
-    public async Task APartlyObservedWindow_ScalesTheBucketsCoveredHoursByTheWindowsCoverage()
+    public async Task AHalfObservedEightHourWindow_StillDividesAFullBucketByFour()
     {
         var start = WindowEnd.AddHours(-8);
-        /* The collector was up for the first half of the window only; twenty waits land in the second full bucket. */
+        /* The collector was up for the first half of the window only; twenty waits land in the second full bucket. The
+           window's four observed hours cover the bucket, so it divides by its own four hours: 5/h, not 20/2. */
         await PlantCoverageAsync(start, start.AddHours(4));
         for (var i = 0; i < 20; i++)
             await PlantBlockingAsync(start.AddHours(4).AddMinutes(10 * i), 100 + i);
 
         var blocking = await CollectBlockingAsync(start);
 
-        var coverage = blocking.Metadata["observed_hours"] / blocking.Metadata["period_hours"];
-        Assert.InRange(coverage, 0.4, 0.6);
-        var expectedCovered = Math.Max(1.0, 4.0 * coverage);
-        Assert.Equal(20.0 / expectedCovered, blocking.Value, precision: 6);
+        Assert.Equal(0.5, blocking.Metadata["observed_hours"] / blocking.Metadata["period_hours"], precision: 6);
+        Assert.Equal(5.0, blocking.Value, precision: 6);
+        Assert.Equal(20.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
         Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
-        Assert.Equal(expectedCovered, covered, precision: 6);
+        Assert.Equal(4.0, covered, precision: 6);
+    }
+
+    [Fact]
+    public async Task AQuarterObservedDay_ReadsAFullBucketAtItsOwnFourHours()
+    {
+        var start = WindowEnd.AddHours(-24);
+        /* The collector was up for the first six hours of the day only, and forty waits land in the fully observed first
+           bucket: 10/h, the rate a fully observed day reads for the same bucket. One coverage fraction for the whole
+           window must not shrink the divisor of a bucket the collector saw end to end. */
+        await PlantCoverageAsync(start, start.AddHours(6));
+        for (var i = 0; i < 40; i++)
+            await PlantBlockingAsync(start.AddMinutes(6 * i), 100 + i);
+
+        var blocking = await CollectBlockingAsync(start);
+
+        Assert.Equal(0.25, blocking.Metadata["observed_hours"] / blocking.Metadata["period_hours"], precision: 6);
+        Assert.Equal(10.0, blocking.Value, precision: 6);
+        Assert.Equal(10.0, blocking.Metadata["events_per_hour_peak_4h"], precision: 6);
+        Assert.Equal(40.0, blocking.Metadata["peak_4h_event_count"], precision: 6);
+        Assert.True(blocking.Metadata.TryGetValue("peak_4h_covered_hours", out var covered), "the fact carries the peak bucket's covered hours");
+        Assert.Equal(4.0, covered, precision: 6);
     }
 
     private async Task<Fact> CollectBlockingAsync(DateTime start)
