@@ -2611,7 +2611,7 @@ internal static class DarlingDataReader
     /// shared with <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database, $6 execution outcome.
     /// </summary>
-    private const string QueryStoreTopRawPrefix = """
+    private const string QueryStoreTopRawPrefix = $$"""
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -2643,10 +2643,10 @@ internal static class DarlingDataReader
                clock-skew slack) and the ceiling is a day of engine-maximum interval plus collector-outage allowance. They keep
                idx_query_store_stats_time (server_id, collection_time) and the hypertable's chunk pruning; the start predicate is a
                residual filter on the rows they bring back. */
-            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
-            AND   collection_time >= $2 - interval '1 hour'
-            AND   collection_time <= $3 + interval '30 days'
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
+            AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
                so dropping the other outcomes first cannot change which row wins any partition, and the window
@@ -2659,8 +2659,11 @@ internal static class DarlingDataReader
     /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
     /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
     /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's <c>ReadStart</c>:
-    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, where raw chunks drop whole and the table
-    /// returns exactly the raw read's own answer, and the exact below-floor start beneath it. $3 is bound the same way
+    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, and the exact below-floor start beneath it.
+    /// The clamp is a <c>collection_time</c>, while the window is placed by the interval's start (#7814), so at the
+    /// clamp itself this read differs from raw's answer by the intervals that started before the floor and were collected
+    /// after it: raw still holds them and this read starts past them. They are the one interval straddling the floor,
+    /// which sits at the edge of what raw retains, so the table read answers for the window from the floor on. $3 is bound the same way
     /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
     /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
     /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
@@ -2693,8 +2696,8 @@ internal static class DarlingDataReader
             /* #7814: placed by the interval's start, as the raw read is (QueryStoreTopRawPrefix). The first_execution_time range
                below is what ix_query_store_interval_wide_server_first_exec serves; this is a residual filter, and no collection_time
                bound is added because none could drop a row here (an interval is collected after it starts). */
-            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))

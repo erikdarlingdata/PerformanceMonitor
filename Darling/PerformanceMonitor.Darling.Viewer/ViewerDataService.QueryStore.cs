@@ -127,10 +127,10 @@ public sealed partial class ViewerDataService
     /// <summary>#7776: the collection_time bounds beside the interval-start window on the raw top read and the slicer. The floor is the
     /// clock-skew slack below the window and the ceiling is a day of engine maximum interval plus collector-outage allowance above it
     /// (see <see cref="QueryStoreSlicerSql"/>). The top read's inline-text fallback uses the ceiling too, so it reaches the fact rows.</summary>
-    private const string CollectionFloorSlackSql = "interval '1 hour'";
+    private const string CollectionFloorSlackSql = QueryStoreIntervalWide.CollectionFloorSlackSql;
 
     /// <summary>The ceiling half of <see cref="CollectionFloorSlackSql"/>.</summary>
-    private const string CollectionCeilingSql = "interval '30 days'";
+    private const string CollectionCeilingSql = QueryStoreIntervalWide.CollectionCeilingSql;
 
     /// <summary>
     /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
@@ -202,8 +202,10 @@ public sealed partial class ViewerDataService
     /// <c>(collection_time DESC, execution_count DESC)</c> per identity) — so this reads it directly and sets
     /// <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's own clamp,
     /// <c>max(window start, raw's chunk floor)</c> (review D4R H3): raw chunks drop whole, so bounding the table
-    /// read there returns exactly the raw read's own answer over the snapshots raw still holds, and reaches
-    /// further back only where raw has already dropped the chunk. $3 is nullable: NULL is an open end (a WPF
+    /// read there reaches further back only where raw has already dropped the chunk. The clamp is a
+    /// <c>collection_time</c> and the window is placed by the interval's start (#7776), so at the clamp itself the
+    /// table read leaves out the intervals that started before the floor and were collected after it, which raw still
+    /// holds: the one interval straddling the floor, at the edge of what raw retains. $3 is nullable: NULL is an open end (a WPF
     /// preset), which reads through whatever the table currently holds; a literal end (a custom range, MCP
     /// <c>as_of</c>) bounds it exactly as raw's own $3 does.
     /// <para><b>The <c>first_execution_time</c> floor (#4605).</b> Neither the unique key (it leads with

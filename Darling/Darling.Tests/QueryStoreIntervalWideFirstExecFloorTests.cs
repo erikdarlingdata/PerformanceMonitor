@@ -141,7 +141,6 @@ public sealed class QueryStoreIntervalWideFirstExecFloorTests
         var mcp = DarlingDataReader.QueryStoreTopTableSql;
         Assert.Single(Regex.Matches(mcp, Regex.Escape("first_execution_time <= $3 + " + QueryStoreIntervalWide.IntervalStartFirstExecMarginSql)));
         Assert.True(mcp.IndexOf(Floor("$2"), StringComparison.Ordinal) < mcp.IndexOf("first_execution_time <= $3 + ", StringComparison.Ordinal));
-        Assert.DoesNotContain(slack, mcp, StringComparison.Ordinal);
         Assert.DoesNotContain(slack, DarlingDataReader.QueryStoreTopSql, StringComparison.Ordinal);
 
         /* The long-window read's two edge arms, each ending at its own window end: [$2, $8) and [$9, $3]. */

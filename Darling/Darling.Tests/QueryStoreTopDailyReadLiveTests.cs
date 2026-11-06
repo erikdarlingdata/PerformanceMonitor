@@ -128,16 +128,17 @@ FROM
     }
 
     /// <summary>One extra wide-table row for query <paramref name="queryId"/> with a duration large enough to rank first.</summary>
-    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null)
+    private static async Task InsertRowAsync(NpgsqlConnection connection, DateTime collectionTime, long queryId, CancellationToken ct, long duration = 90_000_000, DateTime? firstExecution = null, DateTime? intervalStart = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO collect.query_store_interval_wide
 (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
  query_hash, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
  avg_rowcount, query_plan_hash, runtime_stats_interval_id, interval_start_time_utc)
-VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, @ct)", connection);
+VALUES (@ct, 1, 'db0', @q, @q, 'Regular', COALESCE(@fet, @ct - interval '10 minutes'), @ct, 'h' || @q, 1000, @dur, 5, 5, 5, 5, 5, 'late', @q, COALESCE(@ist, @ct))", connection);
         command.Parameters.Add(new NpgsqlParameter("ct", NpgsqlDbType.Timestamp) { Value = collectionTime });
         command.Parameters.Add(new NpgsqlParameter("fet", NpgsqlDbType.Timestamp) { Value = (object?)firstExecution ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter("ist", NpgsqlDbType.Timestamp) { Value = (object?)intervalStart ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter("q", NpgsqlDbType.Bigint) { Value = queryId });
         command.Parameters.Add(new NpgsqlParameter("dur", NpgsqlDbType.Bigint) { Value = duration });
         await command.ExecuteNonQueryAsync(ct);
@@ -585,6 +586,38 @@ FROM generate_series({FirstOwn}, {FirstOwn + count - 1}) AS q;", ct);
             Assert.DoesNotContain(9106L, today);
             Assert.Contains(9107L, today);
             Assert.Contains(9108L, today);
+        });
+    }
+
+    /// <summary>
+    /// #7814: the interval-table read places a window by the interval's start, the daily route by <c>collection_time</c> at its two
+    /// outer edges (a continuous aggregate buckets on the one column it was built on). So over the same window the two disagree
+    /// by the intervals that straddle an outer edge, and by no more: an interval that started before the window and was collected
+    /// inside it is read by the route and not by the table read, and one that started inside the window and was collected after its
+    /// end is read by the table read and not by the route. An interval whose start equals its collection time, as the other cases
+    /// here seed, shows neither.
+    /// </summary>
+    [Fact]
+    public async Task TheOuterEdges_PlaceByCollectionTime_WhereTheTableReadPlacesByTheIntervalStart()
+    {
+        await RunLiveAsync(async (connection, source, ct) =>
+        {
+            var readStart = End.AddHours(-72);
+            /* Collected 10 minutes into the window, started 20 minutes before it. */
+            await InsertRowAsync(connection, readStart.AddMinutes(10), 9201, ct, intervalStart: readStart.AddMinutes(-20));
+            /* Started 20 minutes before the window's end, collected 10 minutes after it. */
+            await InsertRowAsync(connection, End.AddMinutes(10), 9202, ct, firstExecution: End.AddMinutes(-15), intervalStart: End.AddMinutes(-20));
+
+            var route = await RouteAsync(source, readStart, End, null, null, null, ct);
+            Assert.Equal((new DateOnly(2026, 1, 12), new DateOnly(2026, 1, 14)), route.DailySpan);
+            var routeIds = route.Rows.Select(r => r.QueryId).ToHashSet();
+            var table = (await RunSqlAsync(connection, DarlingDataReader.QueryStoreTopTableSql, readStart, End, null, null, null, null, ct))
+                .Select(v => (long)v[1]!).ToHashSet();
+
+            Assert.Contains(9201L, routeIds);
+            Assert.DoesNotContain(9201L, table);
+            Assert.DoesNotContain(9202L, routeIds);
+            Assert.Contains(9202L, table);
         });
     }
 
