@@ -145,4 +145,33 @@ public sealed class ViewerOverviewSearchTests
         Assert.Contains("ServerOverviewFilter.NoMatchText", lite, StringComparison.Ordinal);
         Assert.Contains("OverviewCardView.CountText(", CodeBehind, StringComparison.Ordinal);
     }
+
+    /// <summary>A search narrows every number on the roll-up panel from the same cards: the blocking and deadlock
+    /// totals come from the servers the search left, not from the fleet-wide read, so the totals and the band counts
+    /// under them describe the same servers. Without a search the fleet-wide read still stands.</summary>
+    [Fact]
+    public void BuildRollup_WithASearch_TotalsOnlyTheMatchingCards()
+    {
+        var alpha = Card("alpha", 1, true, "Production");
+        alpha.BlockingCount = 5;
+        alpha.DeadlockCount = 2;
+        var beta = Card("beta", 2, true, "Dev");
+        beta.BlockingCount = 7;
+        beta.DeadlockCount = 3;
+        var cards = new List<ServerSummaryItem> { alpha, beta };
+        var fleetWide = new FleetTotals { TotalBlockingEvents = 12, TotalDeadlocks = 5 };
+
+        var whole = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 2, search: null);
+        Assert.Equal(12, whole.TotalBlockingEvents);
+        Assert.Equal(5, whole.TotalDeadlocks);
+
+        var narrowed = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 2, search: "alpha");
+        Assert.Equal(1, narrowed.TotalServers);
+        Assert.Equal(5, narrowed.TotalBlockingEvents);
+        Assert.Equal(2, narrowed.TotalDeadlocks);
+
+        var none = OverviewCardView.BuildRollup(cards, fleetWide, registeredCount: 2, search: "nothing-matches");
+        Assert.Equal(0, none.TotalBlockingEvents);
+        Assert.Equal(0, none.TotalDeadlocks);
+    }
 }
