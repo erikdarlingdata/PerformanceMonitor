@@ -23,29 +23,14 @@ namespace Lite.Tests;
 /// (the Lock* counters 15), so a summed denominator yields rates 12-17x too LOW.</para>
 ///
 /// <para>Both Darling surfaces carry a dedicated pin for this (<c>DarlingTrendReader</c> and the Viewer's
-/// <c>PerfmonTrendsSql</c>); Lite had none, which a review caught. Lite's queries are inline
-/// <c>CommandText</c> rather than exposed constants, so this reads the source the way
-/// <see cref="ParitySource"/> exists to — the alternative is a live multi-instance DuckDB fixture, and
-/// <c>McpStatusEnvelopeTests</c> seeds one row per counter, so the case that breaks is exactly the one no
-/// existing test exercises.</para>
+/// <c>PerfmonTrendsSql</c>). Lite's side is a live multi-instance DuckDB case: the Transactions/sec case of
+/// <c>LitePerfmonTotalInstanceLiveTests</c> seeds three instance rows per collection and asserts the interval
+/// reads 60 on each read (#7843), so a summed interval fails there. The tests below keep the rest of the
+/// interval's contract.</para>
 /// </summary>
 public sealed class PerfmonIntervalAggregationTests
 {
     private const string ReadPath = "Lite/Services/LocalDataService.Perfmon.cs";
-
-    /// <summary>Both trend reads — the single-counter one and its batched sibling — must take the interval
-    /// as MAX, at both of their layers: per object, where the instance rows are summed, and per collection,
-    /// over the per-object rows (#7771). Four occurrences, two per read, because a fix applied to only one of
-    /// the pair, or at only one layer, is the likelier mistake.
-    /// </summary>
-    [Fact]
-    public void BothPerfmonTrendReads_TakeTheIntervalAsMax()
-    {
-        var source = ParitySource.ReadFile(ReadPath);
-
-        var max = CountOccurrences(source, "MAX(sample_interval_seconds)");
-        Assert.Equal(4, max);
-    }
 
     /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
     /// 12-17x denominator inflation, and it is silent — the column is populated, the query succeeds, and
@@ -95,18 +80,5 @@ public sealed class PerfmonIntervalAggregationTests
 
         var shared = ParitySource.ReadFile("PerformanceMonitor.Common/Mcp/TrendPayloads.cs");
         Assert.Contains("[\"sample_interval_seconds\"] = seconds", shared, StringComparison.Ordinal);
-    }
-
-    private static int CountOccurrences(string haystack, string needle)
-    {
-        var count = 0;
-        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
-             i >= 0;
-             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
-        {
-            count++;
-        }
-
-        return count;
     }
 }

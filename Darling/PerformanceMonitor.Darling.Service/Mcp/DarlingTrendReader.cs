@@ -336,7 +336,7 @@ internal static class DarlingTrendReader
     /// disagree leaves the point NULL even beside a second object that agrees on a type. A pre-rung row has
     /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) — the equality is what stops a mixed sum being classified by
-    /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expressions.</para>
+    /// whichever instance's id sorts first. Only this type expression is shared with the viewer's and Lite's reads; the per-object value and delta arms below also filter <c>NOT is_artifact</c> (#4476), which Lite's single-counter <c>GetPerfmonTrendAsync</c> does not.</para>
     /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
     /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c>
     /// — this read is already scoped to one counter name by <c>$2</c>, unlike the viewer's several-counter

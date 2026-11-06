@@ -86,6 +86,9 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, single.Count);
         Assert.All(single, p => Assert.Equal(100, p.Value));
         Assert.All(single, p => Assert.Equal(100, p.DeltaValue));
+        /* The interval is one sweep gap repeated on each of the three instance rows (#2234): MAX reads 60, a SUM over
+           them would read 180. */
+        Assert.All(single, p => Assert.Equal(60, p.SampleIntervalSeconds));
         /* Every row under the name agrees on the rate type, so the point carries it. */
         Assert.All(single, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
@@ -102,6 +105,7 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, transactions!.Count);
         Assert.All(transactions, p => Assert.Equal(100, p.Value));
         Assert.All(transactions, p => Assert.Equal(100, p.DeltaValue));
+        Assert.All(transactions, p => Assert.Equal(60, p.SampleIntervalSeconds));
         Assert.All(transactions, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
         Assert.True(trends.TryGetValue(PageLifeExpectancy, out var ple), "Page life expectancy did not plot at all");
@@ -113,6 +117,8 @@ public sealed class LitePerfmonTotalInstanceLiveTests : IClassFixture<SharedDuck
         Assert.Equal(3, buckets.Points.Count);
         Assert.All(buckets.Points, p => Assert.Equal(100, p.MaxValue));
         Assert.All(buckets.Points, p => Assert.Equal(100, p.RatedDelta));
+        /* One collection per bucket, so the bucket's rated seconds is that collection's interval alone. */
+        Assert.All(buckets.Points, p => Assert.Equal(60, p.RatedSeconds));
         Assert.All(buckets.Points, p => Assert.Equal(PerfmonCounterTypes.PerfCounterBulkCount, p.CntrType));
 
         var pleBuckets = await _dataService.GetPerfmonBucketsAsync(ServerId, PageLifeExpectancy, hoursBack: 1, asOfUtc: endUtc, bucketMinutes: 1);
