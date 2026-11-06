@@ -1512,7 +1512,14 @@ public static partial class PlanAnalyzer
                     && scanCandidate.Children.Count > 0)
                     scanCandidate = scanCandidate.Children[0];
 
-                if (IsScanOperator(scanCandidate))
+                /* #7890: a plain Top over an Ordered scan, reached through streaming operators only, is
+                   the shape SELECT TOP (n) ... ORDER BY <index key> compiles to. The Top stops the scan
+                   after n rows, so there is no scan and sort to index away. A Top N Sort reads the whole
+                   scan before it returns a row, and an unordered scan carries no such guarantee, so both
+                   keep the finding. */
+                var topStopsScanEarly = isTop && scanCandidate.Ordered;
+
+                if (IsScanOperator(scanCandidate) && !topStopsScanEarly)
                 {
                     var topLabel = isTopNSort ? "Top N Sort" : "Top";
                     var onInner = node.Parent?.PhysicalOp == "Nested Loops" && node.Parent.Children.Count >= 2
