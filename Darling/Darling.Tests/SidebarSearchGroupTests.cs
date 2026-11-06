@@ -256,12 +256,12 @@ public sealed class SidebarSearchGroupTests
         var sidebar = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "sidebar.js");
         var app = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "app.js");
 
-        Assert.Contains("import { buildTagGroups, cardMatches } from \"../fleet-groups.js\";", fleet, StringComparison.Ordinal);
+        Assert.Contains("import { buildTagGroups, cardMatches, tagAncestorNames } from \"../fleet-groups.js\";", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("function buildTagGroups(", fleet, StringComparison.Ordinal);
         Assert.DoesNotContain("function cardMatches(", fleet, StringComparison.Ordinal);
         Assert.Contains("export function buildTagGroups(", shared, StringComparison.Ordinal);
         Assert.Contains("export function cardMatches(", shared, StringComparison.Ordinal);
-        Assert.Contains("cardMatches(c, fleetFilter)", fleet, StringComparison.Ordinal);
+        Assert.Contains("cardMatches(c, fleetFilter, ancestors)", fleet, StringComparison.Ordinal);
 
         Assert.Contains("from \"./fleet-groups.js\"", sidebar, StringComparison.Ordinal);
         Assert.DoesNotContain("function cardMatches(", sidebar, StringComparison.Ordinal);
