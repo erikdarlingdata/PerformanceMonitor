@@ -585,6 +585,8 @@ ORDER BY local_hour";
 
             var peakRate = whole.Peak;
             var avgRate = whole.Mean;
+            /* total_wait_ms and the fact's Value are the WHOLE window's wait total, summed over every tile; the peak and mean
+               beside them are the scored tile's on the tiled path. The PostgreSQL-target twin reports the scored tile's total. */
             var totalWaitMs = windowTotalWaitMs;
 
             /* #1743: the modified z-score replaces the ratio as the trusted-baseline trigger —
@@ -720,7 +722,7 @@ ORDER BY local_hour";
                 ["current_ms_per_sec"] = reportPeak,
                 ["avg_ms_per_sec"] = reportAvg,
                 ["baseline_mean"] = bucketUsed.Mean,
-                ["total_wait_ms"] = totalWaitMs,
+                ["total_wait_ms"] = totalWaitMs, // the whole window's total, not the scored tile's
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
@@ -770,7 +772,7 @@ LIMIT 6";
             {
                 Source = "anomaly",
                 Key = "ANOMALY_WAIT_PROFILE",
-                Value = totalWaitMs,
+                Value = totalWaitMs, // the whole window's wait total
                 ServerId = context.ServerId,
                 Metadata = metadata
             });

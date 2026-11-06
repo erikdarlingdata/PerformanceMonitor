@@ -926,7 +926,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["current_ms_per_sec"] = scoredPeakRate,
                 ["avg_ms_per_sec"] = scoredAvgRate,
                 ["baseline_mean"] = scoredBaseline.Mean,
-                ["total_wait_ms"] = totalWaitMs,
+                ["total_wait_ms"] = totalWaitMs, // the whole window's total, not the scored tile's
                 ["ratio"] = ratio,
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
@@ -967,7 +967,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             {
                 Source = "anomaly",
                 Key = "ANOMALY_WAIT_PROFILE",
-                Value = totalWaitMs,
+                Value = totalWaitMs, // the whole window's wait total
                 ServerId = context.ServerId,
                 Metadata = metadata
             });
