@@ -61,7 +61,7 @@ public sealed class WebDetails7699HarnessTests
     {
         var run = Result.Value;
         Assert.Equal("Severity, latest interval", run.GetProperty("latchSeverityHeader").GetString());
-        var cells = run.GetProperty("latchSeverity").EnumerateArray().Select(c => (c[0].GetString(), c[1].GetString())).ToArray();
+        var cells = run.GetProperty("latchSeverity").EnumerateArray().Select(c => (c[0].GetString()!, c[1].GetString()!)).ToArray();
         Assert.Equal(new[] { ("Low", "Healthy"), ("Medium", "Warning"), ("High", "Critical"), ("—", "Unknown") }, cells);
     }
 
