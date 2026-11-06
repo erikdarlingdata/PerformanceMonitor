@@ -4754,10 +4754,14 @@ FROM config.config_collector_schedules";
     }
 
     /// <summary>
-    /// Waiting-task total wait duration per wait type, bucketed (#7877, #7904). The inner CTE keeps the per-collection total
-    /// exactly as the un-bucketed read computed it (the wait type's summed duration in ONE collection); the outer read averages
-    /// those per-collection totals over the bucket, keeps the largest as the peak and counts the collections, so a wide bucket
-    /// never reads as a bigger wait than one collection. Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the
+    /// Waiting-task total wait duration per wait type, bucketed (#7877, #7904, #7974). The inner CTE keeps the per-collection total
+    /// exactly as the un-bucketed read computed it (the wait type's summed duration in ONE collection); the outer read averages those
+    /// per-collection totals over EVERY collection that ran in the bucket, a collection in which the wait type was absent counting as 0, so
+    /// a wait type present in 1 of 60 collections reads 1/60 of one present in all 60. The run count M is the bucket's SUCCESS runs of the
+    /// <c>waiting_tasks</c> collector in <c>v_collection_log</c> (a collector that ran and found nothing waiting writes no row but does log
+    /// a run); where the log holds fewer runs than the series has rows (a log older than the data, a run stamped a moment into the next
+    /// bucket) M is the rows' own count, so a mean is never taken over fewer collections than it was seen in. The largest single collection
+    /// is the peak and <c>collection_count</c> is M. Grouped on <c>rtrim(wait_type)</c>, so a wait stored with and without the
     /// trailing space the collector trimmed from #4884 on is one series under the clean name.
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes. The first bucket is clamped to $2.
     /// </summary>
@@ -4776,18 +4780,44 @@ FROM config.config_collector_schedules";
             GROUP BY
                 collection_time,
                 rtrim(wait_type)
+        ),
+        bucketed AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                wait_type,
+                SUM(total_wait_ms) AS sum_wait_ms,
+                MAX(total_wait_ms) AS peak_wait_ms,
+                COUNT(*) AS present_count
+            FROM per_collection
+            GROUP BY
+                1, wait_type
+        ),
+        runs AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                COUNT(*) AS run_count
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'waiting_tasks'
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY
+                1
         )
         SELECT
-            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
-            wait_type,
-            CAST(ROUND(AVG(total_wait_ms)) AS bigint) AS avg_wait_ms,
-            MAX(total_wait_ms) AS peak_wait_ms,
-            COUNT(*) AS collection_count
-        FROM per_collection
-        GROUP BY
-            1, wait_type
+            b.bucket_start,
+            b.wait_type,
+            CAST(ROUND(b.sum_wait_ms / GREATEST(COALESCE(r.run_count, 0), b.present_count)) AS bigint) AS avg_wait_ms,
+            b.peak_wait_ms,
+            CAST(GREATEST(COALESCE(r.run_count, 0), b.present_count) AS bigint) AS collection_count
+        FROM bucketed AS b
+        LEFT JOIN runs AS r
+            ON r.bucket_start = b.bucket_start
         ORDER BY
-            1, wait_type
+            b.bucket_start, b.wait_type
         """;
 
     /// <summary>How many wait types the window holds: the series count the bucket width is sized for (#7904). Same filters as <see cref="WaitingTaskTrendSql"/>.
@@ -4873,6 +4903,9 @@ FROM config.config_collector_schedules";
     /// viewer answers. $1 server_id, $2 start, $3 end (naive UTC), $4 the databases as one <c>text[]</c> (#5244): SQL NULL
     /// is every database, otherwise the series is limited to the named ones (<see cref="DatabaseFilter.Clause"/>, so one name
     /// and several are the same statement text).</para>
+    /// <para>#7974: bucketed, the figure is the database's blocked sessions summed over the bucket and divided by EVERY collection that ran
+    /// in it (a collection with nothing blocked for the database counts 0), by the same run count <see cref="WaitingTaskTrendSql"/> uses
+    /// and with the same floor. $5 is the bucket width in minutes.</para>
     /// </summary>
     public static readonly string BlockedSessionTrendSql = $$"""
         WITH per_collection AS
@@ -4892,18 +4925,44 @@ FROM config.config_collector_schedules";
             GROUP BY
                 collection_time,
                 database_name
+        ),
+        bucketed AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                database_name,
+                SUM(blocked_count) AS sum_blocked_count,
+                MAX(blocked_count) AS peak_blocked_count,
+                COUNT(*) AS present_count
+            FROM per_collection
+            GROUP BY
+                1, database_name
+        ),
+        runs AS
+        (
+            SELECT
+                GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                COUNT(*) AS run_count
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'waiting_tasks'
+            AND   status = 'SUCCESS'
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY
+                1
         )
         SELECT
-            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
-            database_name,
-            CAST(AVG(blocked_count) AS double precision) AS avg_blocked_count,
-            MAX(blocked_count) AS peak_blocked_count,
-            COUNT(*) AS collection_count
-        FROM per_collection
-        GROUP BY
-            1, database_name
+            b.bucket_start,
+            b.database_name,
+            CAST(b.sum_blocked_count AS double precision) / GREATEST(COALESCE(r.run_count, 0), b.present_count) AS avg_blocked_count,
+            b.peak_blocked_count,
+            CAST(GREATEST(COALESCE(r.run_count, 0), b.present_count) AS bigint) AS collection_count
+        FROM bucketed AS b
+        LEFT JOIN runs AS r
+            ON r.bucket_start = b.bucket_start
         ORDER BY
-            1, database_name
+            b.bucket_start, b.database_name
         """;
 
     /// <summary>How many databases have blocked sessions in the window under the same filter: the blocked series' share of the series count the
