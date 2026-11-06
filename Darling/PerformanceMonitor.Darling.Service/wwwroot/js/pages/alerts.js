@@ -599,7 +599,7 @@ function buildDismissBar(state) {
   const status = el("span", { class: "dismiss-status", text: "" });
   const bar = el("div", { class: "dismiss-bar" }, [selBtn, allBtn, status]);
   state.dismiss = { bar, selBtn, allBtn, status, busy: false };
-  selBtn.addEventListener("click", () => dismissRows(state, [...selected.values()]));
+  selBtn.addEventListener("click", () => dismissRows(state, selectedShown(state)));
   allBtn.addEventListener("click", () => {
     const rows = visibleRows(state).filter(dismissable);
     if (!rows.length) return;
@@ -617,8 +617,9 @@ function buildDismissBar(state) {
 function updateDismissBar(state) {
   const d = state.dismiss;
   if (!d) return;
-  d.selBtn.textContent = selected.size ? "Dismiss Selected (" + selected.size + ")" : "Dismiss Selected";
-  d.selBtn.disabled = d.busy || selected.size === 0;
+  const picked = selectedShown(state).length;
+  d.selBtn.textContent = picked ? "Dismiss Selected (" + picked + ")" : "Dismiss Selected";
+  d.selBtn.disabled = d.busy || picked === 0;
   d.allBtn.disabled = d.busy || !visibleRows(state).some(dismissable);
 }
 
@@ -635,6 +636,21 @@ function visibleRows(state) {
     if (row && gridRowShown(tr)) shown.add(alertKey(row));
   }
   return rows.filter((a) => shown.has(alertKey(a)));
+}
+
+/* The checked rows Dismiss Selected acts on: only those the column filters leave showing, the same test Dismiss All uses.
+ * A checked row a filter hides stays checked (it is back, checked, when the filter is cleared) but is neither counted
+ * nor sent while hidden, so a click never dismisses a row the grid is not showing (#7919). The button text and its
+ * enabled state read this same list. */
+function selectedShown(state) {
+  const picked = [...selected.values()];
+  if (!picked.length || !state.tbody) return picked;
+  const hidden = new Set();
+  for (const tr of state.tbody.children) {
+    const row = gridRowOf(tr);
+    if (row && !gridRowShown(tr)) hidden.add(alertKey(row));
+  }
+  return picked.filter((a) => !hidden.has(alertKey(a)));
 }
 
 function dismissOutcomeText(t) {
