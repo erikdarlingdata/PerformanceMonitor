@@ -1,0 +1,424 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Chat;
+using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #7656: the thread pass. It reads each request's journal rows in journal order, posts the parent first and every later row as a
+/// reply, skips a request's later posts when its parent post failed, posts nothing from the do-not-post list, lets a follow-up
+/// inherit its parent's thread one level deep, and on a 429 releases the mark, stops the pass and posts nothing to that channel
+/// before Retry-After, while every other error keeps its mark.
+/// </summary>
+public sealed class SlackThreadPassTests
+{
+    private const string Channel = "C0BOT";
+    private const int RouteId = 7;
+    private static readonly DateTime Now = new(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly Guid R1 = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid R2 = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid R3 = Guid.Parse("33333333-3333-3333-3333-333333333333");
+
+    /// <summary>The thread store and the row source in memory: rows the test journals, marks as the store writes them, and every release.</summary>
+    private sealed class MemoryStore : ISlackRequestThreadStore, ISlackThreadRowSource
+    {
+        public readonly Dictionary<Guid, SlackRequestThread> Threads = new();
+        public readonly HashSet<string> Marks = new(StringComparer.Ordinal);
+        public readonly List<string> Released = new();
+        public readonly List<SlackThreadJournalRow> Rows = new();
+        public readonly Dictionary<Guid, List<RequestChangeRow>> Changes = new();
+        public IReadOnlyList<string>? EventsAsked;
+
+        public Task<SlackRequestThread?> FindAsync(Guid threadRequestId, CancellationToken cancellationToken) =>
+            Task.FromResult(Threads.TryGetValue(threadRequestId, out var t) ? t : null);
+
+        public Task SaveAsync(SlackRequestThread thread, CancellationToken cancellationToken)
+        {
+            Threads.TryAdd(thread.RequestId, thread);
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> MarkOnceAsync(Guid requestId, int routeId, int serverId, string postKey, string onceKey, CancellationToken cancellationToken) =>
+            Task.FromResult(Marks.Add(onceKey));
+
+        public Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken)
+        {
+            Released.Add(onceKey);
+            Marks.Remove(onceKey);
+            return Task.CompletedTask;
+        }
+
+        /* Every unmarked row comes back whatever the kinds asked for, so a test can hand the pass a row from the do-not-post list and
+           see the pass itself refuse it. The kinds asked for are kept for the test that reads them. */
+        public Task<IReadOnlyList<SlackThreadJournalRow>> PendingSlackThreadRowsAsync(IReadOnlyList<string> events, DateTime unknownBeforeUtc, int limit, CancellationToken cancellationToken)
+        {
+            EventsAsked = events;
+            IReadOnlyList<SlackThreadJournalRow> pending = Rows
+                .Where(r => !Marks.Contains(SlackThreadPosts.OnceKey(r.RequestId, r.PostKey)))
+                .OrderBy(r => r.JournalId)
+                .Take(limit)
+                .ToList();
+            return Task.FromResult(pending);
+        }
+
+        public Task<IReadOnlyList<RequestChangeRow>> ChangesForRequestAsync(Guid requestId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<RequestChangeRow>>(Changes.TryGetValue(requestId, out var c) ? c : []);
+    }
+
+    private sealed class QueuePosts : ISlackBotPosts
+    {
+        public readonly List<(string Channel, string Text, string? ThreadTs)> Posts = new();
+        public readonly Queue<SlackPostResult> Results = new();
+
+        public Task<SlackPostResult> PostAsync(string channel, string text, IReadOnlyList<object>? blocks, string? threadTs, CancellationToken cancellationToken)
+        {
+            Posts.Add((channel, text, threadTs));
+            return Task.FromResult(Results.Count > 0 ? Results.Dequeue() : new SlackPostResult(true, "1700000000." + Posts.Count.ToString("D6"), channel, null));
+        }
+    }
+
+    private static SlackThreadJournalRow Row(long journalId, string eventKind, Guid requestId, string actor = "agent:a", string? reason = null,
+        string? detailJson = null, Guid? followUpOf = null, int claimNo = 0, string? calledDetailJson = null, string? verdict = null, string? rootCause = null) =>
+        new(journalId, eventKind, Now.AddMinutes(-30).AddSeconds(journalId), actor, reason, detailJson,
+            eventKind == "opened" ? SlackThreadPosts.RequestKey : eventKind == "action_unknown" ? SlackThreadPosts.UnknownKey(journalId) : SlackThreadPosts.EventKey(eventKind, journalId),
+            requestId, RouteId, ServerId: 3, "prod-sql-01", "CPU", "critical", "alert", followUpOf, calledDetailJson, claimNo, verdict, rootCause);
+
+    private static (SlackThreadPass Pass, SlackPostThrottle Throttle) Pass(MemoryStore store, QueuePosts posts, Func<DateTime> now, string channel = Channel)
+    {
+        var throttle = new SlackPostThrottle();
+        var poster = new SlackThreadPoster(store, posts, NullLogger<SlackThreadPoster>.Instance, throttle, now);
+        var routes = new List<NotificationRoute> { new(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = channel } };
+        var pass = new SlackThreadPass(store, store, poster, throttle, () => routes, NullLogger.Instance, McpDataDetail.Full, () => "https://pm.example", now);
+        return (pass, throttle);
+    }
+
+    [Fact]
+    public async Task ThePass_PostsInJournalOrder_TheParentFirst_AndEveryLaterRowRepliesInItsThread()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(3, "claimed", R1, actor: "agent:atlas", claimNo: 1));
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(5, "reported", R1, actor: "agent:atlas", reason: "needs_person", verdict: "needs_person", rootCause: "A plan regressed.\nMore."));
+        store.Rows.Add(Row(8, "resolved", R1, actor: "service", reason: "CPU"));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(4, posted);
+        Assert.Equal(4, posts.Posts.Count);
+        Assert.Null(posts.Posts[0].ThreadTs);
+        Assert.Contains("Investigation request", posts.Posts[0].Text);
+        var ts = store.Threads[R1].ThreadTs;
+        Assert.Equal("1700000000.000001", ts);
+        Assert.All(posts.Posts.Skip(1), p => Assert.Equal(ts, p.ThreadTs));
+        Assert.All(posts.Posts, p => Assert.Equal(Channel, p.Channel));
+        Assert.Contains("agent:atlas", posts.Posts[1].Text);
+        Assert.Contains("claim 1", posts.Posts[1].Text);
+        Assert.Contains("needs_person", posts.Posts[2].Text);
+        Assert.StartsWith("Resolved", posts.Posts[3].Text, StringComparison.Ordinal);
+        Assert.Equal(
+            new HashSet<string>([SlackThreadPosts.OnceKey(R1, "request"), SlackThreadPosts.OnceKey(R1, "claimed:3"), SlackThreadPosts.OnceKey(R1, "reported:5"), SlackThreadPosts.OnceKey(R1, "resolved:8")], StringComparer.Ordinal),
+            store.Marks);
+
+        /* A second pass finds every row marked and posts nothing. */
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(4, posts.Posts.Count);
+    }
+
+    [Fact]
+    public async Task AFailedParent_KeepsItsMark_AndItsLaterPostsAreSkipped_NotPostedAtTheTopLevel()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(2, "claimed", R1, claimNo: 1));
+        store.Rows.Add(Row(3, "resolved", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(4, "opened", R2, actor: "service", reason: "Blocking"));
+        posts.Results.Enqueue(new SlackPostResult(false, null, null, "channel_not_found"));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        var posted = await pass.RunOnceAsync(CancellationToken.None);
+
+        /* One attempt for R1's parent, none for its later rows, and R2's own parent still posts. */
+        Assert.Equal(1, posted);
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.All(posts.Posts, p => Assert.Null(p.ThreadTs));
+        Assert.False(store.Threads.ContainsKey(R1));
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, "request"), store.Marks);
+        Assert.Empty(store.Released);
+
+        /* The next pass does not try the parent again, and still posts none of R1's later rows at the top level. */
+        await pass.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(2, posts.Posts.Count);
+    }
+
+    [Fact]
+    public async Task TheDoNotPostList_PostsNothing_AndWritesNoMark()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Threads[R1] = new SlackRequestThread(R1, Channel, "1700000000.000001");
+        string[] silent =
+        [
+            "joined", "joined_quiet", "evidence_ready", "deadlock_digest", "event_delivered", "fallback_sent", "report_notice_sent",
+            "proposal_notice_sent", "proposal_first_press", "proposal_approved", "refused", "journal_capped", "action_called", "note_written",
+            "link_recorded", "follow_up", "slack_thread_posted",
+        ];
+        var id = 10L;
+        foreach (var kind in silent)
+        {
+            store.Rows.Add(Row(id++, kind, R1));
+        }
+
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Marks);
+
+        /* The kinds the store is asked for are the post list and nothing from the silent list. */
+        Assert.NotNull(store.EventsAsked);
+        Assert.Equal(SlackThreadPass.PostedEvents, store.EventsAsked);
+        Assert.All(silent, kind => Assert.DoesNotContain(kind, SlackThreadPass.PostedEvents));
+        string[] posted =
+        [
+            "opened", "claimed", "reported", "action_done", "action_failed", "action_undone", "proposal_created", "proposal_run", "proposal_failed",
+            "proposal_refused", "proposal_expired", "proposal_superseded", "proposal_voided", "proposal_unknown", "resolved", "closed", "expired", "claims_exhausted",
+        ];
+        Assert.All(posted, kind => Assert.Contains(kind, SlackThreadPass.PostedEvents));
+    }
+
+    [Fact]
+    public async Task EachPostedKind_RendersItsRow_WithTheDecidingPersonAndTheResult()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Threads[R1] = new SlackRequestThread(R1, Channel, "1700000000.000001");
+        var called = """{"tool":"kill_session","kind":"kill","target":{"id":"session 87","server_id":3,"database":"Sales"}}""";
+        store.Rows.Add(Row(2, "action_done", R1, detailJson: """{"called_id":1}""", calledDetailJson: called));
+        store.Rows.Add(Row(3, "action_failed", R1, reason: "error", detailJson: """{"called_id":1,"error":"timeout"}""", calledDetailJson: called));
+        store.Rows.Add(Row(4, "action_undone", R1, actor: "person:erik", detailJson: """{"called_id":1}""", calledDetailJson: called));
+        store.Rows.Add(Row(5, "action_unknown", R1, detailJson: called, calledDetailJson: called));
+        store.Rows.Add(Row(6, "proposal_created", R1, detailJson: """{"proposal_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001","tool":"kill_session","kind":"kill"}"""));
+        store.Rows.Add(Row(7, "proposal_run", R1, actor: "person:erik", detailJson: """{"proposal_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001","tool":"kill_session","by":"person:erik"}"""));
+        store.Rows.Add(Row(8, "proposal_superseded", R1, actor: "service", reason: "the plan changed", detailJson: """{"proposal_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeffff0001","tool":"kill_session"}"""));
+        store.Rows.Add(Row(9, "closed", R1, actor: "person:erik", reason: "handled by hand"));
+        store.Rows.Add(Row(10, "expired", R1, actor: "service", detailJson: """{"unclaimed":true}"""));
+        store.Rows.Add(Row(11, "claims_exhausted", R1, actor: "service"));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        Assert.Equal(10, await pass.RunOnceAsync(CancellationToken.None));
+
+        Assert.All(posts.Posts, p => Assert.Equal("1700000000.000001", p.ThreadTs));
+        Assert.Contains("kill_session", posts.Posts[0].Text);
+        Assert.Contains("done", posts.Posts[0].Text);
+        Assert.Contains("failed", posts.Posts[1].Text);
+        Assert.Contains("undone", posts.Posts[2].Text);
+        Assert.Contains("result unknown", posts.Posts[3].Text);
+        Assert.Contains("created", posts.Posts[4].Text);
+        Assert.Contains("run", posts.Posts[5].Text);
+        Assert.Contains("person:erik", posts.Posts[5].Text);
+        Assert.Contains("superseded", posts.Posts[6].Text);
+        Assert.Contains("the plan changed", posts.Posts[6].Text);
+        Assert.Contains("Closed", posts.Posts[7].Text);
+        Assert.Contains("person:erik", posts.Posts[7].Text);
+        Assert.Contains("handled by hand", posts.Posts[7].Text);
+        Assert.Contains("Expired", posts.Posts[8].Text);
+        Assert.Contains("no agent", posts.Posts[8].Text);
+        Assert.Contains("Claims exhausted", posts.Posts[9].Text);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, "action_unknown:5"), store.Marks);
+    }
+
+    [Fact]
+    public async Task AFollowUp_RepliesInItsParentsThread_AndInheritsIt_SoTheNextFollowUpLandsThereWithOneLookup()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Threads[R1] = new SlackRequestThread(R1, Channel, "1700000000.000001");
+        store.Rows.Add(Row(20, "opened", R2, actor: "service", reason: "CPU", followUpOf: R1));
+        store.Rows.Add(Row(21, "claimed", R2, claimNo: 1));
+        store.Rows.Add(Row(30, "opened", R3, actor: "service", reason: "CPU", followUpOf: R2));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        Assert.Equal(3, await pass.RunOnceAsync(CancellationToken.None));
+
+        Assert.All(posts.Posts, p => Assert.Equal("1700000000.000001", p.ThreadTs));
+        Assert.All(posts.Posts, p => Assert.Equal(Channel, p.Channel));
+        Assert.Equal("1700000000.000001", store.Threads[R2].ThreadTs);
+        Assert.Equal("1700000000.000001", store.Threads[R3].ThreadTs);
+    }
+
+    [Fact]
+    public async Task AFollowUp_StartsANewThread_WhenItsParentHasNone_OrTheParentsChannelIsNotTheRoutesChannelNow()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        /* R1 has no thread; R3's parent R2 has one in a channel the route no longer uses. */
+        store.Threads[R2] = new SlackRequestThread(R2, "C0OLD", "1600000000.000009");
+        store.Rows.Add(Row(40, "opened", R1, actor: "service", reason: "CPU", followUpOf: Guid.Parse("99999999-9999-9999-9999-999999999999")));
+        store.Rows.Add(Row(41, "opened", R3, actor: "service", reason: "CPU", followUpOf: R2));
+        store.Rows.Add(Row(42, "claimed", R3, claimNo: 1));
+        var (pass, _) = Pass(store, posts, () => Now);
+
+        Assert.Equal(3, await pass.RunOnceAsync(CancellationToken.None));
+
+        Assert.Null(posts.Posts[0].ThreadTs);
+        Assert.Null(posts.Posts[1].ThreadTs);
+        Assert.Equal(Channel, posts.Posts[1].Channel);
+        Assert.Equal("1700000000.000002", store.Threads[R3].ThreadTs);
+        Assert.Equal(Channel, store.Threads[R3].ChannelId);
+        Assert.Equal("1700000000.000002", posts.Posts[2].ThreadTs);
+        Assert.Equal("C0OLD", store.Threads[R2].ChannelId);
+    }
+
+    [Fact]
+    public async Task A429_ReleasesTheMark_StopsThePass_AndNothingPostsToTheChannelBeforeRetryAfter()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        store.Rows.Add(Row(2, "claimed", R1, claimNo: 1));
+        store.Rows.Add(Row(3, "opened", R2, actor: "service", reason: "Blocking"));
+        posts.Results.Enqueue(new SlackPostResult(false, null, null, "HTTP 429", RateLimited: true, RetryAfter: TimeSpan.FromSeconds(30)));
+        var now = Now;
+        var (pass, throttle) = Pass(store, posts, () => now);
+
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+
+        /* One attempt, then the pass stopped: the mark is released, nothing else was marked or sent. */
+        Assert.Single(posts.Posts);
+        Assert.Equal([SlackThreadPosts.OnceKey(R1, "request")], store.Released);
+        Assert.Empty(store.Marks);
+        Assert.Empty(store.Threads);
+        Assert.Equal(Now.AddSeconds(30), throttle.BlockedUntil(Channel, Now));
+
+        /* Inside Retry-After, a pass posts nothing to that channel and marks nothing. */
+        now = Now.AddSeconds(10);
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Single(posts.Posts);
+        Assert.Empty(store.Marks);
+
+        /* After it, the next pass posts the released parent and everything behind it, in order. */
+        now = Now.AddSeconds(31);
+        Assert.Equal(3, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(4, posts.Posts.Count);
+        Assert.Null(posts.Posts[1].ThreadTs);
+        Assert.Equal(store.Threads[R1].ThreadTs, posts.Posts[2].ThreadTs);
+        Assert.Null(posts.Posts[3].ThreadTs);
+        Assert.Null(throttle.BlockedUntil(Channel, now));
+    }
+
+    [Fact]
+    public async Task A429_WithNoRetryAfter_WaitsTheDefault()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        posts.Results.Enqueue(new SlackPostResult(false, null, null, "HTTP 429", RateLimited: true));
+        var (pass, throttle) = Pass(store, posts, () => Now);
+
+        await pass.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(Now + SlackThreadPoster.DefaultRetryAfter, throttle.BlockedUntil(Channel, Now));
+        Assert.Equal(TimeSpan.FromSeconds(60), SlackThreadPoster.DefaultRetryAfter);
+    }
+
+    [Fact]
+    public async Task AnotherError_KeepsItsMark_AndIsNotTriedAgain()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Threads[R1] = new SlackRequestThread(R1, Channel, "1700000000.000001");
+        store.Rows.Add(Row(2, "claimed", R1, claimNo: 1));
+        store.Rows.Add(Row(3, "resolved", R1, actor: "service", reason: "CPU"));
+        posts.Results.Enqueue(new SlackPostResult(false, null, null, "HTTP 503"));
+        var (pass, throttle) = Pass(store, posts, () => Now);
+
+        Assert.Equal(1, await pass.RunOnceAsync(CancellationToken.None));
+
+        Assert.Equal(2, posts.Posts.Count);
+        Assert.Contains(SlackThreadPosts.OnceKey(R1, "claimed:2"), store.Marks);
+        Assert.Empty(store.Released);
+        Assert.Null(throttle.BlockedUntil(Channel, Now));
+
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Equal(2, posts.Posts.Count);
+    }
+
+    [Fact]
+    public async Task ARouteWithNoBotChannelOrNoToken_PostsNothing_AndMarksNothing()
+    {
+        var store = new MemoryStore();
+        var posts = new QueuePosts();
+        store.Rows.Add(Row(1, "opened", R1, actor: "service", reason: "CPU"));
+        var (pass, _) = Pass(store, posts, () => Now, channel: "");
+
+        Assert.Equal(0, await pass.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Marks);
+
+        var throttle = new SlackPostThrottle();
+        var poster = new SlackThreadPoster(store, posts, NullLogger<SlackThreadPoster>.Instance, throttle, () => Now);
+        var routes = new List<NotificationRoute> { new(RouteId, "Blocking", "", "", "", "", "", Enabled: true) { SlackBotChannel = Channel } };
+        var noToken = new SlackThreadPass(store, store, poster, throttle, () => routes, NullLogger.Instance, McpDataDetail.Full, () => "", () => Now, ready: () => false);
+
+        Assert.Equal(0, await noToken.RunOnceAsync(CancellationToken.None));
+        Assert.Empty(posts.Posts);
+        Assert.Empty(store.Marks);
+    }
+
+    /// <summary>A handler that answers every request with one status and, when given, a Retry-After in seconds.</summary>
+    private sealed class StatusHandler(HttpStatusCode status, int? retryAfterSeconds) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = new HttpResponseMessage(status) { Content = new StringContent("{\"ok\":false,\"error\":\"ratelimited\"}") };
+            if (retryAfterSeconds is int seconds)
+            {
+                response.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds));
+            }
+
+            return Task.FromResult(response);
+        }
+    }
+
+    [Fact]
+    public async Task TheClient_ReportsA429_AsRateLimited_WithSlacksRetryAfter()
+    {
+        var limited = new SlackBotClient("xoxb-test-token", "http://127.0.0.1:9/api/", new StatusHandler(HttpStatusCode.TooManyRequests, 12));
+        var result = await limited.PostAsync(Channel, "hello", null, null, CancellationToken.None);
+        Assert.False(result.Ok);
+        Assert.True(result.RateLimited);
+        Assert.Equal(TimeSpan.FromSeconds(12), result.RetryAfter);
+        Assert.DoesNotContain("xoxb-test-token", result.Error ?? "", StringComparison.Ordinal);
+
+        var noHeader = new SlackBotClient("xoxb-test-token", "http://127.0.0.1:9/api/", new StatusHandler(HttpStatusCode.TooManyRequests, null));
+        var bare = await noHeader.PostAsync(Channel, "hello", null, null, CancellationToken.None);
+        Assert.True(bare.RateLimited);
+        Assert.Null(bare.RetryAfter);
+
+        var unavailable = new SlackBotClient("xoxb-test-token", "http://127.0.0.1:9/api/", new StatusHandler(HttpStatusCode.ServiceUnavailable, 5));
+        var other = await unavailable.PostAsync(Channel, "hello", null, null, CancellationToken.None);
+        Assert.False(other.Ok);
+        Assert.False(other.RateLimited);
+    }
+}

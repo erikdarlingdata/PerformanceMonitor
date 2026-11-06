@@ -428,6 +428,13 @@ public sealed class SlackThreadPosterTests
             Events.Add("mark");
             return Task.FromResult(Marks.Add(onceKey));
         }
+
+        public Task ReleaseMarkAsync(string onceKey, CancellationToken cancellationToken)
+        {
+            Marks.Remove(onceKey);
+            Events.Add("release");
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class RecordingPosts : ISlackBotPosts

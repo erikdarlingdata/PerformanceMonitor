@@ -139,6 +139,39 @@ public sealed class SlackRequestThreadStoreLiveTests
     }
 
     [Fact]
+    public async Task ReleasingTheMark_DeletesTheServicesOwnRow_AndTheNextMarkIsWrittenAgain()
+    {
+        await WithStoreAsync(async (connection, store, ct) =>
+        {
+            var onceKey = $"slack_thread:{s_request:D}:request";
+            Assert.True(await store.MarkOnceAsync(s_request, 1, 7, "request", onceKey, ct));
+            Assert.False(await store.MarkOnceAsync(s_request, 1, 7, "request", onceKey, ct));
+
+            /* The release takes the mark row away: the owner-row trigger guards inserts, and the service owns the table. */
+            await store.ReleaseMarkAsync(onceKey, ct);
+            Assert.Equal("0", await ActionProposalStoreLiveTests.ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE once_key = '{onceKey}'", ct));
+
+            /* The next pass writes the mark again, so the post goes out then. */
+            Assert.True(await store.MarkOnceAsync(s_request, 1, 7, "request", onceKey, ct));
+            Assert.Equal("1", await ActionProposalStoreLiveTests.ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE once_key = '{onceKey}' AND event = '{InvestigationRequestStore.SlackThreadPosted}'", ct));
+
+            /* A release names one key: another post's mark, and a row of another kind under a once key, stay. */
+            var other = $"slack_thread:{s_request:D}:claimed:5";
+            Assert.True(await store.MarkOnceAsync(s_request, 1, 7, "claimed:5", other, ct));
+            await store.ReleaseMarkAsync(onceKey, ct);
+            Assert.Equal("1", await ActionProposalStoreLiveTests.ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE once_key = '{other}'", ct));
+            await ActionProposalStoreLiveTests.ExecAsync(connection,
+                $"INSERT INTO config.investigation_journal (request_id, event, actor, once_key) VALUES ('{s_request}', 'report_notice_sent', 'service', 'slack_thread:{s_request:D}:other_kind')", ct);
+            await store.ReleaseMarkAsync($"slack_thread:{s_request:D}:other_kind", ct);
+            Assert.Equal("1", await ActionProposalStoreLiveTests.ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE once_key = 'slack_thread:{s_request:D}:other_kind'", ct));
+        });
+    }
+
+    [Fact]
     public async Task DeletingTheRequest_RemovesItsThread()
     {
         await WithStoreAsync(async (connection, store, ct) =>
