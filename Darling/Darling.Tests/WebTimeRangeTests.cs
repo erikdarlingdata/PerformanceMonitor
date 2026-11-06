@@ -286,6 +286,23 @@ public sealed class WebTimeRangeTests
         Assert.Contains("totals and rankings aggregate from", found.GetProperty("label").GetString());
     }
 
+    /// <summary>#7932: a picked range whose end has not arrived is read live up to now, and the page draws it to now as well: the context's end
+    /// and the chart window end at now, the label says "to now", and the range key still names the picked pair.</summary>
+    [Fact]
+    public void ARangeThatEndsLaterToday_IsDrawnToNow_NotToItsFutureEnd()
+    {
+        if (!WebRangeKeptHistoryBehaviourTests.TryRun("pickerFutureEnd", out var r)) return;
+
+        var found = r.GetProperty("found");
+        Assert.Equal(JsonValueKind.Null, found.GetProperty("err").ValueKind);
+        var now = found.GetProperty("now").GetInt64();
+        Assert.Equal(6, found.GetProperty("hours").GetInt32());
+        Assert.Equal(now, found.GetProperty("endMs").GetInt64());
+        Assert.Equal(now, found.GetProperty("axisEnd").GetInt64());
+        Assert.EndsWith(" to now", found.GetProperty("label").GetString());
+        Assert.Equal(found.GetProperty("pickedKey").GetString(), found.GetProperty("rangeKey").GetString());
+    }
+
     /// <summary>Every preset and calendar period, held for a server: the whole-hour presets within the reach are the page's own range
     /// (no trimming), the sub-hour presets and the periods are custom ranges, and what is longer than 7 days is refused and leaves the
     /// range as it was.</summary>
