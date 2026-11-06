@@ -471,7 +471,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                     effective_start = notice.EffectiveStart,
                     window_truncated = notice.WindowTruncated,
                     truncation_note = notice.TruncationNote,
-                }), cancellationToken);
+                }), cancellationToken, start);
         }
 
         return await DarlingServerOfflineNote.UnavailableAsync(

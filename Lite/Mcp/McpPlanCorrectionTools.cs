@@ -81,7 +81,7 @@ public sealed class McpPlanCorrectionTools
                         database, /* #5244 review L2: the echo rides on an empty answer too */
                         (await McpQueryTools.WindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.PlanCorrection, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints()));
+                            windowEnd.AddHours(-hours_back), windowEnd, "plan_correction", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back));
             }
 
             /* #4966: where this server's plan_correction data starts for the window. The rows are re-captures stamped with the

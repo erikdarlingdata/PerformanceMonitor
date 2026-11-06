@@ -129,7 +129,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
                                 + "server this is the healthy state: the profiler samples backends, and an idle "
                                 + "server has none to sample.",
                             tail: DescribeInstrumentForEmpty(instrument, windowTruncated: emptyNotice.WindowTruncated)),
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, emptyStart);
             }
 
             /* #4966: where the store's coverage of the window starts, probed on the web's own source for this read (WebDataStartNote).

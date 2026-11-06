@@ -315,7 +315,7 @@ public sealed class DarlingMcpDataTools
                     : McpHelpers.Status(
                         "unavailable",
                         $"No wait stats have EVER been recorded for {resolved.DisplayName}. This is not an empty window — nothing has been stored for this server at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, now.AddHours(-hours_back));
             }
 
             var notice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, now.AddHours(-hours_back), now, emptyAnswer: false, cancellationToken);
@@ -389,7 +389,7 @@ public sealed class DarlingMcpDataTools
                    the window floor under hints (merged into the collected_wait_types hint); not_collected is permanent and carries none. */
                 var missNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: true, cancellationToken);
                 /* #7167: an empty miss from an offline server answers unavailable, as the get_pg_* reads do. */
-                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken);
+                return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, WithWindowHints(miss, missNotice), cancellationToken, start);
             }
 
             var waitNotice = await TableNoticeAsync(postgres, "wait_stats", resolved.ServerName, start, now, emptyAnswer: false, cancellationToken);
@@ -1019,7 +1019,7 @@ public sealed class DarlingMcpDataTools
 
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now,
-                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), ranFacts, requestedStart, "query_stats"), cancellationToken);
+                    WithWindowHints(await EmptyPageAsync(), DarlingMcpWindowNotice.Build(floor, requestedStart, "query_stats", emptyAnswer: true), ranFacts, requestedStart, "query_stats"), cancellationToken, requestedStart);
 
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
@@ -1334,7 +1334,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0 && tagFilter.Active)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(McpHelpers.Status(
                     "empty",
-                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken);
+                    $"No procedure on {resolved.DisplayName} in the last {hours_back} hour(s) carries query tag '{tagFilter.Requested}'. The tag filter was applied in SQL before the top-{top} ranking."), leftOut)!, cancellationToken, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -1356,8 +1356,12 @@ public sealed class DarlingMcpDataTools
                         : EmptyProcedureStatsStatus(
                             await DarlingCollectorRunFactsReader.ReadAsync(postgres, resolved.ServerId, "procedure_stats", requestedStart, now, cancellationToken),
                             hours_back, leftOut?.Count ?? 0));
+                /* #7724: the collector's no-run answers (no baseline yet, or no successful run inside the window) are unavailable, which EmptyAsync
+                   below leaves alone. For a server that is offline by the SUCCESS-run rule the lead goes in front of them, so "check collection health"
+                   is not the first thing an 8-day-offline server's caller reads. An empty or not_collected page is not touched here. */
+                emptyPage = await DarlingServerOfflineNote.WithLeadAsync(emptyPage!, postgres, resolved.ServerId, resolved.DisplayName, cancellationToken, now);
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.WithDatabasesLeftOut(
-                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken);
+                    WithWindowHints(emptyPage!, DarlingMcpWindowNotice.Build(emptyFloor, requestedStart, "procedure_stats", emptyAnswer: true)), leftOut)!, cancellationToken, requestedStart);
             }
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
@@ -1753,7 +1757,7 @@ public sealed class DarlingMcpDataTools
             if (rows.Count == 0)
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, await DarlingRuntimePrecondition.WithQueryStoreNotWritingHintAsync(
                     /* #7010: the empty answer carries the window floor under hints (a null floor: the store holds no row in the window). */
-                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken);
+                    WithWindowHints(await EmptyAnswerAsync(), DarlingMcpWindowNotice.Build(coverageFloor, requestedStart, "query_store_stats", emptyAnswer: true), ranFacts, requestedStart, "query_store_stats"), postgres, resolved.ServerId, resolved.DisplayName, databases, cancellationToken: cancellationToken), cancellationToken, requestedStart);
 
             var approximate = read.DailyDaysUsed > 0 && read.DailySpan is not null;
             var result = rows.Select(r => new
@@ -3800,7 +3804,7 @@ ORDER BY server_name";
                         postgres, resolved.ServerId, resolved.DisplayName, "waiting_tasks", "waiting-task samples", cancellationToken);
                 if (healthyEmpty != null)
                 {
-                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, McpHelpers.Status("empty", healthyEmpty, emptyNotice.AsHints()), cancellationToken);
+                    return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, McpHelpers.Status("empty", healthyEmpty, emptyNotice.AsHints()), cancellationToken, start);
                 }
 
                 return await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, end, everCollected
@@ -3814,7 +3818,7 @@ ORDER BY server_name";
                     : McpHelpers.Status(
                         "unavailable",
                         $"No waiting-task samples have EVER been recorded for {resolved.DisplayName}, so this is NOT an all-clear — there is nothing to read. Check that collection is running for this server before concluding it was quiet.",
-                        emptyNotice.AsHints()), cancellationToken);
+                        emptyNotice.AsHints()), cancellationToken, start);
             }
 
             var notice = await TableNoticeAsync(postgres, "waiting_tasks", resolved.ServerName, start, end, emptyAnswer: false, cancellationToken);
@@ -3940,7 +3944,7 @@ ORDER BY server_name";
                         emptyNotice.AsHints())
                     : McpHelpers.Status(
                         "unavailable",
-                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."), cancellationToken);
+                        $"The blocking collectors have NEVER run successfully for {resolved.DisplayName}, so this is NOT a clean bill of health — nothing looked. Blocked-process reports need the XE session running, or the DMV blocking snapshot collector enabled; check those before concluding this server does not block."), cancellationToken, start);
             }
 
             /* #4966: one notice for two separate series; see BlockingStatsNoticeAsync. */

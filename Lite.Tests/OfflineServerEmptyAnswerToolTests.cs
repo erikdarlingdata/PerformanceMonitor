@@ -101,6 +101,112 @@ public sealed class OfflineServerEmptyAnswerToolTests : IClassFixture<SharedDuck
         Assert.Equal(new[] { "message", "status" }, root.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// #7724: a server that went offline partway through a wide window. Its newest success is three days back, inside a 7-day window, so the
+    /// empty reads and both trends say what was collected through that instant and that nothing after is known. None calls the window a genuine all-clear.
+    /// </summary>
+    [Theory]
+    [InlineData("deadlocks")]
+    [InlineData("blocked_process_reports")]
+    [InlineData("blocking_trend")]
+    [InlineData("deadlock_trend")]
+    public async Task OfflineServer_WithACollectionInTheWindow_SaysWhatWasCollectedThrough(string family)
+    {
+        var last = DateTime.UtcNow.AddDays(-3);
+        await SeedAsync(last);
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR");
+
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+        var answer = family switch
+        {
+            "deadlocks" => await McpBlockingTools.GetDeadlocks(service, _serverManager, ServerName, 168),
+            "blocked_process_reports" => await McpBlockingTools.GetBlockedProcessReports(service, _serverManager, ServerName, 168),
+            "blocking_trend" => await McpBlockingTools.GetBlockingTrend(service, _serverManager, ServerName, 168),
+            _ => await McpBlockingTools.GetDeadlockTrend(service, _serverManager, ServerName, 168),
+        };
+
+        var root = JsonDocument.Parse(answer).RootElement;
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        /* The offline lead first (an MCP caller still learns the server is offline), then the sentence; the note is the sentence alone. */
+        Assert.Contains(" is offline: ", message, StringComparison.Ordinal);
+        Assert.Contains(". Nothing was recorded through the last collection at ", message, StringComparison.Ordinal);
+        Assert.EndsWith(". Nothing after that is known.", message, StringComparison.Ordinal);
+        Assert.StartsWith("Nothing was recorded through the last collection at ", root.GetProperty("collected_through_note").GetString(), StringComparison.Ordinal);
+        var through = DateTime.Parse(root.GetProperty("collected_through").GetString()!, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+        Assert.InRange((through - last).TotalSeconds, -2, 2);
+        Assert.DoesNotContain("genuine all-clear", answer, StringComparison.Ordinal);
+    }
+
+    private const string UnavailableEnvelope = "{\"status\":\"unavailable\",\"message\":\"The procedure stats collector has not run in this window.\"}";
+
+    /// <summary>#7724: an <c>unavailable</c> answer for a server that is offline as of the window end gets the offline lead in front of its message, and stays <c>unavailable</c>.</summary>
+    [Fact]
+    public async Task WithOfflineLead_OfflineServer_PutsTheLeadBeforeTheMessage()
+    {
+        await SeedAsync(DateTime.UtcNow.AddDays(-3));
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR");
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+
+        var answer = await McpQueryTools.WithOfflineLeadAsync(service, _serverId, DateTime.UtcNow, UnavailableEnvelope);
+
+        var root = JsonDocument.Parse(answer).RootElement;
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.StartsWith(ServerName + " is offline: the store has had no successful collection from it since ", message, StringComparison.Ordinal);
+        Assert.EndsWith(" The procedure stats collector has not run in this window.", message, StringComparison.Ordinal);
+        Assert.True(message.IndexOf(" is offline: ", StringComparison.Ordinal) < message.IndexOf("The procedure stats collector", StringComparison.Ordinal));
+    }
+
+    /// <summary>#7724: a server that is not offline gets its envelope back byte for byte.</summary>
+    [Fact]
+    public async Task WithOfflineLead_ServerCollectedJustNow_ReturnsTheAnswerUnchanged()
+    {
+        await SeedAsync(DateTime.UtcNow.AddMinutes(-1));
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+
+        Assert.Equal(UnavailableEnvelope, await McpQueryTools.WithOfflineLeadAsync(service, _serverId, DateTime.UtcNow, UnavailableEnvelope));
+    }
+
+    /// <summary>#7724: only an <c>unavailable</c> answer takes the lead. An <c>empty</c> answer, a data answer and an answer that does not parse or has no string message are left alone, offline server or not.</summary>
+    [Theory]
+    [InlineData("{\"status\":\"empty\",\"message\":\"No procedure ran.\"}")]
+    [InlineData("{\"status\":\"ok\",\"message\":\"Top procedures.\",\"rows\":[]}")]
+    [InlineData("{\"rows\":[]}")]
+    [InlineData("{\"status\":\"unavailable\"}")]
+    [InlineData("{\"status\":\"unavailable\",\"message\":42}")]
+    [InlineData("{\"status\":\"unavailable\",\"message\":\"cut off")]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    public async Task WithOfflineLead_OfflineServer_LeavesEveryOtherAnswerUnchanged(string answer)
+    {
+        await SeedAsync(DateTime.UtcNow.AddDays(-3));
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR");
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+
+        Assert.Equal(answer, await McpQueryTools.WithOfflineLeadAsync(service, _serverId, DateTime.UtcNow, answer));
+    }
+
+    /// <summary>#7724: the Top Procedures tool itself. A server offline as of the window end, with no procedure stats in the window, answers <c>unavailable</c> with the offline lead first.</summary>
+    [Fact]
+    public async Task TopProcedures_OnAnOfflineServerWithNoProcedureStats_OpensWithTheOfflineLead()
+    {
+        await SeedAsync(DateTime.UtcNow.AddDays(-3));
+        await SeedCollectionLogAsync("wait_stats", DateTime.UtcNow.AddMinutes(-1), "ERROR");
+        var service = new LocalDataService(_duckDb);
+        ServerResolver.WireOfflineLookups(service, _serverManager);
+
+        var root = JsonDocument.Parse(await McpQueryTools.GetTopProceduresByCpu(service, _serverManager, ServerName, 4)).RootElement;
+
+        Assert.Equal("unavailable", root.GetProperty("status").GetString());
+        Assert.StartsWith(ServerName + " is offline: ", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Theory]
     [MemberData(nameof(Families))]
     public async Task ServerCollectedJustNow_KeepsItsTrueNegativeEmpty(string family)

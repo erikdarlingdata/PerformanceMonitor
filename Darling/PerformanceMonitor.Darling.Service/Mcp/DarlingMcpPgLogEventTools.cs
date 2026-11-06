@@ -115,7 +115,7 @@ public sealed class DarlingMcpPgLogEventTools
                         + "is the problem rather than the server.",
                         (await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, "pg_log_events", resolved.ServerName, windowStart, windowEnd, cancellationToken),
-                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken);
+                            null, windowStart, windowEnd, "pg_log_events", emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints()), cancellationToken, windowStart);
             }
 
             var truncated = page.Rows.Count > limit;
