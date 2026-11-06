@@ -201,7 +201,9 @@ function find(n, pred) {
   return null;
 }
 
-const isLoading = (n) => hasClass(n, "loading");
+/* #7942: a panel waiting to send a read the service refused busy again shows busyRetryStrip (util.js), marked `busy-retry`: it has not
+   drawn either, so the poll keeps the panel's current content until the second read answers. */
+const isLoading = (n) => hasClass(n, "loading") || hasClass(n, "busy-retry");
 const isRefreshError = (n) => hasClass(n, "refresh-error");
 const isError = (n) => hasClass(n, "strip") && hasClass(n, "error") && !isRefreshError(n);
 

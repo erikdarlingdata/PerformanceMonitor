@@ -1802,15 +1802,20 @@ export function busyRetryAfter(res) {
   return res && res.kind === "error" && res.status === 429 ? Math.max(1, res.retryAfterSeconds || 5) : null;
 }
 
-/** The strip a page shows while it waits to send a read refused busy again. */
+/** The strip a page shows while it waits to send a read refused busy again. `busy-retry` marks it as a panel that has not drawn yet, so
+ *  a poll's in-place refresh (refresh-in-place.js) keeps the panel's current content until the second read answers (#7942). */
 export function busyRetryStrip(seconds) {
-  return noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  const strip = noticeStrip("The service is running as many long reads as it allows. Retrying in " + seconds + (seconds === 1 ? " second…" : " seconds…"));
+  strip.className += " busy-retry";
+  return strip;
 }
 
 /**
  * #6800: runs `read`, and when the service refuses it busy (429) calls `onBusy(seconds)`, waits the Retry-After the reply named and
  * runs it once more. The second answer is the caller's, whatever it is, so a second refusal shows as the error it is. An abort of
  * `signal` during the wait returns { kind: "aborted" } without the second read.
+ * #7942: the wait counts as a read of the page, on the scope current when it starts, so the poll loop neither stamps the page updated
+ * nor plans the next poll while the second read has not run. The hold ends as the second read starts and counts itself.
  */
 export async function retryOnceWhenBusy(read, onBusy, signal) {
   const first = await read();
@@ -1818,20 +1823,27 @@ export async function retryOnceWhenBusy(read, onBusy, signal) {
   if (seconds === null) return first;
   if (signal && signal.aborted) return { kind: "aborted" };
   if (onBusy) onBusy(seconds);
-  const waited = await new Promise((resolve) => {
-    let onAbort = null;
-    const timer = setTimeout(() => {
-      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, seconds * 1000);
-    if (signal) {
-      onAbort = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
+  const scope = pageReads;
+  scope.n++;
+  let waited;
+  try {
+    waited = await new Promise((resolve) => {
+      let onAbort = null;
+      const timer = setTimeout(() => {
+        if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+        resolve(true);
+      }, seconds * 1000);
+      if (signal) {
+        onAbort = () => {
+          clearTimeout(timer);
+          resolve(false);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+  } finally {
+    scope.n--;
+  }
   return waited ? read() : { kind: "aborted" };
 }
 
