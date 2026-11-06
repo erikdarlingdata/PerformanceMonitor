@@ -55,7 +55,7 @@ public partial class WebhookAlertService
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.SlackChannel, healthTarget);
+            RecordChannelRecovered(settings, NotificationRouter.SlackChannel, webhookUrl, healthTarget);
             _logger.LogInformation($"Slack webhook sent for {metricName} on {serverName}");
             return null;
         }

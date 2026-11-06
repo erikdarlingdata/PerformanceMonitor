@@ -57,7 +57,7 @@ public partial class WebhookAlertService
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.TeamsChannel, healthTarget);
+            RecordChannelRecovered(settings, NotificationRouter.TeamsChannel, webhookUrl, healthTarget);
             _logger.LogInformation($"Teams webhook sent for {metricName} on {serverName}");
             return null;
         }

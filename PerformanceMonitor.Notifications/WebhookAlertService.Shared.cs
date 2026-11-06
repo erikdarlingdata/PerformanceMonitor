@@ -110,13 +110,15 @@ public partial class WebhookAlertService
 
     /// <summary>
     /// Where a send that is handed its destination and not its route (a resolution, a notice, a PagerDuty resolve)
-    /// counts its outcome, in the order the fan-out attributes its own sends. First the entry of the route, enabled or
-    /// disabled, whose own destination <paramref name="destination"/> is: the fan-out counts a send through a route
-    /// against the route even when the settings row names the same URL, so a delivery to that URL must clear the
-    /// route's count, and an alert that fired through a route is resolved after the operator turns the route off. Else
-    /// the settings row's own entry, when the destination is its URL or key for <paramref name="channel"/>. Else
-    /// <see cref="HealthTarget.None"/>: a destination that no configured channel names (a route's URL that was edited
-    /// away) belongs to no entry.
+    /// counts a failure. First the entry of the route, enabled or disabled, whose own destination
+    /// <paramref name="destination"/> is: an alert that fired through a route is resolved after the operator turns the
+    /// route off, and its failure belongs to the route. Else the settings row's own entry, when the destination is its
+    /// URL or key for <paramref name="channel"/>. Else <see cref="HealthTarget.None"/>: a destination that no configured
+    /// channel names (a route's URL that was edited away) belongs to no entry.
+    /// <para>The fan-out counts its own sends against the route the metric matched, or the settings row when none did,
+    /// so a destination that two of them share can carry a failure under either entry, and this picks only where a
+    /// failure lands. A delivery clears every entry that names the destination (<see cref="ClearDestination"/>),
+    /// whichever one the failure landed on.</para>
     /// </summary>
     private static HealthTarget HealthTargetOfDestination(IAlertSettings delivery, string channel, string destination)
     {
@@ -207,22 +209,67 @@ public partial class WebhookAlertService
         _logger.LogError($"{LabelOf(channel, healthTarget)} webhook error: {ex.Message}");
     }
 
-    /// <summary>A send that succeeded: say so when it ends a run of failures on its destination, then clear that
-    /// destination's count and last error. Other destinations of the channel are not touched, and a destination with
-    /// no entry has nothing to clear.</summary>
-    private void RecordChannelRecovered(string channel, HealthTarget healthTarget)
+    /// <summary>A send that succeeded: clear every entry that names its destination (<see cref="ClearDestination"/>),
+    /// and say so for each one that ends a run of failures. Other destinations of the channel are not touched, and a
+    /// destination with no entry has nothing to clear. The log line names the route, never the URL.</summary>
+    private void RecordChannelRecovered(IAlertSettings delivery, string channel, string destination, HealthTarget healthTarget)
     {
+        foreach (var (label, failures) in ClearDestination(delivery, channel, destination, healthTarget))
+        {
+            _logger.LogInformation($"{label} webhook recovered after {failures} failure(s)");
+        }
+    }
+
+    /// <summary>
+    /// A send to <paramref name="destination"/> was delivered: clear the count and last error of every entry that names
+    /// the destination. The entry the send was counted under (<paramref name="healthTarget"/>, created here so a
+    /// destination a send has gone to is listed), the settings row's own when the destination is its URL or key for
+    /// <paramref name="channel"/>, and each route's, enabled or disabled, whose destination it is. A failure to one
+    /// place can land on any of these (the fan-out's on the route the metric matched, or the settings row when none
+    /// did, and a destination-only send's on the first route that names it), and a delivery to that place is a recovery
+    /// of all of them: a count that survived a working delivery would raise the failing signal across it. Returns the
+    /// label and the count of each cleared entry that was failing. A destination with no entry
+    /// (<see cref="HealthTarget.None"/>) is named by nothing, so nothing is cleared.
+    /// </summary>
+    private List<(string Label, int Failures)> ClearDestination(IAlertSettings delivery, string channel, string destination, HealthTarget healthTarget)
+    {
+        var cleared = new List<(string Label, int Failures)>();
         if (!healthTarget.Counted)
         {
-            return;
+            return cleared;
         }
 
-        var health = HealthOf(channel, healthTarget.RouteId);
-        var failures = Interlocked.Exchange(ref health.Failures, 0);
-        health.LastError = null;
+        Clear(healthTarget.RouteId, HealthOf(channel, healthTarget.RouteId));
 
-        if (failures > 0)
-            _logger.LogInformation($"{LabelOf(channel, healthTarget)} webhook recovered after {failures} failure(s)");
+        if (healthTarget.RouteId is not null
+            && IsDestination(SettingsRowDestination(delivery, channel), destination)
+            && _destinationHealth.TryGetValue((channel, null), out var settingsRow))
+        {
+            Clear(null, settingsRow);
+        }
+
+        foreach (var route in delivery.NotificationRoutes)
+        {
+            if (route is not null
+                && route.RouteId != healthTarget.RouteId
+                && IsDestination(RouteDestination(route, channel), destination)
+                && _destinationHealth.TryGetValue((channel, route.RouteId), out var routeHealth))
+            {
+                Clear(route.RouteId, routeHealth);
+            }
+        }
+
+        return cleared;
+
+        void Clear(int? routeId, DestinationHealth health)
+        {
+            var failures = Interlocked.Exchange(ref health.Failures, 0);
+            health.LastError = null;
+            if (failures > 0)
+            {
+                cleared.Add((WebhookChannelFailureCount.LabelOf(channel, routeId), failures));
+            }
+        }
     }
 
     /// <summary>

@@ -300,7 +300,7 @@ public partial class WebhookAlertService
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.PagerDutyChannel, healthTarget);
+            RecordChannelRecovered(settings, NotificationRouter.PagerDutyChannel, routingKey, healthTarget);
             _logger.LogInformation($"PagerDuty webhook sent for {metricName} on {serverName}");
             return null;
         }

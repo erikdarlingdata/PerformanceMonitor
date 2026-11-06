@@ -101,7 +101,7 @@ public partial class WebhookAlertService
                 return error;
             }
 
-            RecordChannelRecovered(NotificationRouter.GenericChannel, healthTarget);
+            RecordChannelRecovered(settings, NotificationRouter.GenericChannel, webhookUrl, healthTarget);
             _logger.LogInformation($"Generic webhook sent for {metricName} on {serverName}");
             return null;
         }
