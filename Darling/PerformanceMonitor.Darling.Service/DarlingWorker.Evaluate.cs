@@ -1668,9 +1668,9 @@ public sealed partial class DarlingWorker
     /// in <i>reports per server-hour</i> on engine-recorded evidence; this alert counts distinct root blockers
     /// SEEN in a once-a-minute sample of <c>pg_stat_activity</c>, so a waiter present in three consecutive
     /// captures is one wait observed three times, not three reports — the very denominator mismatch that keeps
-    /// the PostgreSQL blocking band Unknown-with-reason (<c>Darling/README.md</c>, engine-coverage table).
-    /// The operator's <c>PgBlockingCountThreshold</c> is a fire bar, not a tier. And the sampled-shape
-    /// distribution an honest PostgreSQL tier would be cut from (share of captures holding a waiter; longest
+    /// the PostgreSQL blocking health band (#7616) from banding on a wait count: it bands the share of captures that saw
+    /// blocking instead. The operator's <c>PgBlockingCountThreshold</c> is a fire bar, not a tier. And the sampled-shape
+    /// distribution an honest PostgreSQL alert tier would be cut from (share of captures holding a waiter; longest
     /// observed wait) has not been taken — #3539's residue on #3653 names it, and #3601's <c>lock_wait</c>
     /// log events (one line per wait past <c>deadlock_timeout</c>) as the event-grain source a report-rate
     /// tier would read. When that measurement exists it lands here as a second tier with nothing else to

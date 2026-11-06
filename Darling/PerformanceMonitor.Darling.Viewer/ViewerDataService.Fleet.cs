@@ -169,6 +169,18 @@ SELECT
                 GROUP BY server_id
             ) AS dmv ON xe.server_id = dmv.server_id
         ) AS per_server
+    )
+    /* #7654: a PostgreSQL target adds the captures that saw blocking, the count its Fleet card shows (the service's fleet total adds
+       the same). A server with no capture in the window adds nothing. collection_log is windowed on collection_time alone, like the
+       pg_database_stats arm below. A SQL Server has no pg_blocking row, so it adds 0 here. */
+    +
+    (
+        SELECT COUNT(*)
+        FROM collection_log AS l
+        WHERE " + DarlingPgBlockingReader.PgBlockingCaptureFilter + @"
+        AND   l.rows_collected > 0
+        AND   l.collection_time >= $1
+        AND   l.collection_time <= $2
     ) AS total_blocking_events,
     (
         SELECT COUNT(*)
@@ -369,6 +381,10 @@ public sealed class FleetRollup
 
     /// <summary>Fleet-wide blocking events this window (from the cross-server SQL total).</summary>
     public long TotalBlockingEvents { get; init; }
+
+    /// <summary>#7616 / #3631: the unit(s) <see cref="TotalBlockingEvents"/> adds up, for the tile's tooltip. It sums SQL Server blocked waits and
+    /// PostgreSQL blocking captures, so a fleet with both engines names both. Null when no server has a card.</summary>
+    public string? TotalBlockingDetail { get; init; }
 
     /// <summary>Fleet-wide deadlocks this window (from the cross-server SQL total).</summary>
     public long TotalDeadlocks { get; init; }
@@ -630,6 +646,7 @@ public sealed class FleetRollup
                 TotalServers = registeredTotal,
                 UnknownCount = unknown,
                 TotalBlockingEvents = totals.TotalBlockingEvents,
+                TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
                 TotalDeadlocks = totals.TotalDeadlocks,
                 DeadlockCoverage = deadlockCoverage,
             };
@@ -690,6 +707,7 @@ public sealed class FleetRollup
             OfflineCount = offline,
             ServersWithCollectionFailures = failures,
             TotalBlockingEvents = totals.TotalBlockingEvents,
+            TotalBlockingDetail = ServerHealthClassifier.BlockingTotalUnitsDetail(summaries.Any(s => !s.IsPostgres), summaries.Any(s => s.IsPostgres)),
             TotalDeadlocks = totals.TotalDeadlocks,
             DeadlockCoverage = deadlockCoverage,
             WorstServers = worst,
@@ -827,7 +845,7 @@ public sealed class FleetRollup
         {
             parts.Add($"Memory: {s.MemoryDetail}");
         }
-        if (s.BlockingSeverity >= HealthSeverity.Warning && s.BlockingCount > 0)
+        if (s.BlockingSeverity >= HealthSeverity.Warning && (s.IsPostgres ? s.PgBlockingCapturesWithBlocking : s.BlockingCount) > 0)
         {
             /* #7444: the arm that fired the band (the longest block, the peak snapshot or the rate), through the
                helper the service's fleet card uses, so the two surfaces read alike. #3539 A3: an unrateable window

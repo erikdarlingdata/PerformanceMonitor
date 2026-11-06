@@ -84,6 +84,10 @@ public sealed class DarlingPgReadSqlParsesLiveTests
     private static readonly HashSet<string> NotQueryFields = new(StringComparer.Ordinal)
     {
         "DarlingPgColumnStatsReader.EvidenceStatusList",
+        /* #7616: the pg_blocking capture predicate and the FROM ... WHERE clause built on it, spliced into PgBlockingCaptureCountsSql and
+           PgBlockingCaptureCountsByServerSql (both in the parse-checked population). Not statements, and verified where they are spliced. */
+        "DarlingPgBlockingReader.PgBlockingCaptureFilter",
+        "DarlingPgBlockingReader.PgBlockingCaptureLogWhere",
         /* #7551: the suppression rule as one boolean expression, spliced into PgTableBloatSql and PgTableBloatTotalsSql (both in
            the parse-checked population). Not a statement, and verified where it is spliced. */
         "DarlingPgTableBloatReader.UnpublishableConditionSql",
