@@ -329,7 +329,8 @@ public static class FinOpsRecommendationFigures
             Category = "Storage",
             Severity = totalGb > 50 ? "High" : totalGb > 10 ? "Medium" : "Low",
             Confidence = "High",
-            Finding = $"{candidates.Count} uncompressed object(s) >= 1GB ({totalGb:N1}GB total)",
+            // #7690: words written out, a space before the unit, and the singular for one object.
+            Finding = $"{candidates.Count} uncompressed {(candidates.Count == 1 ? "object" : "objects")} over 1 GB ({totalGb:N1} GB total)",
             Detail = $"Large uncompressed tables/indexes: {string.Join("; ", topItems)}" +
                      (candidates.Count > 5 ? $" and {candidates.Count - 5} more" : "") +
                      ". Consider PAGE or ROW compression to reduce storage and improve I/O."

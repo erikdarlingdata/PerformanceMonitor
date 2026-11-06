@@ -470,9 +470,9 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         AssertTruncatedAt(cut.GetProperty("hints"), Anchor.AddDays(-2));
         var cutMessage = cut.GetProperty("message").GetString()!;
         Assert.StartsWith("No " + eventType + " events were captured for " + ServerName, cutMessage, StringComparison.Ordinal);
-        Assert.Contains("This server HAS captured them before", cutMessage, StringComparison.Ordinal);
+        Assert.Contains("This server has captured them before", cutMessage, StringComparison.Ordinal);
         Assert.EndsWith(". " + McpHelpers.CutWindowNothingMessage, cutMessage, StringComparison.Ordinal);
-        Assert.DoesNotContain("genuinely quiet", cutMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing happened in this window", cutMessage, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -507,7 +507,7 @@ VALUES ($1, $2, $3, $4, $2, $5, $6)",
         var root = Root(await CallAsync(tool));
 
         AssertCovered(root.GetProperty("hints"), WindowStart);
-        Assert.EndsWith(", so the window is genuinely quiet rather than blind — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.EndsWith(", so nothing happened in this window — widen hours_back to reach the most recent events.", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>The tool's type was captured before the window and not in it (the second rung): the keys say nothing in the window was read.</summary>
@@ -663,7 +663,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
         Assert.Contains("773 event(s) are hidden", message, StringComparison.Ordinal);
         Assert.Contains("5 h 23 min old", message, StringComparison.Ordinal);
-        Assert.DoesNotContain("quiet", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nothing happened in this window", message, StringComparison.Ordinal);
     }
 
     private Task SeedTruncatedRunAsync(DateTime at, int hidden = 773, string? note = null) => ExecuteAsync(@"
@@ -934,7 +934,7 @@ VALUES ($1, $2, $3, 'system_health_events', $4, 12, 'SUCCESS', 0, 'ring_buffer_t
         var root = Root(await CallAsync(Tool.SignificantWaits));
 
         Assert.Equal("empty", root.GetProperty("status").GetString());
-        Assert.Contains("genuinely quiet", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("so nothing happened in this window", root.GetProperty("message").GetString()!, StringComparison.Ordinal);
     }
 
     /* #6453: nothing of any type ever stored. The newest run read the live session through its event_file target and found

@@ -382,6 +382,8 @@ export function plainText(text) {
   /* A trend's width note: "...near 1500 points; pass bucket_minutes (1-1440) for another width, or narrow hours_back for finer
      points." The page picks the width, so only the narrower range is left to say. */
   t = t.replace(/pass bucket_minutes \(1-\d+\) for another width, or /g, "");
+  /* #7684 item 2: the Monitor statements switch sits right above this sentence on the Queries, Waits and Active Queries panels, so it names the switch, not the argument the MCP reply names. */
+  t = t.replace(/Pass include_monitor=true to include them\./g, "Turn on Monitor statements to include them.");
   /* #5644 W8: a trend note's closing advice, and the field names it explains. The CPU and Memory pages have no bucket control (the
      page picks the width), so "narrow the bucket" is said as the control that exists, the time range; the Waits, Latch/Spinlock
      and Activity notes name their fields by the column or tile the page shows. */
@@ -442,6 +444,14 @@ export function plainText(text) {
   t = t.replace(/\bmemory_clerks stores\b/g, "The memory clerks collector stores");
   /* #7410: the Query Store Overhead note names the collector's constant for the sleep waits it drops. */
   t = t.replace(/dropped at collection by IgnoredWaitDefaults on both SKUs, and dropped again here by name if a row ever carried one/g, "dropped when they are collected, and dropped again here if one ever slipped through");
+  /* #7690: the Extensions note and the Wait Trend empty text name a field and a tier of the read. The page names the panel and the sampler. */
+  t = t.replace(/Per DATABASE, not per cluster: installed_version describes the database the row names\./g, "Each row describes one database, not the whole server: the installed version is the one in that database.");
+  t = t.replace(/\s[—–-]\s+read install_census for what is installed where, because it is aggregated per extension and no limit touches it/g, ". The Extension Install Census shows what is installed where, because it counts every extension and no limit touches it");
+  t = t.replace(/\binstall_census\b/g, "the Extension Install Census");
+  t = t.replace(/\bthe service_sampled tier\b/g, "the service sampler");
+  t = t.replace(/\bservice_sampled\b/g, "service sampler");
+  /* #7690: the Index Bloat note sets its pointer to the exact-measurement command off with a dash; the page says it as its own sentence. */
+  t = t.replace(/\s[—–-]\s+use (?:exact_measurement_command|the Measure It Exactly column) for that/g, ". Use the Measure It Exactly column for that");
   /* #7410: the Query Heatmap's empty text. */
   t = t.replace(/\bdatabase_name filter\b/g, "database filter");
   t = t.replace(/\ba SECOND cycle\b/g, "a second collection");

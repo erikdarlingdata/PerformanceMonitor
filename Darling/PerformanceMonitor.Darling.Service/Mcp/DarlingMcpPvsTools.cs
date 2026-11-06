@@ -44,6 +44,40 @@ public sealed class DarlingMcpPvsTools
         GetPvsStats(postgres, server_name, trend_hours_back, DatabaseFilter.One(database_name), cancellationToken);
 
     /// <summary>
+    /// #7699 item 7: the empty sentence for a server with no PVS rows. It reads the version from the registry the way the hints tool does
+    /// and says whether the version has no persistent version store (before SQL Server 2019) or the collector has just not completed a
+    /// cycle. A registry that cannot be read makes no version claim.
+    /// </summary>
+    internal static async Task<string> NoRowsMessageAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var target = new PerformanceMonitor.Collectors.CollectorTargetInfo();
+        try
+        {
+            await using var command = postgres.CreateCommand(DarlingMcpForcedPlanTools.HintsTargetFactsSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var edition = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+                target = new PerformanceMonitor.Collectors.CollectorTargetInfo
+                {
+                    IsAzureSqlDb = edition == PerformanceMonitor.Collectors.CollectorEngineCapability.AzureSqlDatabaseEngineEdition,
+                    IsAzureManagedInstance = edition == PerformanceMonitor.Collectors.CollectorEngineCapability.AzureManagedInstanceEngineEdition,
+                    SqlMajorVersion = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                };
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The version only picks between two sentences about an answer that is already empty, so a failed registry read keeps the
+               unknown-version target (assumed newest), which gets the "not completed a cycle" sentence. */
+        }
+
+        return PerformanceMonitor.Collectors.PvsStatsCollector.NoRowsMessage(target);
+    }
+
+    /// <summary>
     /// #5244: get_pvs_stats over a SET of databases (<see cref="DatabaseFilter.All"/> = every database): the chosen databases'
     /// rows at the server's newest snapshot (<c>as_of</c> is the server's snapshot, so it does not move with the filter), and a
     /// trend over the top five of the CHOSEN databases (the cap applies after the filter).
@@ -91,8 +125,7 @@ public sealed class DarlingMcpPvsTools
                            await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "pvs_stats", cancellationToken),
                            databaseFilter.Describe())
                     ?? McpHelpers.StatusForDatabase("empty",
-                        "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
-                        "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.",
+                        await NoRowsMessageAsync(postgres, resolved.ServerId, cancellationToken),
                         databaseFilter.Describe());
             }
 

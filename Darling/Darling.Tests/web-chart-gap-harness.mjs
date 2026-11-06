@@ -25,7 +25,15 @@ class FakeNode {
   get firstChild() {
     return this.children[0] || null;
   }
+  get parentNode() {
+    return this.parent || null;
+  }
+  closest(tag) {
+    for (let n = this; n; n = n.parent) if (n.tag === tag) return n;
+    return null;
+  }
   appendChild(child) {
+    if (child.parent) child.parent.children = child.parent.children.filter((x) => x !== child);
     child.parent = this;
     this.children.push(child);
     return child;
@@ -72,11 +80,17 @@ globalThis.location = { hash: "#/server/A/cpu" };
 const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "chart-gap-")));
 let charts;
 let slicer;
+let panels;
+let util;
+let tabs;
 try {
   fs.cpSync(jsDir, scratch, { recursive: true });
   fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
   charts = await import(pathToFileURL(path.join(scratch, "charts.js")).href);
   slicer = await import(pathToFileURL(path.join(scratch, "time-slicer.js")).href);
+  panels = await import(pathToFileURL(path.join(scratch, "panels.js")).href);
+  util = await import(pathToFileURL(path.join(scratch, "util.js")).href);
+  tabs = await import(pathToFileURL(path.join(scratch, "pages", "server-tabs.js")).href);
 } catch (e) {
   fs.rmSync(scratch, { recursive: true, force: true });
   throw e;
@@ -272,6 +286,62 @@ out.stripGaps = {
   bucket: String(slicer.stripGap({}, { bucket_minutes: 10 })),
   none: String(slicer.stripGap({}, {})),
   seam: slicer.stripGap({ bucketed: false, seam: (d) => d.routing.raw_from }, { bucket_minutes: 60, routing: { raw_from: "2026-01-01T04:00:00" } }),
+};
+
+/* #7692: Query Duration Trend on a quiet server. The reply holds rows only where queries ran: steps of 12, 1, 23, 1, 1, 256 and 9 minutes on a 1 minute bucket.
+   Those steps are uneven, so the chart's own cadence guess reads them as events and never breaks; the panel names the reply's bucket (bucketKey) and the
+   rows' own cadence (median 9 minutes) sets the break, so the 23 minute and 256 minute steps break and no segment crosses the 256 minute one. The strip
+   above Top Queries takes the same step through stripGap. */
+const quietServer = [0, 12, 13, 36, 37, 38, 294, 303];
+const quietReply = { bucket_minutes: 1, trend: quietServer.map((m, i) => ({ time: iso(T0 + m * MIN), value: 5 + (i % 3) })) };
+const quietDesc = { viz: "line", rowsKey: "trend", xKey: "time", series: [{ key: "value", label: "Duration" }], format: "ms", emptyText: "none" };
+const vertexCounts = (host) => lineXs(host).map((xs) => xs.length);
+out.quietPanel = { runs: vertexCounts(panels.VIZ.line(quietReply, { ...quietDesc, bucketKey: "bucket_minutes" })), dots: marks(panels.VIZ.line(quietReply, { ...quietDesc, bucketKey: "bucket_minutes" })).dots };
+out.quietPanelNoKey = { runs: vertexCounts(panels.VIZ.line(quietReply, quietDesc)) };
+/* a busy server (a row every minute, one 4 hour hole) breaks at the hole and nowhere else */
+const busyReply = { bucket_minutes: 1, trend: seq(0, 60).concat(seq(300, 360)).map((m) => ({ time: iso(T0 + m * MIN), value: 5 })) };
+out.busyPanel = { runs: vertexCounts(panels.VIZ.line(busyReply, { ...quietDesc, bucketKey: "bucket_minutes" })) };
+const quietPoints = quietServer.map((m, i) => ({ t: T0 + m * MIN, v: 5 + (i % 3) }));
+const quietStrip = { bucketed: true };
+out.quietStrip = shape(slicer.stripPaths(quietPoints, stripWin, null, slicer.stripGap(quietStrip, { bucket_minutes: 1 }, quietPoints.map((p) => p.t))));
+out.quietStripNoBucketed = shape(slicer.stripPaths(quietPoints, stripWin, null, slicer.stripGap({}, { bucket_minutes: 1 }, quietPoints.map((p) => p.t))));
+out.quietStripGaps = {
+  noBucketInReply: String(slicer.stripGap(quietStrip, {}, quietPoints.map((p) => p.t))),
+  stepWins: String(slicer.stripGap({ bucketed: true, stepMs: 60000 }, { bucket_minutes: 10 }, quietPoints.map((p) => p.t))),
+};
+
+/* #7692, through the page's own wiring. The cases above hand VIZ.line a bucketKey and slicer.stripGap a strip object, so a dropped `bucketKey` descriptor
+   in server-tabs.js, a dropped `bucketed: true` in stripOf, or a rankedSlicer that stops passing the rows' times would pass them all. Here the Queries tab
+   is built from SERVER_TABS and every read it makes is answered with the quiet server's reply (a 256 minute hole), so the line runs are those of the
+   charts and strips the page really draws. */
+const flush = async () => { for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0)); };
+const allNodes = (n, o = []) => { o.push(n); n.children.forEach((c) => allNodes(c, o)); return o; };
+const quietRows = quietServer.map((m, i) => ({ time: iso(T0 + m * MIN), value: 5 + (i % 3), execution_count: 60, executions_per_second: 1 + (i % 3) }));
+globalThis.fetch = async (url) => {
+  const u = new URL(String(url), "http://viewer.test");
+  const name = u.pathname.replace("/api/read/", "");
+  const body = name === "get_query_duration_trend" || name === "get_procedure_duration_trend"
+    ? { bucket_minutes: 1, trend: quietRows }
+    : { status: "empty", message: "none" };
+  return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+};
+process.on("unhandledRejection", () => {});
+const pageCtx = { hours: 24, label: "last 24 hours", startMs: stripWin.startMs, endMs: stripWin.endMs, rangeKey: "preset:24" };
+const queriesTab = tabs.SERVER_TABS.find((t) => t.id === "queries");
+const tabHost = new FakeNode("main");
+util.mount(tabHost, queriesTab.build("quiet", pageCtx));
+await flush();
+const panelRuns = (title) => allNodes(tabHost).filter((n) => n.attrs["data-title"] === title).map((p) => vertexCounts(p))[0] || null;
+const stripRuns = (title) => allNodes(tabHost).filter((n) => cls(n).split(" ").includes("slicer") && n.attrs["data-slicer"] === title).map((s) => {
+  const d = allNodes(s).filter((n) => cls(n).includes("slicer-line")).map((n) => n.attrs.d || "")[0] || "";
+  return subpaths(d);
+})[0] ?? null;
+out.pageWiring = {
+  queryDuration: panelRuns("Query Duration Trend"),
+  executionsPerSecond: panelRuns("Executions per Second"),
+  procedureDuration: panelRuns("Procedure Duration Trend"),
+  queryStrip: stripRuns("Query duration"),
+  procedureStrip: stripRuns("Procedure duration"),
 };
 
 out.split = charts.splitAtGaps([0, 1, 2, 3, 4], [0, 1, 2, 100, 101], 10).map((r) => r.join(","));

@@ -63,13 +63,13 @@ const QUERY_COLUMNS = [
   { key: "est_cost_usd", label: "Est. cost share ($)", format: "num2" },
 ];
 
-const GRANT_COLUMNS = [
+export const GRANT_COLUMNS = [
   { key: "day", label: "Day (UTC)" },
-  { key: "avg_granted_mb", label: "Avg granted (MB)", format: "num1" },
-  { key: "avg_used_mb", label: "Avg used (MB)", format: "num1" },
+  { key: "avg_granted_mb", label: "Avg granted", format: "mbfit" },
+  { key: "avg_used_mb", label: "Avg used", format: "mbfit" },
   { key: "efficiency_pct", label: "Efficiency (%)", format: "num1" },
-  { key: "peak_granted_mb", label: "Peak granted (MB)", format: "num1" },
-  { key: "wasted_mb", label: "Wasted (MB)", format: "num1" },
+  { key: "peak_granted_mb", label: "Peak granted", format: "mbfit" },
+  { key: "wasted_mb", label: "Wasted", format: "mbfit" },
   { key: "total_grantees", label: "Grantees", format: "int" },
   { key: "total_waiters", label: "Waiters", format: "int" },
   { key: "timeout_errors", label: "Timeouts", format: "int" },
