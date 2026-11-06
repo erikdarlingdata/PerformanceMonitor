@@ -610,14 +610,43 @@ public sealed class ViewerPostgresTabsTests
     [Fact]
     public void XminHeldIn_ASourceSeenTwiceThatWonBoth_DoesNotReadAsTwoOfTwo()
     {
-        var seenTwice = new DarlingPgXminReader.PgXminRow(
-            "session", DateTime.UtcNow, XminAge: 10, Holder: "pid 1", Detail: null, IsWinner: false,
-            PeakXminAge: 10, SamplesAsWinner: 2, Samples: 2);
+        var seenTwice = XminRow(samplesAsWinner: 2, samples: 2);
 
-        var shown = PgDisplay.Xmin(seenTwice);
+        var shown = PgDisplay.Xmin(seenTwice, capturesInWindow: 60);
 
+        Assert.Equal("2 of 60 captures", shown.WinnerShare);
         Assert.DoesNotContain("2 of 2", shown.WinnerShare, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// The column sorts by the same share it shows (#8014): over the window's captures, so a source that won twice sorts below
+    /// one that won 58 times even though both won every row of their own.
+    /// </summary>
+    [Fact]
+    public void XminHeldIn_SortsByTheShareOverTheWindow_NotOverTheSourcesOwnRows()
+    {
+        var transient = PgDisplay.Xmin(XminRow(samplesAsWinner: 2, samples: 2), capturesInWindow: 60);
+        var chronic = PgDisplay.Xmin(XminRow(samplesAsWinner: 58, samples: 58), capturesInWindow: 60);
+
+        Assert.Equal("58 of 60 captures", chronic.WinnerShare);
+        Assert.Equal(2 / 60.0, transient.WinnerShareSort);
+        Assert.Equal(58 / 60.0, chronic.WinnerShareSort);
+        Assert.True(transient.WinnerShareSort < chronic.WinnerShareSort);
+    }
+
+    /// <summary>A window with no captures has nothing to divide by: the dash and no sort key, as get_pg_xmin_horizon's null.</summary>
+    [Fact]
+    public void XminHeldIn_AWindowWithNoCaptures_ReadsAsNotApplicable()
+    {
+        var shown = PgDisplay.Xmin(XminRow(samplesAsWinner: 2, samples: 2), capturesInWindow: 0);
+
+        Assert.Equal(PgDisplay.NotApplicableText, shown.WinnerShare);
+        Assert.Null(shown.WinnerShareSort);
+    }
+
+    private static DarlingPgXminReader.PgXminRow XminRow(long samplesAsWinner, long samples) =>
+        new("session", DateTime.UtcNow, XminAge: 10, Holder: "pid 1", Detail: null, IsWinner: false,
+            PeakXminAge: 10, SamplesAsWinner: samplesAsWinner, Samples: samples);
 
     /// <summary>
     /// The viewer's three row flags agree with the MCP surface's severity band on the same row.
@@ -895,8 +924,8 @@ public sealed class ViewerPostgresTabsTests
         {
             ["PgStatementRow.DatabaseName"] = "DatabaseId (shown as Database) — the cell shows the name, or 'database <id>' for a row stored before the name was collected",
             ["PgXminRow.IsWinner"] = "IsWinnerText — rendered as a word rather than True/False",
-            ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 samples' says more than either half alone",
-            ["PgXminRow.Samples"] = "WinnerShare — it is that fraction's denominator",
+            ["PgXminRow.SamplesAsWinner"] = "WinnerShare — '58 of 60 captures' says more than either half alone",
+            ["PgXminRow.Samples"] = "not shown: it is only the captures in which this source recorded a holder, not the window's capture count that WinnerShare divides by (#8014)",
             ["PgXminRow.IsCurrent"] = "not shown: the Viewer reads with includeCleared true, lists only the IsCurrent rows, and the panel note counts the rest as cleared (ClearedRows)",
             ["PgXminRow.LatestCaptureAt"] = "not shown: it is the newest run's time for every row, which the toolbar's window already says",
 
