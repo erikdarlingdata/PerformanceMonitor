@@ -17,9 +17,16 @@
 import { VIZ } from "../panels.js";
 import { el, mount, errorStrip, noticeStrip, captionStrip, adminListOnlyNote, apiGet, apiWrite } from "../util.js";
 
+/** The registry's engine word as the page says it: sqlserver is SQL Server and postgres is PostgreSQL. Any other value is shown as it came. */
+export function engineWord(engine) {
+  if (engine == null || engine === "") return "—";
+  const e = String(engine).trim().toLowerCase();
+  return e === "sqlserver" ? "SQL Server" : e === "postgres" || e === "postgresql" ? "PostgreSQL" : String(engine);
+}
+
 export const SERVER_ACTION_COLUMNS = [
   { key: "server", label: "Server" },
-  { key: "engine", label: "Engine" },
+  { key: "engine", label: "Engine", display: (r) => engineWord(r.engine) },
   { key: "action", label: "Action" },
   { key: "state", label: "Switch" },
   { key: "set_by", label: "Changed by" },
