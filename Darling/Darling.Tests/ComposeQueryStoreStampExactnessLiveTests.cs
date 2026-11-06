@@ -91,6 +91,7 @@ public sealed class ComposeQueryStoreStampExactnessLiveTests
             await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Built, ct);
             await ComposeStampLiveSupport.SeedPrecisionRowsAsync(connection, hourNow, ComposeStampLiveSupport.PrecisionSpot.Tail, ct);
             Assert.Equal(ComposeStampLiveSupport.BuiltHours, await ComposeStampLiveSupport.BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
+            await ComposeStampLiveSupport.UnbuildNewestTwoAsync(connection, hourNow, ct); /* the tail arm reads the newest two hours (#7762: the build reaches them now) */
             await ComposeStampLiveSupport.AssertPrecisionRowsHaveTeethAsync(connection, ct);
 
             /* Window A: starts at hourNow - 28 h + 17 min (mid-hour, inside the built run), ends at hourNow - 40 min. The built hours stop at
