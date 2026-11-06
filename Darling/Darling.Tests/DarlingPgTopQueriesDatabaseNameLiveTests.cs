@@ -54,7 +54,7 @@ public sealed class DarlingPgTopQueriesDatabaseNameLiveTests
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "UPDATE servers SET engine_kind = $2 WHERE server_id = $1", ServerId, MonitoredEngineKind.Postgres);
 
-            var t0 = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-30));
+            var t0 = DarlingMcpTestData.TruncateToSeconds(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Utc).AddMinutes(-30));
             var t1 = t0.AddSeconds(60);
 
             /* Database 16384 is named on both snapshots. Database 16385 is the row an older build stored: no name on either. Database
