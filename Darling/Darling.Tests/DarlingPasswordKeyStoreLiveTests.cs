@@ -882,17 +882,276 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
         }
     }
 
+    [Fact]
+    public async Task APasswordKeyOnAFreshStore_IsPublished_UsedOnRestart_AndNoFileIsWritten()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            using var key = PasswordPrivateKey.Generate();
+            var reference = source.Write(key);
+            var logger = new ListLogger();
+
+            var first = await store.StartAsync(logger: logger, keySetting: reference);
+            Assert.True(first.State == "ok", $"The first start answered {first.State}: {first.Note}");
+            Assert.Equal(key.PublicKey.KeyId, first.Ring.Status.KeyId);
+            Assert.Equal(key.PublicKey.KeyId, (await store.ReadCurrentAsync())!.KeyId);
+
+            var second = await store.StartAsync(logger: logger, keySetting: reference);
+            Assert.True(second.State == "ok", $"The second start answered {second.State}: {second.Note}");
+            Assert.Equal(key.PublicKey.KeyId, second.Ring.Status.KeyId);
+
+            Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.UnixFileName)));
+            Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.WindowsFileName)));
+            Assert.Empty(System.IO.Directory.EnumerateFileSystemEntries(store.Directory));
+            Assert.Equal(2, logger.Lines.Count(l => l == $"Password key {PasswordSeal.DisplayKeyId(key.PublicKey.KeyId)} loaded from passwordKey"));
+            Assert.DoesNotContain(logger.Lines, l => l.Contains(" generated in ", StringComparison.Ordinal));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ADifferentKeyAfterRestart_IsAMismatchNamingPasswordKey()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            using var published = PasswordPrivateKey.Generate();
+            Assert.Equal("ok", (await store.StartAsync(keySetting: source.Write(published))).State);
+
+            // The secret is rotated in place: the next start holds a key the store does not publish.
+            using var rotated = PasswordPrivateKey.Generate();
+            var mismatch = await store.StartAsync(keySetting: source.Write(rotated));
+
+            var expected = DarlingPasswordKeyState.SettingMismatchReason(
+                rotated.PublicKey.Spki, new PublishedKey(published.PublicKey.KeyId, published.PublicKey.Spki));
+            Assert.Equal("mismatch", mismatch.State);
+            Assert.Equal(expected, mismatch.Note);
+            Assert.False(mismatch.Ring.Status.CanSeal);
+            var state = await store.ReadStateAsync("example-host");
+            Assert.Equal(("mismatch", expected), (state.State, state.Note));
+            Assert.Equal(published.PublicKey.KeyId, (await store.ReadCurrentAsync())!.KeyId);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AResetThenAStart_WithTheSameKey_IsResetPending_AndPublishesNothing_ThenANewKeyIsOk()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            using var old = PasswordPrivateKey.Generate();
+            var oldReference = source.Write(old);
+            Assert.Equal("ok", (await store.StartAsync(keySetting: oldReference)).State);
+
+            await using (var c = await store.Source.OpenConnectionAsync(TestContext.Current.CancellationToken))
+            {
+                Assert.Equal(old.PublicKey.KeyId, await DarlingPasswordKeyStore.MarkCurrentResetAsync(c, TestContext.Current.CancellationToken));
+            }
+
+            var pending = await store.StartAsync(keySetting: oldReference);
+            Assert.Equal("reset_pending", pending.State);
+            Assert.Equal(DarlingPasswordKeyState.SettingResetReason(old.PublicKey.KeyId), pending.Note);
+            Assert.False(pending.Ring.Status.CanSeal);
+            Assert.Null(await store.ReadCurrentAsync());
+            Assert.Equal("reset_pending", (await store.ReadStateAsync("example-host")).State);
+
+            using var replacement = PasswordPrivateKey.Generate();
+            var next = await store.StartAsync(keySetting: source.Write(replacement));
+            Assert.True(next.State == "ok", $"The start with a new key answered {next.State}: {next.Note}");
+            Assert.Equal(replacement.PublicKey.KeyId, next.Ring.Status.KeyId);
+            Assert.Equal(replacement.PublicKey.KeyId, (await store.ReadCurrentAsync())!.KeyId);
+            Assert.Empty(System.IO.Directory.EnumerateFileSystemEntries(store.Directory));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task AnUnreadablePasswordKey_RefusesWithoutStoppingAndPublishesNothing()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            var missing = "file:" + Path.Combine(source.Directory, "no-such-key");
+            var refused = await store.StartAsync(keySetting: missing);
+
+            Assert.Equal("refused", refused.State);
+            Assert.False(refused.Ring.Status.CanSeal);
+            Assert.StartsWith("passwordKey", refused.Note, StringComparison.Ordinal);
+            Assert.Null(await store.ReadCurrentAsync());
+            Assert.Equal("refused", (await store.ReadStateAsync("example-host")).State);
+            Assert.Empty(System.IO.Directory.EnumerateFileSystemEntries(store.Directory));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task ALeftoverKeyFile_IsNeverTouched_AndNotedOnce()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            using var leftover = PasswordPrivateKey.Generate();
+            Assert.True(DarlingPasswordKeyFile.Generate(store.Directory, leftover.ExportPkcs8, new ListLogger()).Present);
+            var leftoverPath = Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName);
+            var leftoverBytes = File.ReadAllBytes(leftoverPath);
+            var namesBefore = System.IO.Directory.EnumerateFileSystemEntries(store.Directory).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToList();
+
+            using var key = PasswordPrivateKey.Generate();
+            var logger = new ListLogger();
+            var runtime = await store.StartAsync(logger: logger, keySetting: source.Write(key));
+
+            Assert.True(runtime.State == "ok", $"The start answered {runtime.State}: {runtime.Note}");
+            Assert.Equal(key.PublicKey.KeyId, runtime.Ring.Status.KeyId);
+            Assert.Equal(leftoverBytes, File.ReadAllBytes(leftoverPath));
+            Assert.Equal(namesBefore, System.IO.Directory.EnumerateFileSystemEntries(store.Directory).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToList());
+            Assert.False(File.Exists(leftoverPath + ".retired"));
+            Assert.False(File.Exists(leftoverPath + ".discarded"));
+            var noted = logger.Entries.Where(e => e.Line.Contains(leftoverPath, StringComparison.Ordinal)).ToList();
+            Assert.Single(noted);
+            Assert.Equal(LogLevel.Information, noted[0].Level);
+            Assert.Equal(
+                $"passwordKey is set, so the password key file {leftoverPath} is not used. Delete it once the service logs the key as loaded from passwordKey.",
+                noted[0].Line);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    [Fact]
+    public async Task TheSweep_WithASettingKey_SaysPutANewKeyInThePasswordKeySource()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        try
+        {
+            using var key = PasswordPrivateKey.Generate();
+            var runtime = await store.StartAsync(keySetting: source.Write(key));
+            Assert.Equal("ok", runtime.State);
+            var ct = TestContext.Current.CancellationToken;
+
+            await using (var c = await store.Source.OpenConnectionAsync(ct))
+            {
+                await DarlingPasswordKeyStore.MarkCurrentResetAsync(c, ct);
+            }
+
+            await runtime.SweepCheckAsync(ct);
+            Assert.False(store.LastRing!.Status.CanSeal);
+            var reset = await store.ReadStateAsync("example-host");
+            Assert.Equal(("reset_pending", DarlingPasswordKeyState.SettingSweepResetReason), (reset.State, reset.Note));
+
+            // A different key published in its place names both keys and the setting.
+            using var other = PasswordPrivateKey.Generate();
+            await store.ExecAsync(
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, 'RSA3072-OAEP-SHA256/A256GCM', 'current');",
+                ("id", other.PublicKey.KeyId), ("key", other.PublicKey.Spki));
+            await runtime.SweepCheckAsync(ct);
+            var mismatch = await store.ReadStateAsync("example-host");
+            Assert.Equal(
+                ("mismatch", DarlingPasswordKeyState.SettingSweepMismatchReason(other.PublicKey.KeyId, key.PublicKey.KeyId)),
+                (mismatch.State, mismatch.Note));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    /// <summary>A secret mount stand-in: a temp directory of its own, never the store's credentials directory, holding
+    /// the key a <c>passwordKey</c> reference names as one line of base64.</summary>
+    private sealed class SettingKeySource : IDisposable
+    {
+        public SettingKeySource()
+        {
+            Directory = Path.Combine(Path.GetTempPath(), "pmkeysrc-" + Guid.NewGuid().ToString("N")[..12]);
+            System.IO.Directory.CreateDirectory(Directory);
+        }
+
+        public string Directory { get; }
+
+        /// <summary>Writes <paramref name="key"/> over the source's key file and returns the <c>file:</c> reference to it.</summary>
+        public string Write(PasswordPrivateKey key)
+        {
+            var path = Path.Combine(Directory, "password-key.b64");
+            var pkcs8 = key.ExportPkcs8();
+            try
+            {
+                File.WriteAllText(path, Convert.ToBase64String(pkcs8));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(pkcs8);
+            }
+
+            return "file:" + path;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                System.IO.Directory.Delete(Directory, recursive: true);
+            }
+            catch (IOException)
+            {
+                // A scratch directory under TEMP that cannot be removed now is left for the TEMP cleanup; the test's verdict stands.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // As above: leaving a scratch directory behind is not a test failure.
+            }
+        }
+    }
+
     private sealed class ListLogger : ILogger
     {
         public List<string> Lines { get; } = [];
+
+        public List<(LogLevel Level, string Line)> Entries { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state)
             where TState : notnull => null;
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
-        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Lines.Add(formatter(state, exception));
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            var line = formatter(state, exception);
+            Lines.Add(line);
+            Entries.Add((logLevel, line));
+        }
     }
 
     /// <summary>One scratch store, migrated, with its own key directory and the owner's data source.</summary>
@@ -931,7 +1190,7 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
             bool isWindows = false, Func<string, bool>? canOpen = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
-            ILogger? logger = null, string serviceHost = "example-host") =>
+            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null) =>
             DarlingPasswordKeyRuntime.StartAsync(
                 Directory, Source, logger ?? new ListLogger(), TestContext.Current.CancellationToken,
                 new PasswordKeyStartOptions
@@ -941,6 +1200,7 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
                     SelfTest = selfTest,
                     SetRing = ring => LastRing = ring,
                     ServiceHost = serviceHost,
+                    KeySetting = keySetting,
                 });
 
         public async Task ExecAsync(string sql, params (string Name, object Value)[] parameters)
