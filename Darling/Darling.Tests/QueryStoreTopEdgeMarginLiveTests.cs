@@ -213,8 +213,10 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
            even hours, collected two minutes after they close, so the 10:00 interval on the 14th (first execution 10:00 to 10:49)
            is collected at 12:02, inside the window, with every first execution before it. Plan 9999 exists only in that interval. #7776: the
            Viewer grid places its window by the interval's start, so the two straddlers below carry an interval start of 12:00, the window
-           start, with a first execution two hours (9999) and three and a half hours (9998) before it, which is the row the edge margin
-           has to keep; an interval start of 10:00 is outside the grid's window and the Viewer reads would never return it. */
+           start, with a first execution two hours (9999) and three and a half hours (9998) before it. These two rows are synthetic:
+           Query Store records first_execution_time within the interval, so it never emits a first execution before the interval start.
+           They exist only to exercise the narrowed first-execution floor of the edge margin. An interval start of 10:00 is outside the
+           grid's window and the Viewer reads would never return it. */
         const string columns = """
             (collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
              last_execution_time, query_hash, query_plan_hash, execution_count, avg_duration_us, avg_cpu_time_us,
@@ -247,7 +249,7 @@ public sealed class QueryStoreTopEdgeMarginLiveTests
             """, ct);
 
         /* Server 6: hourly database "a" (health row, 60 minutes) and 2-hour database "c" (no health row at all), same shape as
-           servers 1 and 2. c's plan 9998 exists only in an interval collected at 12:02 whose first execution was 08:30. */
+           servers 1 and 2. c's plan 9998 exists only in an interval collected at 12:02 whose first execution was 08:30 (synthetic, see above). */
         await ExecAsync(connection, $"""
             INSERT INTO collect.query_store_interval_wide {columns}
             SELECT t.h + interval '62 minutes', {UnreportedDatabase}, 'a', p.p, p.p, 'Regular', t.h + (p.p % 50) * interval '1 minute',
