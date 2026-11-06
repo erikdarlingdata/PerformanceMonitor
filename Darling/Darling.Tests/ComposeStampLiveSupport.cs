@@ -261,6 +261,9 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         }
     }
 
+    /// <summary>The extra backlog hours the plan offers when every built hour is backlog: all of them past the <see cref="QueryStoreComposeStamp.MaxBuildsPerTick"/> normal builds, up to <see cref="QueryStoreComposeStamp.MaxExtraBacklogBuilds"/>.</summary>
+    internal static int ExtraBacklogHours => Math.Min(QueryStoreComposeStamp.MaxExtraBacklogBuilds, BuiltHours - QueryStoreComposeStamp.MaxBuildsPerTick);
+
     /// <summary>A migrated scratch store with the three servers enrolled, the 30-hour seed, and every due hour built (<see cref="BuiltHours"/>). <paramref name="at"/>: the seed's hour (a whole hour), default this hour.</summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)> ArrangeAsync(
         CancellationToken ct, int servers = 3, bool build = true, DateTime? at = null)

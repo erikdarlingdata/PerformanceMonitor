@@ -72,11 +72,13 @@ public sealed class QueryStoreComposeStampRaceLiveTests
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
-        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct);
+        var (scratch, connection, source, hourNow) = await ArrangeAsync(ct, build: false, at: ThisHour().AddHours(1));
         var bodySucceeded = false;
         try
         {
-            /* The hour before this one: its trigger margin (H + 2 h) is still ahead, so a row written into it now is unmarked. */
+            /* The store's current hour (the seed ends one hour later than the default, see the Arrange call): its trigger margin (H + 1 h,
+               QueryStoreComposeStamp.WriterGuardSql) is still ahead, so a row written into it now is unmarked. From the hour before it the
+               writer would begin after H + 1 h and the guard would not defer. */
             var hour = hourNow.AddHours(-1);
             await using var writer = await OpenAsync(scratch, ct);
             await using var builder = await source.OpenConnectionAsync(ct);

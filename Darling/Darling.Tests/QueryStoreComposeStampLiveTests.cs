@@ -199,7 +199,9 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
         try
         {
             var from = hourNow.AddHours(-30);
-            var to = hourNow.AddHours(-2);
+            /* The newest hour the build reaches at the test's clock (#7762: the 90-minute lag), through its end. */
+            var newestDue = ComposeStampLiveSupport.NewestDueHour(ComposeStampLiveSupport.ClockWithin(hourNow));
+            var to = newestDue.AddHours(1);
             Assert.True(await CountAsync(connection, "SELECT count(*) FROM collect.query_store_compose_stamp", ct) > 1000);
             Assert.Equal(0, await MismatchesAsync(connection, from, to, ct));
 
@@ -228,7 +230,7 @@ VALUES (TIMESTAMP '{At(collectionTime)}', {serverId}, 'dbX', 99, 99, 'Regular', 
 
             /* A tick with nothing due builds nothing; the newest builds were the youngest due hour. */
             Assert.Equal(0, await BuildAllAsync(source, ct, ComposeStampLiveSupport.ClockWithin(hourNow)));
-            Assert.Equal(hourNow.AddHours(-3), Convert.ToDateTime(await TextAsync(connection, "SELECT max(hour) FROM collect.query_store_compose_stamp_hours", ct), CultureInfo.InvariantCulture));
+            Assert.Equal(newestDue, Convert.ToDateTime(await TextAsync(connection, "SELECT max(hour) FROM collect.query_store_compose_stamp_hours", ct), CultureInfo.InvariantCulture));
             bodySucceeded = true;
         }
         finally

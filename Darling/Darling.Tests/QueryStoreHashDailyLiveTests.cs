@@ -44,7 +44,7 @@ public sealed class QueryStoreHashDailyLiveTests
     private static Task<long> CountAsync(NpgsqlConnection connection, string sql, CancellationToken ct) =>
         ComposeStampLiveSupport.CountAsync(connection, sql, ct);
 
-    /// <summary>Yesterday (UTC midnight) from the anchored clock. The seed's hour is Y + 3 h, so hours (Y - 2 d) 21:00 to Y 00:00 are built: the day Y - 1 d is whole.</summary>
+    /// <summary>Yesterday (UTC midnight) from the anchored clock. The seed's hour is Y + 3 h, so every seeded hour, (Y - 2 d) 21:00 to Y + 2 h, is built (#7762: the build lag is 90 minutes): the day Y - 1 d is whole.</summary>
     private static DateTime Yesterday() => LiveClock.AnchoredEnd().Date;
 
     private static DateTime FullDay() => Yesterday().AddDays(-1);
@@ -246,9 +246,9 @@ GROUP BY w.server_id, w.query_hash";
             var before = Yesterday().AddDays(-2);
             var after = Yesterday();
 
-            /* The two partial days of the seed (3 hours and 1 hour built): no rows, no ledger rows, not valid, and a direct build refuses. */
+            /* The two partial days of the seed (the seed's first 3 hours and last 3 hours): no rows, no ledger rows, not valid, and a direct build refuses. */
             Assert.Equal(3, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{At(before)}' AND hour < TIMESTAMP '{At(before.AddDays(1))}'", ct));
-            Assert.Equal(1, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{At(after)}' AND hour < TIMESTAMP '{At(after.AddDays(1))}'", ct));
+            Assert.Equal((long)(hourNow.AddHours(-1) - after).TotalHours + 1, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_compose_stamp_hours WHERE hour >= TIMESTAMP '{At(after)}' AND hour < TIMESTAMP '{At(after.AddDays(1))}'", ct));
             Assert.Equal(0, await CountAsync(connection, $"SELECT count(*) FROM collect.query_store_hash_daily WHERE day IN (TIMESTAMP '{At(before)}', TIMESTAMP '{At(after)}')", ct));
             Assert.Equal(Expect(day, 1, 2, 3), await ValidAsync(connection, new[] { 1, 2, 3 }, before, after.AddDays(1), ct));
             Assert.Null(await QueryStoreHashDaily.BuildDayAsync(connection, before, Clock(hourNow), ct));
