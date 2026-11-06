@@ -48,26 +48,52 @@ ORDER BY sqlserver_cpu_utilization DESC
 LIMIT 1";
 
     /// <summary>#7896: one entry per request. A request alive across several snapshots in the span is sampled once per snapshot with
-    /// a climbing cumulative CPU, so the read keeps each (session, request) once, at its longest sample, before ranking and cutting
-    /// to five. <c>request_id</c> is the DMV's and is stored on every row; DISTINCT ON treats a NULL from an older row as one key.</summary>
+    /// a climbing cumulative CPU, so the read keeps each request once, at its longest sample, before ranking and cutting to five. A
+    /// request is (session_id, request_id, request_no), where request_no counts the gaps wider than
+    /// <see cref="PerformanceMonitor.Analysis.QueriesAtSpikeRequestKey.StartGapSeconds"/> between the session's snapshots ordered by
+    /// their computed start, collection_time minus total_elapsed_time_ms; that class says why neither (session_id, request_id) nor a
+    /// start truncated to a bucket is the key. A NULL computed start (an older row) groups as one key per (session_id, request_id), and
+    /// DISTINCT ON treats a NULL request_id as one key. Lite's twin is DrillDownCollector.CollectQueriesAtSpike.</summary>
     public const string QueriesAtSpikeSql = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
        query_text
 FROM (
-    SELECT DISTINCT ON (session_id, request_id)
+    SELECT DISTINCT ON (session_id, request_id, request_no)
            collection_time, session_id, database_name, status,
            cpu_time_ms, total_elapsed_time_ms, logical_reads,
            wait_type, dop, parallel_worker_count,
            query_text
-    FROM v_query_snapshots
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   query_text NOT LIKE 'WAITFOR%'
-    AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
-    ORDER BY session_id, request_id, cpu_time_ms DESC, collection_time DESC
+    FROM (
+        SELECT *,
+               SUM(new_request) OVER (PARTITION BY session_id, request_id, (request_start IS NULL)
+                                      ORDER BY request_start, collection_time
+                                      ROWS UNBOUNDED PRECEDING) AS request_no
+        FROM (
+            SELECT *,
+                   CASE WHEN request_start IS NULL THEN 0
+                        WHEN request_start - LAG(request_start) OVER (PARTITION BY session_id, request_id, (request_start IS NULL)
+                                                                      ORDER BY request_start, collection_time)
+                             <= INTERVAL '{PerformanceMonitor.Analysis.QueriesAtSpikeRequestKey.StartGapSeconds} seconds' THEN 0
+                        ELSE 1
+                   END AS new_request
+            FROM (
+                SELECT collection_time, session_id, database_name, status,
+                       cpu_time_ms, total_elapsed_time_ms, logical_reads,
+                       wait_type, dop, parallel_worker_count,
+                       query_text, request_id,
+                       collection_time - total_elapsed_time_ms * INTERVAL '1 millisecond' AS request_start
+                FROM v_query_snapshots
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   query_text NOT LIKE 'WAITFOR%'
+                AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
+            ) AS spanned
+        ) AS marked
+    ) AS keyed
+    ORDER BY session_id, request_id, request_no, cpu_time_ms DESC, collection_time DESC
 ) AS per_request
 ORDER BY cpu_time_ms DESC
 LIMIT 5";

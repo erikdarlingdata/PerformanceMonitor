@@ -53,21 +53,47 @@ LIMIT 1";
 
         // Step 2: Get queries active within 2 minutes of peak
         /* #7896: one entry per request. A request alive across several snapshots in the span is sampled once per snapshot with a
-           climbing cumulative CPU, so the read keeps each (session, request) once, at its longest sample, before ranking and
-           cutting to five. request_id is the DMV's and is stored on every row; a NULL from an older row partitions as one key. */
+           climbing cumulative CPU, so the read keeps each request once, at its longest sample, before ranking and cutting to five.
+           A request is (session_id, request_id, request_no), where request_no counts the gaps wider than
+           QueriesAtSpikeRequestKey.StartGapSeconds between the session's snapshots ordered by their computed start, collection_time
+           minus total_elapsed_time_ms; that class says why neither (session_id, request_id) nor a start truncated to a bucket is
+           the key. A NULL computed start (an older row) groups as one key per (session_id, request_id), and a NULL request_id
+           partitions as one key. Darling's twin is PgDrillDownCollector.QueriesAtSpikeSql. */
         using var queryCmd = connection.CreateCommand();
         queryCmd.CommandText = $@"
 SELECT collection_time, session_id, database_name, status,
        cpu_time_ms, total_elapsed_time_ms, logical_reads,
        wait_type, dop, parallel_worker_count,
        query_text
-FROM v_query_snapshots
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   query_text NOT LIKE 'WAITFOR%'
-AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
-QUALIFY ROW_NUMBER() OVER (PARTITION BY session_id, request_id ORDER BY cpu_time_ms DESC, collection_time DESC) = 1
+FROM (
+    SELECT *,
+           SUM(new_request) OVER (PARTITION BY session_id, request_id, (request_start IS NULL)
+                                  ORDER BY request_start, collection_time
+                                  ROWS UNBOUNDED PRECEDING) AS request_no
+    FROM (
+        SELECT *,
+               CASE WHEN request_start IS NULL THEN 0
+                    WHEN request_start - LAG(request_start) OVER (PARTITION BY session_id, request_id, (request_start IS NULL)
+                                                                  ORDER BY request_start, collection_time)
+                         <= INTERVAL '{QueriesAtSpikeRequestKey.StartGapSeconds} seconds' THEN 0
+                    ELSE 1
+               END AS new_request
+        FROM (
+            SELECT collection_time, session_id, database_name, status,
+                   cpu_time_ms, total_elapsed_time_ms, logical_reads,
+                   wait_type, dop, parallel_worker_count,
+                   query_text, request_id,
+                   collection_time - total_elapsed_time_ms * INTERVAL '1 millisecond' AS request_start
+            FROM v_query_snapshots
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   query_text NOT LIKE 'WAITFOR%'
+            AND   {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate}
+        ) AS spanned
+    ) AS marked
+) AS keyed
+QUALIFY ROW_NUMBER() OVER (PARTITION BY session_id, request_id, request_no ORDER BY cpu_time_ms DESC, collection_time DESC) = 1
 ORDER BY cpu_time_ms DESC
 LIMIT 5";
 
