@@ -161,9 +161,15 @@ export function isoZ(ms) {
   return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
 }
 
+/** The whole minutes in a span, floored (#7940): the one minute count a length is named, identified and measured by, so "7.5 minutes" is
+ *  7 minutes in its name, its id and its length text alike, and the id reads back as the range the name says. */
+function wholeMinutes(spanMs) {
+  return Math.floor(Math.max(0, spanMs) / MINUTE_MS);
+}
+
 /** The length of a span as the picker words it: "3d" for three days and some hours, "7h 1m" under a day, "45m". Floors. */
 export function formatLength(spanMs) {
-  const totalMinutes = Math.floor(Math.max(0, spanMs) / MINUTE_MS);
+  const totalMinutes = wholeMinutes(spanMs);
   if (totalMinutes >= 1440) return Math.floor(totalMinutes / 1440) + "d";
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
@@ -237,7 +243,7 @@ export function specId(spec) {
       if (s === 30 * DAY_MS) return "1mo";
       if (s % DAY_MS === 0) return s / DAY_MS + "d";
       if (s % HOUR_MS === 0) return s / HOUR_MS + "h";
-      return roundEven(s / MINUTE_MS) + "m";
+      return wholeMinutes(s) + "m";
     }
     case "calendar":
       return spec.period;
@@ -301,7 +307,7 @@ function pastLength(spanMs) {
     count = spanMs / HOUR_MS;
     unit = "hour";
   } else {
-    count = roundEven(spanMs / MINUTE_MS);
+    count = wholeMinutes(spanMs);
     unit = "minute";
   }
   return count === 1 ? unit : count + " " + unit + "s";

@@ -958,11 +958,10 @@ public sealed class AgentSetupWebLiveTests
         }, seat: new DarlingWebSeat("alice", true));
     }
 
-    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0 (or
-       below), or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
+    /* #6400: the server side of the tag test above. The profile table has no foreign key to a server either, so a profile for server 0, or for a server id that is not registered (no row in config.config_monitored_servers), is a 400 with one sentence and writes
        nothing; a registered server still saves, and a blank save still removes the profile of a server that has gone. */
     [Fact]
-    public async Task EnvironmentProfiles_AServerThatIs0OrBelowOrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
+    public async Task EnvironmentProfiles_AServerThatIs0OrIsNotRegistered_Is400_AndWritesNothing_ViaTheWebAndTheStore()
     {
         await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
         {
@@ -987,7 +986,7 @@ public sealed class AgentSetupWebLiveTests
             var fleetStamp = await ScalarAsync(owner, "SELECT modified_at::text FROM config.agent_environment_profiles", ct);
             Assert.Equal("1", await ScalarAsync(owner, Journal, ct));
 
-            /* Server 0, a negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
+            /* Server 0, an unregistered negative server and an unregistered server are refused, with text and blank, and the fleet profile is not touched. */
             foreach (var refused in new[] { 0, -1, unregistered })
             {
                 var answer = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}");
@@ -1019,6 +1018,45 @@ public sealed class AgentSetupWebLiveTests
             Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"orphan, edited\"}}")).Status);
             Assert.Equal(200, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{unregistered},\"profile_text\":\"\"}}")).Status);
             Assert.Equal("3", await ScalarAsync(owner, Rows, ct));
+        }, seat: new DarlingWebSeat("alice", true));
+    }
+
+    /* #7975: a Darling server id is a 32-bit hash of the storage name and negative for about half of all servers. A registered server with
+       a negative id saves, reads back, edits and is removed again, through the web and through the store; an unregistered negative id is
+       still refused by the registry check, and server 0 by the scope rule. */
+    [Fact]
+    public async Task EnvironmentProfiles_AServerWithANegativeId_Saves_ReadsBack_AndIsRemoved_ViaTheWebAndTheStore()
+    {
+        await WithWebRoutesAsync("admin", async (owner, _, Send, ct) =>
+        {
+            const int negativeServer = -1_714_925_380;
+            const int negativeUnregistered = -1_714_925_381;
+            var store = new InvestigationRequestStore(owner, 30);
+            await ExecAsync(owner, $"INSERT INTO config.config_monitored_servers (server_id, name, host) VALUES ({negativeServer}, 'LcAgentSetupNegative', 'host-negative')", ct);
+
+            var saved = await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{negativeServer},\"profile_text\":\"payroll runs 01:00-03:00\"}}");
+            Assert.Equal(200, saved.Status);
+            Assert.Equal("saved", (string)saved.Body!["status"]!);
+
+            var listed = (await Send("GET", "/api/environment-profiles", null)).Body!["profiles"]!.AsArray();
+            var row = Assert.Single(listed, p => (int?)p!["scope_server_id"] == negativeServer)!;
+            Assert.Equal("payroll runs 01:00-03:00", (string)row["profile_text"]!);
+
+            var stored = Assert.Single(await store.ListProfilesAsync(ct), p => p.ScopeServerId == negativeServer);
+            Assert.Equal("payroll runs 01:00-03:00", stored.ProfileText);
+
+            Assert.True(await store.SaveProfileAsync(negativeServer, null, "payroll runs 01:00-04:00", "dave", stored.ModifiedAtUtc, ct));
+            stored = Assert.Single(await store.ListProfilesAsync(ct), p => p.ScopeServerId == negativeServer);
+            Assert.Equal("payroll runs 01:00-04:00", stored.ProfileText);
+
+            foreach (var refused in new[] { negativeUnregistered, 0 })
+            {
+                await Assert.ThrowsAsync<ArgumentException>(() => store.SaveProfileAsync(refused, null, "for no server", "dave", null, ct));
+                Assert.Equal(400, (await Send("PUT", "/api/environment-profiles", Json, $"{{\"scope_server_id\":{refused},\"profile_text\":\"for no server\"}}")).Status);
+            }
+
+            Assert.True(await store.SaveProfileAsync(negativeServer, null, "   ", "dave", stored.ModifiedAtUtc, ct));
+            Assert.Empty(await store.ListProfilesAsync(ct));
         }, seat: new DarlingWebSeat("alice", true));
     }
 

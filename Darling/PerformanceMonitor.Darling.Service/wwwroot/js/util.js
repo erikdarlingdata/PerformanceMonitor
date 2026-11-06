@@ -293,9 +293,13 @@ export function listOnlyNote(managedStore, lists, toChange, adminWritesOff) {
       ", use the Viewer app, or give the web an admin store login (set postgres.webConnectionString to an admin login).";
 }
 
-/** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off. Every tab used to
-    open its list-only note with "Changes from this page are turned off" and the switch's name; now a tab says only what it lists. */
-export const ADMIN_WRITES_OFF_NOTE = "Changes from the web are turned off. To let a signed-in admin make them here, set web.allowAdminWrites to true in darling.json and restart the service.";
+/** #7558: the sentence Admin says once, under its heading, when the managed store's web.allowAdminWrites switch is off; each tab's own
+    list-only note then says only what it lists. #7950: it names the changes the switch turns off, and says that adding and editing servers
+    are not among them: those follow the edit seat through the web login's own grants, so the Servers tab still saves with the switch off. */
+export const ADMIN_WRITES_OFF_NOTE =
+  "Changes from the web to alert settings, notification routes, environment profiles, threshold overrides, people, report feedback, " +
+  "practice requests, pending notes, server actions and agent changes are turned off. Adding and editing servers follow the edit seat and " +
+  "still work. To let a signed-in admin make the other changes here, set web.allowAdminWrites to true in darling.json and restart the service.";
 
 /** #7558: listOnlyNote for an Admin tab. With the switch off the heading already said so (ADMIN_WRITES_OFF_NOTE), so the tab keeps only what
     it lists and where to change it. Any other cause is a fact about this store login and stays in the tab's own words. */
