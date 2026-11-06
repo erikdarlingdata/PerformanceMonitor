@@ -780,9 +780,13 @@ public sealed partial class DarlingCollectorRunner
             {
                 if (diversionPlan.Count > 0)
                 {
+                    /* The flush's upserts and touches take the batch's own deadline, the same regime as the COPY above and
+                       every statement below it on this transaction: one borrowed store connection under one sweep permit,
+                       retried on the collector's cadence. Left unset they would fall through to Npgsql's 30 s default. */
                     var absentDigests = await PayloadDimensionWriter.FlushAsync(
                         pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
-                        compressPlanContent: _compressPlanContent());
+                        compressPlanContent: _compressPlanContent(),
+                        commandTimeoutSeconds: ServiceCommandDeadlines.CollectionSweepSeconds);
 
                     /* #5158: digests this batch referenced without content that the store holds no plan for. The host
                        forgets them so the next sighting renders the plan again. FlushAsync reports upper-case hex and
