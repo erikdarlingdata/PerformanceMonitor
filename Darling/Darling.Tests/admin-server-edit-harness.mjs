@@ -1466,25 +1466,43 @@ try {
       await settle(30);
       return { afterRefusal, afterSecondPress, afterEditAndSave: { strips: strips(), saveLabel: saveLabel(), puts: puts() } };
     },
-    /* #7952: a write whose button is disabled while it is in flight. The param is the button pressed: routeSave (Edit on route 7, Severity changed,
-       then Save), routeDelete (Delete on route 7, the confirm answered yes) or profileSave (text typed, then Save profile). The write is held at
-       the service; while it is held the button is pressed again, as a click (which a disabled button never receives) and forced past the disabled
-       state; then the answer lands. Returns, during the hold, whether the pressed button is disabled and the writes sent so far; after the second
-       press, the writes; and after the answer, the writes and whether the pressed button is disabled. */
+    /* #7952, #7954: a write whose button is disabled while it is in flight. The param is the button pressed: routeSave (Edit on route 7, Severity
+       changed, then Save), routeDelete (Delete on route 7, the confirm answered yes), profileSave (text typed, then Save profile), or on the Agent
+       changes tab agentSwitch (Turn off agent changes, the confirm answered yes) and agentUndo (Undo on change c-1, the confirm answered yes). The
+       write is held at the service; while it is held the button is pressed again, as a click (which a disabled button never receives) and forced
+       past the disabled state; then the answer lands. Returns, during the hold, whether the pressed button is disabled, the writes sent so far and
+       `tracked`, the disabled state of the Agent changes tab's switch and Undo buttons (null off that tab); after the second press, the writes; and
+       after the answer, the writes, whether the pressed button is disabled, and `tracked` again. */
     inFlight: async (target) => {
+      const agent = target.startsWith("agent");
       const route = { route_id: 7, metric_match: "blocking", match_kind: "exact_metric", family: "performance", configured_channels: [], smtp_recipients: [],
         enabled: true, modified_at_utc: "2026-01-01T00:00:00.1234567Z", scope_server_id: null, scope_tag_id: null, agent_level: null, agent_max_per_hour: 10,
         agent_max_per_day: 50, agent_lease_minutes: 30, agent_expiry_minutes: 120, send_resolutions: null, fallback_route_id: null, severities: "critical", report_notice: "off" };
       let routes = [route];
-      scopeSetup("ok", (method, url) => {
-        if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes } };
-        if (method === "GET" && url === "/api/environment-profiles") return { status: 200, body: { can_edit: true, max_length: 4000, profiles: [] } };
-        if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
-        if (method === "DELETE" && url === "/api/notification-routes/7") { routes = []; return { status: 200, body: { status: "deleted", route_id: 7 } }; }
-        if (method === "PUT" && url === "/api/environment-profiles") return { status: 200, body: { status: "updated" } };
-        return null;
-      });
-      await mountPage(target === "profileSave" ? "profiles" : "routes");
+      if (agent) {
+        state.canEdit = true;
+        state.responder = (method, url) => {
+          if (method === "GET" && url === "/api/agent-changes") {
+            return { status: 200, body: { enabled: true, can_decide: true, refusals: [], changes: [{
+              called_id: "c-1", called_at_utc: "2026-10-01T00:00:00Z", server_name: "alpha", server_id: 1, kind: "module_recompile", tool: "recompile_module", actor: "agent-a",
+              reason: "stale plan", result: "done", result_detail: null, undone_at_utc: null, undone_by: null, muted_alerts: 0, force_review: null, can_undo: true }] } };
+          }
+          if (method === "PUT") return { status: 200, body: { status: "updated" } };
+          return { status: 404, body: { error: "no such request " + url } };
+        };
+      } else {
+        scopeSetup("ok", (method, url) => {
+          if (method === "GET" && url === "/api/read/get_notification_routes") return { status: 200, body: { routes } };
+          if (method === "GET" && url === "/api/environment-profiles") return { status: 200, body: { can_edit: true, max_length: 4000, profiles: [] } };
+          if (method === "PUT" && url === "/api/notification-routes/7") return { status: 200, body: { status: "updated", route_id: 7 } };
+          if (method === "DELETE" && url === "/api/notification-routes/7") { routes = []; return { status: 200, body: { status: "deleted", route_id: 7 } }; }
+          if (method === "PUT" && url === "/api/environment-profiles") return { status: 200, body: { status: "updated" } };
+          return null;
+        });
+      }
+      await mountPage(agent ? "agent-changes" : target === "profileSave" ? "profiles" : "routes");
+      const switchButton = () => buttons(main, "Turn off agent changes")[0] || null;
+      const undoButton = () => byAttr(main, "aria-label", "Undo agent change c-1").find((n) => n.tag === "button") || null;
       let pressed;
       if (target === "routeSave") {
         await fire(byAttr(main, "data-action", "edit-route")[0], "click");
@@ -1495,14 +1513,16 @@ try {
       else if (target === "profileSave") {
         await typeInto(byAttr(main, "data-field", "profile-text")[0], "Production fleet.");
         pressed = byAttr(main, "data-action", "save-profile")[0];
-      }
+      } else if (target === "agentSwitch") pressed = switchButton();
+      else if (target === "agentUndo") pressed = undoButton();
       if (!pressed) throw new Error("no button for " + target);
       const writes = () => requests.filter((r) => r.method !== "GET").map((r) => r.method + " " + r.url);
+      const tracked = () => (agent ? { switch: switchButton() ? switchButton().disabled : null, undo: undoButton() ? undoButton().disabled : null } : null);
       let release;
       state.gate = new Promise((r) => { release = r; });
       const first = fire(pressed, "click");
       await settle(30);
-      const during = { disabled: pressed.disabled, writes: writes() };
+      const during = { disabled: pressed.disabled, writes: writes(), tracked: tracked() };
       /* The second press is not awaited here: a write it wrongly sent would be held at the gate with the first, and lands with it. */
       const again = Promise.all([fire(pressed, "click"), forceClick(pressed)]);
       await settle(30);
@@ -1511,7 +1531,7 @@ try {
       release();
       await Promise.all([first, again]);
       await settle(30);
-      return { during, afterSecondPress, after: { disabled: pressed.disabled, writes: writes() } };
+      return { during, afterSecondPress, after: { disabled: pressed.disabled, writes: writes(), tracked: tracked() } };
     },
     /* #7611: the Database Protection ages on the Settings tab. The param is "<seat>" or "<seat>/<hours>,<minutes>,<hours>": the seat is
        `editor` or `readonly`, and the boxes are typed over with the values and Save is clicked. The reply says what the rows and boxes
