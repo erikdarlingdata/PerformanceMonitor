@@ -748,6 +748,51 @@ public sealed class NotificationChannelFailingTests
         Assert.Equal(0, webhooks.GetSlackHealth().ConsecutiveFailures);
     }
 
+    /// <summary>
+    /// The settings row and two routes point Slack at one URL. The fan-out counts a failed send against the route the
+    /// metric matched, or the settings row when none did, while a resolution is handed the URL alone and finds the first
+    /// route that names it. A delivery to the URL has to clear every entry that names it, whichever one the failure
+    /// landed on: a count that survived a working delivery would raise "failed 3 times in a row" across it. The first
+    /// row fires a metric no route matches, so the failure is the settings row's (<c>RouteId</c> null). The second fires
+    /// route 2's metric, so the failure is route 2's, and the lookup for the resolution lands on route 1.
+    /// </summary>
+    [Theory]
+    [InlineData("Other Metric", null)]
+    [InlineData("Spare Metric", 2)]
+    public async Task ADeliveredResolutionToASharedUrl_ClearsEveryEntryThatNamesIt_WhicheverTheFailureLandedOn(string metric, int? failedRouteId)
+    {
+        using var shared = new CapturingWebhookEndpoint(statusSequence: new[] { 500, 200 });
+        var settings = new FakeSlackSettings
+        {
+            SlackWebhookEnabled = true,
+            SlackWebhookUrl = shared.Url,
+            NotificationRoutes = new[]
+            {
+                SlackRoute(shared.Url, enabled: true),
+                new NotificationRoute(RouteId: 2, MetricMatch: "Spare Metric", TeamsUrl: "", SlackUrl: shared.Url, GenericUrl: "",
+                    PagerDutyRoutingKey: "", SmtpRecipients: "", Enabled: true),
+            },
+        };
+        var webhooks = new WebhookAlertService(settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+
+        var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+        Assert.Equal(AlertChannelOutcome.Failed, (await webhooks.TrySendWebhookAlertsAsync(metric, server, "1", "0", serverId: server)).Outcome);
+        Assert.Single(shared.Bodies);
+
+        var failed = webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel && c.RouteId == failedRouteId);
+        Assert.Equal(1, failed.ConsecutiveFailures);
+        Assert.Equal(1, webhooks.GetSlackHealth().ConsecutiveFailures);
+
+        /* The endpoint answers 200 from here on. The resolution is handed the shared URL and not the route. */
+        Assert.Null(await ResolveSlackAsync(webhooks, shared.Url));
+        Assert.Equal(2, shared.Bodies.Count);
+
+        var slack = webhooks.GetChannelFailureCounts().Where(c => c.Channel == NotificationRouter.SlackChannel).ToList();
+        Assert.Equal(0, slack.Single(c => c.RouteId == failedRouteId).ConsecutiveFailures);
+        Assert.All(slack, c => Assert.Equal(0, c.ConsecutiveFailures));
+        Assert.Equal((0, (string?)null), webhooks.GetSlackHealth());
+    }
+
     /// <summary>The metric names are webhook automation keys and the history grids classify by name, so both
     /// are pinned as strings, and the resolution must read as one.</summary>
     [Fact]
