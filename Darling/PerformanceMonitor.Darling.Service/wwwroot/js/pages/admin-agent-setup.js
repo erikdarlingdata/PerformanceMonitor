@@ -188,9 +188,11 @@ let routeBusy = false;
 
 const statusNode = (status) => (status ? (status.isError ? errorStrip(status.message) : noticeStrip(status.message)) : null);
 
-async function sendRoute(verb, entries, repaint) {
+/** `button` is the one pressed: it is disabled while the write runs, so a second press sends nothing, and enabled again before the repaint. */
+async function sendRoute(verb, entries, repaint, button) {
   if (routeBusy) return;
   routeBusy = true;
+  if (button) button.disabled = true;
   let out;
   try {
     if (verb === "delete") {
@@ -213,6 +215,7 @@ async function sendRoute(verb, entries, repaint) {
     out = { message: "Could not change the route: " + (e && e.message ? e.message : String(e)), isError: true };
   }
   routeBusy = false;
+  if (button) button.disabled = false;
   if (out.message) routeStatus = { message: out.message, isError: out.isError };
   if (out.isError === false) routeEntries = null;
   await repaint();
@@ -303,7 +306,7 @@ function routeForm(options) {
   for (const c of [...Object.values(controls), enabled, recipients, ...Object.values(hookBoxes), ...Object.values(removeBoxes)]) c.addEventListener("input", sync);
   const save = el("button", {
     class: "btn primary", type: "button", "data-action": "save-route", text: entries.id == null ? "Add route" : "Save route " + entries.id,
-    onClick: () => sendRoute("save", read(), options.repaint),
+    onClick: () => sendRoute("save", read(), options.repaint, save),
   });
   const parts = [
     field("Match:", controls.match), field("Applies to:", controls.scope), field("Severity:", controls.severities), field("Agent:", controls.level), el("label", { class: "tag-field" }, [el("span", { class: "mute-label", text: "Report notice:" }), controls.reportNotice, noticeHint]),
@@ -353,7 +356,7 @@ export function routeColumns(base, options) {
       class: "btn", type: "button", text: "Delete", "aria-label": "Delete route " + row.route_id, "data-action": "delete-route",
       onClick: () => {
         if (!window.confirm("Delete route " + row.route_id + "? Routes that name it as their fallback lose that fallback. This cannot be undone.")) return undefined;
-        return sendRoute("delete", { id: row.route_id }, options.repaint);
+        return sendRoute("delete", { id: row.route_id }, options.repaint, remove);
       },
     });
     return el("span", { class: "row-actions" }, [edit, remove]);
@@ -464,6 +467,8 @@ function profileForm(profiles, fleet, maxLength, ctx) {
     onClick: async () => {
       if (profileBusy) return;
       profileBusy = true;
+      /* Disabled while the write runs, so a second press sends nothing; enabled again before the repaint. */
+      save.disabled = true;
       let out;
       try {
         /* The version the page read for this scope (#6274): a profile saved by someone else since is refused with 409, not overwritten.
@@ -480,6 +485,7 @@ function profileForm(profiles, fleet, maxLength, ctx) {
         out = { message: "Could not save the profile: " + (e && e.message ? e.message : String(e)), isError: true };
       }
       profileBusy = false;
+      save.disabled = false;
       if (out.message) profileStatus = { message: out.message, isError: out.isError };
       if (out.isError === false) profileText = null;
       await ctx.repaint();
