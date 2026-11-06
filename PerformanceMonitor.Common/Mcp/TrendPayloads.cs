@@ -40,14 +40,15 @@ internal sealed record LockWaitPoint(DateTime BucketStart, double WaitTimeMsPerS
 /// rated collections covered, and the worst single collection's wait rate.</summary>
 internal sealed record WaitBucketPoint(DateTime BucketStart, double WaitTimeMsPerSecond, double SignalWaitTimeMsPerSecond, double? PeakWaitTimeMsPerSecond);
 
-/// <summary>One bucket of one wait type on <c>get_current_waits_trend</c> (#7877, #7904): the wait type's total wait across its
-/// waiting tasks in ONE collection, averaged over the collections of the bucket in which it was waiting, the largest such single
-/// collection, and how many collections that was.</summary>
+/// <summary>One bucket of one wait type on <c>get_current_waits_trend</c> (#7877, #7904, #7974): the wait type's total wait across its
+/// waiting tasks in ONE collection, averaged over EVERY collection that ran in the bucket (a collection in which it was not waiting
+/// counts 0), the largest single collection, and how many collections ran (<paramref name="CollectionCount"/>, the same for every series
+/// of the bucket).</summary>
 internal sealed record CurrentWaitsWaitPoint(DateTime BucketStart, string WaitType, long AvgWaitMs, long PeakWaitMs, long CollectionCount);
 
-/// <summary>One bucket of one database's blocked sessions on <c>get_current_waits_trend</c> (#7877, #7904): the distinct blocked
-/// sessions in ONE collection, averaged over the bucket's collections in which the database had any, the most any one of them saw,
-/// and how many collections that was.</summary>
+/// <summary>One bucket of one database's blocked sessions on <c>get_current_waits_trend</c> (#7877, #7904, #7974): the distinct blocked
+/// sessions in ONE collection, averaged over EVERY collection that ran in the bucket (a collection with none blocked counts 0), the most
+/// any one of them saw, and how many collections ran (<paramref name="CollectionCount"/>).</summary>
 internal sealed record CurrentWaitsBlockedPoint(DateTime BucketStart, string DatabaseName, double AvgBlockedCount, long PeakBlockedCount, long CollectionCount);
 
 /// <summary>One bucket of CPU samples (#3960): each percentage averaged over the samples in the bucket, the busiest
@@ -689,10 +690,10 @@ internal static class TrendPayloads
     /// <summary>What a <c>get_current_waits_trend</c> point means (#7877, #7904), said once in the payload because the same keys meant
     /// "one collection" before the read was bucketed.</summary>
     public const string CurrentWaitsFiguresNote =
-        "total_wait_ms is the wait type's total across its waiting tasks in ONE collection, averaged over the collections of the bucket in which that wait type was waiting; "
+        "total_wait_ms is the wait type's total across its waiting tasks in ONE collection, averaged over EVERY collection that ran in the bucket; "
         + "blocked_count is the distinct blocked sessions of a database in ONE collection, averaged the same way. "
-        + "peak_wait_ms and peak_blocked_count are the largest single collection in the bucket, so a spike survives the rollup, and collection_count is how many collections the average covers. "
-        + "A collection in which a wait type or database had nothing waiting or blocked has no row and is not in its count. "
+        + "A collection in which a wait type or database had nothing waiting or blocked writes no row but still counts as 0, so a series seen in 1 of 60 collections reads about 1/60 of one seen in all 60 (blocked_count is given to three decimals so that stays visible). "
+        + "peak_wait_ms and peak_blocked_count are the largest single collection in the bucket, so a spike survives the rollup, and collection_count is how many collections ran in the bucket, the divisor of the average. "
         + "A bucket that holds one collection is that collection's own figure.";
 
     /// <summary>
@@ -723,7 +724,8 @@ internal static class TrendPayloads
         {
             collection_time = Stamp(b.BucketStart),
             database_name = b.DatabaseName,
-            blocked_count = Math.Round(b.AvgBlockedCount, 1),
+            /* #7974: a bucket mean over every collection that ran, so 1 of 60 is 0.017; one decimal would print it as 0. */
+            blocked_count = Math.Round(b.AvgBlockedCount, 3),
             peak_blocked_count = b.PeakBlockedCount,
             collection_count = b.CollectionCount,
         });

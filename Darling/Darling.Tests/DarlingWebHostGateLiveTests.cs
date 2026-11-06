@@ -705,6 +705,7 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.Equal(StatusCodes.Status403Forbidden, write.Response.StatusCode);
         var body = await new StreamReader(write.Response.Body).ReadToEndAsync();
         Assert.Contains("reads only", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("reads_only_dashboard", System.Text.Json.JsonDocument.Parse(body).RootElement.GetProperty("reason").GetString());
     }
 
     /// <summary>No token configured, loopback-only: with <c>web.allowTokenlessLoopback</c> on the dashboard serves

@@ -211,7 +211,7 @@ public sealed class ViewerQueryTrendsSqlTests
 /// Pins the Query-Heatmap DuckDB→PG rewrite — the wave's load-bearing SQL work. Guards that both
 /// dialect swaps landed for EVERY metric: <c>time_bucket</c> is gone (replaced by <c>date_bin</c> with an
 /// explicit epoch origin) and <c>ARG_MAX</c> is gone (replaced by a <c>ROW_NUMBER … rn = 1</c> top-1
-/// window plus <c>COUNT(*) OVER</c> for the per-cell count).
+/// window; the per-cell distinct count is proved by behaviour in the live test).
 /// </summary>
 public sealed class ViewerQueryHeatmapSqlTests
 {
@@ -241,7 +241,6 @@ public sealed class ViewerQueryHeatmapSqlTests
             Assert.DoesNotContain("ARG_MAX", sql, StringComparison.Ordinal); /* DuckDB-only */
             /* Hottest query per cell = the max-delta_execution_count row, taken by a top-1 window. */
             Assert.Contains("ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn", sql, StringComparison.Ordinal);
-            Assert.Contains("COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count", sql, StringComparison.Ordinal);
             Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
         }
     }
@@ -546,6 +545,53 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal("SELECT low", result.CellDetails[0, 0].TopQueryText);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_stats", HeatmapServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#7881: a cell's count is the number of distinct queries in it, not the sample rows. One hash collected five
+    /// times in one 5-minute bin is ONE query (the old per-row count read 5); a second hash seen twice in the same cell makes it two.</summary>
+    [Fact]
+    public async Task QueryHeatmap_CountsDistinctQueriesPerCell_NotSampleRows_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_stats", HeatmapServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var end = TruncateToSeconds(DateTime.UtcNow);
+        var start = end.AddHours(-24);
+        var bin = start.AddHours(1);
+        bin = new DateTime(bin.Ticks - (bin.Ticks % TimeSpan.FromMinutes(5).Ticks), bin.Kind); /* the bin's start, so +0..+4 minutes stay in it */
+
+        var bodySucceeded = false;
+        try
+        {
+            /* ~50ms per execution -> bucket 2 for every row. 0xSTEADY is collected five times, 0xTWICE twice. */
+            for (var minute = 0; minute < 5; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(minute), "0xSTEADY", deltaExec: 5, deltaWorker: 0, deltaElapsed: 250_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT steady");
+            for (var minute = 0; minute < 2; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(minute), "0xTWICE", deltaExec: 1, deltaWorker: 0, deltaElapsed: 50_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT twice");
+            /* A second bin holding only 0xSTEADY: one query, collected five times. */
+            for (var minute = 0; minute < 5; minute++)
+                await InsertQueryStatsAsync(connection, HeatmapServerId, bin.AddMinutes(5 + minute), "0xSTEADY", deltaExec: 5, deltaWorker: 0, deltaElapsed: 250_000, deltaReads: 0, deltaWrites: 0, queryText: "SELECT steady");
+
+            var result = await viewer.GetQueryHeatmapAsync(HeatmapServerId, HeatmapMetric.Duration, start, end);
+
+            Assert.Equal(2, result.TimeBuckets.Length);
+            Assert.Equal(2.0, result.Intensities[2, 0]);              /* 0xSTEADY + 0xTWICE: two queries, seven sample rows */
+            Assert.Equal(1.0, result.Intensities[2, 1]);              /* 0xSTEADY alone: one query, five sample rows */
+            Assert.Equal("0xSTEADY", result.CellDetails[2, 1].TopQueryHash);
 
             bodySucceeded = true;
         }

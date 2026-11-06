@@ -100,6 +100,34 @@ public sealed class AdminWritesOffBehaviourTests
         Assert.DoesNotContain("Sign in to the web as an admin", page.GetProperty("text").GetString() ?? "", StringComparison.Ordinal);
     }
 
+    /// <summary>#7950: the switch never covered adding and editing servers (they follow the edit seat), so the line under the Admin
+    /// heading names the changes that are off and says servers still save, over the Servers tab and over a list-only tab alike. The
+    /// Servers tab keeps its Edit buttons.</summary>
+    [Fact]
+    public void TheAdminHeading_WithTheSwitchOff_NamesTheChangesThatAreOff_AndSaysServersStillSave()
+    {
+        var servers = AdminServerEditBehaviourTests.Run("writesOffServers:off");
+        var settings = AdminServerEditBehaviourTests.Run("writesOff:settings/off");
+
+        var heading = servers.GetProperty("heading").GetString();
+        Assert.NotNull(heading);
+        Assert.Contains("Adding and editing servers", heading, StringComparison.Ordinal);
+        Assert.Contains("still work", heading, StringComparison.Ordinal);
+        Assert.Contains(SwitchSentence, heading, StringComparison.Ordinal);
+        Assert.DoesNotContain("Changes from the web are turned off", heading, StringComparison.Ordinal);
+        Assert.True(servers.GetProperty("editButtons").GetInt32() > 0);
+        Assert.Contains(Strings(settings.GetProperty("strips")), t => t.Contains("Adding and editing servers", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheAdminHeading_WithTheSwitchOn_DrawsNoLine_AndServersKeepsEdit()
+    {
+        var on = AdminServerEditBehaviourTests.Run("writesOffServers:on");
+
+        Assert.Equal(JsonValueKind.Null, on.GetProperty("heading").ValueKind);
+        Assert.True(on.GetProperty("editButtons").GetInt32() > 0);
+    }
+
     [Fact]
     public void PendingNotes_WithTheSwitchOff_ListTheNotesWithNoWriteFormAndNoDecisionButtons_AndNameTheSwitch()
     {
