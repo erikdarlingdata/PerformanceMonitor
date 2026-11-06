@@ -53,7 +53,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
             await DarlingMcpTestData.ExecAsync(c, ct,
                 @"INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_text_digest)
                   VALUES ($1,$2,$3,$4,$5,$6,sha256($7::text::bytea))",
-                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow - age), server, name, database, hash, text.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                CollectionIdGenerator.Next(), LiveClock.AnchoredEnd() - age, server, name, database, hash, text.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
         await Stat(1, "ix-a", "Sales", "0xA001", 77, TimeSpan.FromHours(2));
         await Stat(1, "ix-a", "Sales", "0xA001", 77, TimeSpan.FromHours(1));
@@ -61,19 +61,20 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await Stat(2, "ix-b", "Hr", "0xB003", 1234, TimeSpan.FromHours(1));
     }
 
-    private static async Task<ScratchPostgres> OpenScratchAsync(CancellationToken ct)
+    internal static async Task<ScratchPostgres> OpenScratchAsync(CancellationToken ct)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
         await using var c = new NpgsqlConnection(scratch.ConnectionString);
         await c.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(c, ct);
         await SeedAsync(c, ct);
         await using var count = new NpgsqlCommand("SELECT count(*) FROM collect.query_text_dim", c);
         Assert.Equal(3000L, Convert.ToInt64(await count.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
         return scratch;
     }
 
-    private static async Task BuildIndexAsync(NpgsqlDataSource data, CancellationToken ct)
+    internal static async Task<QueryTextTrigramIndexTracker> BuildIndexAsync(NpgsqlDataSource data, CancellationToken ct)
     {
         var tracker = new QueryTextTrigramIndexTracker();
         tracker.Configure(true);
@@ -81,11 +82,12 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await using var c = await data.OpenConnectionAsync(ct);
         var state = await QueryTextTrigramIndex.ReadStateAsync(c, ct);
         Assert.True(state.IndexValid, "the fixture's index was not built, so the plan check below would prove nothing");
+        return tracker;
     }
 
     /// <summary>The planner's plan for one of the tool's statements with sequential scans turned off, so that any index that can serve the
     /// predicate is the cheaper way in and shows up in the plan. Returns the plan as JSON text.</summary>
-    private static async Task<string> ExplainAsync(NpgsqlDataSource data, string sql, string? database, string pattern, bool withServer, CancellationToken ct)
+    internal static async Task<string> ExplainAsync(NpgsqlDataSource data, string sql, string? database, string pattern, bool withServer, CancellationToken ct)
     {
         await using var c = await data.OpenConnectionAsync(ct);
         await using (var set = new NpgsqlCommand("SET enable_seqscan = off", c))
@@ -97,7 +99,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         await analyze.ExecuteNonQueryAsync(ct);
 
         await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + sql, c);
-        var floor = DateTime.SpecifyKind(DateTime.UtcNow - TimescaleSupport.RawRetentionSpan, DateTimeKind.Unspecified);
+        var floor = LiveClock.Now() - TimescaleSupport.RawRetentionSpan;
         if (withServer)
         {
             explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 1 });
@@ -110,7 +112,7 @@ public sealed class FindQueriesByTextIndexScopeLiveTests
         return Convert.ToString(await explain.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture)!;
     }
 
-    private const string IndexShortName = "ix_query_text_dim_trgm";
+    internal const string IndexShortName = "ix_query_text_dim_trgm";
 
     [Theory]
     [InlineData(null)]
