@@ -148,7 +148,14 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             "reserved_mb DESC NULLS LAST, database_name, schema_name, table_name, index_name NULLS LAST", sql,
             "reserved_mb ties no longer break by name (a heap's NULL name last, as on Lite), so a capped page can change between calls");
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
+        /* #8013: the latest snapshot is resolved first by GetLatestIndexObjectStatsSnapshotTimeAsync (a windowed probe, then an
+           unbounded one when the window is empty) and bound as $4, so the statement reads one capture and the planner excludes
+           every other chunk; the MAX(collection_time) lives on the two probes. */
+        SqlTextPin.AssertExpresses("collection_time = $4", sql, "the read is no longer anchored on the server's latest capture");
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql,
+            "the windowed probe no longer resolves the latest snapshot in its window");
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotFallbackProbeSql,
+            "the fallback probe no longer resolves the latest snapshot");
         /* Case is NOT normalised: these are the values the tool emits and callers compare. */
         Assert.Contains("'Unused'", sql, StringComparison.Ordinal);
         Assert.Contains("'Write-only'", sql, StringComparison.Ordinal);
@@ -177,11 +184,26 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("row_lock_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("page_io_latch_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("index_lock_promotion_count", sql, StringComparison.Ordinal);
+        /* #8013: the server's latest capture is resolved first by GetLatestIndexObjectStatsSnapshotTimeAsync (a windowed probe
+           over v_index_object_stats by server_id, then an unbounded one when the window is empty) and bound as $4, so the
+           statement itself carries no MAX(collection_time) and the planner excludes every other chunk. The anchor is still
+           the SERVER's newest capture, never a per-database one: the probes filter on server_id alone. */
         SqlTextPin.AssertExpresses(
-            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
+            "collection_time = $4",
             sql,
             "the read is no longer anchored on the server's latest capture — #3878's immortal per-name groups are back");
+        Assert.DoesNotContain("MAX(collection_time)", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(
+            "MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1",
+            DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql,
+            "the windowed probe no longer resolves the SERVER's latest capture");
+        SqlTextPin.AssertExpresses(
+            "MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1",
+            DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotFallbackProbeSql,
+            "the fallback probe no longer resolves the SERVER's latest capture");
         Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotWindowedProbeSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name", DarlingObjectStatsReader.IndexObjectStatsLatestSnapshotFallbackProbeSql, StringComparison.Ordinal);
     }
 
     /// <summary>
