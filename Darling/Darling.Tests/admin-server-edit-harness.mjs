@@ -104,6 +104,9 @@ class FakeNode {
   set textContent(v) { for (const c of [...this.children]) detach(c); this._text = String(v); }
   get id() { return this.attrs.id || ""; }
   get tagName() { return this.tag.toUpperCase(); }
+  /* As a browser reflects it: an input's type attribute in lower case, "text" when it has none; another tag's attribute or "". */
+  get type() { return this.tag === "input" ? String(this.attrs.type || "text").toLowerCase() : this.attrs.type || ""; }
+  set type(v) { this.attrs.type = String(v); }
   contains(n) { for (let x = n; x; x = x.parent) if (x === this) return true; return false; }
   focus() { if (this.isConnected && !this.disabled) activeElement = this; }
   blur() { if (activeElement === this) activeElement = null; }
@@ -1374,7 +1377,12 @@ try {
        typed into the full-backup age, the focus dropped, and the poll's render again (the tab rebuilds); then Save on the report; returns
        the boxes' values at each step, whether the Title box is the same node, and the PUT bodies. "preview": Preview pressed with its read
        held, the poll's render while it is in flight (no box has the focus, so the tab rebuilds), then the read answers; returns the preview
-       box's text while held and after, whether the box is a new node, and what the box taken off the page holds. */
+       box's text while held and after, whether the box is a new node, and what the box taken off the page holds. "switch": text typed into
+       the report Title and the full-backup age without Save, then Routes and back to Alert Settings, and again with Admin left for the
+       fleet page and come back to; returns the two boxes' values after each return. "servers": the Servers tab, Alpha's form open, the Host
+       box typed into and focused, then the poll's render; returns how many list reads the poll made and whether the box kept its node,
+       its focus and its text. "checkbox": Alert Settings, the report's enabled checkbox focused, then the poll's render; returns whether
+       the tab was redrawn (the Title box is a new node) and how many settings reads were made. */
     adminPoll: async (param) => {
       state.canEdit = true;
       state.sessionReply = () => ({ status: 200, body: { can_edit: true, signed_in_admin: true, managed_store: false, admin_writes_off: false } });
@@ -1437,6 +1445,45 @@ try {
         await settle(30);
         const after = byAttr(main, "data-field", "daily-report-preview-box")[0];
         return { newBox: during !== before, whileHeld, onPage: text(after), offPage: text(before), reads: requests.filter((r) => r.url === "/api/read/get_daily_health_report").length };
+      }
+      if (param === "switch") {
+        const typeBoth = async () => {
+          await typeInto(dailyBox("title"), "Typed title");
+          await typeInto(ageBox("backup_overdue"), "200");
+        };
+        const values = () => ({ title: dailyBox("title").value, backup: ageBox("backup_overdue").value });
+        await mountPage("settings");
+        await typeBoth();
+        await mountPage("routes");
+        await mountPage("settings");
+        const afterTabs = values();
+        await typeBoth();
+        /* Leaving Admin: the hash moves to another page, which is drawn into main in the tab body's place, and then back. */
+        await leaveHash("#/fleet");
+        main.replaceChildren(new FakeNode("div"));
+        await settle();
+        await leaveHash("#/admin/settings");
+        await mountPage("settings");
+        return { afterTabs, afterLeaving: values() };
+      }
+      if (param === "servers") {
+        seed();
+        await mountPage("servers");
+        await clickEdit(1);
+        const host = field("host");
+        await typeInto(host, "sql-prod-01");
+        state.servers = [alpha, charlie];
+        const listBefore = listGets();
+        await poll("servers");
+        return { listReads: listGets() - listBefore, activeIsHost: activeElement === host, sameHost: field("host") === host, hostValue: host.value, rows: tableRows() };
+      }
+      if (param === "checkbox") {
+        await mountPage("settings");
+        const first = dailyBox("title");
+        dailyBox("enabled").focus();
+        const focusedType = activeElement ? activeElement.type : null;
+        await poll("settings");
+        return { focusedType, redrawn: dailyBox("title") !== first, reads: requests.filter((r) => r.url === "/api/read/get_alert_settings").length };
       }
       throw new Error("unknown adminPoll case " + param);
     },

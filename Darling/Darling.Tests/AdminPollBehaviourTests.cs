@@ -71,4 +71,45 @@ public sealed class AdminPollBehaviourTests
         Assert.Contains("PREVIEW BODY 123", result.GetProperty("onPage").GetString(), StringComparison.Ordinal);
         Assert.Equal(1, result.GetProperty("reads").GetInt32());
     }
+
+    /* Text typed into the editors and not saved is dropped by a switch to another tab and by leaving Admin: coming back, the boxes show
+       the saved values, not the unsaved text as if it had been saved. */
+    [Fact]
+    public void TextTypedIntoTheAlertSettingsEditors_IsDroppedByATabSwitch_AndByLeavingAdmin()
+    {
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:switch");
+
+        var afterTabs = result.GetProperty("afterTabs");
+        Assert.Equal("Daily", afterTabs.GetProperty("title").GetString());
+        Assert.Equal("168", afterTabs.GetProperty("backup").GetString());
+
+        var afterLeaving = result.GetProperty("afterLeaving");
+        Assert.Equal("Daily", afterLeaving.GetProperty("title").GetString());
+        Assert.Equal("168", afterLeaving.GetProperty("backup").GetString());
+    }
+
+    /* The Servers tab keeps its nodes across a draw, so the poll still reads the list under an open form whose Host box has the focus,
+       and the box keeps its node, its focus and its text. */
+    [Fact]
+    public void APollWhileTheServersHostBoxHasTheFocus_StillReadsTheList_AndKeepsTheBox()
+    {
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:servers");
+
+        Assert.Equal(1, result.GetProperty("listReads").GetInt32());
+        Assert.True(result.GetProperty("activeIsHost").GetBoolean());
+        Assert.True(result.GetProperty("sameHost").GetBoolean());
+        Assert.Equal("sql-prod-01", result.GetProperty("hostValue").GetString());
+        Assert.Equal(new[] { "Alpha", "Charlie" }, result.GetProperty("rows").EnumerateArray().Select(r => r.GetString()).ToArray());
+    }
+
+    /* A checkbox that keeps the focus after a click is not being typed in: the poll still redraws the tab. */
+    [Fact]
+    public void APollWhileACheckboxHasTheFocus_StillRedrawsTheTab()
+    {
+        var result = AdminServerEditBehaviourTests.Run("adminPoll:checkbox");
+
+        Assert.Equal("checkbox", result.GetProperty("focusedType").GetString());
+        Assert.True(result.GetProperty("redrawn").GetBoolean());
+        Assert.Equal(2, result.GetProperty("reads").GetInt32());
+    }
 }
