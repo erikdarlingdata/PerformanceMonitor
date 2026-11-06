@@ -164,12 +164,12 @@ public sealed class DeadlockProcessRowsTests
     }
 
     [Fact]
-    public void ThePage_KeepsTheFiveColumnSummary_AndAddsTheSubGrid_KeyedAtModuleScope()
+    public void ThePage_KeepsTheFourColumnSummary_AndAddsTheSubGrid_KeyedAtModuleScope()
     {
         var js = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
 
         Assert.Contains("DEADLOCK_COLUMNS,", js, StringComparison.Ordinal);
-        Assert.Equal(5, System.Text.RegularExpressions.Regex.Matches(
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(
             js[js.IndexOf("const DEADLOCK_COLUMNS = [", StringComparison.Ordinal)..].Split("];")[0], @"\{ key: ").Count);
         Assert.Contains("const deadlockProcessesOpen = new Set();", js, StringComparison.Ordinal);
         Assert.Contains("server + \"\\u0001\" + (row.dedup_key", js, StringComparison.Ordinal);

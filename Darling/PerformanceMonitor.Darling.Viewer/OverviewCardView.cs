@@ -57,11 +57,14 @@ public static class OverviewCardView
 
     /// <summary>
     /// The fleet roll-up above the cards, narrowed by the search box (D9 of the final walk): the "Needs Attention"
-    /// rows, the band counts and "Monitoring N servers" count the servers the search leaves, not the whole fleet, so
-    /// the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every card
-    /// and the registered fleet size, as before. With one, it reduces only the matching cards and
-    /// <see cref="FleetRollup.FilteredOfTotal"/> carries the registered size, so the subtitle reads "Monitoring 2 of
-    /// 9 servers". The needs-attention toggle does not narrow it: the panel is the shortlist that toggle opens.
+    /// rows, the band counts and "Monitoring N enabled servers" count the servers the search leaves, not the whole
+    /// fleet, so the panel and the grid under it agree. With no search it is <see cref="FleetRollup.Build"/> over every
+    /// card and the enabled fleet size. With one, it reduces only the matching cards and
+    /// <see cref="FleetRollup.FilteredOfTotal"/> carries the enabled fleet size, so the subtitle reads "Monitoring 2 of
+    /// 9 enabled servers". The blocking and deadlock totals follow the search too: the fleet-wide <paramref name="totals"/>
+    /// read counts every server, so a narrowed panel sums the matching cards' own counts instead, and the totals
+    /// describe the same servers as the band counts beside them. The needs-attention toggle does not narrow it: the
+    /// panel is the shortlist that toggle opens.
     /// </summary>
     public static FleetRollup BuildRollup(
         IReadOnlyList<ServerSummaryItem> cards, FleetTotals totals, int registeredCount, string? search)
@@ -74,16 +77,23 @@ public static class OverviewCardView
         }
 
         var matched = cards.Where(c => ServerOverviewFilter.Matches(term, SearchFields(c))).ToList();
-        var rollup = FleetRollup.Build(matched, totals, totalServerCount: matched.Count);
+        /* Each card adds what the fleet-wide read adds for it: BlockingCountForBand is a SQL Server card's blocked
+           waits and a PostgreSQL card's captures that saw blocking, and null (no capture in the window) adds nothing. */
+        var matchedTotals = new FleetTotals
+        {
+            TotalBlockingEvents = matched.Sum(c => (long)(c.BlockingCountForBand ?? 0)),
+            TotalDeadlocks = matched.Sum(c => (long)c.DeadlockCount),
+        };
+        var rollup = FleetRollup.Build(matched, matchedTotals, totalServerCount: matched.Count);
         rollup.FilteredOfTotal = registeredCount;
         return rollup;
     }
 
     /// <summary>
     /// Whether the Fleet Health block (heading, toggle, Search box, Sort) is drawn at all (#7354). It follows the
-    /// REGISTERED fleet, not the servers the search left: a search that matches nothing leaves
+    /// ENABLED fleet, not the servers the search left: a search that matches nothing leaves
     /// <see cref="FleetRollup.TotalServers"/> at 0, and gating on that hid the block with the Search box inside
-    /// it, so the user had no way to clear the term. An empty fleet (nothing registered) still hides it.
+    /// it, so the user had no way to clear the term. An empty fleet (nothing enabled) still hides it.
     /// </summary>
     public static bool ShowsRollup(FleetRollup rollup)
     {
@@ -92,8 +102,9 @@ public static class OverviewCardView
     }
 
     /// <summary>
-    /// Whether the "All N servers healthy" line is shown. A search that matched nothing has no servers to judge,
-    /// and <see cref="FleetRollup.IsAllClear"/> is vacuously true there, which would print "All 0 servers healthy".
+    /// Whether the "All N enabled servers healthy" line is shown. A search that matched nothing has no servers to
+    /// judge, and <see cref="FleetRollup.IsAllClear"/> is vacuously true there, which would print "All 0 enabled
+    /// servers healthy".
     /// The no-match sentence beside the toggle (<see cref="CountText"/>) is what that state shows instead.
     /// </summary>
     public static bool ShowsAllClear(FleetRollup rollup)

@@ -583,6 +583,11 @@ table.data th {
   background: var(--card);
 }
 table.data tbody tr:nth-child(even) { background: var(--row-alt); }
+/* #7729: the row's name column stays at the left edge while a grid that overflows scrolls sideways (panels.js pinIdentityColumn). The header cell
+   already sticks to the top, so it also gets a higher layer than the other headers, and each cell paints the row's own background over what scrolls under it. */
+.table-wrap.pin-first table.data th.pin-col { left: 0; z-index: 3; box-shadow: inset 0 -1px 0 var(--border), 1px 0 0 var(--border); }
+.table-wrap.pin-first table.data td.pin-col { position: sticky; left: 0; z-index: 1; background: var(--card); box-shadow: 1px 0 0 var(--border); }
+.table-wrap.pin-first table.data tbody tr:nth-child(even) td.pin-col { background: var(--row-alt); }
 table.data td.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* #7392: a number column's header sits over its right-aligned values, not beside the next column's header. */
 table.data th.num { text-align: right; }
@@ -1561,6 +1566,8 @@ table.data td.rec-text { min-width: 16rem; }
 .reco-group { margin-bottom: 0.6rem; }
 .reco-card { margin: 0.5rem 0; }
 .reco-fix { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-dark); padding: 0.6rem; border-radius: 4px; }
+/* #7726: a backtick span in the advice text is drawn as code. */
+.reco-advice code { font-family: var(--mono); font-size: 0.9em; background: var(--bg-dark); padding: 0.05rem 0.3rem; border-radius: 3px; overflow-wrap: anywhere; }
 .reco-actions { display: flex; gap: 0.5rem; margin-top: 0.4rem; }
 
 /* #5235: a wait cell that links to Active Queries filtered to that wait, and the strip that clears the filter. */

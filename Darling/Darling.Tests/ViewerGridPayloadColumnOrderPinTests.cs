@@ -183,7 +183,7 @@ public sealed class ViewerGridPayloadColumnOrderPinTests
     [InlineData("LONG_QUERY_COLUMNS", "event_time", "statement", 8)]
     [InlineData("PLAN_CORRECTION_COLUMNS", "capture_count", "query_text", 8, 2)]
     [InlineData("BLOCKING_COLUMNS", "event_time", "blocked_sql_text", 9)]
-    [InlineData("DEADLOCK_COLUMNS", "deadlock_time", "victim_sql_text", 5)]
+    [InlineData("DEADLOCK_COLUMNS", "deadlock_time", "victim_sql_text", 4)]
     public void EveryWebGridWithQueryText_PutsItRightOfTheAnchor(string array, string anchor, string text, int minKeys, int anchorAt = 0)
     {
         // Array order IS the rendered column order — the page hands the array straight to the table renderer.

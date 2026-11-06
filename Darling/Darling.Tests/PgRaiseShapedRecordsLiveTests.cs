@@ -161,7 +161,8 @@ public sealed class PgRaiseShapedRecordsLiveTests
 
             var (victimPid, pidA, pidB) = await ProvokeFunctionDeadlockAsync(target!, ct);
 
-            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct, $"Process {victimPid} waits for");
+            await PgLogLiveWait.WaitForTextAsync(targetConnection, "csv", ct,
+                $"Process {victimPid} waits for", $"Process {victimPid}: SELECT upd_4058l(");
 
             var context = new CollectorContext
             {
@@ -183,7 +184,13 @@ public sealed class PgRaiseShapedRecordsLiveTests
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 var rows = await definition.ReadAsync(reader, context, ct);
 
-                var matching = rows.Where(r => r.VictimPid == victimPid).ToList();
+                /* Both live deadlock classes share one cluster and log, and PostgreSQL reuses backend pids, so a pid
+                   alone can match another class's deadlock (#7818): also require this test's own function name in
+                   the row's report text or victim statement. */
+                Assert.NotEmpty(rows);
+                var matching = rows.Where(r => r.VictimPid == victimPid
+                    && (r.GraphText.Contains("upd_4058l", StringComparison.OrdinalIgnoreCase)
+                        || (r.VictimStatement?.Contains("upd_4058l", StringComparison.OrdinalIgnoreCase) ?? false))).ToList();
                 var row = Assert.Single(matching);
                 Assert.Equal(2, row.ParticipantCount);
                 Assert.True(row.VictimPid == pidA || row.VictimPid == pidB);

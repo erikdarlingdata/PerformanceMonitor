@@ -444,8 +444,60 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
     private readonly ConcurrentDictionary<int, ConcurrentQueue<string>> _waitStatsClearWarnings = new();
 
     /// <inheritdoc />
-    public IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime)
-        => new BaselineSnapshot(this, serverId, groups, keys, collectionTime);
+    public IDeltaBaselineSnapshot? CaptureBaselines(int serverId, IReadOnlyList<string> groups, IReadOnlyCollection<string> keys, DateTime collectionTime, bool keepNewKeys = false)
+        => new BaselineSnapshot(this, serverId, groups, keys, collectionTime, keepNewKeys);
+
+    /// <summary>
+    /// Captures one pass window of <paramref name="group"/> on <paramref name="serverId"/> as it stands before a run rolls it forward to
+    /// <paramref name="observedTime"/>, for a window that moves on a clock other than the collection time (pg_statement_stats' target
+    /// clock). The restore puts it back only while the window still holds <paramref name="observedTime"/>, and leaves a window the run
+    /// created in place.
+    /// </summary>
+    public IDeltaBaselineSnapshot? CapturePass(int serverId, string group, DateTime observedTime)
+        => new PassSnapshot(this, serverId, group, observedTime);
+
+    private sealed class PassSnapshot : IDeltaBaselineSnapshot
+    {
+        private readonly CollectorDeltaCalculator _owner;
+        private readonly int _serverId;
+        private readonly string _group;
+        private readonly DateTime _observed;
+        private readonly bool _existed;
+        private readonly DateTime _current;
+        private readonly DateTime? _previous;
+        private bool _restored;
+
+        public PassSnapshot(CollectorDeltaCalculator owner, int serverId, string group, DateTime observed)
+        {
+            _owner = owner;
+            _serverId = serverId;
+            _group = group;
+            _observed = observed;
+            if (owner._passes.TryGetValue(serverId, out var serverPasses) && serverPasses.TryGetValue(group, out var pass))
+            {
+                _existed = true;
+                _current = pass.Current;
+                _previous = pass.Previous;
+            }
+        }
+
+        public void Restore()
+        {
+            if (_restored)
+            {
+                return;
+            }
+
+            _restored = true;
+            if (_existed
+                && _owner._passes.TryGetValue(_serverId, out var serverPasses)
+                && serverPasses.TryGetValue(_group, out var now)
+                && now.Current == _observed)
+            {
+                serverPasses[_group] = (_current, _previous);
+            }
+        }
+    }
 
     /// <summary>#7419: see <see cref="IDeltaBaselineSnapshot"/>. Restores only what still carries the run's own collection
     /// time, so a baseline cleared or replaced by anyone else after the capture is never overwritten.</summary>
@@ -454,15 +506,17 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         private readonly CollectorDeltaCalculator _owner;
         private readonly int _serverId;
         private readonly DateTime _time;
+        private readonly bool _keepNewKeys;
         private List<(string Group, string Key, bool Existed, long Value, DateTime? Timestamp)>? _entries = new();
         private List<(string Group, bool Existed, DateTime Current, DateTime? Previous)>? _passes = new();
 
         public BaselineSnapshot(CollectorDeltaCalculator owner, int serverId, IReadOnlyList<string> groups,
-            IReadOnlyCollection<string> keys, DateTime time)
+            IReadOnlyCollection<string> keys, DateTime time, bool keepNewKeys = false)
         {
             _owner = owner;
             _serverId = serverId;
             _time = time;
+            _keepNewKeys = keepNewKeys;
             owner._cache.TryGetValue(serverId, out var serverCache);
             owner._passes.TryGetValue(serverId, out var serverPasses);
             foreach (var group in groups)
@@ -518,7 +572,7 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                     {
                         groupCache[key] = (value, timestamp);
                     }
-                    else
+                    else if (!_keepNewKeys)
                     {
                         groupCache.TryRemove(key, out _);
                     }
@@ -538,7 +592,7 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
                     {
                         serverPasses[group] = (current, previous);
                     }
-                    else
+                    else if (!_keepNewKeys)
                     {
                         serverPasses.TryRemove(group, out _);
                     }

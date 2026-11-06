@@ -180,7 +180,10 @@ internal static class DarlingQueryStoreAbortsReader
         }
 
         List<AbortRow> rows;
-        await using (var command = postgres.CreateCommand(RawSql))
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        /* #7730: the key table's test in place of the marker-only text test once the backfill has run. */
+        var rawSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, null, McpCommandDeadlines.ReadSeconds, RawSql, cancellationToken);
+        await using (var command = new NpgsqlCommand(rawSql, connection))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             Bind(command, serverId, startUtc, endUtc, limit, databases);
@@ -221,7 +224,7 @@ internal static class DarlingQueryStoreAbortsReader
             }
 
             gateDecided = true;
-            var sql = TableSql;
+            var sql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, TableSql, cancellationToken);
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)

@@ -947,8 +947,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
                 await BoundTheReadAsync();
             }
 
-            using var cmd = new NpgsqlCommand(
-                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection, snapshot)
+            /* #7730: the key table's test in place of the marker-only text test once its backfill has run, so the old statements the
+               monitor sent before #7463 are left out here too. Asked in the read's own transaction, before the read. */
+            var regressionSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
+                connection, snapshot, FactCommandTimeoutSeconds,
+                readsDays ? PlanRegressionDailySql : readsTable ? PlanRegressionTableSql : PlanRegressionSql, context.CancellationToken);
+            using var cmd = new NpgsqlCommand(regressionSql, connection, snapshot)
             { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             if (readsDays)

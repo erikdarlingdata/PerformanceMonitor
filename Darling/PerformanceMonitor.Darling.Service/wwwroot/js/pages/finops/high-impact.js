@@ -47,7 +47,8 @@ const COLUMNS = [
   { key: "impact_score", label: "Score", format: "int" },
   /* #7699: the band prints as a word with a capital (High, Medium, Low), as the other verdict columns do. */
   { key: "impact_band", label: "Band", format: "status", sevKey: "impact_band_sev" },
-  { key: "database_name", label: "Database", render: databaseCell, cellClass: () => "name-cell" },
+  /* #7729: the column that stays at the left edge when the grid scrolls sideways. */
+  { key: "database_name", label: "Database", render: databaseCell, cellClass: () => "name-cell", pin: true },
   { key: "query_hash", label: "Query hash", mono: true },
   { key: "sample_query_text", label: "Query preview", clamp: true, valueList: false },
   { key: "total_executions", label: "Executions", format: "int" },
@@ -62,7 +63,7 @@ const COLUMNS = [
   { key: "peak_memory_mb", label: "Peak grant MB", format: "num1" },
   { key: "memory_share_pct", label: "Memory %", format: "num1" },
   { key: "executions_share_pct", label: "Executions %", format: "num1" },
-  { key: "has_plan", label: "Plan", format: "bool" },
+  { key: "has_plan", label: "Has plan", format: "bool" },
 ];
 
 // The read returns the union of the top LIMIT hashes on each of six measures, so the count and the window come from the answer.
